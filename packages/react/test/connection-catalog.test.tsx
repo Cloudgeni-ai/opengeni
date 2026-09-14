@@ -100,3 +100,46 @@ test("legacy callers without typed health retain their visible host status", () 
   expect(html).toContain('class="og-capability-catalog-notice">Reconnect required');
   expect(html).not.toContain('class="og-capability-catalog-sr-only"');
 });
+
+test("flat services expose each connection directly without a disclosure", () => {
+  const html = renderToStaticMarkup(<ConnectionCatalog services={[service]} grouped={false} />);
+  expect(html).not.toContain("<details");
+  expect(html).not.toContain("<summary");
+  expect(html.match(/<button/g)).toHaveLength(2);
+  expect(html).toContain("Slack · Chat");
+  expect(html).toContain("Slack · Agent tools");
+  expect(html).toContain('data-status="added"');
+  expect(html).toContain('data-status="available"');
+});
+
+test("overview filters before limiting individual connection rows", () => {
+  const services = Array.from({ length: 12 }, (_, i) => ({
+    ...service,
+    id: String(i),
+    name: i < 4 ? "Other" : `Match ${i}`,
+    options: [{ ...service.options[0]!, id: String(i) }],
+  }));
+  const html = renderToStaticMarkup(
+    <ConnectionCatalog
+      services={services}
+      grouped={false}
+      query="Match"
+      resultLimit={6}
+      onShowMore={() => {}}
+    />,
+  );
+  expect(html.match(/class="og-connection-catalog-action-row"/g)).toHaveLength(6);
+  expect(html).toContain("Match 4");
+  expect(html).not.toContain("Match 10");
+  expect(html).toContain("View all connections");
+  const empty = renderToStaticMarkup(
+    <ConnectionCatalog
+      services={services}
+      grouped={false}
+      query="absent"
+      resultLimit={6}
+      onShowMore={() => {}}
+    />,
+  );
+  expect(empty).not.toContain("View all connections");
+});

@@ -36,9 +36,9 @@ describe("BundlesSection", () => {
         if (expected.startsWith("plugin:")) {
           expect(
             rendered.container
-              .querySelector("[data-installed-plugin]")
-              ?.getAttribute("data-installed-plugin"),
-          ).toBe("example/research");
+              .querySelector(".og-connection-installed button")
+              ?.getAttribute("aria-label"),
+          ).toBe("Research suite · Installed");
           expect(rowIds(rendered.container)).toEqual([]);
         } else {
           expect(rowIds(rendered.container)).toEqual([expected]);
@@ -76,9 +76,9 @@ describe("BundlesSection", () => {
         "skill:terraform",
       ]);
       // Skill and template rows preserve their provenance in the accessible name.
-      expect(rendered.container.querySelector("[data-installed-plugin]")?.textContent).toContain(
-        "Research suite",
-      );
+      expect(
+        rendered.container.querySelector(".og-connection-installed button")?.textContent,
+      ).toContain("Research suite");
       expect(rowNames(rendered.container)).toEqual([
         "Infrastructure operations. Workflow template, registered in this workspace. Not installed",
         "release-operator. Skill, imported from source. Installed",
@@ -110,7 +110,9 @@ describe("BundlesSection", () => {
     const rendered = await renderSection();
     try {
       expect(count(rendered.container)).toBe("3 results");
-      expect(rendered.container.querySelectorAll("[data-installed-plugin]")).toHaveLength(1);
+      expect(rendered.container.querySelectorAll(".og-connection-installed button")).toHaveLength(
+        1,
+      );
     } finally {
       await rendered.unmount();
     }
@@ -208,7 +210,9 @@ describe("BundlesSection", () => {
       />,
     );
     try {
-      const card = rendered.container.querySelector<HTMLButtonElement>("[data-installed-plugin]");
+      const card = rendered.container.querySelector<HTMLButtonElement>(
+        ".og-connection-installed button",
+      );
       expect(card?.textContent).toContain("Research suite");
       await act(async () => card!.click());
       expect(getInstalledPluginDetails).toHaveBeenCalledTimes(1);

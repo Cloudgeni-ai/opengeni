@@ -104,10 +104,14 @@ describe("Bundles section browser acceptance", () => {
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await dialog.getByRole("button", { name: "Install", exact: true }).click();
 
+      await expectVisible(
+        page.locator(".og-connection-installed").getByRole("button", { name: /release-operator/ }),
+      );
+      await openInstalledPackages(page);
       const skillRow = page.locator(`[data-integration-row="imported:${skillCapabilityId}"]`);
       await expectVisible(skillRow);
       await expectText(skillRow, "release-operator");
-      await expectText(skillRow, "Skill · Imported from source");
+      expect(await skillRow.getAttribute("aria-label")).toContain("imported from source");
       expect(state.skillInstallRequests).toHaveLength(1);
       expect(state.skillInstallRequests[0]).toMatchObject({
         url: skillUrl,
@@ -137,7 +141,7 @@ describe("Bundles section browser acceptance", () => {
       const pluginRow = page.getByRole("button", { name: /Research suite.*Installed/ });
       await expectVisible(pluginRow);
       await expectText(pluginRow, "Research suite");
-      await expectText(pluginRow, "Installed");
+      expect(await pluginRow.getAttribute("aria-label")).toContain("Installed");
       expect(state.pluginPreviewRequests).toHaveLength(2);
       expect(state.pluginInstallRequests).toHaveLength(1);
       expect(state.pluginInstallRequests[0]).toMatchObject({
@@ -145,8 +149,8 @@ describe("Bundles section browser acceptance", () => {
         bindings: { linear: { connectionId: financeConnectionId } },
       });
       // The shared search still filters the selected category without a second input.
-      await expectVisible(page.getByRole("heading", { name: "Plugins", exact: true }));
-      const search = page.getByLabel("Search capabilities");
+      await expectVisible(page.getByRole("tab", { name: "Plugins", exact: true, selected: true }));
+      const search = page.getByRole("searchbox", { name: "Search plugins", exact: true });
       await search.fill("research");
       await page.getByRole("tab", { name: "Plugins", exact: true }).click();
       await expectVisible(pluginRow);
@@ -211,6 +215,7 @@ describe("Bundles section browser acceptance", () => {
       });
 
       await page.getByRole("tab", { name: "Skills", exact: true }).click();
+      await openInstalledPackages(page);
       const skillRow = page.locator(`[data-integration-row="imported:${skillCapabilityId}"]`);
       await openBundleSheet(page, `imported:${skillCapabilityId}`);
       await page
@@ -249,6 +254,7 @@ describe("Bundles section browser acceptance", () => {
     try {
       await installApi(page, state);
       await openCapabilities(page);
+      await openInstalledPackages(page);
       await expectText(
         page.locator('section[aria-label="Skills and plugins"]'),
         "Workspace administrators can install, update, and remove these items.",
@@ -261,7 +267,7 @@ describe("Bundles section browser acceptance", () => {
       // A viewer who cannot act is told so, rather than shown buttons that do
       // nothing when pressed.
       await openBundleSheet(page, `plugin:${pluginKey}`);
-      const pluginSheet = page.locator('[data-integration-sheet="bundle-plugin-example/research"]');
+      const pluginSheet = page.getByRole("dialog");
       await expectText(
         pluginSheet,
         "Workspace administrators can install, update, and remove imported Skills and Plugins.",
@@ -273,7 +279,7 @@ describe("Bundles section browser acceptance", () => {
       await page.keyboard.press("Escape");
       await expectHidden(pluginSheet);
       await page.waitForFunction(() =>
-        document.activeElement?.matches(".og-capability-catalog-row"),
+        document.activeElement?.matches(".og-connection-installed button"),
       );
       expect(state.pluginInstallRequests).toHaveLength(0);
       expect(state.pluginRemoveRequests).toHaveLength(0);
@@ -307,7 +313,7 @@ describe("Bundles section browser acceptance", () => {
       const packRow = page.getByRole("button", { name: /Infrastructure operations/ });
       await expectVisible(packRow);
       await expectText(packRow, "Infrastructure operations");
-      await expectText(packRow, "Registered in this workspace");
+      await expectText(packRow, "Installed");
       expect((await packRow.textContent()) ?? "").not.toContain("Curated by OpenGeni");
       await packRow.click();
       const dialog = page.locator(`[data-pack-dialog="${packId}"]`);
@@ -373,6 +379,12 @@ async function openCapabilities(page: Page): Promise<void> {
   await page.getByRole("tab", { name: "Skills", exact: true }).click();
 }
 
+async function openInstalledPackages(page: Page): Promise<void> {
+  const summary = page.getByText("Manage installed packages", { exact: true });
+  if (!(await summary.evaluate((node) => node.parentElement?.hasAttribute("open"))))
+    await summary.click();
+}
+
 async function openBundleSheet(page: Page, rowId: string): Promise<void> {
   if (rowId.startsWith("plugin:")) {
     await page.getByRole("tab", { name: "Plugins", exact: true }).click();
@@ -392,15 +404,20 @@ async function openBundleSheet(page: Page, rowId: string): Promise<void> {
       );
     }
     const manage = page.getByRole("button", { name: "Manage installation", exact: true });
-    await manage.scrollIntoViewIfNeeded();
+    if (canManage) await manage.scrollIntoViewIfNeeded();
     await page.getByRole("dialog").screenshot({
       path: `${evidenceDir}installed-plugin-overview-${canManage ? "manager" : "viewer"}.png`,
     });
+    if (!canManage) {
+      expect(await manage.count()).toBe(0);
+      return;
+    }
     await manage.focus();
     await page.keyboard.press("Enter");
     return;
   }
   await page.getByRole("tab", { name: "Skills", exact: true }).click();
+  await openInstalledPackages(page);
   await page.locator(`button[data-integration-row="${rowId}"]`).first().click();
 }
 
@@ -495,7 +512,28 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       request.method() === "GET" &&
       url.pathname === `/v1/workspaces/${workspaceId}/skills/content`
     ) {
-      return json({ skills: [], nextCursor: null });
+      return json({
+        skills: state.skillInstalled
+          ? [
+              {
+                id: skillCapabilityId,
+                stableKey: "release-operator",
+                title: "release-operator",
+                description: "Release safely with immutable operational instructions.",
+                scope: "workspace",
+                scopeVersion: 1,
+                status: "active",
+                activationMode: "workspace_managed",
+                activeRevisionId: "active",
+                revisionId: "active",
+                pendingRevisionIds: [],
+                contentHash: "b".repeat(64),
+                source: null,
+              },
+            ]
+          : [],
+        nextCursor: null,
+      });
     }
     if (request.method() === "GET" && url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
       return json({ plugins: state.pluginInstalled ? [installedPlugin(state)] : [] });

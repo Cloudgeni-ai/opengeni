@@ -103,3 +103,36 @@ test("plugin discovery preserves loading, retry, and registry filters", async ()
     await rendered.unmount();
   }
 });
+
+test("overview limits plugins to six and delegates View all without fetching another page", async () => {
+  const client = {
+    discoverPlugins: mock(async () => ({
+      items: Array.from({ length: 10 }, (_, i) => ({ ...item, id: String(i) })),
+      total: 100,
+      nextOffset: 10,
+    })),
+  };
+  const more = mock(() => {});
+  const view = await renderComponent(
+    <PluginDiscovery
+      client={client}
+      workspaceId="overview"
+      query=""
+      onOpen={() => {}}
+      resultLimit={6}
+      onShowMore={more}
+    />,
+  );
+  try {
+    await flush(250);
+    expect(view.container.querySelectorAll(".og-capability-catalog-row")).toHaveLength(6);
+    expect(view.container.querySelector("h3")?.textContent).toBe("Plugins");
+    expect(view.container.querySelector('[aria-label="Plugin registry"]')).toBeNull();
+    const button = view.container.querySelector<HTMLButtonElement>(".og-catalog-more")!;
+    await actRun(() => button.click());
+    expect(more).toHaveBeenCalledTimes(1);
+    expect(client.discoverPlugins).toHaveBeenCalledTimes(1);
+  } finally {
+    await view.unmount();
+  }
+});

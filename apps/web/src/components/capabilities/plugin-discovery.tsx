@@ -3,9 +3,9 @@ import {
   type CapabilityCatalogItem,
   type PluginInstallationSummary,
 } from "@opengeni/contracts";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  CapabilityCatalogRow,
+  ConnectionInstalled,
   ConnectionLogo,
   PluginDiscovery as Catalog,
   PluginDetails,
@@ -24,11 +24,17 @@ export function PluginDiscovery({
   workspaceId,
   query,
   canManage = false,
+  beforeCatalog,
+  resultLimit,
+  onShowMore,
   onChanged,
   onOpenConnection,
   onManageInstalled,
   installedPlugins = EMPTY_INSTALLED_PLUGINS,
 }: {
+  beforeCatalog?: ReactNode;
+  resultLimit?: number;
+  onShowMore?: () => void;
   installedPlugins?: PluginInstallationSummary[];
   onOpenConnection?: (item: CapabilityCatalogItem) => void;
   onManageInstalled?: (plugin: PluginInstallationSummary, opener: HTMLElement) => void;
@@ -161,41 +167,37 @@ export function PluginDiscovery({
   const opener = useRef<HTMLElement | null>(null);
   return (
     <>
-      {installedPlugins.length ? (
-        <section className="mb-6">
-          <h3 className="mb-2 text-sm font-semibold">Installed</h3>
-          <div className="grid gap-x-6 sm:grid-cols-2">
-            {installedPlugins
-              .filter((plugin) =>
-                (plugin.name + " " + plugin.description)
-                  .toLowerCase()
-                  .includes(query.trim().toLowerCase()),
-              )
-              .map((plugin) => (
-                <CapabilityCatalogRow
-                  key={plugin.pluginKey}
-                  data-installed-plugin={plugin.pluginKey}
+      {!resultLimit ? (
+        <ConnectionInstalled
+          title="Installed"
+          items={installedPlugins
+            .filter((plugin) =>
+              (plugin.name + " " + plugin.description)
+                .toLowerCase()
+                .includes(query.trim().toLowerCase()),
+            )
+            .map((plugin) => ({
+              id: plugin.pluginKey,
+              name: plugin.name,
+              status: plugin.status === "needs_attention" ? "Needs attention" : "Installed",
+              needsAttention: plugin.status === "needs_attention",
+              onOpen: () => void openInstalled(plugin),
+              icon: (
+                <ConnectionLogo
+                  src={plugin.logoUrl ?? null}
                   name={plugin.name}
-                  description={plugin.description}
-                  status={plugin.status === "needs_attention" ? "attention" : "added"}
-                  statusLabel={
-                    plugin.status === "needs_attention" ? "Needs attention" : "Installed"
-                  }
-                  onOpen={() => void openInstalled(plugin)}
-                  icon={
-                    <ConnectionLogo
-                      src={plugin.logoUrl ?? null}
-                      name={plugin.name}
-                      fallback={<BoxesIcon aria-hidden="true" />}
-                    />
-                  }
+                  size={40}
+                  fallback={<BoxesIcon aria-hidden="true" />}
                 />
-              ))}
-          </div>
-        </section>
+              ),
+            }))}
+        />
       ) : null}
       {!selected && error ? <p role="alert">{error}</p> : null}
+      {beforeCatalog}
       <Catalog
+        {...(resultLimit ? { resultLimit } : {})}
+        {...(onShowMore ? { onShowMore } : {})}
         client={client}
         workspaceId={workspaceId}
         query={query}
@@ -246,6 +248,12 @@ export function PluginDiscovery({
                 error={error}
                 {...(canManage ? { onInstall: () => void install(selected) } : {})}
               />
+              {!canManage ? (
+                <p className="border-t border-border p-4 text-sm text-fg-muted">
+                  Workspace administrators can install, update, and remove imported Skills and
+                  Plugins.
+                </p>
+              ) : null}
               {canManage && selectedInstallation && onManageInstalled ? (
                 <div className="border-t border-border p-4">
                   <Button

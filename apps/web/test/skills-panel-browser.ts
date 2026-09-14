@@ -14,9 +14,13 @@ try {
     console.error(error.message);
   });
   await page.goto(`${baseUrl}/test/skills-panel.html`);
-  const row = page.getByRole("button", { name: /release-checks.*Added/ });
+  const row = page.getByRole("button", { name: /release-checks.*Installed/ });
   await row.waitFor();
-  if (await row.evaluate((element) => getComputedStyle(element).display !== "flex"))
+  if (
+    await row.evaluate(
+      (element) => !["flex", "inline-flex"].includes(getComputedStyle(element).display),
+    )
+  )
     throw new Error("Shared catalog styles are missing when Skills is loaded directly");
   await row.click();
   const editor = page.getByRole("dialog", { name: "release-checks", exact: true });

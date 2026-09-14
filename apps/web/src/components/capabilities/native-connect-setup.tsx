@@ -7,15 +7,10 @@ import {
   type ConnectInstallationTarget,
   type ConnectAttempt,
 } from "@opengeni/connect";
-import { ConnectSetup } from "@opengeni/react/connect";
+import { ConnectSetup, ConnectionLogo } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
+import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { CapabilityDialogContent } from "./detail-dialog";
 import { Button } from "@/components/ui/button";
 
 export type NativeConnectRequest = {
@@ -27,6 +22,9 @@ export type NativeConnectRequest = {
   reconnectAccountId?: string;
   installationTarget?: ConnectInstallationTarget;
   displayName?: string;
+  description?: string;
+  logoUrl?: string;
+  authorizeLabel?: string;
 };
 
 export function nativeConnectApiInput(request: NativeConnectRequest) {
@@ -60,6 +58,13 @@ export function NativeConnectSetup({
   const [preparing, setPreparing] = useState(true);
   const [retry, setRetry] = useState(0);
   const [pending, setPending] = useState<ConnectAttempt[]>([]);
+  const [resumed, setResumed] = useState(false);
+  const heading = useRef<HTMLHeadingElement | null>(null);
+  const opener = useRef<HTMLElement | null>(
+    typeof document !== "undefined" && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null,
+  );
   const navigation = useRef<AbortController | null>(null);
   useEffect(() => {
     if (request.scope.workspaceId !== workspaceId || request.scope.transport !== transport) {
@@ -71,6 +76,7 @@ export function NativeConnectSetup({
     setFailed(false);
     setPreparing(true);
     setPending([]);
+    setResumed(false);
     const abort = new AbortController();
     navigation.current?.abort();
     navigation.current = new AbortController();
@@ -84,9 +90,13 @@ export function NativeConnectSetup({
           (attempt) =>
             attempt.providerId === request.providerId &&
             attempt.ownership === request.ownership &&
+            attempt.installationTarget?.instanceKey === request.installationTarget?.instanceKey &&
             (!request.reconnectAccountId || attempt.account?.id === request.reconnectAccountId),
         );
-        if (matches.length) setPending(matches);
+        if (matches.length === 1) {
+          setResumed(true);
+          await next.recover(matches[0]!.id);
+        } else if (matches.length > 1) setPending(matches);
         else await next.begin(nativeConnectApiInput(request));
       })
       .catch(() => {
@@ -124,80 +134,130 @@ export function NativeConnectSetup({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>
-            Connect{" "}
-            {request.displayName ?? request.installationTarget?.displayName ?? request.providerId}
-          </DialogTitle>
-          <DialogDescription>
-            Complete the setup below. Closing this window does not cancel saved setup.
-          </DialogDescription>
-        </DialogHeader>
-        {failed && (
-          <div role="alert">
-            Could not start setup.{" "}
-            <Button variant="outline" onClick={() => setRetry((value) => value + 1)}>
-              Retry setup
-            </Button>
+      <CapabilityDialogContent
+        className="max-h-[85dvh] overflow-y-auto sm:max-w-[36rem]"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          heading.current?.focus();
+        }}
+        onCloseAutoFocus={(event) => {
+          if (opener.current?.isConnected) {
+            event.preventDefault();
+            opener.current.focus();
+          }
+        }}
+      >
+        <DialogHeader className="flex-row items-center gap-4 border-b border-border px-6 py-6 pr-12 text-left">
+          <ConnectionLogo
+            src={request.logoUrl ?? null}
+            name={request.displayName ?? request.providerId}
+          />
+          <div className="min-w-0 space-y-1.5">
+            <DialogTitle
+              ref={heading}
+              tabIndex={-1}
+              className="text-xl font-semibold tracking-tight outline-none"
+            >
+              Connect{" "}
+              {request.displayName ?? request.installationTarget?.displayName ?? request.providerId}
+            </DialogTitle>
+            <DialogDescription className="text-sm leading-6 text-fg-muted">
+              {request.description ?? "Authorize access to use this connection in OpenGeni."}
+            </DialogDescription>
           </div>
-        )}
-        {preparing && <p role="status">Preparing account setup…</p>}
-        {pending.length > 0 && controller && (
-          <section aria-label="Unfinished connection setup">
-            <p>
-              You have unfinished setup for this provider. Resume an attempt or connect a different
-              account.
+        </DialogHeader>
+        <div className="space-y-4 px-6 py-5 text-sm">
+          {failed && (
+            <div
+              role="alert"
+              className="flex flex-wrap items-center justify-between gap-3 text-status-error"
+            >
+              Could not start setup.{" "}
+              <Button variant="outline" onClick={() => setRetry((value) => value + 1)}>
+                Retry setup
+              </Button>
+            </div>
+          )}
+          {preparing && (
+            <p role="status" className="py-2 text-fg-muted">
+              Preparing connection…
             </p>
-            <ul>
-              {pending.map((attempt) => (
-                <li key={attempt.id}>
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setPending([]);
-                      void controller.recover(attempt.id).catch(() => setFailed(true));
-                    }}
-                  >
-                    Resume{" "}
-                    {attempt.installationTarget?.displayName ??
-                      attempt.account?.label ??
-                      attempt.providerId}{" "}
-                    — {attempt.state.replaceAll("_", " ")}
-                  </Button>
-                </li>
-              ))}
-            </ul>
+          )}
+          {pending.length > 0 && controller && (
+            <section aria-label="Unfinished connection setup" className="space-y-4">
+              <p>
+                You have unfinished setup for this provider. Resume an attempt or connect a
+                different account.
+              </p>
+              <ul className="space-y-2">
+                {pending.map((attempt) => (
+                  <li key={attempt.id}>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setPending([]);
+                        setResumed(true);
+                        void controller.recover(attempt.id).catch(() => setFailed(true));
+                      }}
+                    >
+                      Resume{" "}
+                      {attempt.installationTarget?.displayName ??
+                        attempt.account?.label ??
+                        attempt.providerId}{" "}
+                      — {attempt.state.replaceAll("_", " ")}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setPending([]);
+                  void controller
+                    .begin(nativeConnectApiInput(request))
+                    .catch(() => setFailed(true));
+                }}
+              >
+                Connect a different account
+              </Button>
+            </section>
+          )}
+          {resumed && controller && !preparing && !failed && (
             <Button
-              variant="outline"
+              variant="ghost"
               onClick={() => {
-                setPending([]);
-                void controller.begin(nativeConnectApiInput(request)).catch(() => setFailed(true));
+                setResumed(false);
+                setPreparing(true);
+                void controller
+                  .begin(nativeConnectApiInput(request))
+                  .catch(() => setFailed(true))
+                  .finally(() => setPreparing(false));
               }}
             >
               Connect a different account
             </Button>
-          </section>
-        )}
-        {controller && !preparing && !failed && pending.length === 0 && (
-          <ConnectSetup
-            className="og-connect"
-            controller={controller}
-            onAuthorize={async (attempt) => {
-              const result = await authorizeConnectAttempt(
-                transport,
-                attempt,
-                createBrowserConnectNavigation(window),
-                {
-                  mode: "popup",
-                  ...(navigation.current ? { signal: navigation.current.signal } : {}),
-                },
-              );
-              if (result) await controller.recover(result.id);
-            }}
-          />
-        )}
-      </DialogContent>
+          )}
+          {controller && !preparing && !failed && pending.length === 0 && (
+            <ConnectSetup
+              className="og-connect"
+              authorizeLabel={request.authorizeLabel}
+              controller={controller}
+              onAuthorize={async (attempt) => {
+                const result = await authorizeConnectAttempt(
+                  transport,
+                  attempt,
+                  createBrowserConnectNavigation(window),
+                  {
+                    mode: "popup",
+                    ...(navigation.current ? { signal: navigation.current.signal } : {}),
+                  },
+                );
+                if (result) await controller.recover(result.id);
+              }}
+            />
+          )}
+        </div>
+      </CapabilityDialogContent>
     </Dialog>
   );
 }

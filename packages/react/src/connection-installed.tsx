@@ -6,6 +6,7 @@ export type ConnectionInstalledItem = {
   status: string;
   icon?: ReactNode;
   needsAttention?: boolean;
+  disabled?: boolean;
   onOpen: () => void;
 };
 
@@ -31,6 +32,7 @@ export function ConnectionInstalled({
             key={item.id}
             type="button"
             onClick={item.onOpen}
+            disabled={item.disabled}
             title={item.status}
             aria-label={`${item.name} · ${item.status}`}
           >

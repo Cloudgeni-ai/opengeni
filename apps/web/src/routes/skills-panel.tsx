@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type RefObject } from "react";
 import { BookOpenIcon, ChevronDownIcon, PlusIcon } from "lucide-react";
-import { CapabilityCatalogRow } from "@opengeni/react/connect";
+import { ConnectionInstalled } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
 import type {
   SkillRecord,
@@ -8,6 +8,7 @@ import type {
   SkillSummary,
   PreferenceRegistryRevisionSummary,
 } from "@opengeni/sdk";
+import { CatalogHeader } from "@/components/capabilities/catalog-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -36,12 +37,18 @@ export function SkillsPanel({
   query = "",
   onFindSkill,
   onImportSkill,
+  refreshRevision = 0,
+  onSkillsChange,
+  openSkillRef,
 }: {
   workspaceId: string;
   personalWorkspace?: boolean;
   query?: string;
   onFindSkill?: (() => void) | undefined;
   onImportSkill?: (() => void) | undefined;
+  refreshRevision?: number;
+  onSkillsChange?: (skills: SkillSummary[]) => void;
+  openSkillRef?: RefObject<((id: string) => void) | null>;
 }) {
   return (
     <SkillsPanelContent
@@ -51,6 +58,9 @@ export function SkillsPanel({
       query={query}
       onFindSkill={onFindSkill}
       onImportSkill={onImportSkill}
+      refreshRevision={refreshRevision}
+      {...(onSkillsChange ? { onSkillsChange } : {})}
+      {...(openSkillRef ? { openSkillRef } : {})}
     />
   );
 }
@@ -62,6 +72,9 @@ export function SkillsPanelContent({
   query = "",
   onFindSkill,
   onImportSkill,
+  refreshRevision = 0,
+  onSkillsChange,
+  openSkillRef,
 }: {
   context: AppContextValue;
   workspaceId: string;
@@ -69,6 +82,9 @@ export function SkillsPanelContent({
   query?: string;
   onFindSkill?: (() => void) | undefined;
   onImportSkill?: (() => void) | undefined;
+  refreshRevision?: number;
+  onSkillsChange?: (skills: SkillSummary[]) => void;
+  openSkillRef?: RefObject<((id: string) => void) | null>;
 }) {
   const { client } = context;
   const editorId = useId();
@@ -103,6 +119,7 @@ export function SkillsPanelContent({
   const [reload, setReload] = useState(0);
   const [discardAction, setDiscardAction] = useState<(() => void) | null>(null);
   const generation = useRef(0);
+  const inventoryGeneration = useRef(0);
   const dirty = Boolean(
     record &&
     (files.length !== record.files.length ||
@@ -113,7 +130,8 @@ export function SkillsPanelContent({
   );
 
   useEffect(() => {
-    const current = ++generation.current;
+    generation.current++;
+    const current = ++inventoryGeneration.current;
     setLoading(true);
     setBusy(false);
     setRecord(null);
@@ -126,24 +144,62 @@ export function SkillsPanelContent({
     void client
       .listWorkspaceSkills(workspaceId)
       .then((result) => {
-        if (generation.current === current) {
+        if (inventoryGeneration.current === current) {
+          setLoading(false);
           setSkills(result.skills);
           setNextCursor(result.nextCursor ?? null);
         }
       })
       .catch((reason) => {
-        if (generation.current === current)
+        if (inventoryGeneration.current === current)
           setError(reason instanceof Error ? reason.message : "Could not load Skills");
       })
       .finally(() => {
-        if (generation.current === current) setLoading(false);
+        if (inventoryGeneration.current === current) setLoading(false);
       });
     return () => {
       // Invalidate every request started since this effect, not only its initial list.
       // eslint-disable-next-line react-hooks/exhaustive-deps
       generation.current++;
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      inventoryGeneration.current++;
     };
   }, [client, workspaceId, reload]);
+
+  useEffect(() => {
+    onSkillsChange?.(skills);
+  }, [skills, onSkillsChange]);
+  useEffect(() => {
+    if (!refreshRevision) return;
+    let live = true;
+    const current = ++inventoryGeneration.current;
+    void client
+      .listWorkspaceSkills(workspaceId)
+      .then((result) => {
+        if (live && current === inventoryGeneration.current) {
+          setLoading(false);
+          setSkills(result.skills);
+          setNextCursor(result.nextCursor ?? null);
+        }
+      })
+      .catch((reason) => {
+        if (live && current === inventoryGeneration.current)
+          setError(reason instanceof Error ? reason.message : "Could not refresh Skills");
+      })
+      .finally(() => {
+        if (live && current === inventoryGeneration.current) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, workspaceId, refreshRevision]);
+  useEffect(() => {
+    if (!openSkillRef) return;
+    openSkillRef.current = (id) => navigate(() => void open(id));
+    return () => {
+      openSkillRef.current = null;
+    };
+  });
 
   useEffect(() => {
     if (!dirty) return;
@@ -163,11 +219,12 @@ export function SkillsPanelContent({
   const loadMore = useCallback(async () => {
     if (!nextCursor || busy) return;
     const current = generation.current;
+    const inventoryRequest = ++inventoryGeneration.current;
     setBusy(true);
     setError(null);
     try {
       const page = await client.listWorkspaceSkills(workspaceId, { cursor: nextCursor });
-      if (generation.current !== current) return;
+      if (inventoryGeneration.current !== inventoryRequest) return;
       setSkills((previous) => [
         ...new Map([...previous, ...page.skills].map((skill) => [skill.id, skill])).values(),
       ]);
@@ -255,15 +312,20 @@ export function SkillsPanelContent({
         expectedScopeVersion: record.scopeVersion,
         reason: "Change skill scope",
       });
+      if (generation.current !== current) return;
+      const inventoryRequest = ++inventoryGeneration.current;
       const [updated, inventory] = await Promise.all([
         client.readWorkspaceSkill(workspaceId, record.id, record.revisionId),
         client.listWorkspaceSkills(workspaceId),
       ]);
+      if (inventoryGeneration.current === inventoryRequest) {
+        setSkills(inventory.skills);
+        setNextCursor(inventory.nextCursor ?? null);
+      }
       if (generation.current !== current) return;
       // Keep any unsaved file edits while refreshing scope/version metadata.
       setRecord(updated);
-      setSkills(inventory.skills);
-      setNextCursor(inventory.nextCursor ?? null);
+
       setNotice("Skill scope updated.");
     } catch (reason) {
       if (generation.current === current)
@@ -303,15 +365,19 @@ export function SkillsPanelContent({
                 : client.restoreWorkspaceSkill.bind(client)
             )(workspaceId, record.id, { ...version, revisionId: record.revisionId! });
       if (generation.current !== current) return;
+      const inventoryRequest = ++inventoryGeneration.current;
       const [updated, inventory, detail] = await Promise.all([
         client.readWorkspaceSkill(workspaceId, receipt.skillId),
         client.listWorkspaceSkills(workspaceId),
         client.getPreferenceRegistry(workspaceId, receipt.skillId),
       ]);
+      if (inventoryGeneration.current === inventoryRequest) {
+        setSkills(inventory.skills);
+        setNextCursor(inventory.nextCursor ?? null);
+      }
       if (generation.current !== current) return;
       show(updated);
-      setSkills(inventory.skills);
-      setNextCursor(inventory.nextCursor ?? null);
+
       setHistory(detail.revisions);
       setNotice(
         receipt.outcome === "pending"
@@ -338,48 +404,42 @@ export function SkillsPanelContent({
 
   return (
     <section aria-label="Skills" className="skills-panel space-y-4">
-      <div
+      <CatalogHeader
+        title="Skills"
+        headingRef={headingRef}
         hidden={Boolean(query.trim()) && !matchingSkills.length && !record}
-        className="flex flex-wrap items-center justify-between gap-3"
-      >
-        <div>
-          <h2 ref={headingRef} tabIndex={-1} className="text-lg font-semibold">
-            Your skills
-          </h2>
-          <p hidden={Boolean(query.trim())} className="text-sm text-fg-subtle">
-            Create and manage your agent’s instructions.
-          </p>
-        </div>
-        <div hidden={Boolean(query.trim())} className="flex flex-wrap gap-2">
-          {([personalWorkspace ? "user" : "workspace", "organization"] as const)
-            .filter(canManage)
-            .slice(0, 1)
-            .map((scope) => (
-              <DropdownMenu key={scope}>
-                <DropdownMenuTrigger asChild>
-                  <Button ref={newSkillRef} variant="default" disabled={busy}>
-                    <PlusIcon aria-hidden="true" />
-                    New skill
-                    <ChevronDownIcon aria-hidden="true" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onSelect={() => navigate(() => create(scope))}>
-                    Create manually
-                  </DropdownMenuItem>
-                  {onFindSkill ? (
-                    <DropdownMenuItem onSelect={onFindSkill}>
-                      Find a skill in the catalogue
+        action={
+          <div hidden={Boolean(query.trim())} className="flex flex-wrap gap-2">
+            {([personalWorkspace ? "user" : "workspace", "organization"] as const)
+              .filter(canManage)
+              .slice(0, 1)
+              .map((scope) => (
+                <DropdownMenu key={scope}>
+                  <DropdownMenuTrigger asChild>
+                    <Button ref={newSkillRef} variant="default" disabled={busy}>
+                      <PlusIcon aria-hidden="true" />
+                      New skill
+                      <ChevronDownIcon aria-hidden="true" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={() => navigate(() => create(scope))}>
+                      Create manually
                     </DropdownMenuItem>
-                  ) : null}
-                  {onImportSkill ? (
-                    <DropdownMenuItem onSelect={onImportSkill}>Import from URL</DropdownMenuItem>
-                  ) : null}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ))}
-        </div>
-      </div>
+                    {onFindSkill ? (
+                      <DropdownMenuItem onSelect={onFindSkill}>
+                        Find a skill in the catalogue
+                      </DropdownMenuItem>
+                    ) : null}
+                    {onImportSkill ? (
+                      <DropdownMenuItem onSelect={onImportSkill}>Import from URL</DropdownMenuItem>
+                    ) : null}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ))}
+          </div>
+        }
+      />
       {error && !record ? (
         <p role="alert" className="text-sm text-status-error">
           {error}{" "}
@@ -400,45 +460,34 @@ export function SkillsPanelContent({
       {loading ? <p role="status">Loading Skills…</p> : null}
       {!loading && !skills.length ? (
         <p className="text-sm text-fg-subtle">
-          No Skills yet. Create one here or install one from the catalog.
+          {onFindSkill
+            ? "No skills installed yet. Browse the catalog below or add your own."
+            : "No skills yet. Create one to give your agent reusable instructions."}
         </p>
       ) : null}
-      <div className="grid gap-1">
-        {matchingSkills.map((skill) => (
-          <CapabilityCatalogRow
-            key={skill.id}
-            name={skill.title || skill.stableKey}
-            description={skill.description ?? undefined}
-            icon={<BookOpenIcon aria-hidden="true" />}
-            status={
-              skill.pendingRevisionIds.length
-                ? "attention"
-                : skill.status === "active"
-                  ? "added"
-                  : "unavailable"
-            }
-            statusLabel={
-              skill.pendingRevisionIds.length
-                ? skill.status === "active"
-                  ? "Pending changes"
-                  : "Pending changes · not active"
-                : skill.status === "active"
-                  ? undefined
-                  : `Not active · ${skill.status}`
-            }
-            aria-haspopup="dialog"
-            aria-expanded={record?.id === skill.id}
-            aria-controls={record?.id === skill.id ? editorId : undefined}
-            disabled={busy}
-            onOpen={() => navigate(() => void open(skill.id))}
-          />
-        ))}
-        {nextCursor ? (
-          <Button variant="outline" disabled={busy} onClick={() => void loadMore()}>
-            Load more Skills
-          </Button>
-        ) : null}
-      </div>
+      <ConnectionInstalled
+        title="Your skills"
+        items={matchingSkills.map((skill) => ({
+          id: skill.id,
+          name: skill.title || skill.stableKey,
+          icon: <BookOpenIcon aria-hidden="true" className="size-10 p-2 text-fg-muted" />,
+          status: skill.pendingRevisionIds.length
+            ? "Pending changes"
+            : skill.status === "active"
+              ? "Installed"
+              : `Not active · ${skill.status}`,
+          needsAttention: Boolean(skill.pendingRevisionIds.length),
+          disabled: busy,
+          onOpen: () => {
+            if (!busy) navigate(() => void open(skill.id));
+          },
+        }))}
+      />
+      {nextCursor ? (
+        <Button variant="outline" disabled={busy} onClick={() => void loadMore()}>
+          Load more Skills
+        </Button>
+      ) : null}
       <Sheet
         open={record !== null}
         onOpenChange={(isOpen) => {

@@ -38,14 +38,18 @@ test("plugin rows and centered details preserve keyboard focus, scrolling, and i
         });
         await page.goto(`${origin}/test/plugin-discovery.html${query}`);
         const opener = page.locator(
-          query.includes("installed") ? "[data-installed-plugin]" : "[data-plugin-id]",
+          query.includes("installed") ? ".og-connection-installed button" : "[data-plugin-id]",
         );
         await opener.waitFor();
         expect(await opener.locator("button").count()).toBe(0);
         expect(await opener.locator(".og-connection-logo").count()).toBe(1);
-        expect(await opener.locator("[data-status]").getAttribute("data-status")).toBe(
-          query.includes("installed") ? "added" : "available",
-        );
+        if (query.includes("installed")) {
+          expect(await opener.getAttribute("aria-label")).toContain("Installed");
+        } else {
+          expect(await opener.locator("[data-status]").getAttribute("data-status")).toBe(
+            "available",
+          );
+        }
         await opener.focus();
         await page.keyboard.press("Enter");
         const dialog = page.getByRole("dialog");
@@ -99,7 +103,7 @@ test("plugin rows and centered details preserve keyboard focus, scrolling, and i
         await page.keyboard.press("Escape");
         await dialog.waitFor({ state: "hidden" });
         await page.waitForFunction(() =>
-          document.activeElement?.matches("[data-plugin-id], [data-installed-plugin]"),
+          document.activeElement?.matches("[data-plugin-id], .og-connection-installed button"),
         );
         expect(await opener.evaluate((node) => document.activeElement === node)).toBe(true);
         await page.close();

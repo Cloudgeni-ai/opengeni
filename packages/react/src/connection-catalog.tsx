@@ -27,6 +27,8 @@ export type ConnectionCatalogProps = {
   services: ConnectionCatalogService[];
   query?: string;
   columns?: 1 | 2;
+  resultLimit?: number;
+  onShowMore?: () => void;
   /** Group capabilities by service, or show every capability independently. */
   grouped?: boolean;
   className?: string;
@@ -114,6 +116,8 @@ export function ConnectionCatalog({
   query = "",
   columns = 1,
   grouped = true,
+  resultLimit,
+  onShowMore,
   className = "",
   emptyMessage = "No connections match your search.",
 }: ConnectionCatalogProps) {
@@ -138,12 +142,21 @@ export function ConnectionCatalog({
       .includes(search),
   );
   return (
-    <div className={`og-connection-catalog ${className}`} data-columns={columns}>
-      {visible.length ? (
-        visible.map((service) => <ConnectionServiceRow key={service.id} service={service} />)
-      ) : (
-        <p role="status">{emptyMessage}</p>
-      )}
-    </div>
+    <>
+      <div className={`og-connection-catalog ${className}`} data-columns={columns}>
+        {visible.length ? (
+          visible
+            .slice(0, resultLimit)
+            .map((service) => <ConnectionServiceRow key={service.id} service={service} />)
+        ) : (
+          <p role="status">{emptyMessage}</p>
+        )}
+      </div>
+      {resultLimit && visible.length > resultLimit ? (
+        <button className="og-catalog-more" type="button" onClick={onShowMore}>
+          View all connections
+        </button>
+      ) : null}
+    </>
   );
 }

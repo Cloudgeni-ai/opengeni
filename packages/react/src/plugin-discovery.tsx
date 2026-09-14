@@ -1,9 +1,11 @@
+import { createDiscoveryCache } from "./discovery-cache";
 import { useEffect, useRef, useState } from "react";
 import type { PluginDiscoveryItem, PluginDiscoveryPage } from "@opengeni/sdk";
 import { BoxesIcon } from "lucide-react";
 import { CapabilityCatalogRow } from "./capability-catalog-row";
 import { ConnectionLogo } from "./connection-logo";
 
+const discoveryCache = createDiscoveryCache<PluginDiscoveryPage>();
 const EMPTY_INSTALLED_IDS: ReadonlySet<string> = new Set();
 
 export type PluginDiscoveryProps = {
@@ -17,30 +19,37 @@ export type PluginDiscoveryProps = {
   query: string;
   /** Discovery identities already installed in the current workspace. */
   installedIds?: ReadonlySet<string>;
+  resultLimit?: number;
+  onShowMore?: () => void;
   onOpen: (item: PluginDiscoveryItem) => void;
 };
 export function PluginDiscovery(props: PluginDiscoveryProps) {
   const [provider, setProvider] = useState("");
   return (
-    <section className="og-plugin-discovery" aria-label="Discover plugins">
+    <section
+      className={`og-plugin-discovery ${props.resultLimit ? "og-catalog-overview" : ""}`}
+      aria-label="Discover plugins"
+    >
       <header>
-        <h3>Browse plugins</h3>
-        <div className="og-plugin-filters" role="group" aria-label="Plugin registry">
-          {[
-            { value: "", label: "All" },
-            { value: "openai", label: "OpenAI plugin registry" },
-            { value: "anthropic", label: "Anthropic plugin registry" },
-          ].map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              aria-pressed={provider === option.value}
-              onClick={() => setProvider(option.value)}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
+        <h3>{props.resultLimit ? "Plugins" : "Browse plugins"}</h3>
+        {!props.resultLimit ? (
+          <div className="og-plugin-filters" role="group" aria-label="Plugin registry">
+            {[
+              { value: "", label: "All" },
+              { value: "openai", label: "OpenAI plugin registry" },
+              { value: "anthropic", label: "Anthropic plugin registry" },
+            ].map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                aria-pressed={provider === option.value}
+                onClick={() => setProvider(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </header>
       <Results
         key={`${props.workspaceId}:${props.query}:${provider}`}
@@ -57,38 +66,47 @@ function Results({
   provider,
   installedIds = EMPTY_INSTALLED_IDS,
   onOpen,
+  resultLimit,
+  onShowMore,
 }: PluginDiscoveryProps & { provider: string }) {
-  const [items, setItems] = useState<PluginDiscoveryItem[]>([]);
+  const initial = discoveryCache.peek(client, JSON.stringify([workspaceId, query, provider, 0]));
+  const [items, setItems] = useState<PluginDiscoveryItem[]>(initial?.items ?? []);
   const [offset, setOffset] = useState(0);
-  const [next, setNext] = useState<number | null>(null);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
+  const [next, setNext] = useState<number | null>(initial?.nextOffset ?? null);
+  const [total, setTotal] = useState(initial?.total ?? 0);
+  const [loading, setLoading] = useState(!initial);
   const [error, setError] = useState(false);
   const [retry, setRetry] = useState(0);
   const sentinel = useRef<HTMLDivElement>(null);
   useEffect(() => {
     let active = true;
-    setLoading(true);
+    const cacheKey = JSON.stringify([workspaceId, query, provider, offset]);
+    const cached = discoveryCache.peek(client, cacheKey);
+    setLoading(!cached);
     setError(false);
     const timer = setTimeout(
       () => {
-        void client.discoverPlugins(workspaceId, { query, provider, offset }).then(
-          (page) => {
-            if (!active) return;
-            setItems((previous) => (offset ? [...previous, ...page.items] : page.items));
-            setTotal(page.total);
-            setNext(page.nextOffset);
-            setLoading(false);
-          },
-          () => {
-            if (active) {
-              setError(true);
+        void discoveryCache
+          .read(client, cacheKey, () =>
+            client.discoverPlugins(workspaceId, { query, provider, offset }),
+          )
+          .then(
+            (page) => {
+              if (!active) return;
+              setItems((previous) => (offset ? [...previous, ...page.items] : page.items));
+              setTotal(page.total);
+              setNext(page.nextOffset);
               setLoading(false);
-            }
-          },
-        );
+            },
+            () => {
+              if (active) {
+                setError(true);
+                setLoading(false);
+              }
+            },
+          );
       },
-      offset ? 0 : 200,
+      cached || offset ? 0 : 200,
     );
     return () => {
       active = false;
@@ -96,7 +114,7 @@ function Results({
     };
   }, [client, workspaceId, query, provider, offset, retry]);
   useEffect(() => {
-    if (loading || error || next === null || !sentinel.current) return;
+    if (resultLimit || loading || error || next === null || !sentinel.current) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) setOffset(next);
@@ -105,7 +123,7 @@ function Results({
     );
     observer.observe(sentinel.current);
     return () => observer.disconnect();
-  }, [loading, error, next]);
+  }, [loading, error, next, resultLimit]);
   return (
     <>
       {!loading && !error ? (
@@ -114,7 +132,7 @@ function Results({
         </p>
       ) : null}
       <div className="og-plugin-discovery-grid">
-        {items.map((item) => (
+        {items.slice(0, resultLimit).map((item) => (
           <CapabilityCatalogRow
             key={item.id}
             data-plugin-id={item.id}
@@ -142,8 +160,13 @@ function Results({
           </button>
         </p>
       ) : null}
+      {resultLimit && !loading && !error && total > resultLimit ? (
+        <button className="og-catalog-more" type="button" onClick={onShowMore}>
+          View all plugins
+        </button>
+      ) : null}
       <div ref={sentinel}>
-        {next !== null && !loading && !error ? (
+        {!resultLimit && next !== null && !loading && !error ? (
           <button className="og-plugin-more" type="button" onClick={() => setOffset(next)}>
             Show more plugins
           </button>
