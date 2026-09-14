@@ -1,4 +1,3 @@
-import type { ConnectorToolPermission } from "@opengeni/contracts";
 export * from "./artifact-catalog";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
 export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
@@ -78950,6 +78949,7 @@ export * from "./knowledge-entries";
 
 export * from "./knowledge-indexing";
 
+import type { ConnectorToolPermission } from "@opengeni/contracts";
 export * from "./knowledge-document-preparation";
 
 export async function listConnectorToolPermissionPolicies(
