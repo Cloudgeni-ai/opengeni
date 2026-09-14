@@ -1,4 +1,5 @@
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
+import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import {
   AUTOMATION_WEBHOOK_MAX_BYTES,
   OPENGENI_PR_REVIEW_PACK_ID,
@@ -340,6 +341,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     assertManagedCompute(deps);
     requireConfiguredApp(deps);
 
+    await withOrganizationIntegrationAcquisition(deps.db, grant, ["github-lens"], async () => {});
     if (payload.intent === "pr_review_github_discovery") {
       let candidates: GitHubInstallationBindingCandidate[] | null;
       try {
@@ -424,32 +426,38 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     }
     let synchronized;
     try {
-      synchronized = await syncManagedGitHubPrReviewInstallation(deps.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        installationId,
-        providerAccountLogin: proof.installation.accountLogin,
-        providerAccountType: proof.installation.accountType as "User" | "Organization",
-        githubActorId: proof.actorId,
-        authorityKind: proof.authorityKind,
-        authorityCheckedAt: new Date(),
-        authorityExpiresAt: new Date((payload.iat + bindingStateMaxAgeSeconds) * 1_000),
-        authorityNonce: payload.nonce,
-        appId: deps.settings.prReviewGithubAppId!,
-        webhookSecretEncrypted: encryptVariableSetValue(
-          encryptionKey,
-          deps.settings.prReviewGithubWebhookSecret!,
-        ),
-        repositories: proof.repositories,
-        createdBySubjectId: grant.subjectId,
-        packInstallationId: packInstallation.id,
-        packConnectorId: prReviewPackConnectorId("github"),
-        packTemplateId: template.id,
-        adapterId: template.adapterId,
-        eventTypes: template.eventTypes,
-        configuration: template.configuration,
-        sessionTemplate: template.sessionTemplate,
-      });
+      synchronized = await withOrganizationIntegrationAcquisition(
+        deps.db,
+        grant,
+        ["github-lens"],
+        (tx) =>
+          syncManagedGitHubPrReviewInstallation(tx, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            installationId,
+            providerAccountLogin: proof.installation.accountLogin,
+            providerAccountType: proof.installation.accountType as "User" | "Organization",
+            githubActorId: proof.actorId,
+            authorityKind: proof.authorityKind,
+            authorityCheckedAt: new Date(),
+            authorityExpiresAt: new Date((payload.iat + bindingStateMaxAgeSeconds) * 1_000),
+            authorityNonce: payload.nonce,
+            appId: deps.settings.prReviewGithubAppId!,
+            webhookSecretEncrypted: encryptVariableSetValue(
+              encryptionKey,
+              deps.settings.prReviewGithubWebhookSecret!,
+            ),
+            repositories: proof.repositories,
+            createdBySubjectId: grant.subjectId,
+            packInstallationId: packInstallation.id,
+            packConnectorId: prReviewPackConnectorId("github"),
+            packTemplateId: template.id,
+            adapterId: template.adapterId,
+            eventTypes: template.eventTypes,
+            configuration: template.configuration,
+            sessionTemplate: template.sessionTemplate,
+          }),
+      );
     } catch (error) {
       if (error instanceof PrReviewDispatchAuthorityError) {
         throw new HTTPException(409, { message: error.message });

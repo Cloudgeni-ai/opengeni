@@ -7,6 +7,7 @@ import {
   type GitHubInstallationBindingCandidate,
 } from "@opengeni/contracts";
 import { PersonalGitHubConnectionMetadata } from "@opengeni/contracts/personal-github";
+import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import {
   ListGitHubRepositoryBranchesQuery,
   VerifyPublicGitHubRepositoryRefRequest,
@@ -598,6 +599,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
           message: "GitHub OAuth state does not match this workspace",
         });
       }
+      await withOrganizationIntegrationAcquisition(db, grant, ["github-app"], async () => {});
       let candidates: GitHubInstallationBindingCandidate[] | null;
       try {
         candidates = deps.githubAppApi?.discoverInstallationBindingCandidates
@@ -652,6 +654,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "GitHub OAuth state does not match this workspace",
       });
     }
+    await withOrganizationIntegrationAcquisition(db, grant, ["github-app"], async () => {});
     let proof;
     try {
       proof = deps.githubAppApi?.authorizeInstallationBinding
@@ -681,22 +684,24 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const expiresAt = new Date((statePayload.iat + githubBindingStateMaxAgeSeconds) * 1_000);
     let bound;
     try {
-      bound = await bindAuthorizedGitHubInstallationRepositories(db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        installationId,
-        githubAccountId: proof.installation.accountId,
-        accountLogin: proof.installation.accountLogin,
-        accountType: proof.installation.accountType,
-        linkedBySubjectId: grant.subjectId,
-        githubActorId: proof.actorId,
-        githubActorLogin: proof.actorLogin,
-        authorityKind: proof.authorityKind,
-        authorityCheckedAt,
-        authorityExpiresAt: expiresAt,
-        authorityNonce: statePayload.nonce,
-        repositoryIds,
-      });
+      bound = await withOrganizationIntegrationAcquisition(db, grant, ["github-app"], (tx) =>
+        bindAuthorizedGitHubInstallationRepositories(tx, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          installationId,
+          githubAccountId: proof.installation.accountId,
+          accountLogin: proof.installation.accountLogin,
+          accountType: proof.installation.accountType,
+          linkedBySubjectId: grant.subjectId,
+          githubActorId: proof.actorId,
+          githubActorLogin: proof.actorLogin,
+          authorityKind: proof.authorityKind,
+          authorityCheckedAt,
+          authorityExpiresAt: expiresAt,
+          authorityNonce: statePayload.nonce,
+          repositoryIds,
+        }),
+      );
     } catch (error) {
       if (error instanceof GitHubInstallationAuthorityCommitError) {
         throw new HTTPException(409, { message: error.message });
