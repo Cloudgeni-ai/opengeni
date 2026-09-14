@@ -123,15 +123,18 @@ function routes(api: ApiRouteDeps) {
 }
 const headers = () => ({ authorization: `Bearer ${token}`, "content-type": "application/json" });
 for (const provider of ["github-app", "github-lens"] as const) {
-  for (const late of [false, true])
-    test(`${provider} native callback ${late ? "late fence" : "preflight"}`, async () => {
+  for (const boundary of ["preflight", "late policy", "late actor"] as const)
+    test(`${provider} native callback ${boundary}`, async () => {
+      const late = boundary !== "preflight";
       await allow(late ? [provider] : [provider === "github-app" ? "github-lens" : "github-app"]);
       let calls = 0;
       const api = deps(async () => []);
       const installationId = Math.floor(Math.random() * 100_000_000) + 1;
       const proof = async () => {
         calls++;
-        if (late) await allow([]);
+        if (boundary === "late policy") await allow([]);
+        if (boundary === "late actor")
+          await shared.admin`update api_keys set revoked_at = now() where id = ${keyId}`;
         return {
           actorId: 7,
           actorLogin: "fixture",
@@ -175,6 +178,10 @@ for (const provider of ["github-app", "github-lens"] as const) {
           headers: { ...headers(), cookie: `${cookie}=${state}` },
         },
       );
+      // Restore this synthetic shared test actor before assertions so the
+      // negative probe does not strand subsequent independent test cases.
+      if (boundary === "late actor")
+        await shared.admin`update api_keys set revoked_at = null where id = ${keyId}`;
       expect({
         status: response.status,
         body: response.status === 403 ? undefined : await response.text(),
@@ -356,6 +363,7 @@ test("manual GitHub repository preflight, late policy fence, allowed commit and 
   const registration = await created.json();
   let calls = 0;
   let restrict = false;
+  let revokeActor = false;
   const fetch = spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     calls++;
     const url = new URL(String(input));
@@ -369,6 +377,8 @@ test("manual GitHub repository preflight, late policy fence, allowed commit and 
       });
     if (url.pathname === "/installation/repositories") {
       if (restrict) await allow([]);
+      if (revokeActor)
+        await shared.admin`update api_keys set revoked_at = now() where id = ${keyId}`;
       return Response.json({
         total_count: 1,
         repositories: [
@@ -411,6 +421,14 @@ test("manual GitHub repository preflight, late policy fence, allowed commit and 
     expect(row!.count).toBe(0);
     await allow(["github-lens"]);
     restrict = false;
+    revokeActor = true;
+    const revoked = await bind();
+    await shared.admin`update api_keys set revoked_at = null where id = ${keyId}`;
+    revokeActor = false;
+    expect(revoked.status).toBe(403);
+    const [afterRevocation] =
+      await shared.admin`select count(*)::int as count from pr_review_repository_bindings where registration_id = ${registration.id}`;
+    expect(afterRevocation!.count).toBe(0);
     const accepted = await bind();
     expect({
       status: accepted.status,
@@ -446,8 +464,9 @@ test("manual GitHub repository preflight, late policy fence, allowed commit and 
         })
       ).status,
     ).toBe(204);
-    expect(calls).toBe(6);
+    expect(calls).toBe(9);
   } finally {
+    await shared.admin`update api_keys set revoked_at = null where id = ${keyId}`;
     fetch.mockRestore();
   }
 });

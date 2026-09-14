@@ -21,6 +21,7 @@ import {
   prReviewPackConnectorId,
   PR_REVIEW_AUTOMATION_TEMPLATE_ID,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requirePermission,
   resolveWorkspaceCatalogSettings,
   type ApiRouteDeps,
@@ -49,6 +50,7 @@ import {
   verifyPrReviewProviderRepository,
 } from "../integrations/pr-review-provider";
 import { registerPrReviewGitHubRoutes } from "./pr-review-github";
+import { integrationCommitGrant } from "../integrations/integration-commit-authority";
 
 export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings } = deps;
@@ -279,7 +281,11 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/pr-review/repositories", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await integrationCommitGrant(
+      await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:admin"),
+      ["workspace:admin"],
+      { settings: deps.settings, authorizationHeader: c.req.header("authorization") },
+    );
     const packInstallation = await requirePrReviewPackActive(db, workspaceId);
     const payload = CreatePrReviewRepositoryBindingRequest.parse(await c.req.json());
     const registration = await getPrReviewAppRegistrationSecret(db, {
@@ -422,8 +428,9 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(503, { message: "PR Review automation template is unavailable" });
     }
     const binding = await mapPrReviewUniqueConflict(
-      withOrganizationIntegrationAcquisition(db, grant, [integrationKey], (tx) =>
-        createPrReviewRepositoryBinding(tx, {
+      withOrganizationIntegrationAcquisition(db, grant, [integrationKey], async (tx) => {
+        await grant.authorizeCommit(tx);
+        return createPrReviewRepositoryBinding(tx, {
           accountId: grant.accountId,
           workspaceId,
           registrationId: registration.id,
@@ -445,8 +452,8 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
           configuration: template.configuration,
           sessionTemplate: template.sessionTemplate,
           ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
-        }),
-      ),
+        });
+      }),
       "This repository is already bound to the selected PR Review registration",
     );
     await recordAuditEvent(db, {

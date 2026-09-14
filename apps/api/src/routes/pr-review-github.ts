@@ -50,6 +50,10 @@ import {
 } from "@opengeni/github";
 import type { Context, Hono } from "hono";
 import { requireLegacyOAuthActor } from "../connection-ownership";
+import {
+  integrationCommitGrant,
+  type IntegrationCommitGrant,
+} from "../integrations/integration-commit-authority";
 import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { githubBrowserBaseUrl } from "../github-browser-flow";
@@ -430,8 +434,9 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
         deps.db,
         grant,
         ["github-lens"],
-        (tx) =>
-          syncManagedGitHubPrReviewInstallation(tx, {
+        async (tx) => {
+          await grant.authorizeCommit(tx);
+          return syncManagedGitHubPrReviewInstallation(tx, {
             accountId: grant.accountId,
             workspaceId: grant.workspaceId,
             installationId,
@@ -456,7 +461,8 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
             eventTypes: template.eventTypes,
             configuration: template.configuration,
             sessionTemplate: template.sessionTemplate,
-          }),
+          });
+        },
       );
     } catch (error) {
       if (error instanceof PrReviewDispatchAuthorityError) {
@@ -547,17 +553,33 @@ async function requirePrReviewManageGrant(
   deps: ApiRouteDeps,
   workspaceId: string,
   state: GitHubSignedStatePayload,
-): Promise<AccessGrant> {
-  let grant: AccessGrant;
+): Promise<IntegrationCommitGrant> {
+  let grant: IntegrationCommitGrant;
   try {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:admin");
     requireLegacyOAuthActor(access);
-    grant = access.grant;
+    grant = await integrationCommitGrant(access, ["workspace:admin", "secrets:write"], {
+      settings: deps.settings,
+      authorizationHeader: c.req.header("authorization"),
+    });
   } catch (error) {
     if (!(error instanceof HTTPException) || error.status !== 401) throw error;
     const handedOff = prReviewBrowserGrantFromState(deps, state, workspaceId);
     if (!handedOff) throw error;
-    grant = handedOff;
+    grant = {
+      ...handedOff,
+      authorizeCommit: async () => {
+        const current = prReviewBrowserGrantFromState(deps, state, workspaceId);
+        if (
+          !current ||
+          current.accountId !== handedOff.accountId ||
+          current.subjectId !== handedOff.subjectId
+        )
+          throw new HTTPException(403, {
+            message: "OpenGeni Lens browser handoff expired or changed",
+          });
+      },
+    };
   }
   requirePermission(grant, "secrets:write");
   if (grant.accountId !== state.accountId) {

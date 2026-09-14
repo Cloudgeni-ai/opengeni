@@ -74,6 +74,10 @@ import {
 } from "../connection-ownership";
 import { listPersonalGitHubConnections } from "../integrations/personal-github";
 import {
+  integrationCommitGrant,
+  type IntegrationCommitGrant,
+} from "../integrations/integration-commit-authority";
+import {
   isConsistentGitHubBindingCandidates,
   isConsistentGitHubBindingProof,
 } from "../integrations/github-installation-proof";
@@ -684,23 +688,29 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const expiresAt = new Date((statePayload.iat + githubBindingStateMaxAgeSeconds) * 1_000);
     let bound;
     try {
-      bound = await withOrganizationIntegrationAcquisition(db, grant, ["github-app"], (tx) =>
-        bindAuthorizedGitHubInstallationRepositories(tx, {
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId,
-          installationId,
-          githubAccountId: proof.installation.accountId,
-          accountLogin: proof.installation.accountLogin,
-          accountType: proof.installation.accountType,
-          linkedBySubjectId: grant.subjectId,
-          githubActorId: proof.actorId,
-          githubActorLogin: proof.actorLogin,
-          authorityKind: proof.authorityKind,
-          authorityCheckedAt,
-          authorityExpiresAt: expiresAt,
-          authorityNonce: statePayload.nonce,
-          repositoryIds,
-        }),
+      bound = await withOrganizationIntegrationAcquisition(
+        db,
+        grant,
+        ["github-app"],
+        async (tx) => {
+          await grant.authorizeCommit(tx);
+          return bindAuthorizedGitHubInstallationRepositories(tx, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            installationId,
+            githubAccountId: proof.installation.accountId,
+            accountLogin: proof.installation.accountLogin,
+            accountType: proof.installation.accountType,
+            linkedBySubjectId: grant.subjectId,
+            githubActorId: proof.actorId,
+            githubActorLogin: proof.actorLogin,
+            authorityKind: proof.authorityKind,
+            authorityCheckedAt,
+            authorityExpiresAt: expiresAt,
+            authorityNonce: statePayload.nonce,
+            repositoryIds,
+          });
+        },
       );
     } catch (error) {
       if (error instanceof GitHubInstallationAuthorityCommitError) {
@@ -918,18 +928,32 @@ async function requireGitHubManageGrant(
   deps: ApiRouteDeps,
   workspaceId: string,
   expectedState: GitHubSignedStatePayload,
-): Promise<AccessGrant> {
+): Promise<IntegrationCommitGrant> {
   try {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "github:manage");
     requireLegacyOAuthActor(access);
-    return access.grant;
+    return integrationCommitGrant(access, ["github:manage"], {
+      settings: deps.settings,
+      authorizationHeader: c.req.header("authorization"),
+    });
   } catch (error) {
     if (!(error instanceof HTTPException) || error.status !== 401) {
       throw error;
     }
     const grant = githubBrowserGrantFromState(deps.settings, expectedState, workspaceId);
     if (grant) {
-      return grant;
+      return {
+        ...grant,
+        authorizeCommit: async () => {
+          const current = githubBrowserGrantFromState(deps.settings, expectedState, workspaceId);
+          if (
+            !current ||
+            current.accountId !== grant.accountId ||
+            current.subjectId !== grant.subjectId
+          )
+            throw new HTTPException(403, { message: "GitHub browser handoff expired or changed" });
+        },
+      };
     }
     throw error;
   }
