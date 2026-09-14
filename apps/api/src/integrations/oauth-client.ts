@@ -63,6 +63,7 @@ import { ApiHttpError } from "../http/api-error";
 import { requireConnectOwnerAuthority } from "./connect-authority";
 import {
   DEFAULT_OAUTH_PROFILE,
+  OFFICIAL_GMAIL_MCP_URL,
   DEPLOYMENT_MANAGED_CLIENTS,
   builtInOAuthProfileByKey,
   assertAuthorizationServerNotReserved,
@@ -646,8 +647,19 @@ async function completeMcpOAuthCallbackWithinDeadline(
     state = readOAuthState(input.state, settings);
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(db, state, state.connectAttemptId);
+      // Native Gmail setup uses its own provider id, but shares this callback.
+      // Bind that id to the exact reviewed personal Gmail destination before
+      // claiming an operation (including receipt replay), not to arbitrary MCP.
+      const gmailAttemptMatches =
+        stored.attempt.providerId === "gmail" &&
+        state.mcpUrl === OFFICIAL_GMAIL_MCP_URL &&
+        state.providerDomain === "gmailmcp.googleapis.com" &&
+        builtInOAuthProfileFor(state)?.key === "official-gmail" &&
+        state.ownership === "personal" &&
+        personalOwnerStateAccepted(state);
       if (
-        !["mcp-oauth", "slack-personal"].includes(stored.attempt.providerId) ||
+        (!["mcp-oauth", "slack-personal"].includes(stored.attempt.providerId) &&
+          !gmailAttemptMatches) ||
         stored.attempt.ownership !== state.ownership ||
         stored.returnUrl !== state.returnUrl
       )
