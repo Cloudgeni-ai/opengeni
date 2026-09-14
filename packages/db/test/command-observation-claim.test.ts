@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
+  addSessionSystemUpdate,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
@@ -81,6 +82,22 @@ async function fixture() {
 
 test("terminal reads preserve notification and history delivered by the ordinary claim API", async () => {
   const { identity } = await fixture();
+  // The terminal notice rides eligible new input; it does not itself wake idle.
+  await addSessionSystemUpdate(client.db, {
+    accountId: identity.accountId,
+    workspaceId: identity.workspaceId,
+    sessionId: identity.sessionId,
+    kind: "agent_message",
+    classification: "info",
+    sourceId: crypto.randomUUID(),
+    dedupeKey: crypto.randomUUID(),
+    summary: "Inspect the command result",
+    payload: {
+      type: "agent_message",
+      text: "Inspect the command result",
+      operationId: crypto.randomUUID(),
+    },
+  });
   const claim = await claimSessionWorkForAttempt(client.db, identity.workspaceId, {
     sessionId: identity.sessionId,
     workflowId: `session-${identity.sessionId}`,

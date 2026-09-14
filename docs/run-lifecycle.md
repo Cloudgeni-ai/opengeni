@@ -298,9 +298,11 @@ schedules, goal continuation, compaction, and coalesced internal batches use
 explicit service principals. An Agent Steer remains the causal initiator when
 authority-neutral ordinary machine notices coalesce into its inference; those
 notices cannot erase the steering subject merely because they arrived in the
-same batch. Child lifecycle and goal-continuation updates freeze their exact
-target causal turn and claim separately from a Steer or a different target
-turn. A malformed historical authority-bearing update also receives an
+same batch. Child lifecycle, command and goal-continuation updates retain their
+exact target causal turn. Different originating turns may coalesce only when
+they resolve to the same receiving-session human and their frozen execution
+permissions match. Unresolved origins keep exact-turn isolation; Agent Steer
+keeps its exact caller attempt. A malformed historical authority-bearing update also receives an
 isolated claim instead of borrowing a coalesced principal; Agent Steer lineage
 is complete only when the caller session, turn, attempt, and execution
 generation all validate. The session creator is stored separately and is
@@ -1550,8 +1552,15 @@ physical proof and cannot license replay or rebinding.
 The exact terminal transition is also the fallback agent-input boundary: changing the
 command to `exited|lost` and appending `session.command.finished` commit
 together. For a nonterminal session, one dedupe-keyed
-`background_command_result`, `system.update.pending`, and any idle workflow
-wake join that transaction unless command completion was already observed.
+`background_command_result` and `system.update.pending` join that transaction
+unless command completion was already observed. A command completion registers
+a workflow wake only for a current explicit session input wait. Otherwise the
+result stays available without starting a model turn, including failures and
+results queued before the preceding turn finished. Eligible new input can carry
+compatible pending command results. Claim selects non-command input before
+command notices and before the batch read limit, so command backlogs cannot
+block later messages. Incompatible command notices remain pending. Human pause,
+execution-authority boundaries and the batch size/byte limits still apply.
 A successful agent-facing command read that reports `exited|lost` records
 completion observation and suppresses a still-pending completion notification.
 A running read does not observe future completion. Observation concerns terminal

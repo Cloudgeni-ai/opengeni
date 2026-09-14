@@ -87,15 +87,15 @@ Canonical: `apps/worker/src/workflows/session.ts` and
 
 ### 3.3 Logical turns and physical attempts are different
 
-A **turn** is accepted work; an **attempt**, physical execution. Recovery,
-interruption or capacity waiting may replace attempts without duplicating turns/effects.
+A **turn** is accepted work; an **attempt**, replaceable execution without duplicate
+effects. Updates form atomic batches; resumed attempts append batches, preserving
+ordered, exactly-once history.
 
-Internal-update delivery is atomic per batch, not unique per logical turn:
-resumed attempts may append a new batch while retaining earlier receipts.
-Canonical model history owns their ordered, exactly-once inclusion.
-
-Successful `wait_for_input` ends model execution after tool-batch settlement;
-trusted runtime state and immutable same-turn deadlines preserve wait/wake authority.
+`wait_for_input` ends execution after tool-batch settlement, preserving trusted
+wait authority and immutable same-turn deadlines. Command results remain durable;
+alone, they wake only explicit waits. Notices cannot block other inbox input.
+Different causal turns may coalesce only with equivalent human/execution authority,
+preserving lineage. See [`run-lifecycle.md`](run-lifecycle.md).
 
 `runAgentTurn` is non-retryable by default: model/tool/sandbox/Git/connector/cloud
 operations have external effects. Recovery is explicit and attempt-fenced.
