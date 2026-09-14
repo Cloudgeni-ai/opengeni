@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ComposerMobilePlus, type ComposerPlusProps } from "@/components/composer-mobile-plus";
 import { useAppContext } from "@/context";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
 import { composerConnectorOptions } from "@/lib/composer-connectors";
 import { capabilityReconnectPlan, connectionHealth } from "@/lib/capabilities";
@@ -11,6 +12,11 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
   const context = useAppContext();
   const { client } = context;
   const { workspaceId } = props;
+  const canReadConnections = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "connections:read",
+  );
   const [catalog, setCatalog] = useState<{
     workspaceId: string;
     client: typeof client;
@@ -37,12 +43,14 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
     try {
       const [result, connections] = await Promise.all([
         client.listCapabilities(workspaceId),
-        client.listConnections(workspaceId).catch(() => null),
+        canReadConnections
+          ? client.listConnections(workspaceId).catch(() => null)
+          : Promise.resolve(null),
       ]);
       if (!live()) return;
       setCatalog({ client, workspaceId, items: result.items, connections });
       setError(
-        connections === null
+        canReadConnections && connections === null
           ? "Connection status couldn't be checked. Open Capabilities to check the connection."
           : null,
       );
@@ -52,7 +60,7 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
     } finally {
       if (live()) setLoading(false);
     }
-  }, [client, workspaceId, lifecycle]);
+  }, [client, workspaceId, lifecycle, canReadConnections]);
   useEffect(() => {
     setError(null);
     setBusyId(null);
