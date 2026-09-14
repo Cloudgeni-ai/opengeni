@@ -455,11 +455,11 @@ export function SessionList() {
       ),
     [groupContinuations, pageGeneration],
   );
-  const [archiveOverrides, setArchiveOverrides] = useState<ReadonlyMap<string, Session>>(
-    () => new Map(),
-  );
+  const [archiveOverrides, setArchiveOverrides] = useState<
+    ReadonlyMap<string, { session: Session; completedGeneration: number }>
+  >(() => new Map());
   const archiveMembershipEvidence = useMemo(() => {
-    const evidence = new Map(archiveOverrides);
+    const evidence = new Map([...archiveOverrides].map(([id, receipt]) => [id, receipt.session]));
     for (const session of sessions) {
       const previous = evidence.get(session.id);
       if (!previous || (session.archiveVersion ?? 0) > (previous.archiveVersion ?? 0)) {
@@ -468,6 +468,21 @@ export function SessionList() {
     }
     return evidence;
   }, [archiveOverrides, sessions]);
+  const archiveReadEvidence = useMemo(() => {
+    const rowReadGenerations = new Map<string, number>();
+    for (const [, continuation] of activeGroupContinuations) {
+      for (const [id, generation] of continuation.channelGenerations) {
+        rowReadGenerations.set(id, Math.max(rowReadGenerations.get(id) ?? 0, generation));
+      }
+    }
+    for (const session of sessions) rowReadGenerations.set(session.id, rootReadGeneration);
+    return {
+      rowReadGenerations,
+      completedGenerations: new Map(
+        [...archiveOverrides].map(([id, receipt]) => [id, receipt.completedGeneration]),
+      ),
+    };
+  }, [activeGroupContinuations, archiveOverrides, rootReadGeneration, sessions]);
   useEffect(() => {
     setArchiveOverrides(new Map());
   }, [rail.workspaceId]);
@@ -846,7 +861,7 @@ export function SessionList() {
       archiveMembershipEvidence,
       browseStatus === "all" ? "all" : browseStatus === "archived",
       rail.workspaceId,
-      { flat: !hierarchyMode },
+      { flat: !hierarchyMode, ...archiveReadEvidence },
     );
     const projectedAttention = new Map(attentionOverrides);
     const active = activeSessionId
@@ -869,6 +884,7 @@ export function SessionList() {
   }, [
     activeSessionId,
     archiveMembershipEvidence,
+    archiveReadEvidence,
     attentionOverrides,
     hierarchyMode,
     channelMoveOverrides,
@@ -1479,8 +1495,9 @@ export function SessionList() {
           expectedVersion: session.archiveVersion ?? 0,
         });
         if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
+        const completedGeneration = context.sessionChannelProjectionAuthority.beginRead();
         setArchiveOverrides((current) => {
-          const next = new Map(current).set(updated.id, updated);
+          const next = new Map(current).set(updated.id, { session: updated, completedGeneration });
           if (next.size > 64) next.delete(next.keys().next().value!);
           return next;
         });
