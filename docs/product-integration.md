@@ -557,6 +557,11 @@ runtime agent.
 
 ## Browser and React integration
 
+For organization-wide server-enforced Connect acquisition choices, use the
+[organization integration policy](organization-integration-policy.md). Its
+catalog exposes named stable keys, and its revisioned update API is administered
+with the backend's organization key rather than a browser-only filter.
+
 Use `SessionConversation` for a packaged existing-session experience, or
 compose the timeline and composer. These use the normal SDK, not the
 simplified backend chat-handler protocol. Custom clients of that protocol
