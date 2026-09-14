@@ -12,6 +12,7 @@ import {
   deleteWorkspace,
   grantWorkspaceAccess,
   getApiIntegrationUninstallPreview,
+  getApiIntegrationReconciliationSnapshot,
   getConnectionMetadata,
   installApiIntegration,
   IntegrationFacetBindingOwnershipConflictError,
@@ -191,6 +192,52 @@ async function removePolicyFixtureInstallation(installed: {
 }
 
 describe("API Integration persistence", () => {
+  test("a stored reconciliation snapshot cannot restore subsequently removed authority", async () => {
+    if (!client || !shared) throw new Error("Snapshot regression requires PostgreSQL");
+    for (const change of ["owner", "disabled", "tools"] as const) {
+      const input = integrationInput(undefined, `snapshot-${change}-${crypto.randomUUID()}`);
+      const installed = await installApiIntegration(client.db, input);
+      try {
+        const snapshot = await getApiIntegrationReconciliationSnapshot(client.db, {
+          accountId: first.accountId,
+          workspaceId: first.workspaceId,
+          subjectId: first.subjectId,
+          source: { kind: "openapi", url: input.sourceUrl! },
+          expectedRevisionId: input.revision.id,
+          expectedContentSha256: input.revision.contentSha256,
+        });
+        expect(snapshot?.runtime.instanceId).toBe(installed.instanceId);
+        await shared.admin`insert into organization_integration_policies (account_id, mode, allowed_integration_keys, revision)
+          values (${first.accountId}, 'restricted', '[]'::jsonb, 1)`;
+        // Simulate another committed lifecycle writer after the read-only snapshot.
+        if (change === "owner")
+          await shared.admin`delete from integration_facet_binding_owners where binding_id = ${installed.instanceId} and owner_kind = 'direct'`;
+        else if (change === "disabled")
+          await shared.admin`update integration_facet_bindings set status = 'disabled', version = version + 1 where id = ${installed.instanceId}`;
+        else
+          await shared.admin`update integration_facet_bindings set config = jsonb_set(config, '{allowedTools}', '["list_items"]'::jsonb), version = version + 1 where id = ${installed.instanceId}`;
+        await expect(installApiIntegration(client.db, input)).rejects.toThrow(
+          "organization policy",
+        );
+        const [binding] =
+          await shared.admin`select status, config from integration_facet_bindings where id = ${installed.instanceId}`;
+        if (change === "owner") {
+          const owners =
+            await shared.admin`select id from integration_facet_binding_owners where binding_id = ${installed.instanceId} and owner_kind = 'direct'`;
+          expect(owners).toHaveLength(0);
+        } else if (change === "disabled") expect(binding!.status).toBe("disabled");
+        else expect(binding!.config.allowedTools).toEqual(["list_items"]);
+      } finally {
+        await shared.admin`delete from organization_integration_policies where account_id = ${first.accountId}`;
+        // Restore only fixture state so the normal exact-target uninstaller can clean up.
+        if (change === "owner")
+          await shared.admin`insert into integration_facet_binding_owners (account_id, workspace_id, binding_id, owner_kind, owner_id, removable) values (${first.accountId}, ${first.workspaceId}, ${installed.instanceId}, 'direct', ${input.capabilityId}, true) on conflict do nothing`;
+        if (change === "disabled")
+          await shared.admin`update integration_facet_bindings set status = 'active' where id = ${installed.instanceId}`;
+        await removePolicyFixtureInstallation(installed);
+      }
+    }
+  });
   test("restricted policy permits exact API reconciliation and tool reductions but no acquired authority", async () => {
     if (!client || !shared) throw new Error("API reconciliation regression requires PostgreSQL");
     const input = integrationInput(undefined, `reconcile-${crypto.randomUUID()}`);

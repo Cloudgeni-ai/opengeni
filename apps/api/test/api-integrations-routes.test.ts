@@ -3,6 +3,7 @@ import {
   CORE_INTEGRATION_DEFINITIONS,
   GOOGLE_DRIVE_INTEGRATION_DEFINITION,
   INTEGRATION_DEFINITION_PRESENTATIONS,
+  integrationFacetDefinitions,
 } from "@opengeni/capabilities";
 import { CURATED_CATALOG } from "../../../scripts/catalog-curation";
 import {
@@ -248,6 +249,153 @@ async function request(
 }
 
 describe("API Integration routes", () => {
+  test("restricted curated and authenticated GraphQL reconciliation preserves exact source and subject", async () => {
+    if (!client || !shared) throw new Error("Reconciliation regression requires PostgreSQL");
+    for (const protocol of ["openapi", "graphql"] as const) {
+      const curated = protocol === "openapi";
+      const definitionId = curated
+        ? CORE_INTEGRATION_DEFINITIONS[0]!.id
+        : "route-graphql-reconcile";
+      const sourceUrl = `https://127.0.0.1/${protocol}-stored`;
+      const connection = !curated
+        ? await createConnection(client.db, {
+            accountId,
+            workspaceId,
+            subjectId,
+            providerDomain: "127.0.0.1",
+            kind: "api_key",
+            credentialEncrypted: "fixture-never-resolved",
+            createdBySubjectId: subjectId,
+          })
+        : null;
+      const replacement = !curated
+        ? await createConnection(client.db, {
+            accountId,
+            workspaceId,
+            subjectId,
+            providerDomain: "127.0.0.1",
+            kind: "api_key",
+            credentialEncrypted: "replacement-never-resolved",
+            createdBySubjectId: subjectId,
+          })
+        : null;
+      const revision = {
+        id: `${protocol}:${"4".repeat(24)}`,
+        protocol,
+        definitionId,
+        contentSha256: "4".repeat(64),
+        source: { url: sourceUrl },
+        title: "Stored fixture",
+        tools: [
+          {
+            id: "list_items",
+            operationKey: "listItems",
+            name: "List items",
+            description: "Read items",
+            inputSchema: { type: "object", properties: {} },
+            safety: "read" as const,
+            approvalMode: "never" as const,
+            deprecated: false,
+          },
+        ],
+        bindings:
+          protocol === "graphql"
+            ? {
+                list_items: {
+                  kind: "query",
+                  fieldName: "items",
+                  operationName: "ListItems",
+                  variableDefinitions: [],
+                  variableNames: [],
+                  defaultSelection: "id",
+                  selectionAllowed: true,
+                },
+              }
+            : {
+                list_items: {
+                  method: "get",
+                  pathTemplate: "/items",
+                  serverUrl: sourceUrl,
+                  parameters: [],
+                },
+              },
+      };
+      const installed = await installApiIntegration(client.db, {
+        accountId,
+        workspaceId,
+        subjectId,
+        capabilityId: `api:${definitionId}`,
+        pluginKey: `integration/${definitionId}`,
+        serverId: `stored_${protocol}`,
+        name: "Stored fixture",
+        description: "Read items",
+        category: "integrations",
+        tags: [protocol, "custom"],
+        definitionId,
+        definitionProvenance: curated ? "curated" : "workspace",
+        providerDomain: "127.0.0.1",
+        protocol,
+        baseUrl: sourceUrl,
+        sourceUrl,
+        // Missing legacy auth is valid at initial insertion; immutable rows are never patched.
+        authScheme: connection ? { kind: "api_key", carrier: "header", name: "Authorization" } : {},
+        ...(connection ? { connectionId: connection.id } : {}),
+        instanceKey: "stored",
+        ownership: connection ? "subject" : "workspace",
+        facetDefinitions: integrationFacetDefinitions(definitionId),
+        revision,
+      });
+      const body = {
+        source: curated
+          ? { kind: "definition", definitionId }
+          : { kind: "graphql", endpoint: sourceUrl },
+        ...(connection ? { connectionId: connection.id } : {}),
+        instanceKey: "stored",
+        expectedRevisionId: revision.id,
+        expectedContentSha256: revision.contentSha256,
+      };
+      const post = (payload: unknown, actor = subjectId) =>
+        request("/integrations/install", { method: "POST", body: JSON.stringify(payload) }, actor);
+      try {
+        await shared.admin`insert into organization_integration_policies (account_id, mode, allowed_integration_keys, revision) values (${accountId}, 'restricted', '[]'::jsonb, 1)`;
+        const beforeFetches = sourceFetches;
+        const exact = await post(body);
+        expect(exact.status, await exact.clone().text()).toBe(201);
+        expect((await exact.json()).instanceVersion).toBe(installed.instanceVersion);
+        const changed = await post({
+          ...body,
+          source: curated
+            ? { kind: "definition", definitionId: "not-the-installed-definition" }
+            : { kind: "graphql", endpoint: `${sourceUrl}/changed` },
+        });
+        expect(changed.status).toBe(403);
+        if (replacement) {
+          expect((await post({ ...body, connectionId: replacement.id })).status).toBe(403);
+          expect((await post(body, "user:other-reconciliation-subject")).status).toBe(403);
+        }
+        expect(sourceFetches).toBe(beforeFetches);
+      } finally {
+        await shared.admin`delete from organization_integration_policies where account_id = ${accountId}`;
+        const preview = await getApiIntegrationUninstallPreview(
+          client.db,
+          workspaceId,
+          subjectId,
+          installed.capabilityId,
+          installed.instanceKey,
+        );
+        if (preview.installed)
+          await uninstallApiIntegration(client.db, {
+            accountId,
+            workspaceId,
+            subjectId,
+            capabilityId: installed.capabilityId,
+            instanceKey: installed.instanceKey,
+            expectedInstallationVersion: preview.installationVersion!,
+            expectedInstanceVersion: preview.instanceVersion!,
+          });
+      }
+    }
+  });
   test("restricted API reconciliation uses exact stored previews without new discovery", async () => {
     if (!client || !shared || !app) throw new Error("API reconciliation requires real PostgreSQL");
     const source = { kind: "openapi", url: "https://127.0.0.1/reconciliation-openapi.json" };
