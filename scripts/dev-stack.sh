@@ -10,8 +10,7 @@ case "${1:-}" in
   shift
   ;;
 *)
-  opengeni_dev_stack_token="$(bun -e 'import { randomUUID } from "node:crypto"; process.stdout.write(randomUUID())')"
-  exec bash "$0" "--opengeni-dev-stack-token=${opengeni_dev_stack_token}" "$@"
+  exec bun "$(dirname "${BASH_SOURCE[0]}")/run-development-stack.ts" "$@"
   ;;
 esac
 
@@ -552,7 +551,9 @@ cleanup() {
     wait "$pid" >/dev/null 2>&1 || true
   done
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 dev_processes_running() {
   local index pid label status
@@ -1206,6 +1207,12 @@ else
 fi
 (cd packages/db && bun run migrate)
 (cd packages/db && bun run provision-roles)
+# Diagnose schema/role incompatibilities before expensive builds and before the
+# API's fatal-process boundary reduces the failure to structural telemetry.
+if ! (cd packages/db && bun run assert-runtime-posture); then
+  echo "Local runtime database posture is invalid. Check the diagnostic above and ensure migrations and roles match this checkout; see docs/deployment.md. Existing data has been preserved." >&2
+  exit 1
+fi
 # The sidecars need only their dedicated DSNs. Do not leak raw provisioning
 # passwords into API/web/worker child environments after role convergence.
 unset OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_PASSWORD

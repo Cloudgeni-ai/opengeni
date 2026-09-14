@@ -148,7 +148,9 @@ intentionally bind OpenGeni runtime infrastructure into their own process.
 
 Prerequisites:
 
-- Bun
+- Bun at the exact version in [`.bun-version`](.bun-version)
+- Git and curl
+- A C build toolchain (Xcode Command Line Tools on macOS; `build-essential` on Debian/Ubuntu)
 - Docker
 - rustup (the artifact kernel uses its checked-in exact Rust toolchain)
 - OpenAI or Azure OpenAI credentials for real model runs

@@ -5764,6 +5764,7 @@ export function applyGitAuthPointerEnvironment(
 }
 
 export type StartupRetryOptions = {
+  shouldRetry?: (error: unknown) => boolean;
   attempts?: number;
   initialDelayMs?: number;
   maxDelayMs?: number;
@@ -5778,7 +5779,7 @@ export type StartupRetryOptions = {
 
 export function startupRetryOptions(
   settings: Settings,
-): Required<Omit<StartupRetryOptions, "onRetry">> {
+): Required<Omit<StartupRetryOptions, "onRetry" | "shouldRetry">> {
   return {
     attempts: settings.startupDependencyRetryAttempts,
     initialDelayMs: settings.startupDependencyRetryInitialDelayMs,
@@ -5798,7 +5799,7 @@ export async function retryStartupDependency<T>(
     try {
       return await operation();
     } catch (error) {
-      if (attempt >= attempts) {
+      if (attempt >= attempts || options.shouldRetry?.(error) === false) {
         throw error;
       }
       const delayMs = Math.min(maxDelayMs, initialDelayMs * 2 ** (attempt - 1));
