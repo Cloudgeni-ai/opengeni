@@ -86,6 +86,12 @@ test("connections, skills, and plugins share row geometry and a single dialog ac
         await page.screenshot({ path: `${evidence}${width}-setup.png`, fullPage: true });
         await page.keyboard.press("Escape");
         await dialog.waitFor({ state: "hidden" });
+        // Radix restores focus after the dialog exit cleanup, not when it first becomes hidden.
+        await page.waitForFunction(
+          (node) => node === document.activeElement,
+          await notion.elementHandle(),
+          { timeout: 5_000 },
+        );
         expect(await notion.evaluate((node) => node === document.activeElement)).toBe(true);
       }
       expect(errors).toEqual([]);
