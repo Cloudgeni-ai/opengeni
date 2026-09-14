@@ -991,6 +991,19 @@ Provider and environment acceptance are separate, ordered gates:
 A merge, green repository CI run, local Docker result, or provider-free capture
 must never be interpreted as authorization to mutate staging or production.
 
+### Personal Connection session consent (migration 0475)
+
+`0475_personal_connection_session_consent.sql` is rolling. Apply it before the
+matching API/web release. It removes the private-session activation prerequisite
+only from owned Connection discovery, exact-session consent, and revocation.
+The existing 0264 runtime authority, FORCE RLS, and routine ACLs remain intact;
+there is no backfill, new privilege, or organization activation. Gmail can then
+be explicitly authorized for a session in Personal or shared workspaces even
+when the canonical activation switch remains off. Standing grants and other
+personal resources still follow the activation procedure below. Cached older
+clients remain restricted until refreshed; older APIs do not expose the new
+`Session.connectionContext` consent metadata.
+
 ### Canonical organization-tenancy authority activation
 
 Organization-tenancy activation follows the same maintenance shape, one

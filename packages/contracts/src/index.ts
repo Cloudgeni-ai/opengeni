@@ -12586,6 +12586,14 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     metadata: z.record(z.string(), z.unknown()),
     /** Additive public tenancy projection; omitted by legacy/internal readers. */
     tenancy: SessionTenancyPublicProjection.optional(),
+    /** Consent metadata for personal connections, independent of private-session enablement.
+     * This projection grants no access; issuance and use recheck the live session. */
+    connectionContext: z
+      .object({
+        visibility: SessionVisibility,
+        authorityEpoch: z.number().int().positive(),
+      })
+      .optional(),
     /** Frozen creator fact used only for creation attribution/idempotent repair. */
     createdBy: TurnInitiator,
     createdByContext: TurnInitiatorContext,

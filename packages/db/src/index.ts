@@ -77869,6 +77869,16 @@ function mapSession(
     ...(tenancyViewer?.activated
       ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) }
       : {}),
+    ...(tenancyViewer
+      ? {
+          connectionContext: {
+            visibility: sessionVisibilityToPublic(
+              row.visibility as "user_private" | "workspace_shared",
+            ),
+            authorityEpoch: Number(row.authorityEpoch),
+          },
+        }
+      : {}),
     createdBy: initiatorFromStorage(
       row.createdByKind,
       row.createdBySubjectId,
