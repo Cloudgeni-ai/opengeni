@@ -2246,13 +2246,48 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     }
     const rows = [...roots, ...children];
     const titles = ["Zulu", " alpha ", "ALPHA", "", "Zulu", "alpha", "ALPHA"];
-    for (let index = 0; index < rows.length; index++) {
-      await executeSessionActivity(
+    const setSortFixture = async (
+      id: string,
+      title: string,
+      createdAt: string,
+      updatedAt: string,
+    ) => {
+      // These are explicit fixture titles, not automatic title candidates. The
+      // automatic-title policy cancels the whole UPDATE for an unfenced agent title.
+      const persisted = await withWorkspaceSessionActivityRls(
+        db,
         workspace.workspaceId,
-        sql`update sessions
-        set title = ${titles[index]!}, created_at = '2026-01-01T00:00:00.123456Z'::timestamptz,
-          updated_at = '2026-02-01T00:00:00.123456Z'::timestamptz
-        where id = ${rows[index]!.id}`,
+        async (scoped) =>
+          await scoped.execute<{
+            id: string;
+            title: string;
+            title_source: string;
+            created_at: string;
+            updated_at: string;
+          }>(sql`update sessions
+            set title = ${title}, title_source = 'user',
+              created_at = ${createdAt}::timestamptz,
+              updated_at = ${updatedAt}::timestamptz
+            where id = ${id}
+            returning id, title, title_source,
+              to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as created_at,
+              to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as updated_at`),
+      );
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0]).toEqual({
+        id,
+        title,
+        title_source: "user",
+        created_at: createdAt,
+        updated_at: updatedAt,
+      });
+    };
+    for (let index = 0; index < rows.length; index++) {
+      await setSortFixture(
+        rows[index]!.id,
+        titles[index]!,
+        "2026-01-01T00:00:00.123456Z",
+        "2026-02-01T00:00:00.123456Z",
       );
     }
     await setSessionArchive(db, {
@@ -2351,12 +2386,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         archiveStatus: "active",
       }),
     ).rejects.toBeInstanceOf(SessionListCursorError);
-    await executeSessionActivity(
-      workspace.workspaceId,
-      sql`update sessions
-      set created_at = '2026-01-02T00:00:00.123456Z'::timestamptz,
-        updated_at = '2026-01-31T00:00:00.123456Z'::timestamptz
-      where id = ${roots[1]!.id}`,
+    await setSortFixture(
+      roots[1]!.id,
+      titles[1]!,
+      "2026-01-02T00:00:00.123456Z",
+      "2026-01-31T00:00:00.123456Z",
     );
     const otherRoots = [roots[0]!.id, roots[2]!.id, roots[3]!.id].sort().reverse();
     expect(
@@ -2372,12 +2406,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       (fraction) => `2026-03-01T00:00:00.123${fraction}Z`,
     );
     for (let index = 0; index < orderedIds.length; index++) {
-      await executeSessionActivity(
-        workspace.workspaceId,
-        sql`update sessions
-        set created_at = ${timestamps[index]!}::timestamptz,
-          updated_at = ${timestamps[index]!}::timestamptz
-        where id = ${orderedIds[index]!}`,
+      const id = orderedIds[index]!;
+      await setSortFixture(
+        id,
+        titles[rows.findIndex((row) => row.id === id)]!,
+        timestamps[index]!,
+        timestamps[index]!,
       );
     }
     for (const sortBy of ["createdAt", "updatedAt"] as const) {
