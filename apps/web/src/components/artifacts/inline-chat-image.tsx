@@ -23,7 +23,11 @@ type InlineChatImageProps = {
 export function InlineChatImage(props: InlineChatImageProps) {
   if (props.thumbnail) return <InlineChatImageBody {...props} />;
   return (
-    <DeferredChatMedia height={CHAT_IMAGE_HEIGHT} label="Loading image…">
+    <DeferredChatMedia
+      key={`${props.workspaceId}:${props.artifactId}`}
+      height={CHAT_IMAGE_HEIGHT}
+      label={props.alt || "image"}
+    >
       {/* Metadata must not change the height reserved before viewport entry. */}
       <div
         className="flex w-full min-w-0 flex-col overflow-hidden rounded-md"
@@ -116,7 +120,9 @@ function InlineChatImageBody({
   );
   return (
     <>
-      {thumbnail ? image : (
+      {thumbnail ? (
+        image
+      ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center">{image}</div>
       )}
       {showArtifactLink && !thumbnail ? (

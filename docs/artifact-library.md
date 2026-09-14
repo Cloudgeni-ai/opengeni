@@ -71,6 +71,16 @@ through the shared isolated HTML frame and tool bridge. Message-owned inline
 HTML is not automatically copied into the library. Publish a Site when that
 visualization needs independent discovery and a durable version lifecycle.
 
+Chat previews reserve their display space before loading. Retained chat images
+and executable HTML/Site previews start loading near the visible timeline, not
+for every offscreen message in the loaded history window. Once activated, they
+stay mounted while scrolling so interactive state is preserved. A manual Load
+action remains available, and browsers without intersection observation load
+normally. Site and inline-HTML chat viewports have bounded fixed heights; larger
+content scrolls inside the preview or opens with the full-screen control. Late
+content resize messages do not resize the conversation. Loading, failure, and
+retry states retain the same chat slot.
+
 ## Boundaries and compatibility
 
 - No new image storage provider or second HTML execution path.

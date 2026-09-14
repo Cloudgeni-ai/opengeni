@@ -5,12 +5,16 @@ import { createRoot, type Root } from "react-dom/client";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 
 GlobalRegistrator.register();
-(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: Error) => void;
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
   return { promise, resolve, reject };
 }
 
@@ -23,7 +27,12 @@ const artifact: RetainedArtifactReference = {
   sha256: "a".repeat(64),
   retainedAt: "2026-09-01T00:00:00Z",
   retention: { policy: "workspace_file", expiresAt: null },
-  retrieval: { method: "GET", path: "/retained/image", acceptRanges: "bytes", maxRangeBytes: 1048576 },
+  retrieval: {
+    method: "GET",
+    path: "/retained/image",
+    acceptRanges: "bytes",
+    maxRangeBytes: 1048576,
+  },
 };
 let metadata = deferred<RetainedArtifactReference>();
 let bytes = deferred<{ artifact: RetainedArtifactReference; bytes: Uint8Array }>();
@@ -37,13 +46,21 @@ mock.module("@/context", () => ({
   }),
 }));
 const client = {
-  getRetainedArtifact: () => { metadataCalls++; return metadata.promise; },
-  downloadRetainedArtifact: () => { byteCalls++; return bytes.promise; },
+  getRetainedArtifact: () => {
+    metadataCalls++;
+    return metadata.promise;
+  },
+  downloadRetainedArtifact: () => {
+    byteCalls++;
+    return bytes.promise;
+  },
 };
 mock.module("@opengeni/react", () => ({ useLightboxOptional: () => ({ open }) }));
 mock.module("@tanstack/react-router", () => ({
   Link: ({ children, className }: { children: ReactNode; className?: string }) => (
-    <a href="#artifact" className={className}>{children}</a>
+    <a href="#artifact" className={className}>
+      {children}
+    </a>
   ),
 }));
 const { InlineChatImage } = await import("./inline-chat-image");
@@ -61,7 +78,9 @@ beforeEach(() => {
   Object.defineProperty(globalThis, "IntersectionObserver", {
     configurable: true,
     value: class {
-      constructor(callback: IntersectionObserverCallback) { notify = callback; }
+      constructor(callback: IntersectionObserverCallback) {
+        notify = callback;
+      }
       observe() {}
       disconnect() {}
       unobserve() {}
@@ -71,17 +90,30 @@ beforeEach(() => {
   document.body.append(container);
   root = createRoot(container);
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
+afterEach(async () => {
+  await act(async () => root.unmount());
+  container.remove();
+});
 afterAll(() => GlobalRegistrator.unregister());
 
 async function render(thumbnail = false, showArtifactLink = false) {
-  await act(async () => root.render(
-    <InlineChatImage workspaceId="workspace" artifactId="image" alt="Diagram" thumbnail={thumbnail} showArtifactLink={showArtifactLink} />,
-  ));
+  await act(async () =>
+    root.render(
+      <InlineChatImage
+        workspaceId="workspace"
+        artifactId="image"
+        alt="Diagram"
+        thumbnail={thumbnail}
+        showArtifactLink={showArtifactLink}
+      />,
+    ),
+  );
 }
 async function enterViewport() {
   expect(notify).toBeDefined();
-  await act(async () => notify!([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
+  await act(async () =>
+    notify!([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver),
+  );
 }
 function slot() {
   const element = container.querySelector<HTMLDivElement>("div.flex.flex-col");
@@ -91,7 +123,11 @@ function slot() {
   return element!;
 }
 
-for (const dimensions of [undefined, { width: 12000, height: 8000 }, { width: 200, height: 1600 }]) {
+for (const dimensions of [
+  undefined,
+  { width: 12000, height: 8000 },
+  { width: 200, height: 1600 },
+]) {
   test(`metadata and bytes are deferred with a stable ready slot: ${JSON.stringify(dimensions)}`, async () => {
     await render();
     expect(metadataCalls).toBe(0);
@@ -112,7 +148,9 @@ for (const dimensions of [undefined, { width: 12000, height: 8000 }, { width: 20
     expect(image.className).toContain("h-full w-full");
     expect(image.className).toContain("object-contain");
     expect(image.getAttribute("width")).toBe(dimensions ? String(dimensions.width) : null);
-    const expand = container.querySelector<HTMLButtonElement>('button[aria-label="Expand Diagram"]')!;
+    const expand = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Expand Diagram"]',
+    )!;
     await act(async () => expand.click());
     expect(open).toHaveBeenCalledTimes(1);
     await act(async () => image.dispatchEvent(new Event("error")));
@@ -128,7 +166,9 @@ for (const failure of ["metadata", "bytes"] as const) {
     await enterViewport();
     const reserved = slot();
     if (failure === "bytes") await act(async () => metadata.resolve(artifact));
-    await act(async () => (failure === "metadata" ? metadata : bytes).reject(new Error("Unavailable")));
+    await act(async () =>
+      (failure === "metadata" ? metadata : bytes).reject(new Error("Unavailable")),
+    );
     expect(slot()).toBe(reserved);
     expect(container.querySelector('[role="status"]')?.textContent).toContain("unavailable");
     metadata = deferred();
