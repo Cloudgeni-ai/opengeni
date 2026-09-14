@@ -15,6 +15,9 @@ test("connector defaults require an explicit target and cannot be named as tool 
   ).toBe(true);
   for (const selection of [
     { toolNames: ["*"] },
+    { target: "tools", toolNames: [" * "] },
+    { target: "tools", toolNames: ["\t*\n"] },
+    { target: "tools", toolNames: [" read_item "] },
     { target: "tools", toolNames: ["*"] },
     { target: "tools", toolNames: ["read_item", "*"] },
     { target: "default", toolNames: ["read_item"] },

@@ -224,10 +224,10 @@ export async function getConnectorToolPermissions(
   let discoveryError: string | null = null;
   try {
     tools = await listTools(input, target);
-    if (tools.some((tool) => tool.name === "*")) {
-      tools = tools.filter((tool) => tool.name !== "*");
+    if (tools.some((tool) => tool.name === "*" || tool.name !== tool.name.trim())) {
+      tools = tools.filter((tool) => tool.name !== "*" && tool.name === tool.name.trim());
       discoveryError =
-        'The connector exposes a tool named "*". Individual permissions for this reserved name are unsupported, so it is omitted from tool groups. The connector default still applies to it.';
+        "The connector exposes a reserved or whitespace-padded tool name. Individual permissions for these names are unsupported, so they are omitted from tool groups. The connector default still applies.";
     }
   } catch {
     discoveryError =
@@ -272,8 +272,13 @@ export async function updateConnectorToolPermissions(
 ): Promise<void> {
   if (!canManageConnectorPermissions(input.grant))
     throw new HTTPException(403, { message: "Connector management permission required" });
-  if (input.payload.target === "tools" && input.payload.toolNames.includes("*"))
-    throw new HTTPException(400, { message: "The wildcard is reserved for connector defaults." });
+  if (
+    input.payload.target === "tools" &&
+    input.payload.toolNames.some((name) => name === "*" || name !== name.trim())
+  )
+    throw new HTTPException(400, {
+      message: "Tool names must be exact and cannot use the connector-default wildcard.",
+    });
   const target = await resolveTarget(input);
   // Prevent a reconnect while the sheet is open from applying old choices to a new account.
   if (target.connectionId !== input.payload.connectionId)

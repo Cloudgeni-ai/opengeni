@@ -44,8 +44,8 @@ export const UpdateConnectorToolPermissionsRequest = z.discriminatedUnion("targe
             .string()
             .min(1)
             .max(512)
-            .refine((name) => name !== "*", {
-              message: "The wildcard is reserved for connector defaults.",
+            .refine((name) => name !== "*" && name === name.trim(), {
+              message: "Tool names must be exact and cannot use the connector-default wildcard.",
             }),
         )
         .min(1)

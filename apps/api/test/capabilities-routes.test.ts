@@ -192,7 +192,7 @@ describe("connector tool permissions API", () => {
                     ...(advertiseWildcard
                       ? [
                           {
-                            name: "*",
+                            name: " * ",
                             inputSchema: { type: "object" },
                             annotations: { readOnlyHint: true },
                           },
@@ -291,13 +291,17 @@ describe("connector tool permissions API", () => {
       expect(policies).toHaveLength(3);
       advertiseWildcard = true;
       const wildcardCatalog = await (await app!.request(path, { headers })).json();
-      expect(wildcardCatalog.discoveryError).toContain('tool named "*"');
+      expect(wildcardCatalog.discoveryError).toContain("reserved or whitespace-padded tool name");
       expect(wildcardCatalog.tools.map((tool: { name: string }) => tool.name)).toEqual([
         "read_item",
         "delete_item",
         "unknown_action",
       ]);
       expect((await write({ target: "tools", toolNames: ["*"] }, "allow")).status).toBe(400);
+      expect((await write({ target: "tools", toolNames: [" * "] }, "allow")).status).toBe(400);
+      expect((await write({ target: "tools", toolNames: [" read_item "] }, "allow")).status).toBe(
+        400,
+      );
       expect(
         (await write({ target: "tools", toolNames: ["read_item", "*"] }, "allow")).status,
       ).toBe(400);
