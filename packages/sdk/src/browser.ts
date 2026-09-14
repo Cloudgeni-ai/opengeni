@@ -35,3 +35,10 @@ export {
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
 export { resolveWorkspaceVoiceInputEnabled } from "./transcription";
 export { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
+
+export type {
+  ConnectorToolPermission,
+  ConnectorToolPermissionEntry,
+  ConnectorToolPermissionsResponse,
+  UpdateConnectorToolPermissionsRequest,
+} from "./types";

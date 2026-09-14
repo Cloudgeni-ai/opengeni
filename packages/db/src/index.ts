@@ -30801,9 +30801,16 @@ function resolvedSessionMcpApproval(
 
 function resolvedConnectorWritePolicy(
   resolved: ResolvedConnectorActionPolicy,
-  approvalMode: "connector" | "connector_write",
+  approvalMode: "connector" | "connector_write" | "session_mcp",
   actionName: string,
 ): ResolvedConnectorActionPolicy {
+  if (approvalMode === "session_mcp") {
+    // Explicit Block still wins for header-backed / credential-free servers.
+    // Allow cannot lower the separately frozen session approval floor.
+    return resolved.managed && connectorActionPolicyDecision(resolved) !== "allow"
+      ? resolved
+      : resolvedSessionMcpApproval(actionName);
+  }
   return approvalMode === "connector_write" && !resolved.managed
     ? {
         managed: true,
@@ -31391,19 +31398,16 @@ export async function prepareConnectorActionApproval(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const snapshot = await connectorActionAttemptSnapshot(tx as unknown as Database, identity);
-        const resolved =
-          normalized.approvalMode === "session_mcp"
-            ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-            : resolvedConnectorWritePolicy(
-                resolveConnectorActionPolicy(snapshot, {
-                  connectionId: normalized.connectionId!,
-                  serverId: normalized.serverId,
-                  toolName: normalized.toolName,
-                  actionName: normalized.policyActionSelector,
-                }),
-                normalized.approvalMode,
-                normalized.policyActionSelector,
-              );
+        const resolved = resolvedConnectorWritePolicy(
+          resolveConnectorActionPolicy(snapshot, {
+            connectionId: normalized.connectionId!,
+            serverId: normalized.serverId,
+            toolName: normalized.toolName,
+            actionName: normalized.policyActionSelector,
+          }),
+          normalized.approvalMode,
+          normalized.policyActionSelector,
+        );
         if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
         const durable = durableConnectorActionInvocation(
           identity,
@@ -31460,19 +31464,16 @@ export async function previewConnectorActionApproval(
     { accountId: identity.accountId, workspaceId: identity.workspaceId },
     async (scopedDb) => {
       const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
-      const resolved =
-        normalized.approvalMode === "session_mcp"
-          ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-          : resolvedConnectorWritePolicy(
-              resolveConnectorActionPolicy(snapshot, {
-                connectionId: normalized.connectionId!,
-                serverId: normalized.serverId,
-                toolName: normalized.toolName,
-                actionName: normalized.policyActionSelector,
-              }),
-              normalized.approvalMode,
-              normalized.policyActionSelector,
-            );
+      const resolved = resolvedConnectorWritePolicy(
+        resolveConnectorActionPolicy(snapshot, {
+          connectionId: normalized.connectionId!,
+          serverId: normalized.serverId,
+          toolName: normalized.toolName,
+          actionName: normalized.policyActionSelector,
+        }),
+        normalized.approvalMode,
+        normalized.policyActionSelector,
+      );
       if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
       const durable = durableConnectorActionInvocation(
         identity,
@@ -31522,19 +31523,16 @@ export async function beginConnectorActionExecution(
         let row = existing;
         let inserted = false;
         if (!row) {
-          const resolved =
-            normalized.approvalMode === "session_mcp"
-              ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-              : resolvedConnectorWritePolicy(
-                  resolveConnectorActionPolicy(snapshot, {
-                    connectionId: normalized.connectionId!,
-                    serverId: normalized.serverId,
-                    toolName: normalized.toolName,
-                    actionName: normalized.policyActionSelector,
-                  }),
-                  normalized.approvalMode,
-                  normalized.policyActionSelector,
-                );
+          const resolved = resolvedConnectorWritePolicy(
+            resolveConnectorActionPolicy(snapshot, {
+              connectionId: normalized.connectionId!,
+              serverId: normalized.serverId,
+              toolName: normalized.toolName,
+              actionName: normalized.policyActionSelector,
+            }),
+            normalized.approvalMode,
+            normalized.policyActionSelector,
+          );
           if (!resolved.managed) return { allowed: true, managed: false } as const;
           const durable = durableConnectorActionInvocation(
             identity,
@@ -78952,3 +78950,5 @@ export * from "./knowledge-entries";
 export * from "./knowledge-indexing";
 
 export * from "./knowledge-document-preparation";
+
+export * from "./connector-tool-permissions";

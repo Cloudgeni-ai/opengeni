@@ -231,6 +231,39 @@ key blindly. No user message, turn, workflow wake, retry, or implicit Resume is
 created. In particular, this operation grants no permission to replay an
 outcome-unknown external tool call or resume a failed turn.
 
+## Connector permission settings
+
+The workspace connector detail sheet loads the server's current MCP tool catalog
+through `GET /v1/workspaces/:workspaceId/capabilities/:capabilityId/tool-permissions`.
+`PATCH` on the same route accepts the displayed connection identity, a bounded
+list of unprefixed tool names (`*` for the server default), and `allow`, `ask`, or
+`block`. `OpenGeniClient.getConnectorToolPermissions` and
+`updateConnectorToolPermissions` expose the same contract.
+
+Policies require `capabilities:manage`; agent attempts and services cannot change
+them. Personal connections additionally require the authenticated owning human.
+Credential lookup and tool discovery use the existing connection broker and
+pinned network transport. Discovery never invokes a tool. A failed discovery
+leaves saved policies intact and offers reconnect/retry. A changed connection
+identity rejects an outdated settings write. Host-owned MCP credentials retain
+host-managed settings.
+
+The UI groups tools by optional MCP annotations. Destructive annotations take
+precedence over a read-only annotation; unannotated tools appear separately.
+These are presentation hints, never permission authority. A group change writes
+explicit overrides for its currently listed tools. The server wildcard default
+covers future tools; a more-specific policy still wins. The UI's Allow does not
+remove session or deployment approval requirements, or action-specific policy.
+Changes are captured by subsequent attempts, never injected into an active one.
+
+Credential-free and encrypted-header MCP servers use the existing stable
+`session-mcp:<server id>:<sha256 of endpoint URL>` identity. This identity changes
+when the destination changes. Native connections use the broker-resolved exact
+connection id, including subject-owned generic refs. Both normal model calls
+and Codemode enforce the same frozen connector policies before provider calls.
+Codemode Ask returns its typed approval-required error and must be invoked via
+the normal model tool path to request human approval.
+
 ## Connector action policy enforcement
 
 Connection-backed MCP tools can additionally be governed by workspace

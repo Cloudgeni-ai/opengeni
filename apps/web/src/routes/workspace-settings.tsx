@@ -492,11 +492,31 @@ function OperationalWorkspaceSettingsRoute({
         ) : null}
 
         {section === "tools" ? (
-          <WorkspaceCapabilityDefaults
-            workspaceId={workspaceId}
-            canManage={canManageSettings}
-            kind="permissions"
-          />
+          <>
+            <WorkspaceCapabilityDefaults
+              workspaceId={workspaceId}
+              canManage={canManageSettings}
+              kind="permissions"
+            />
+            <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-4">
+              <div>
+                <h2 className="text-sm font-medium">Agent learning</h2>
+                <p className="mt-1 text-xs text-fg-muted">
+                  Choose how agents retain knowledge and improve instructions and skills.
+                </p>
+              </div>
+              <Button asChild variant="secondary" size="sm">
+                <Link
+                  to="/workspaces/$workspaceId/settings"
+                  params={{ workspaceId }}
+                  search={{ section: "learning" }}
+                >
+                  Manage agent learning
+                  <ArrowUpRightIcon className="size-3.5" />
+                </Link>
+              </Button>
+            </section>
+          </>
         ) : null}
 
         {section === "plugins" ? (

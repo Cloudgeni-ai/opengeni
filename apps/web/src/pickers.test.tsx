@@ -48,10 +48,10 @@ const FIRST_PARTY = [
 ];
 
 describe("unified session tool picker", () => {
-  test("dialog tools toggle without a dropdown content or roving-focus context", async () => {
+  test("dialog connectors toggle without a roving-focus context and preserve hidden builtins", async () => {
     let latest: SessionToolSelection = {
-      mcpServerIds: new Set<string>(),
-      firstPartyToolIds: new Set<FirstPartyMcpToolName>(),
+      mcpServerIds: new Set(["files"]),
+      firstPartyToolIds: new Set<FirstPartyMcpToolName>(["session_get"]),
     };
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -75,18 +75,18 @@ describe("unified session tool picker", () => {
     }
     try {
       await act(async () => root.render(<Harness />));
-      const linear = container.querySelector<HTMLButtonElement>('button[title="linear"]')!;
-      expect(linear.getAttribute("aria-pressed")).toBe("false");
+      const linear = container.querySelector<HTMLButtonElement>(
+        'button[role="switch"][aria-label="Linear"]',
+      )!;
+      expect(linear.getAttribute("aria-checked")).toBe("false");
       await act(async () => linear.click());
       expect(latest.mcpServerIds.has("linear")).toBe(true);
-      expect(linear.getAttribute("aria-pressed")).toBe("true");
+      expect(linear.getAttribute("aria-checked")).toBe("true");
       await act(async () => linear.click());
       expect(latest.mcpServerIds.has("linear")).toBe(false);
-      const capability = container.querySelector<HTMLButtonElement>(
-        "button[aria-pressed]:not([title])",
-      )!;
-      await act(async () => capability.click());
-      expect(latest.firstPartyToolIds.size).toBeGreaterThan(0);
+      expect(latest.mcpServerIds.has("files")).toBe(true);
+      expect([...latest.firstPartyToolIds]).toEqual(["session_get"]);
+      expect(container.querySelectorAll("button[role=switch]")).toHaveLength(1);
     } finally {
       await act(async () => root.unmount());
       container.remove();

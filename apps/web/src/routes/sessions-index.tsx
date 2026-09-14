@@ -2,6 +2,7 @@ import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
+import { changedConnectorExclusions, defaultConnectorSelection } from "@/lib/composer-connectors";
 // The sessions index: the centered "Start a session" composer. The form is
 // organised top-down — (A) message + model/tools/repos pills → (B) WHERE SHOULD
 // THIS RUN? (when machines exist) → (C) rig/variable-set or machine fields.
@@ -68,9 +69,9 @@ import { toast } from "sonner";
 import { BillingClassMark } from "@/components/billing-class-mark";
 import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
-import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
+import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
 import { SessionVisibilityPicker } from "@/components/session-visibility-picker";
-import { ModelPicker } from "@/components/pickers";
+import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
 import {
   RepositoryContextMenuBody,
   type RepositoryContextPickerProps,
@@ -581,6 +582,18 @@ function SessionsIndexRouteContent({
     },
   );
   const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
+  const [connectorExclusions, setConnectorExclusions] = useState<string[]>([]);
+  const changeConnectorSelection = (selection: SessionToolSelection) => {
+    if (!toolSelectionExplicit)
+      setConnectorExclusions((current) =>
+        changedConnectorExclusions(
+          current,
+          context.selectedCapabilityToolIds,
+          selection.mcpServerIds,
+        ),
+      );
+    context.setSelectedCapabilityToolIds(selection.mcpServerIds);
+  };
   const [submitting, setSubmitting] = useState(false);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
     useState<CreatedSessionRouteAuthority | null>(null);
@@ -690,12 +703,14 @@ function SessionsIndexRouteContent({
         workspaceDefaultMcpServerIds: context.workspaceDefaultToolIds,
         catalogReady: context.workspaceMcpCatalogReady,
         explicit: toolSelectionExplicit,
+        ...(!toolSelectionExplicit ? { excludedMcpServerIds: connectorExclusions } : {}),
       }),
     [
       context.selectedCapabilityToolIds,
       context.workspaceMcpCatalogReady,
       context.workspaceDefaultToolIds,
       toolSelectionExplicit,
+      connectorExclusions,
     ],
   );
   const persistedValue = useMemo(
@@ -711,11 +726,16 @@ function SessionsIndexRouteContent({
       reasoningEffort: context.reasoningEffort,
       latencyMode: context.latencyMode,
       ...(projectProvenancePresent ? { selectedProjectChannelId: selectedChannelId } : {}),
-      options: newSessionDraftOptionsFromSessionDraft(
-        draft,
-        defaultFirstPartyMcpTools,
-        createVisibility,
-      ),
+      options: {
+        ...newSessionDraftOptionsFromSessionDraft(
+          draft,
+          defaultFirstPartyMcpTools,
+          createVisibility,
+        ),
+        ...(persistedToolPolicy.excludedMcpServerIds !== undefined
+          ? { excludedMcpServerIds: persistedToolPolicy.excludedMcpServerIds }
+          : {}),
+      },
     }),
     [
       attachments.readyResources,
@@ -795,10 +815,14 @@ function SessionsIndexRouteContent({
       setReasoningEffort(remote.reasoningEffort);
       setLatencyMode(remote.latencyMode);
       setToolSelectionExplicit(remote.toolsProvided);
+      setConnectorExclusions(remote.options.excludedMcpServerIds ?? []);
       const selected = new Set(
         remote.toolsProvided
           ? remote.tools.map((tool) => tool.id)
-          : workspaceDefaultToolIdsForHydration,
+          : defaultConnectorSelection(
+              workspaceDefaultToolIdsForHydration,
+              remote.options.excludedMcpServerIds ?? [],
+            ),
       );
       setSelectedCapabilityToolIds(selectableSessionMcpServerIds(selected));
       const repositorySelection = repositorySelectionFromResources(remote.resources, githubRepos);
@@ -839,6 +863,21 @@ function SessionsIndexRouteContent({
     // GitHub remains optional and must not keep the composer unsendable.
     resourceHydrationReady: context.workspaceMcpCatalogReady && tenancyCapabilities !== null,
   });
+  useEffect(() => {
+    if (newSessionDraft.loading || !context.workspaceMcpCatalogReady || toolSelectionExplicit)
+      return;
+    const next = defaultConnectorSelection(context.workspaceDefaultToolIds, connectorExclusions);
+    setSelectedCapabilityToolIds((current) =>
+      current.size === next.size && [...next].every((id) => current.has(id)) ? current : next,
+    );
+  }, [
+    newSessionDraft.loading,
+    context.workspaceMcpCatalogReady,
+    context.workspaceDefaultToolIds,
+    setSelectedCapabilityToolIds,
+    connectorExclusions,
+    toolSelectionExplicit,
+  ]);
   const busy = context.busy || submitting;
   const privateCreateUnavailable =
     (personalWorkspace && tenancyCapabilities === null) ||
@@ -1318,6 +1357,7 @@ function SessionsIndexRouteContent({
                   onChange: (agentLearning) =>
                     setDraft((current) => ({ ...current, agentLearning })),
                 }}
+                workspaceId={workspaceId}
                 disabled={busy || newSessionDraft.loading}
                 fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
                 servers={context.toolMcpServers}
@@ -1328,12 +1368,7 @@ function SessionsIndexRouteContent({
                 }}
                 toolsDisabled={busy || newSessionDraft.loading}
                 onToolSelectionChange={(selection) => {
-                  setToolSelectionExplicit(true);
-                  context.setSelectedCapabilityToolIds(selection.mcpServerIds);
-                  setDraft((current) => ({
-                    ...current,
-                    firstPartyMcpTools: selection.firstPartyToolIds,
-                  }));
+                  changeConnectorSelection(selection);
                 }}
                 {...(draft.compute.kind === "sandbox"
                   ? {

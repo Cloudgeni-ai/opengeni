@@ -31,7 +31,13 @@ export type RepoDraft = {
 // whose default is one of those was overridden to "low" on every web turn
 // (billing impact — "low" beats the deployer's configured default server-side).
 export type IntelligenceEffort = ReasoningEffort;
-export type McpServerOption = { id: string; name: string };
+export type McpServerOption = {
+  id: string;
+  name: string;
+  logoSrc?: string | null;
+  detail?: string;
+  connectionStatus?: "ready" | "reconnect" | "unavailable" | "unknown";
+};
 
 const NON_SELECTABLE_SESSION_MCP_SERVER_IDS = new Set(["opengeni"]);
 
@@ -183,7 +189,15 @@ export function newSessionDraftToolPolicy(input: {
   workspaceDefaultMcpServerIds: Iterable<string>;
   catalogReady: boolean;
   explicit: boolean;
-}): { tools: ToolRef[]; toolsProvided: boolean } {
+  excludedMcpServerIds?: Iterable<string>;
+}): { tools: ToolRef[]; toolsProvided: boolean; excludedMcpServerIds?: string[] } {
+  if (!input.explicit && input.excludedMcpServerIds !== undefined) {
+    return {
+      tools: [],
+      toolsProvided: false,
+      excludedMcpServerIds: [...new Set(input.excludedMcpServerIds)].sort(),
+    };
+  }
   if (!input.catalogReady) return { tools: [], toolsProvided: false };
   const selected = buildOpenGeniUiTools(undefined, input.selectedMcpServerIds);
   const baseline = buildOpenGeniUiTools(undefined, input.workspaceDefaultMcpServerIds);
@@ -210,7 +224,9 @@ export function sessionPolicyPickerIds(
   const mode = session.effectiveToolPolicy?.mode ?? session.toolPolicy.mode;
   const policyIds =
     mode === "workspace_default"
-      ? [...workspaceDefaultIds]
+      ? [...workspaceDefaultIds, ...session.tools.map((tool) => tool.id)].filter(
+          (id) => !session.toolPolicy.excludedMcpServerIds?.includes(id),
+        )
       : (session.effectiveToolPolicy?.effectiveIds ?? session.tools.map((tool) => tool.id));
   return new Set(policyIds.filter((id) => selectable.has(id)));
 }

@@ -7,17 +7,21 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
-import { sessionCapabilityGroupsFor } from "@/lib/session-capabilities";
+import { builtInMcpCapability, sessionCapabilityGroupsFor } from "@/lib/session-capabilities";
 import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
   type McpServerOption,
 } from "@/lib/session-tools";
 
-type Defaults = Required<WorkspaceSessionToolDefaults>;
+type Defaults = Required<
+  Pick<WorkspaceSessionToolDefaults, "mcpServerIds" | "firstPartyMcpTools">
+> &
+  Pick<WorkspaceSessionToolDefaults, "inheritConnectedMcpServers">;
 type SelectionPatch = {
   firstPartyMcpTools?: FirstPartyMcpToolName[] | null;
   mcpServerIds?: string[] | null;
+  inheritConnectedMcpServers?: boolean | null;
 };
 
 export function WorkspaceCapabilityDefaults({
@@ -34,12 +38,20 @@ export function WorkspaceCapabilityDefaults({
   const policy = clientFirstPartyMcpToolPolicy(context.clientConfig);
   const configured = resolveWorkspaceSessionToolDefaults(workspace?.settings);
   const defaults: Defaults = {
+    ...(configured?.mcpServerIds !== undefined
+      ? { inheritConnectedMcpServers: configured.inheritConnectedMcpServers }
+      : { inheritConnectedMcpServers: true }),
     mcpServerIds: configured?.mcpServerIds ?? context.toolMcpServers.map((server) => server.id),
     firstPartyMcpTools: configured?.firstPartyMcpTools ?? policy.default,
   };
   const custom =
     kind === "permissions"
-      ? configured?.firstPartyMcpTools !== undefined
+      ? configured?.firstPartyMcpTools !== undefined ||
+        (configured?.mcpServerIds !== undefined &&
+          context.toolMcpServers.some(
+            (server) =>
+              builtInMcpCapability(server) && !configured.mcpServerIds!.includes(server.id),
+          ))
       : configured?.mcpServerIds !== undefined;
   return (
     <WorkspaceCapabilityDefaultsView
@@ -85,16 +97,34 @@ export function WorkspaceCapabilityDefaultsView({
   onSave: (patch: SelectionPatch) => Promise<boolean>;
 }) {
   const permissions = kind === "permissions";
-  const groups = useMemo(() => sessionCapabilityGroupsFor(firstPartyTools), [firstPartyTools]);
+  const groups = useMemo(
+    () => sessionCapabilityGroupsFor(firstPartyTools).filter((group) => group.kind === "opengeni"),
+    [firstPartyTools],
+  );
+  const nativeServers = servers.filter((server) => builtInMcpCapability(server));
+  const connectedServers = servers.filter((server) => !builtInMcpCapability(server));
   const source = permissions ? defaults.firstPartyMcpTools : defaults.mcpServerIds;
-  const sourceKey = JSON.stringify([revisionKey, kind, custom, source]);
+  const sourceKey = JSON.stringify([
+    revisionKey,
+    kind,
+    custom,
+    source,
+    defaults.mcpServerIds,
+    defaults.inheritConnectedMcpServers,
+  ]);
   const [selected, setSelected] = useState<Set<string>>(() => new Set(source));
+  const [selectedMcp, setSelectedMcp] = useState<Set<string>>(() => new Set(defaults.mcpServerIds));
+  const [inheritConnectors, setInheritConnectors] = useState(
+    defaults.inheritConnectedMcpServers === true,
+  );
   const [editing, setEditing] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     setSelected(new Set(source));
+    setSelectedMcp(new Set(defaults.mcpServerIds));
+    setInheritConnectors(defaults.inheritConnectedMcpServers === true);
     setEditing(false);
     setResetting(false);
     setError(null);
@@ -117,9 +147,32 @@ export function WorkspaceCapabilityDefaultsView({
     setSaving(true);
     setError(null);
     try {
+      const nativeSelectionChanged =
+        JSON.stringify([...selectedMcp].sort()) !==
+        JSON.stringify([...defaults.mcpServerIds].sort());
+      const nativeResetRequired =
+        reset && nativeServers.some((server) => !defaults.mcpServerIds.includes(server.id));
+      const nextMcpIds = reset
+        ? [
+            ...new Set([...defaults.mcpServerIds, ...nativeServers.map((server) => server.id)]),
+          ].sort()
+        : [...selectedMcp].sort();
       const patch: SelectionPatch = permissions
-        ? { firstPartyMcpTools: reset ? null : ([...selected].sort() as FirstPartyMcpToolName[]) }
-        : { mcpServerIds: reset ? null : [...selected].sort() };
+        ? {
+            firstPartyMcpTools: reset ? null : ([...selected].sort() as FirstPartyMcpToolName[]),
+            ...((!reset && nativeSelectionChanged) || nativeResetRequired
+              ? {
+                  mcpServerIds: nextMcpIds,
+                  ...(defaults.inheritConnectedMcpServers !== undefined
+                    ? { inheritConnectedMcpServers: defaults.inheritConnectedMcpServers }
+                    : {}),
+                }
+              : {}),
+          }
+        : {
+            mcpServerIds: reset ? null : [...selected].sort(),
+            inheritConnectedMcpServers: reset ? null : inheritConnectors,
+          };
       if (await onSave(patch)) {
         setEditing(false);
         setResetting(false);
@@ -142,8 +195,8 @@ export function WorkspaceCapabilityDefaultsView({
           </h2>
           <p className="mt-1 max-w-2xl text-xs text-fg-muted">
             {custom
-              ? "This saved selection does not automatically include new tools. You are responsible for keeping it up to date."
-              : "New sessions follow the deployment’s defaults, including future updates. No workspace override is saved."}
+              ? "This workspace has custom tool defaults. Deployment restrictions and required approvals still apply."
+              : "Tools are available by default. New sessions follow deployment defaults, including future updates."}
           </p>
           <p className="mt-1 text-xs text-fg-muted">
             Changes apply to new sessions only. Deployment restrictions always apply.
@@ -177,7 +230,7 @@ export function WorkspaceCapabilityDefaultsView({
           <p className="text-sm">Remove this override?</p>
           <p className="text-xs text-fg-muted">
             New sessions will follow deployment defaults. This may enable tools missing from your
-            custom selection. Existing sessions and the other defaults section will not change.
+            custom selection. Existing sessions will not change.
           </p>
           <div className="flex gap-2">
             <Button size="sm" disabled={saving} onClick={() => void save(true)}>
@@ -192,8 +245,9 @@ export function WorkspaceCapabilityDefaultsView({
       {editing ? (
         <div className="grid gap-2 border-l-2 border-brand pl-3">
           <p className="text-xs text-fg-muted">
-            Saving creates a fixed workspace selection. Future tools will not be added
-            automatically. Nothing changes until you save.
+            {permissions
+              ? "Saving creates a fixed selection of built-in tools for new sessions. Connector selections are preserved. Nothing changes until you save."
+              : "Connected apps are included automatically unless you choose a custom list. Nothing changes until you save."}
           </p>
           <div className="flex gap-2">
             <Button size="sm" disabled={saving} onClick={() => void save(false)}>
@@ -205,6 +259,8 @@ export function WorkspaceCapabilityDefaultsView({
               disabled={saving}
               onClick={() => {
                 setSelected(new Set(source));
+                setSelectedMcp(new Set(defaults.mcpServerIds));
+                setInheritConnectors(defaults.inheritConnectedMcpServers === true);
                 setEditing(false);
                 setError(null);
               }}
@@ -220,6 +276,46 @@ export function WorkspaceCapabilityDefaultsView({
         </p>
       ) : null}
       <div className="divide-y divide-border rounded-lg border border-border bg-surface px-3">
+        {permissions ? (
+          nativeServers.map((server) => (
+            <div key={server.id} className="py-3">
+              <ToolCheckbox
+                label={builtInMcpCapability(server)!.name}
+                state={selectedMcp.has(server.id)}
+                disabled={disabled}
+                onChange={() =>
+                  setSelectedMcp((current) => {
+                    const next = new Set(current);
+                    if (next.has(server.id)) next.delete(server.id);
+                    else next.add(server.id);
+                    return next;
+                  })
+                }
+              />
+            </div>
+          ))
+        ) : (
+          <div className="py-3">
+            <ToolCheckbox
+              label="Use connected apps automatically"
+              state={inheritConnectors}
+              disabled={disabled}
+              onChange={() => {
+                if (inheritConnectors) {
+                  setSelected(
+                    (current) =>
+                      new Set([...current, ...connectedServers.map((server) => server.id)]),
+                  );
+                }
+                setInheritConnectors((current) => !current);
+              }}
+            />
+            <p className="mt-1 text-xs text-fg-muted">
+              Include available MCP connections, including apps connected later. Each connector's
+              tool permissions still apply.
+            </p>
+          </div>
+        )}
         {permissions
           ? groups.map((group) => {
               const count = group.toolIds.filter((id) => selected.has(id)).length;
@@ -254,7 +350,8 @@ export function WorkspaceCapabilityDefaultsView({
                 </details>
               );
             })
-          : servers.map((server) => (
+          : !inheritConnectors &&
+            connectedServers.map((server) => (
               <div key={server.id} className="py-3">
                 <ToolCheckbox
                   label={server.name}
@@ -264,7 +361,7 @@ export function WorkspaceCapabilityDefaultsView({
                 />
               </div>
             ))}
-        {!permissions && servers.length === 0 ? (
+        {!permissions && connectedServers.length === 0 ? (
           <p className="py-3 text-xs text-fg-muted">No plugins are available in this workspace.</p>
         ) : null}
       </div>

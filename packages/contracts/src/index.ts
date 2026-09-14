@@ -2057,6 +2057,7 @@ export type WorkspaceSessionDefaults = z.infer<typeof WorkspaceSessionDefaults>;
  */
 export const WorkspaceSessionToolDefaults = z
   .object({
+    inheritConnectedMcpServers: z.boolean().optional(),
     mcpServerIds: z
       .array(z.string().trim().min(1).max(128))
       .max(128)
@@ -2074,6 +2075,8 @@ export type WorkspaceSessionToolDefaults = z.infer<typeof WorkspaceSessionToolDe
 // Omitted keys preserve the stored selection; null removes only that override.
 export const WorkspaceSessionToolDefaultsPatch = z
   .object({
+    inheritConnectedMcpServers:
+      WorkspaceSessionToolDefaults.shape.inheritConnectedMcpServers.nullable(),
     mcpServerIds: WorkspaceSessionToolDefaults.shape.mcpServerIds.nullable(),
     firstPartyMcpTools: WorkspaceSessionToolDefaults.shape.firstPartyMcpTools.nullable(),
   })
@@ -5716,10 +5719,14 @@ const registryId = /^[A-Za-z0-9_-]+$/;
 export const SessionMcpServerId = z.string().min(1).regex(registryId);
 export type SessionMcpServerId = z.infer<typeof SessionMcpServerId>;
 
+/** Session exclusions narrow live defaults without freezing future connections. */
+export const SessionExcludedMcpServerIds = z.array(SessionMcpServerId.max(200)).max(64);
+
 // How a session's persisted tool selection was chosen.
 export const SessionToolPolicy = z.object({
   mode: z.enum(["workspace_default", "explicit", "inherited"]),
   inheritedFromSessionId: z.string().uuid().nullable(),
+  excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
 });
 export type SessionToolPolicy = z.infer<typeof SessionToolPolicy>;
 
@@ -6404,6 +6411,9 @@ export const UpdateSessionToolPolicyRequest = z.union([
   z
     .object({
       mode: z.literal("workspace_default"),
+      // When supplied, edit only connector exclusions and preserve built-in tools.
+      // Omission explicitly resets the complete policy to workspace defaults.
+      excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
       expectedVersion: z.number().int().positive(),
     })
     .strict(),
@@ -7590,6 +7600,7 @@ export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftReque
  */
 export const NewSessionDraftOptions = withVariableSetIdAlias({
   agentLearning: AgentLearningOverrides.optional(),
+  excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
   visibility: SessionVisibility.optional(),
   sandboxBackend: SandboxBackend.optional(),
   targetSandboxId: z.string().uuid().optional(),
@@ -15179,6 +15190,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // omission still applies workspace-default capability MCP tools; explicit []
       // suppresses those defaults (the first-party OpenGeni server remains added).
       tools: z.array(ToolRef).default([]),
+      excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
       metadata: z.record(z.string(), z.unknown()).default({}),
       model: z.string().min(1).optional(),
       reasoningEffort: ReasoningEffort.optional(),
@@ -17324,3 +17336,4 @@ export * from "./feedback";
 export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discovery";
 export { mcpEndpointIdentity } from "./mcp-endpoint";
 export { pluginMcpUnavailableReason } from "./mcp-endpoint";
+export * from "./connector-tool-permissions";

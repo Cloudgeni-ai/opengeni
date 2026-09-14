@@ -64,6 +64,7 @@ import {
   getLatestRunState,
   peekSessionWork,
   prepareConnectorActionApproval,
+  previewConnectorActionApproval,
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
   requestSessionCompaction,
@@ -6914,6 +6915,27 @@ describe("clean session control plane", () => {
       policy: "block",
     });
     expect(wildcardPolicy.changed).toBe(true);
+    const headerConnectionId = `session-mcp:${serverId}:fixture-target`;
+    await upsertConnectorActionPolicy(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      subjectId: grant.subjectId,
+      connectionId: headerConnectionId,
+      serverId,
+      toolName: "header_blocked",
+      actionName: "*",
+      policy: "block",
+    });
+    await upsertConnectorActionPolicy(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      subjectId: grant.subjectId,
+      connectionId: headerConnectionId,
+      serverId,
+      toolName: "header_allowed",
+      actionName: "*",
+      policy: "allow",
+    });
     await send(grant, session.id, "exercise connector action policies");
 
     const firstAttemptId = crypto.randomUUID();
@@ -6935,6 +6957,37 @@ describe("clean session control plane", () => {
       executionGeneration: firstClaim.turn.executionGeneration,
       initiator: firstClaim.turn.initiator,
     };
+    const headerBlockedCall = {
+      approvalId: "header-blocked",
+      connectionId: headerConnectionId,
+      serverId,
+      toolName: "header_blocked",
+      arguments: {},
+      approvalMode: "session_mcp" as const,
+    };
+    expect(
+      await previewConnectorActionApproval(client.db, firstIdentity, headerBlockedCall),
+    ).toMatchObject({ managed: true, decision: "block" });
+    expect(
+      await previewConnectorActionApproval(client.db, firstIdentity, {
+        ...headerBlockedCall,
+        approvalId: "header-allowed-preview",
+        toolName: "header_allowed",
+      }),
+    ).toMatchObject({ managed: true, decision: "ask" });
+    expect(
+      await prepareConnectorActionApproval(client.db, firstIdentity, headerBlockedCall),
+    ).toMatchObject({ managed: true, decision: "block" });
+    expect(
+      await beginConnectorActionExecution(client.db, firstIdentity, headerBlockedCall),
+    ).toMatchObject({ allowed: false, managed: true, reason: "blocked" });
+    expect(
+      await prepareConnectorActionApproval(client.db, firstIdentity, {
+        ...headerBlockedCall,
+        approvalId: "header-allowed",
+        toolName: "header_allowed",
+      }),
+    ).toMatchObject({ managed: true, decision: "ask" });
     const sensitiveFixture = `sensitive-fixture-${crypto.randomUUID()}`;
     const call = (approvalId: string, action: string, value = sensitiveFixture) => ({
       approvalId,

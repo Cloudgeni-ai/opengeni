@@ -1519,7 +1519,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                     <ConnectionCatalog grouped={false} services={featuredServices} columns={2} />
                   </section>
                 ) : null}
-                <section aria-label="Browse connections" className="mt-6">
+                <section id="connectors-browse" aria-label="Browse connections" className="mt-6">
                   <h2 className="mb-2 text-sm font-semibold">
                     {hasQuery || searchingAll ? "Connections" : "Browse"}
                   </h2>
@@ -1793,6 +1793,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       </div>
 
       <CapabilityDetailSheet
+        workspaceId={workspaceId}
         item={selectedItem}
         health={selectedHealth}
         logoSrc={selectedItem ? logoUrl(selectedItem) : null}

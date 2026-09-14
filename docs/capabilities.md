@@ -23,16 +23,34 @@ Every catalog item includes a typed `lifecycle` projection and a bounded list of
 
 ## Runtime Behavior
 
-Remote MCP capabilities with a streamable HTTP endpoint are executable. Enabling a remote MCP first performs an MCP initialize/list-tools probe. If the probe succeeds, OpenGeni stores a `capability_installations` row and the API/worker merge that row into the runtime MCP server list for new sessions, follow-ups, and scheduled tasks. A workspace may store an exact `sessionToolDefaults` selection for new sessions and scheduled sessions created without an explicit `tools` key. Workspaces without that override preserve the compatibility default of every enabled capability MCP server. An explicit tools list (even an empty one) is taken verbatim. If the probe fails, the API returns `422` and the capability stays disabled, so a stale, down, or auth-only endpoint never breaks agent turns at runtime.
+Remote MCP capabilities with a streamable HTTP endpoint are executable. Enabling a remote MCP first performs an MCP initialize/list-tools probe. If the probe succeeds, OpenGeni stores a `capability_installations` row and the API/worker merge that row into the runtime MCP server list for new sessions, follow-ups, and scheduled tasks. A workspace may store `sessionToolDefaults` for sessions and scheduled sessions created without an explicit `tools` key. Workspaces without that override include available configured and enabled capability MCP servers by default. An existing exact override remains exact; `inheritConnectedMcpServers: true` additionally includes current and future connected MCP servers while preserving the selected built-in `files`/`docs` defaults. The web editor preserves independent built-in and connector overrides; customizing built-in MCP defaults from an inherited workspace keeps connector inheritance enabled. An explicit tools list (even an empty one) is taken verbatim. If the probe fails, the API returns `422` and the capability stays disabled, so a stale, down, or auth-only endpoint never breaks agent turns at runtime.
 
-Tool selection is durable session state. The session tool picker presents a
-small product-level list of OpenGeni capabilities and connected apps while it
-atomically persists their exact MCP servers and first-party OpenGeni tools under
-one version; the next attempt reads that selection. Built-in Files and Workspace
-knowledge are shown as OpenGeni capabilities, not connected apps. Follow-up Send
-and Steer requests do not carry a private one-turn tool list. The picker hides
-only its mandatory internal `opengeni` carrier. The public API remains exact:
-an explicit session policy may omit `files`.
+Tool selection is durable session state. The composer’s **+ → Connectors** menu
+contains connected apps, with available connections on by default. A normal
+session stores excluded connector ids while continuing to inherit the workspace
+connector inventory, so disabling one app does not freeze all future connections.
+Existing explicit, inherited-fixed, and legacy session policies remain exact;
+the next attempt reads the persisted policy. Follow-up Send and Steer requests
+do not carry a private one-turn tool list.
+
+Built-in tools belong in **Settings → Agent tools**, separate from connector
+controls: Files, Documents, Command output, Memory and learning tools, agent
+coordination, browser and computer interaction, and workspace operations.
+Built-in first-party tools default on, subject to deployment and workspace
+restrictions. The same page links to **Settings → Agent learning**, which owns
+the current scoped knowledge retention and instruction/skill improvement defaults;
+enabling tools does not bypass that policy or action approvals. Command output
+controls the real `command_read` and `command_wait` tools. Code execution follows
+the compute environment's permissions.
+**Settings → Plugins** controls whether workspace defaults automatically include
+connected apps or retain an exact connection list. Saving built-in defaults
+preserves connector settings, including temporarily unavailable selections.
+These controls set defaults for new sessions; they do not revoke an existing
+session's stored tool selection. Workspace-default sessions also refresh the
+connected-app inventory at each attempt, while session exclusions and exact
+session restrictions remain authoritative. The public API remains exact: an explicit
+session policy may omit `files`. The mandatory internal `opengeni` carrier is
+never presented as an app.
 Provider-native web search remains available independently of this MCP policy.
 Its search, open-page, and find-in-page response items settle from their own
 provider status and render before the answer they informed; they do not wait for

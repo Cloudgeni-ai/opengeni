@@ -132,3 +132,5 @@ export { prepareKnowledgeFile } from "./domain/knowledge-files";
 export { prepareKnowledgeSave } from "./domain/knowledge-preparation";
 
 export { retainKnowledgeMessage } from "./domain/knowledge-messages";
+
+export * from "./domain/connector-tool-permissions";

@@ -236,6 +236,21 @@ describe("buildCreateSessionRequest", () => {
     expect(result.expectedNewSessionDraftRevision).toBe(7);
   });
 
+  test("creates a live default policy with durable connector exclusions", () => {
+    const result = build([], [], {
+      selectedTools: [],
+      newSessionDraftToolPolicy: {
+        tools: [],
+        toolsProvided: false,
+        excludedMcpServerIds: ["slack"],
+      },
+      expectedNewSessionDraftRevision: 7,
+    });
+    expect(result).not.toHaveProperty("tools");
+    expect(result.excludedMcpServerIds).toEqual(["slack"]);
+    expect(result.expectedNewSessionDraftRevision).toBe(7);
+  });
+
   test("preserves explicit empty and omitted draft policies across catalog changes", () => {
     for (const toolsProvided of [true, false]) {
       const result = build([], [], {
