@@ -5,12 +5,12 @@ import { parseConcurrentIndexMigration } from "../src/migrate";
 describe("billing recent-usage indexes", () => {
   for (const [file, indexName, columns] of [
     [
-      "0469_usage_events_account_recent_index.sql",
+      "0471_usage_events_account_recent_index.sql",
       "usage_events_account_recent_idx",
       '"account_id", "occurred_at" DESC, "recorded_at" DESC',
     ],
     [
-      "0470_usage_events_workspace_recent_index.sql",
+      "0472_usage_events_workspace_recent_index.sql",
       "usage_events_workspace_recent_idx",
       '"account_id", "workspace_id", "occurred_at" DESC, "recorded_at" DESC',
     ],
