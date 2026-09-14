@@ -18,6 +18,7 @@ import {
   listUsageEvents,
   getOrganizationUsageSummary,
   getOrganizationUsageWorkspacePage,
+  withSessionRlsActorContext,
   getManagedAccount,
   markStripeWebhookProcessed,
   recordStripeWebhookEvent,
@@ -28,6 +29,7 @@ import { HTTPException } from "hono/http-exception";
 import Stripe from "stripe";
 import { requireAccessContext } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 
 export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/billing", async (c) => {
@@ -70,7 +72,9 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: parsed.error.issues[0]?.message ?? "invalid usage query",
       });
     }
-    return c.json(await getOrganizationUsageSummary(deps.db, { accountId, ...parsed.data }));
+    return await withBillingUsageActor(deps, context, accountId, async () =>
+      c.json(await getOrganizationUsageSummary(deps.db, { accountId, ...parsed.data })),
+    );
   });
 
   app.get("/v1/billing/usage-workspaces", async (c) => {
@@ -81,7 +85,9 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, {
         message: parsed.error.issues[0]?.message ?? "invalid usage page query",
       });
-    return c.json(await getOrganizationUsageWorkspacePage(deps.db, { accountId, ...parsed.data }));
+    return await withBillingUsageActor(deps, context, accountId, async () =>
+      c.json(await getOrganizationUsageWorkspacePage(deps.db, { accountId, ...parsed.data })),
+    );
   });
 
   app.get("/v1/billing/entitlements", async (c) => {
@@ -663,6 +669,25 @@ export function stripeCustomerProvider(
     input.settings.stripeSecretKey?.startsWith("rk_live_")
     ? "stripe:live"
     : "stripe:test";
+}
+
+/** Billing routes do not traverse the workspace actor middleware. Always bind
+ * these reads explicitly; only a revalidated live attempt may supply a human
+ * initiator. Neither query parameters nor serviceInitiator claims are proof. */
+async function withBillingUsageActor<T>(
+  deps: ApiRouteDeps,
+  context: AccessContext,
+  accountId: string,
+  read: () => Promise<T>,
+): Promise<T> {
+  const attemptGrant = context.workspaceGrants.find(
+    (grant) =>
+      grant.accountId === accountId &&
+      grant.subjectId === context.subjectId &&
+      grant.principalKind === "agent_attempt",
+  );
+  if (attemptGrant) return await withAccessGrantSessionRlsContext(deps, attemptGrant, read);
+  return await withSessionRlsActorContext({ subjectId: context.subjectId }, read);
 }
 
 function requireSelectedAccount(
