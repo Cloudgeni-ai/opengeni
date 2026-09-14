@@ -29,7 +29,7 @@ import {
 import { useAppContext } from "@/context";
 import { cn } from "@/lib/utils";
 import { relativeTimeLabel } from "@/lib/sessions-group";
-import { KnowledgeCollectionCache } from "./knowledge-collection-cache";
+import { KnowledgeCollectionRequests } from "./knowledge-collection-requests";
 
 import { KNOWLEDGE_SOURCE_LABEL as SOURCE } from "./knowledge-labels";
 
@@ -123,7 +123,7 @@ type TreeProps = {
   onCreate: (kind: "note" | "group", parent: KnowledgeCollection) => void;
 };
 type TreeState = TreeProps & {
-  cache: KnowledgeCollectionCache;
+  requests: KnowledgeCollectionRequests;
   expanded: Set<string>;
   active: string;
   setActive: (path: string) => void;
@@ -132,10 +132,10 @@ type TreeState = TreeProps & {
 
 export function KnowledgeTree(props: TreeProps) {
   const { client, accessContext, workspaceStateOwnerId } = useAppContext();
-  // A new cache also remounts each open collection before it can display rows
+  // A new request context also remounts each open collection before it can display rows
   // belonging to the previous principal/workspace/filter or edit generation.
-  const cache = useMemo(
-    () => new KnowledgeCollectionCache(),
+  const requests = useMemo(
+    () => new KnowledgeCollectionRequests(),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- these identities invalidate retained Knowledge, not constructor inputs
     [client, accessContext, workspaceStateOwnerId, props.workspaceId, props.scope, props.refresh],
   );
@@ -146,7 +146,7 @@ export function KnowledgeTree(props: TreeProps) {
   const roots = treeOrder(props.entries);
   const state: TreeState = {
     ...props,
-    cache,
+    requests,
     expanded,
     active: active || roots[0]?.id || "",
     setActive,
@@ -302,7 +302,7 @@ function TreeNode({
       </div>
       {folder && open ? (
         <CollectionChildren
-          key={state.cache.id}
+          key={state.requests.id}
           entry={entry}
           path={path}
           ancestors={[...ancestors, entry.id]}
@@ -332,25 +332,20 @@ function CollectionChildren({
     limit: 50,
   };
   const requestKey = JSON.stringify(request);
-  const [entries, setEntries] = useState<KnowledgeEntrySummary[]>(
-    () => state.cache.peek(requestKey)?.entries ?? [],
-  );
-  const [cursor, setCursor] = useState<string | null>(
-    () => state.cache.peek(requestKey)?.nextCursor ?? null,
-  );
-  const [loading, setLoading] = useState(() => !state.cache.peek(requestKey));
+  const [entries, setEntries] = useState<KnowledgeEntrySummary[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
   const generation = useRef(0);
-  const cache = state.cache;
+  const requests = state.requests;
   useEffect(() => {
     const current = ++generation.current;
     setError(null);
-    const cached = cache.peek(requestKey);
-    setLoading(!cached);
-    setEntries(cached?.entries ?? []);
-    setCursor(cached?.nextCursor ?? null);
-    void cache
+    setLoading(true);
+    setEntries([]);
+    setCursor(null);
+    void requests
       .load(requestKey, () =>
         client.listKnowledgeEntries(state.workspaceId, JSON.parse(requestKey)),
       )
@@ -370,15 +365,15 @@ function CollectionChildren({
       // eslint-disable-next-line react-hooks/exhaustive-deps -- invalidate pending pages on unmount
       ++generation.current;
     };
-  }, [client, state.workspaceId, requestKey, cache, retry]);
+  }, [client, state.workspaceId, requestKey, requests, retry]);
   async function more() {
     if (!cursor || loading) return;
     const current = generation.current;
     setLoading(true);
     setError(null);
     try {
-      // Cursor pages stay fresh: never combine a newly fetched first page with
-      // a cached continuation from an earlier collection snapshot.
+      // Continuation pages are fetched directly; only pending first-page reads
+      // are shared across collection expansions.
       const result = await client.listKnowledgeEntries(state.workspaceId, {
         ...request,
         cursor,
