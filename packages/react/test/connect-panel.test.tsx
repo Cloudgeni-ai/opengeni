@@ -35,7 +35,7 @@ async function render(state: ConnectAttempt["state"], title?: string | null) {
         controller={controller}
         returnUrl="https://host.example/settings"
         onAuthorize={() => {}}
-        title={title}
+        {...(title === undefined ? {} : { title })}
       />,
     );
   } finally {
