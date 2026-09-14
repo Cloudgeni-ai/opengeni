@@ -73,6 +73,7 @@ describe("compact session view on the live local workspace route (API fixture)",
         holdRead?: ReturnType<typeof deferred>;
         readStarted: boolean;
         failReads: boolean;
+        failFirstPage?: boolean;
       }
     | undefined;
   beforeAll(async () => {
@@ -213,7 +214,10 @@ describe("compact session view on the live local workspace route (API fixture)",
         let selected = (fixture ? [fixture.root, ...fixture.children] : rows).filter(
           (row) =>
             archiveStatus === "all" ||
-            (fixture?.root.archived ?? row.archived) === (archiveStatus === "archived"),
+            (fixture && row.rootSessionId === fixture.root.id
+              ? fixture.root.archived
+              : row.archived) ===
+              (archiveStatus === "archived"),
         );
         const search = url.searchParams.get("search");
         if (search) selected = selected.filter((row) => row.title.includes(search));
@@ -241,7 +245,8 @@ describe("compact session view on the live local workspace route (API fixture)",
           fixture.holdRead = undefined;
           fixture.readStarted = true;
           await hold?.promise;
-          if (fixture.failReads) return json({ message: "Deliberate read failure" }, 500);
+          if (fixture.failReads || (fixture.failFirstPage && limit === 50))
+            return json({ message: "Deliberate read failure" }, 500);
         }
         return json(response);
       }
@@ -397,9 +402,15 @@ describe("compact session view on the live local workspace route (API fixture)",
     );
   };
 
-  for (const localArchived of [true, false]) {
-    test(`retained local ${localArchived ? "archive" : "restore"} receipt yields only to later-started child search reads`, async () => {
-      const root = { ...rows[0]!, title: "Nonmatching root", archived: !localArchived };
+  for (const { localArchived, continuationFirst } of [true, false].flatMap((localArchived) =>
+    [false, true].map((continuationFirst) => ({ localArchived, continuationFirst })),
+  )) {
+    test(`retained local ${localArchived ? "archive" : "restore"} receipt yields only to later-started child search reads${continuationFirst ? " with stale first-page overlap" : ""}`, async () => {
+      const root = {
+        ...rows[0]!,
+        title: "Nonmatching root",
+        archived: !localArchived,
+      };
       archiveFixture = {
         root,
         children: Array.from({ length: 55 }, (_, index) => ({
@@ -414,6 +425,16 @@ describe("compact session view on the live local workspace route (API fixture)",
         readStarted: false,
         failReads: false,
       };
+      if (continuationFirst) {
+        // A different matching tree keeps pagination reachable while the
+        // mutated tree is suppressed. It must not inherit that tree's receipt.
+        archiveFixture.children.unshift({
+          ...rows[2]!,
+          title: "Needle !unrelated",
+          archived: !localArchived,
+          updatedAt: new Date(Date.now() + 60_000).toISOString(),
+        });
+      }
       await page.reload({ waitUntil: "networkidle" });
       await page
         .getByRole("textbox", { name: "Message the agent", exact: true })
@@ -422,6 +443,7 @@ describe("compact session view on the live local workspace route (API fixture)",
       await choose("Group by", "None");
       await choose("Status", localArchived ? "Active" : "Archived");
       const rail = page.locator("[data-sessionpin-session-list]");
+      const matchingChildren = rail.locator("a[data-session-row]").filter({ hasText: /Needle \d/ });
       const rootRow = rail.locator(`a[data-session-row][href$="/${root.id}"]`);
       await rootRow.waitFor();
       archiveFixture.mutation = deferred();
@@ -431,6 +453,7 @@ describe("compact session view on the live local workspace route (API fixture)",
           name: localArchived ? "Archive session" : "Restore session",
           exact: true,
         })
+        .and(page.locator(`[data-session-actions="${root.id}"]`))
         .click();
       await page.waitForTimeout(50);
       expect(archiveFixture.mutationStarted).toBe(true);
@@ -442,7 +465,8 @@ describe("compact session view on the live local workspace route (API fixture)",
       ]);
       await settleRead();
       // A successfully returned child-only page cannot revive a pending tree.
-      expect(await rail.locator("a[data-session-row]").count()).toBe(0);
+      expect(await matchingChildren.count()).toBe(0);
+      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 1 : 0);
       // Start another child-only read BEFORE completion, but deliver it AFTER
       // the successful receipt and its deliberately failed refresh.
       const delayed = deferred();
@@ -452,7 +476,8 @@ describe("compact session view on the live local workspace route (API fixture)",
       await page.waitForTimeout(100);
       expect(archiveFixture.readStarted).toBe(true);
       // Pending transitions cannot be revived even by a new query.
-      expect(await rail.locator("a[data-session-row]").count()).toBe(0);
+      expect(await matchingChildren.count()).toBe(0);
+      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 1 : 0);
       archiveFixture.failReads = true;
       archiveFixture.mutation.resolve();
       await page
@@ -461,28 +486,55 @@ describe("compact session view on the live local workspace route (API fixture)",
       archiveFixture.failReads = false;
       delayed.resolve();
       await settleRead();
-      expect(await rail.locator("a[data-session-row]").count()).toBe(0);
+      expect(await matchingChildren.count()).toBe(0);
+      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 1 : 0);
 
       // Another client reverses revision 1 to revision 2; no root matches the
       // search and the mounted component must retain its own local receipt.
       archiveFixture.root = { ...archiveFixture.root, archived: !localArchived, archiveVersion: 2 };
+      if (continuationFirst) {
+        // Keep the accepted first page from BEFORE mutation completion. Only
+        // the 100-row continuation may confirm membership after the reversal;
+        // it overlaps 49 cached children and adds six continuation-only children.
+        archiveFixture.failFirstPage = true;
+        await invalidate();
+        await settleRead();
+        expect(await matchingChildren.count()).toBe(0);
+        await rail.getByText("Needle !unrelated", { exact: true }).waitFor();
+        await rail.getByRole("button", { name: /^Load older sessions in/ }).click();
+        await rail.getByText("Needle 54", { exact: true }).waitFor();
+        await settleRead();
+        expect(await matchingChildren.count()).toBe(55);
+        expect(await rail.getByText("Needle 00", { exact: true }).count()).toBe(1);
+        expect(await rail.getByText("Nonmatching root", { exact: true }).count()).toBe(0);
+        // An unrelated failed first-page refresh cannot erase the newer
+        // per-row continuation proof or globally retire the local receipt.
+        await invalidate();
+        await settleRead();
+        expect(await matchingChildren.count()).toBe(55);
+        archiveFixture.failFirstPage = false;
+      }
       for (let refresh = 0; refresh < 2; refresh++) {
         await invalidate();
         await rail.getByText("Needle 00", { exact: true }).waitFor();
         await settleRead();
         expect(await rail.getByText("Nonmatching root", { exact: true }).count()).toBe(0);
       }
-      await rail.getByRole("button", { name: /^Load older sessions in/ }).click();
+      if (!continuationFirst)
+        await rail.getByRole("button", { name: /^Load older sessions in/ }).click();
       await rail.getByText("Needle 54", { exact: true }).waitFor();
-      expect(await rail.locator("a[data-session-row]").count()).toBe(55);
+      expect(await matchingChildren.count()).toBe(55);
+      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 56 : 55);
       await invalidate();
       await settleRead();
-      expect(await rail.locator("a[data-session-row]").count()).toBe(55);
+      expect(await matchingChildren.count()).toBe(55);
+      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 56 : 55);
       // Failure cannot retire the receipt or grant freshness to old rows.
       archiveFixture.failReads = true;
       await invalidate();
       await settleRead();
-      expect(await rail.locator("a[data-session-row]").count()).toBe(55);
+      expect(await matchingChildren.count()).toBe(55);
+      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 56 : 55);
       archiveFixture.failReads = false;
       await Promise.all([
         page.waitForResponse(

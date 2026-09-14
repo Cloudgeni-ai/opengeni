@@ -475,7 +475,14 @@ export function SessionList() {
         rowReadGenerations.set(id, Math.max(rowReadGenerations.get(id) ?? 0, generation));
       }
     }
-    for (const session of sessions) rowReadGenerations.set(session.id, rootReadGeneration);
+    for (const session of sessions) {
+      // The shared first page can predate an accepted overlapping continuation.
+      // Preserve the newest membership proof for each row, not source priority.
+      rowReadGenerations.set(
+        session.id,
+        Math.max(rowReadGenerations.get(session.id) ?? 0, rootReadGeneration),
+      );
+    }
     return {
       rowReadGenerations,
       completedGenerations: new Map(
