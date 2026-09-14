@@ -481,7 +481,20 @@ export type SandboxOperationMetricObservation = {
   op: string;
   outcome: "ok" | "not_found" | "failed";
   durationMs: number;
+  materializationFailureReason?: string;
 };
+
+const MATERIALIZATION_FAILURE_REASONS = new Set([
+  "path_not_visible",
+  "command_failed",
+  "command_pending",
+  "invalid_response",
+  "command_error",
+]);
+const MATERIALIZATION_FAILURE_METRIC = {
+  name: "opengeni_sandbox_materialization_verification_failures_total",
+  help: "Sandbox destination visibility-check failures by bounded reason; exact command evidence is retained in the session failure event.",
+} as const;
 
 export function createObservability(
   settings: ObservabilitySettings,
@@ -540,6 +553,19 @@ export class Observability {
       });
       this.registerSandboxRolloutConfig();
       this.registerTenancyCompatibilityLanes();
+      if (options.component === "worker" || options.component === "api") {
+        // Publish the finite series at startup so a first failure has a zero
+        // baseline and healthy zeroes differ from a missing instrumentation path.
+        for (const backend of [...SANDBOX_OPERATION_BACKENDS, "unknown"]) {
+          for (const reason of [...MATERIALIZATION_FAILURE_REASONS, "unknown"]) {
+            this.incrementCounter({
+              ...MATERIALIZATION_FAILURE_METRIC,
+              labels: { backend, reason },
+              amount: 0,
+            });
+          }
+        }
+      }
     }
   }
 
@@ -957,6 +983,19 @@ export function sandboxOperationMetricObserver(
         labels: { backend, op },
         value: Math.max(0, observation.durationMs) / 1_000,
       });
+      if (
+        op === "materializeEntry" &&
+        observation.outcome === "failed" &&
+        observation.materializationFailureReason
+      ) {
+        const reason = MATERIALIZATION_FAILURE_REASONS.has(observation.materializationFailureReason)
+          ? observation.materializationFailureReason
+          : "unknown";
+        observability.incrementCounter({
+          ...MATERIALIZATION_FAILURE_METRIC,
+          labels: { backend, reason },
+        });
+      }
     } catch {
       try {
         observability.incrementCounter({
