@@ -125,8 +125,8 @@ export type TurnSummaryProps = {
   items: ActivityItem[];
   /**
    * The settled verdict — or absent for a completed CLUSTER of a still-running
-   * turn, which folds neutrally: no verdict glyph (the turn has none yet), a
-   * quiet pulse dot in its place so alignment and the running feel both hold.
+   * turn, which folds neutrally. Only unfinished activity inside this summary
+   * animates; the parent turn may still be composing a response elsewhere.
    */
   outcome?: TurnOutcome | undefined;
   /** A short failure reason shown inline on a failed chip (never hidden). */
@@ -447,7 +447,7 @@ export function TurnSummary({
             />
             {/* Completion is the quiet default and needs no repeated glyph. Failed,
             cancelled, and still-running folds retain a visible state marker. */}
-            {outcome === "complete" || (liveHeader && !outcome) ? null : (
+            {outcome === "complete" || (!outcome && (liveHeader || context.settled)) ? null : (
               <span
                 className={cn(
                   "inline-flex shrink-0 items-center justify-center",
