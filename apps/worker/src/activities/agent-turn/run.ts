@@ -1,5 +1,4 @@
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
-import { prepareTurnKnowledgeSources } from "./knowledge-sources";
 import {
   assertModelConnectionAllowsTurn,
   freezeAgentLearningPolicy,
@@ -1030,44 +1029,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             knowledgeRecoveryNote =
               "[OpenGeni confirmation recovery unavailable] Do not assume an earlier remember confirmation was published. Inspect the current Knowledge or instruction review.";
           }
-          const attachmentPreparationNote = await prepareTurnKnowledgeSources({
-            settings: runSettings,
-            scope: {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              attemptId: input.attemptId,
-              executionGeneration: attempt.executionGeneration,
-            },
-            // Only attachments on this accepted turn are new source inputs.
-            // Session-level file receipts remain historical context and must
-            // never trigger metadata reads, downloads, or re-preparation.
-            resources: turn.resources,
-            selectedTools: session.firstPartyMcpTools,
-            permissions: session.firstPartyMcpPermissions,
-            learningMode: learning.effective.knowledge,
-            signal: cancellationSignal,
-            onOutcome: async (outcome) => {
-              if (outcome.status === "disabled") return;
-              await eventing.publish!(
-                [
-                  {
-                    type:
-                      outcome.status === "failed"
-                        ? "knowledge.source.failed"
-                        : "knowledge.source.prepared",
-                    payload: outcome,
-                  },
-                ],
-                true,
-              );
-            },
-          });
-
-          const knowledgeSourcePreparationNote =
-            [knowledgeRecoveryNote, attachmentPreparationNote].filter(Boolean).join("\n\n") ||
-            undefined;
+          const knowledgeSourcePreparationNote = knowledgeRecoveryNote;
 
           const sandboxRoute = await resolveSandboxRoute({
             input,

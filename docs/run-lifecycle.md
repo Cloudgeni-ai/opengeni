@@ -508,6 +508,10 @@ chat or scheduled-run context. Child work and replacement attempts reuse their
 producer's accepted policy. Legacy `memoryEnabled` opt-outs are converted to the
 Knowledge setting; the old setting cannot be changed after 0461.
 
+Ordinary turn acceptance does not parse or publish chat attachments into Knowledge.
+Original attachments keep their existing exact-turn resource lifecycle. Agents
+explicitly select useful findings and retain supporting sources when needed.
+
 Retained Knowledge is retrieval context. It is not ambient conversation memory
 or behavioral authority. Explicit `view: "needs_review"` lets agents inspect and correct unapproved proposals without activating them. Normal search excludes pending revisions; source ACLs,
 exact evidence revisions and scope checks apply before ranking. Review-first

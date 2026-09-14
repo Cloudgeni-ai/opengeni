@@ -3065,6 +3065,7 @@ export type Permission = KnownPermission | (string & {});
 
 export type FirstPartyMcpToolName =
   | "knowledge_search"
+  | "knowledge_prepare_save"
   | "knowledge_get"
   | "knowledge_browse"
   | "knowledge_save"

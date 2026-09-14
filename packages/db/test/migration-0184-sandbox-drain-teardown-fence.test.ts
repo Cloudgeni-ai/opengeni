@@ -64,6 +64,7 @@ const withheldMigrationNames = [
   "0466_agent_instruction_activation_preservation.sql",
   // Compiles against the Knowledge tables and visibility helper from 0461.
   "0468_knowledge_relationship_projection.sql",
+  "0469_knowledge_source_discovery.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

@@ -21,6 +21,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_resume: { sessionRequired: true, allOf: ["goals:manage"] },
   knowledge_search: { sessionRequired: true, allOf: ["documents:search"] },
+  knowledge_prepare_save: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_get: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_browse: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_retain_file: { sessionRequired: true, allOf: ["documents:search", "files:read"] },

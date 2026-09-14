@@ -10,12 +10,17 @@ and workspace Knowledge use the same structure and tools, with different access.
 
 ## Files, sources and findings
 
-Uploading a PDF in a chat retains the original file. During its work, the agent
-prepares searchable source text and saves useful findings when Knowledge learning
-allows it. These are linked records, not three competing knowledge bases:
+Uploading a file in a chat keeps the original available to that conversation.
+The agent saves lasting Knowledge when it finds useful information, such as a
+decision, requirement or the cause and fix of an incident. Uploads, screenshots
+and routine approvals do not automatically become Knowledge. These records
+serve different purposes:
 
 - **File:** the original PDF you can open or download.
-- **Source:** retained text with its file, page or external source reference.
+- **Source:** a deliberately retained reference document, or supporting evidence
+  linked from a finding. Supporting chat excerpts and screenshots stay out of
+  ordinary Knowledge browsing and search; **Include supporting evidence** makes
+  them discoverable when needed.
 - **Finding:** useful information, such as a renewal date, with evidence pointing
   to the source revision that supports it. A finding can cite an existing source;
   it does not require another duplicate excerpt.
@@ -29,7 +34,11 @@ Files, Instructions and Skills tabs. Files open their preview, extracted text
 and related entries. Knowledge uses a compact folder tree: expand a collection to
 see its entries and nested collections, then click an entry to read it. Short
 collection descriptions stay visible below folder names. An entry can appear in
-several collections without being copied. A collection's menu opens its details
+several collections without being copied. Before saving, the agent can fetch
+the collection structure and descriptions together with related published and
+pending entries. It reuses unchanged knowledge and updates existing entries
+instead of appending duplicates. File sources open their original preview with
+extracted text available below it. A collection's menu opens its details
 or adds knowledge and subcollections. Search finds entries across the tree.
 
 A scheduled task reads its configured source through an agent, just as ordinary

@@ -46,7 +46,10 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture(mode: "automatic" | "review_first" | "off" = "automatic") {
+async function fixture(
+  mode: "automatic" | "review_first" | "off" = "automatic",
+  contentType = "application/pdf",
+) {
   const id = crypto.randomUUID();
   const subjectId = `user:${id}`;
   const access = await bootstrapWorkspace(client.db, {
@@ -134,7 +137,7 @@ async function fixture(mode: "automatic" | "review_first" | "off" = "automatic")
     fileId,
     filename: "Acme.pdf",
     safeFilename: "Acme.pdf",
-    contentType: "application/pdf",
+    contentType,
     sizeBytes: bytes.length,
     sha256: null,
     bucket: "test",
@@ -432,3 +435,148 @@ test("message retention pins the real conversation message and respects review-f
     await server.close();
   }
 });
+
+test("prepare-save returns all collection descriptions and pending matches without authoring", async () => {
+  const f = await fixture("review_first");
+  const { saveKnowledgeEntry } = await import("@opengeni/db");
+  const parentId = crypto.randomUUID();
+  await saveKnowledgeEntry(client.db, f.human, {
+    operationId: crypto.randomUUID(),
+    entryId: parentId,
+    expectedVersion: 0,
+    scope: "workspace",
+    entry: { kind: "group", title: "Engineering", content: "Product and implementation decisions" },
+  });
+  for (let i = 0; i < 26; i++) {
+    await saveKnowledgeEntry(client.db, f.human, {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      scope: "workspace",
+      entry: {
+        kind: "group",
+        title: `System ${i}`,
+        content: `Technical reference for system ${i}`,
+        groupIds: [parentId],
+      },
+    });
+  }
+  const server = new McpServer({ name: "save-preparation", version: "1" });
+  registerKnowledgeEntryTools(server, f.deps, f.agentGrant, f.session.id);
+  const mcp = new McpClient({ name: "agent", version: "1" });
+  const [left, right] = InMemoryTransport.createLinkedPair();
+  await server.connect(right);
+  await mcp.connect(left);
+  const call = async (name: string, args = {}) => {
+    const result = await mcp.callTool({ name, arguments: args });
+    if (result.isError) throw new Error(JSON.stringify(result));
+    return JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
+  };
+  try {
+    const entryId = crypto.randomUUID();
+    await call("knowledge_save", {
+      operationId: crypto.randomUUID(),
+      entryId,
+      expectedVersion: 0,
+      entry: {
+        kind: "requirement",
+        title: "Consistent plugin setup dialogs",
+        content: "Plugin setup should reuse the connection dialog components.",
+        groupIds: [parentId],
+      },
+    });
+    const [before] =
+      await shared.admin`SELECT count(*)::int AS count FROM knowledge_entry_revisions WHERE account_id=${f.grant.accountId}`;
+    const prepared = await call("knowledge_prepare_save", { query: "plugin connection dialog" });
+    expect(prepared.collections.complete).toBe(true);
+    expect(prepared.collections.entries).toHaveLength(27);
+    expect(prepared.collections.entries.find((entry: any) => entry.id === parentId)).toMatchObject({
+      title: "Engineering",
+      description: "Product and implementation decisions",
+      parentIds: [],
+      view: "published",
+    });
+    expect(
+      prepared.collections.entries.filter((entry: any) => entry.parentIds.includes(parentId)),
+    ).toHaveLength(26);
+    expect(prepared.matches.needs_review.entries.some((entry: any) => entry.id === entryId)).toBe(
+      true,
+    );
+    expect(prepared.matches.published.entries.some((entry: any) => entry.id === entryId)).toBe(
+      false,
+    );
+    const [after] =
+      await shared.admin`SELECT count(*)::int AS count FROM knowledge_entry_revisions WHERE account_id=${f.grant.accountId}`;
+    expect(after.count).toBe(before.count);
+
+    const url = `http://test/v1/workspaces/${f.grant.workspaceId}/knowledge/entries/prepare-save`;
+    for (const selected of [
+      ["knowledge_prepare_save"],
+      ["knowledge_search"],
+      [],
+    ] as FirstPartyMcpToolName[][]) {
+      const response = await f.app.request(url, {
+        method: "POST",
+        headers: {
+          authorization: await f.authorization(selected, false),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ query: "plugin connection dialog" }),
+      });
+      expect(response.status).toBe(selected.includes("knowledge_prepare_save") ? 200 : 403);
+    }
+  } finally {
+    await mcp.close();
+    await server.close();
+  }
+}, 180_000);
+
+test("explicit file evidence stays out of discovery while references remain searchable", async () => {
+  for (const purpose of ["evidence", "reference"] as const) {
+    const f = await fixture();
+    const response = await f.app.request(f.url, {
+      method: "POST",
+      headers: { authorization: await f.authorization(), "content-type": "application/json" },
+      body: JSON.stringify({ purpose }),
+    });
+    expect(response.status).toBe(200);
+    const result = (await response.json()) as KnowledgeFilePreparationResult;
+    if (result.status !== "retained") throw new Error("Expected source");
+    const { getKnowledgeEntry, listKnowledgeEntries } = await import("@opengeni/db");
+    const record = await getKnowledgeEntry(client.db, f.human, result.receipt.entryId);
+    expect(record?.revision.entry.source?.purpose).toBe(purpose);
+    expect(record?.revision.entry.content).toBe(
+      "  Acme renews in December.\n\u0000Exact extracted text.  ",
+    );
+    const found = await listKnowledgeEntries(client.db, f.human, { query: "Acme" });
+    expect(found.entries.some((entry) => entry.id === result.receipt.entryId)).toBe(
+      purpose === "reference",
+    );
+    const evidence = await listKnowledgeEntries(client.db, f.human, {
+      query: "Acme",
+      includeEvidence: true,
+    });
+    expect(evidence.entries.some((entry) => entry.id === result.receipt.entryId)).toBe(true);
+  }
+}, 180_000);
+
+test("a selected image retains exact visual evidence without OCR or a searchable text claim", async () => {
+  const f = await fixture("automatic", "image/png");
+  f.failParser(true);
+  const response = await f.app.request(f.url, {
+    method: "POST",
+    headers: { authorization: await f.authorization() },
+  });
+  expect(response.status).toBe(200);
+  const result = (await response.json()) as KnowledgeFilePreparationResult;
+  if (result.status !== "retained") throw new Error("Expected image evidence");
+  expect(f.calls).toEqual([`read:${f.fileId}`]);
+  const { getKnowledgeEntry } = await import("@opengeni/db");
+  const record = await getKnowledgeEntry(client.db, f.human, result.receipt.entryId);
+  expect(record?.revision.entry.content).toBe("");
+  expect(record?.revision.entry.source).toMatchObject({
+    fileId: f.fileId,
+    purpose: "evidence",
+    retention: "reference",
+  });
+}, 180_000);
