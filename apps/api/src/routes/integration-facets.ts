@@ -7,6 +7,7 @@ import {
   UpsertIntegrationFacetRequest,
 } from "@opengeni/contracts";
 import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
+import { CORE_INTEGRATION_DEFINITIONS } from "@opengeni/capabilities";
 import {
   hasPermission,
   requireAccessGrant,
@@ -27,6 +28,7 @@ import {
   removeIntegrationFacet,
   replayCompletedIntegrationFacetOperation,
   setIntegrationFacetLifecycle,
+  type IntegrationFacetAcquisitionAuthorizer,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -198,9 +200,11 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
                     ? { expectedVersion: payload.expectedVersion }
                     : {}),
                   idempotencyKey: payload.idempotencyKey,
-                  // Generic installed facets do not prove a curated identity or
-                  // validated custom protocol solely from their ID/domain/metadata.
-                  beforeAcquire: async () => assertOrganizationIntegrationAllowed(policy, null),
+                  beforeAcquire: async (_db, context) =>
+                    assertOrganizationIntegrationAllowed(
+                      policy,
+                      installedFacetIntegrationKey(context),
+                    ),
                 }),
             ),
           ),
@@ -236,7 +240,11 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
                     action,
                     expectedVersion: payload.expectedVersion,
                     idempotencyKey: payload.idempotencyKey,
-                    beforeAcquire: async () => assertOrganizationIntegrationAllowed(policy, null),
+                    beforeAcquire: async (_db, context) =>
+                      assertOrganizationIntegrationAllowed(
+                        policy,
+                        installedFacetIntegrationKey(context),
+                      ),
                   }),
               ),
             ),
@@ -278,6 +286,23 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
 
 function decoded(value: string): string {
   return decodeURIComponent(value);
+}
+
+/** The DB context comes from the matching installed API facet and immutable
+ * server-authored version manifest, never request metadata or a provider domain.
+ */
+function installedFacetIntegrationKey(
+  context: Parameters<IntegrationFacetAcquisitionAuthorizer>[1],
+): string | null {
+  if (context.apiProtocol !== "openapi" && context.apiProtocol !== "graphql") return null;
+  if (context.definitionProvenance === "workspace") return `custom:${context.apiProtocol}`;
+  if (
+    context.definitionProvenance === "curated" &&
+    CORE_INTEGRATION_DEFINITIONS.some((definition) => definition.id === context.definitionId)
+  ) {
+    return context.definitionId;
+  }
+  return null;
 }
 
 function facetHttpError(error: unknown): HTTPException {

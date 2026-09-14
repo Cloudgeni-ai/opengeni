@@ -172,6 +172,9 @@ type IntegrationInstanceContext = {
   integrationFacetId: string;
   providerDomain: string;
   connectionId: string | null;
+  apiProtocol: string | null;
+  definitionId: string | null;
+  definitionProvenance: string | null;
 };
 
 /** Trusted server callback, never part of a serialized mutation request. The
@@ -744,6 +747,13 @@ async function loadIntegrationInstanceContext(
       integrationFacetId: schema.integrationFacetDefinitions.integrationFacetId,
       providerDomain: schema.capabilityIntegrationFacets.providerDomain,
       connectionId: schema.integrationFacetBindings.connectionId,
+      apiProtocol: schema.capabilityApiFacets.protocol,
+      definitionId: sql<
+        string | null
+      >`${schema.capabilityPluginVersions.manifest} ->> 'definitionId'`,
+      definitionProvenance: sql<
+        string | null
+      >`${schema.capabilityPluginVersions.manifest} ->> 'definitionProvenance'`,
     })
     .from(schema.integrationFacetBindings)
     .innerJoin(
@@ -775,6 +785,21 @@ async function loadIntegrationInstanceContext(
       schema.capabilityPluginVersions,
       eq(schema.capabilityPluginVersions.id, schema.capabilityPluginInstallations.pluginVersionId),
     )
+    .leftJoin(
+      schema.capabilityApiFacets,
+      and(
+        eq(
+          schema.capabilityApiFacets.integrationFacetId,
+          schema.capabilityIntegrationFacets.facetId,
+        ),
+        sql`exists (
+          select 1 from ${schema.capabilityFacetInstallations} api_installation
+          where api_installation.plugin_installation_id = ${schema.capabilityPluginInstallations.id}
+            and api_installation.facet_id = ${schema.capabilityApiFacets.facetId}
+            and api_installation.status = 'active'
+        )`,
+      ),
+    )
     .where(
       and(
         eq(schema.integrationFacetBindings.workspaceId, workspaceId),
@@ -794,7 +819,17 @@ async function loadIntegrationInstanceContext(
       ),
     )
     .limit(2);
-  if (lock) query = query.for("update") as typeof query;
+  if (lock)
+    query = query.for("update", {
+      of: [
+        schema.integrationFacetBindings,
+        schema.integrationFacetDefinitions,
+        schema.capabilityIntegrationFacets,
+        schema.capabilityFacetInstallations,
+        schema.capabilityPluginInstallations,
+        schema.capabilityPluginVersions,
+      ],
+    }) as typeof query;
   const rows = await query;
   if (rows.length === 0) return null;
   if (rows.length !== 1) throw new Error(`API Integration ${capabilityId} instance is ambiguous`);

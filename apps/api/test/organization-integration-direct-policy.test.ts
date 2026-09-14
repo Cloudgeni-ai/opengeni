@@ -315,9 +315,11 @@ test("Slack bot setup uses its dedicated key, never the personal Slack permissio
   expect(allowed.status, await allowed.text()).toBe(200);
 });
 
-test("facet policy admits exact receipts and unchanged bindings, denies new authority and resume, preserves pause/remove", async () => {
-  const f = await fixture();
-  const definitionId = `direct-facet-${crypto.randomUUID()}`;
+async function installFacetFixture(
+  f: Awaited<ReturnType<typeof fixture>>,
+  options: { definitionId?: string; provenance?: "workspace" | "curated" } = {},
+) {
+  const definitionId = options.definitionId ?? `direct-facet-${crypto.randomUUID()}`;
   const capabilityId = `api:${definitionId}`;
   const installed = await installApiIntegration(client.db, {
     accountId: f.accountId,
@@ -331,7 +333,7 @@ test("facet policy admits exact receipts and unchanged bindings, denies new auth
     category: "operations",
     tags: [],
     definitionId,
-    definitionProvenance: "workspace",
+    definitionProvenance: options.provenance ?? "workspace",
     providerDomain: "facet.example",
     protocol: "openapi",
     baseUrl: "https://facet.example/v1/",
@@ -380,7 +382,12 @@ test("facet policy admits exact receipts and unchanged bindings, denies new auth
       },
     },
   });
-  const path = `integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(installed.instanceKey)}/facets/source`;
+  return `integrations/${encodeURIComponent(capabilityId)}/instances/${encodeURIComponent(installed.instanceKey)}/facets/source`;
+}
+
+test("facet policy admits exact receipts and unchanged bindings, denies new authority and resume, preserves pause/remove", async () => {
+  const f = await fixture();
+  const path = await installFacetFixture(f);
   const original = {
     displayName: "Fixture source",
     config: { source: "first" },
@@ -448,4 +455,33 @@ test("facet policy admits exact receipts and unchanged bindings, denies new auth
     idempotencyKey: crypto.randomUUID(),
   });
   expect(reactivated.status, await reactivated.text()).toBe(403);
+});
+
+test("facet acquisition uses stored API protocol and catalog-validated immutable provenance", async () => {
+  const f = await fixture();
+  const customPath = await installFacetFixture(f);
+  const unknownDefinition = `unknown-curated-${crypto.randomUUID()}`;
+  const unknownPath = await installFacetFixture(f, {
+    definitionId: unknownDefinition,
+    provenance: "curated",
+  });
+  const curatedPath = await installFacetFixture(f, {
+    definitionId: "microsoft-outlook-mail",
+    provenance: "curated",
+  });
+  const payload = () => ({
+    displayName: "Protocol fixture",
+    config: { source: "one" },
+    idempotencyKey: crypto.randomUUID(),
+  });
+  await f.restrict(["custom:graphql", "custom:mcp", "microsoft-outlook-mail", unknownDefinition]);
+  const wrongProtocol = await f.request(customPath, "PUT", payload());
+  expect(wrongProtocol.status, await wrongProtocol.text()).toBe(403);
+  const knownCurated = await f.request(curatedPath, "PUT", payload());
+  expect(knownCurated.status, await knownCurated.text()).toBe(201);
+  await f.restrict(["custom:openapi", unknownDefinition]);
+  const allowedCustom = await f.request(customPath, "PUT", payload());
+  expect(allowedCustom.status, await allowedCustom.text()).toBe(201);
+  const forgedCurated = await f.request(unknownPath, "PUT", payload());
+  expect(forgedCurated.status, await forgedCurated.text()).toBe(403);
 });
