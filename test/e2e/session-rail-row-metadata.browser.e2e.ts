@@ -47,24 +47,38 @@ describe("Session rail row metadata in Chromium", () => {
     await Promise.allSettled([browser?.close(), web?.stop()]);
   }, 30_000);
 
-  test("puts truthful sorting first and grouping in a keyboard-accessible submenu", async () => {
+  test("offers compact status, independent sorting, grouping and empty groups by keyboard", async () => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.getByRole("button", { name: "Session view", exact: true }).click();
     const menu = page.getByRole("menu").first();
     const text = await menu.innerText();
-    expect(text.indexOf("Sort by")).toBeLessThan(text.indexOf("Group by"));
-    expect(text).toContain("Last activity · newest first");
-    expect(text).toContain("Sort order is fixed.");
+    expect(text.indexOf("Status")).toBeLessThan(text.indexOf("Group by"));
+    expect(text.indexOf("Group by")).toBeLessThan(text.indexOf("Sort by"));
+    expect(text).toContain("Last activity");
+    expect(text).not.toContain("Sort order is fixed.");
     expect(await page.getByRole("menuitemradio").count()).toBe(0);
     await page.getByRole("menuitem", { name: /Group by/ }).focus();
     await page.keyboard.press("ArrowRight");
     await page.getByRole("menuitemradio", { name: "Created date", exact: true }).click();
     await page.getByRole("button", { name: "Session view", exact: true }).click();
-    expect(await menu.innerText()).toContain("Created date · newest first");
-    expect(await menu.innerText()).toContain("Within loaded date groups.");
-    expect(await menu.innerText()).toContain("More sessions load by activity, not creation date.");
+    expect(await menu.innerText()).toContain("Created date");
+    expect(await menu.innerText()).toContain("Last activity");
+    await page.getByRole("menuitem", { name: /Sort by/ }).focus();
+    await page.keyboard.press("ArrowRight");
+    await page.getByRole("menuitemradio", { name: "Name", exact: true }).click();
+    await page.getByRole("button", { name: "Session view", exact: true }).click();
+    expect(await menu.innerText()).toContain("Name");
+    await page.getByRole("menuitem", { name: /Group by/ }).focus();
+    await page.keyboard.press("ArrowRight");
+    await page.getByRole("menuitemradio", { name: "None", exact: true }).click();
+    await page.getByRole("button", { name: "Session view", exact: true }).click();
+    expect(
+      await page
+        .getByRole("menuitemcheckbox", { name: "Show empty groups" })
+        .getAttribute("aria-disabled"),
+    ).toBe("true");
     expect(await menu.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
-    await page.screenshot({ path: "/tmp/opengeni-session-menu-desktop.png", fullPage: true });
+    await page.screenshot({ path: "/workspace/compact-session-menu-desktop.png", fullPage: true });
     await page.keyboard.press("Escape");
     expect(
       await page
@@ -108,6 +122,36 @@ describe("Session rail row metadata in Chromium", () => {
       expect(await row.locator(".animate-spin").count()).toBe(0);
     }
     await page.setViewportSize({ width: 1280, height: 800 });
+  });
+
+  test("keeps compact-menu choices reachable on a coarse touch pointer", async () => {
+    const touchPage = await browser.newPage({
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+    });
+    try {
+      await touchPage.goto(`${baseUrl}/test/session-rail-row-metadata.html`, {
+        waitUntil: "networkidle",
+      });
+      await touchPage.getByRole("button", { name: "Session view", exact: true }).tap();
+      const status = touchPage.getByRole("menuitem", { name: /^Status/ });
+      expect((await status.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      await status.tap();
+      const archived = touchPage.getByRole("menuitemradio", { name: "Archived", exact: true });
+      expect((await archived.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      await archived.tap();
+      await touchPage.getByRole("button", { name: "Session view", exact: true }).tap();
+      expect(await touchPage.getByRole("menuitem", { name: /^Status/ }).innerText()).toContain(
+        "Archived",
+      );
+      await touchPage.screenshot({
+        path: "/workspace/compact-session-menu-touch.png",
+        fullPage: true,
+      });
+    } finally {
+      await touchPage.close();
+    }
   });
 
   test("contains every production-width row and keeps titles clear of real metadata", async () => {

@@ -1,6 +1,7 @@
-import type { SessionBrowseGroupBy } from "@/lib/sessions-group";
+import type { SessionBrowseGroupBy, SessionBrowseSortBy } from "@/lib/sessions-group";
+import type { SessionBrowseStatus } from "@/lib/session-browse-preferences";
 import {
-  DropdownMenuLabel,
+  DropdownMenuCheckboxItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
@@ -9,51 +10,92 @@ import {
   DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu";
 
-/** Describe the existing order without offering unsupported server-side sorts. */
+const GROUPS: Record<SessionBrowseGroupBy, string> = {
+  activity: "Last activity",
+  project: "Project",
+  none: "None",
+  created: "Created date",
+  creator: "Creator",
+};
+const SORTS: Record<SessionBrowseSortBy, string> = {
+  updatedAt: "Last activity",
+  createdAt: "Created date",
+  name: "Name",
+};
+const STATUSES: Record<SessionBrowseStatus, string> = {
+  active: "Active",
+  archived: "Archived",
+  all: "All",
+};
+
+function ViewSubmenu<T extends string>({
+  label,
+  value,
+  choices,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  choices: Record<T, string>;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger className="pointer-coarse:min-h-11 [&>svg]:ml-0">
+        {label}
+        <span className="ml-auto mr-1 text-xs text-fg-subtle">{choices[value]}</span>
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="w-44">
+        <DropdownMenuRadioGroup
+          aria-label={label}
+          value={value}
+          onValueChange={(next) => onChange(next as T)}
+        >
+          {(Object.keys(choices) as T[]).map((choice) => (
+            <DropdownMenuRadioItem key={choice} value={choice} className="pointer-coarse:min-h-11">
+              {choices[choice]}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
+  );
+}
+
 export function SessionBrowseOrderControls({
   groupBy,
   onGroupByChange,
+  sortBy,
+  onSortByChange,
+  status,
+  onStatusChange,
+  showEmptyGroups,
+  onShowEmptyGroupsChange,
 }: {
   groupBy: SessionBrowseGroupBy;
   onGroupByChange: (value: SessionBrowseGroupBy) => void;
+  sortBy: SessionBrowseSortBy;
+  onSortByChange: (value: SessionBrowseSortBy) => void;
+  status: SessionBrowseStatus;
+  onStatusChange: (value: SessionBrowseStatus) => void;
+  showEmptyGroups: boolean;
+  onShowEmptyGroupsChange: (value: boolean) => void;
 }) {
   return (
     <>
-      <DropdownMenuLabel>Sort by</DropdownMenuLabel>
-      <div className="px-2 pb-2" data-session-sort-summary>
-        <p className="text-sm">
-          {groupBy === "created" ? "Created date" : "Last activity"} · newest first
-        </p>
-        <p className="mt-1 text-2xs leading-4 text-fg-subtle">
-          {groupBy === "created"
-            ? "Within loaded date groups. More sessions load by activity, not creation date."
-            : "Within groups. Sort order is fixed."}
-        </p>
-      </div>
+      <ViewSubmenu label="Status" value={status} choices={STATUSES} onChange={onStatusChange} />
       <DropdownMenuSeparator />
-      <DropdownMenuSub>
-        <DropdownMenuSubTrigger>
-          Group by
-          <span className="ml-auto mr-1 text-2xs text-fg-subtle">
-            {groupBy === "activity"
-              ? "Last activity"
-              : groupBy === "created"
-                ? "Created date"
-                : "Creator"}
-          </span>
-        </DropdownMenuSubTrigger>
-        <DropdownMenuSubContent className="w-44">
-          <DropdownMenuRadioGroup
-            aria-label="Group by"
-            value={groupBy}
-            onValueChange={(value) => onGroupByChange(value as SessionBrowseGroupBy)}
-          >
-            <DropdownMenuRadioItem value="activity">Last activity</DropdownMenuRadioItem>
-            <DropdownMenuRadioItem value="created">Created date</DropdownMenuRadioItem>
-            <DropdownMenuRadioItem value="creator">Creator</DropdownMenuRadioItem>
-          </DropdownMenuRadioGroup>
-        </DropdownMenuSubContent>
-      </DropdownMenuSub>
+      <ViewSubmenu label="Group by" value={groupBy} choices={GROUPS} onChange={onGroupByChange} />
+      <ViewSubmenu label="Sort by" value={sortBy} choices={SORTS} onChange={onSortByChange} />
+      <DropdownMenuSeparator />
+      <DropdownMenuCheckboxItem
+        checked={showEmptyGroups}
+        disabled={groupBy === "none"}
+        className="pointer-coarse:min-h-11"
+        onCheckedChange={(checked) => onShowEmptyGroupsChange(checked === true)}
+      >
+        Show empty groups
+      </DropdownMenuCheckboxItem>
     </>
   );
 }

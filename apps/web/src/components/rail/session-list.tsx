@@ -69,12 +69,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
@@ -86,7 +81,6 @@ import {
   advanceSessionPageIdentity,
   applySessionArchiveProjection,
   authoritativeSessionContinuationChannels,
-  compareSessionArchiveOrder,
   emptySessionContinuation,
   mergeSessionContinuation,
   projectSessionArchiveMembership,
@@ -154,15 +148,14 @@ import {
 import {
   buildPinnedRailSections,
   channelRailSections,
-  filterSessionsForBrowse,
   groupSessionForestForBrowse,
+  sortSessionForest,
+  compareSessionBrowse,
   projectRailSessions,
   groupSessionsForRail,
   mergeSessionForRail,
-  normalizeSessionBrowseCreator,
   relativeTimeLabel,
   sessionBrowseResultCount,
-  sessionCreatorKey,
   selectedDescendantNode,
   sessionCreatorLabelMap,
   visibleForestRows,
@@ -172,16 +165,15 @@ import {
   SESSION_GROUP_ORDER,
   type RailAggregateStatus,
   type SessionTreeNode,
-  type SessionBrowseDateField,
-  type SessionBrowseDateRange,
-  type SessionBrowseGroupBy,
   type SessionForest,
   type SessionRecencyGroup,
 } from "@/lib/sessions-group";
 import {
-  readSessionBrowseGroupBy,
+  readSessionBrowsePreferences,
+  DEFAULT_SESSION_BROWSE_PREFERENCES,
+  type SessionBrowsePreferences,
   sessionBrowsePreferenceStorageId,
-  writeSessionBrowseGroupBy,
+  writeSessionBrowsePreferences,
 } from "@/lib/session-browse-preferences";
 import { railRowCreator } from "@/lib/creator-initials";
 import { formatWaitingSince } from "@/lib/format";
@@ -323,28 +315,32 @@ export function SessionList() {
   // refresh; the previous index relied on a one-shot load.
   const [searchDraft, setSearchDraft] = useState("");
   const [search, setSearch] = useState("");
-  const [archivedOpen, setArchivedOpen] = useState(false);
   const browsePreferenceStorageId = useMemo(
-    () => sessionBrowsePreferenceStorageId(context.accessContext.subjectId),
-    [context.accessContext.subjectId],
+    () => sessionBrowsePreferenceStorageId(context.accessContext.subjectId, rail.workspaceId),
+    [context.accessContext.subjectId, rail.workspaceId],
   );
   const previousBrowsePreferenceStorageId = useRef(browsePreferenceStorageId);
-  const [browseGroupBy, setBrowseGroupByState] = useState<SessionBrowseGroupBy>(() =>
-    readSessionBrowseGroupBy(browsePreferenceStorageId),
+  const [browsePreferences, setBrowsePreferences] = useState(() =>
+    readSessionBrowsePreferences(browsePreferenceStorageId),
   );
-  const [browseDateField, setBrowseDateField] = useState<SessionBrowseDateField>("activity");
-  const [browseDateRange, setBrowseDateRange] = useState<SessionBrowseDateRange>("any");
-  const [browseCreator, setBrowseCreator] = useState<string | null>(null);
-  const browseCreatorOrigin = useRef<"search" | "hierarchy" | null>(null);
+  const {
+    groupBy: browseGroupBy,
+    sortBy: browseSortBy,
+    status: browseStatus,
+    showEmptyGroups,
+  } = browsePreferences;
   useEffect(() => {
     if (previousBrowsePreferenceStorageId.current === browsePreferenceStorageId) return;
     previousBrowsePreferenceStorageId.current = browsePreferenceStorageId;
-    setBrowseGroupByState(readSessionBrowseGroupBy(browsePreferenceStorageId));
+    setBrowsePreferences(readSessionBrowsePreferences(browsePreferenceStorageId));
   }, [browsePreferenceStorageId]);
-  const setBrowseGroupBy = useCallback(
-    (groupBy: SessionBrowseGroupBy) => {
-      setBrowseGroupByState(groupBy);
-      writeSessionBrowseGroupBy(browsePreferenceStorageId, groupBy);
+  const updateBrowsePreferences = useCallback(
+    (patch: Partial<SessionBrowsePreferences>) => {
+      setBrowsePreferences((current) => {
+        const next = { ...current, ...patch };
+        writeSessionBrowsePreferences(browsePreferenceStorageId, next);
+        return next;
+      });
     },
     [browsePreferenceStorageId],
   );
@@ -357,41 +353,20 @@ export function SessionList() {
   // root workstreams and preserve their expandable descendant hierarchy.
   const hierarchyMode = search.length === 0;
   const clearBrowseControls = useCallback(() => {
-    setBrowseGroupBy("activity");
-    setBrowseDateField("activity");
-    setBrowseDateRange("any");
-    browseCreatorOrigin.current = null;
-    setBrowseCreator(null);
-  }, [setBrowseGroupBy]);
+    updateBrowsePreferences(DEFAULT_SESSION_BROWSE_PREFERENCES);
+  }, [updateBrowsePreferences]);
   const updateSearchDraft = useCallback((value: string) => {
     setSearchDraft(value);
-    if (value.trim().length > 0 || browseCreatorOrigin.current !== "search") return;
-    browseCreatorOrigin.current = null;
-    setBrowseCreator(null);
   }, []);
-  const updateBrowseCreator = useCallback(
-    (creator: string | null) => {
-      browseCreatorOrigin.current = creator ? (hierarchyMode ? "hierarchy" : "search") : null;
-      setBrowseCreator(creator);
-    },
-    [hierarchyMode],
-  );
 
   const rootPage = useWorkspaceSessions({
     limit: 50,
     search,
     ...(hierarchyMode ? { parentSessionId: null } : {}),
-    archivedOnly: false,
+    archiveStatus: browseStatus,
+    sortBy: browseSortBy,
     pollIntervalMs: 15_000,
     beginRead: context.sessionChannelProjectionAuthority.beginRead,
-  });
-  // Archive is a closed folder at the end of the normal session rail. Keep
-  // its page independent so opening it never changes the active-session view.
-  const archivedRootPage = useWorkspaceSessions({
-    limit: 50,
-    parentSessionId: null,
-    archivedOnly: true,
-    pollIntervalMs: 15_000,
   });
   // Pins are shortcuts and may point anywhere in a workstream. Fetch their
   // complete global section separately from the root-only hierarchy page; a
@@ -430,11 +405,6 @@ export function SessionList() {
     refresh,
   } = rootPage;
   const {
-    sessions: archivedSessions,
-    nextCursor: archivedNextCursor,
-    refresh: refreshArchivedSessions,
-  } = archivedRootPage;
-  const {
     pinned: globalPinned,
     loading: globalPinsLoading,
     error: globalPinsError,
@@ -448,8 +418,8 @@ export function SessionList() {
   // Every invalidation must refresh both or a pin changed in another tab/device
   // can disappear from the shortcut section until the next polling interval.
   const refreshSessionPages = useCallback(async () => {
-    await Promise.all([refresh(), refreshArchivedSessions(), refreshGlobalPins()]);
-  }, [refresh, refreshArchivedSessions, refreshGlobalPins]);
+    await Promise.all([refresh(), refreshGlobalPins()]);
+  }, [refresh, refreshGlobalPins]);
   // Ordinary rows page independently of the complete pinned section. The
   // polled hook owns the shared discovery page. Projects share a workspace
   // continuation; filtered browsing and Archived retain their own cursors.
@@ -460,9 +430,8 @@ export function SessionList() {
       search,
       hierarchyMode ? "tree" : "search",
       browseGroupBy,
-      browseDateField,
-      browseDateRange,
-      browseCreator ?? "",
+      browseSortBy,
+      browseStatus,
       [paginationDate.getFullYear(), paginationDate.getMonth() + 1, paginationDate.getDate()].join(
         "-",
       ),
@@ -491,14 +460,14 @@ export function SessionList() {
   );
   const archiveMembershipEvidence = useMemo(() => {
     const evidence = new Map(archiveOverrides);
-    for (const session of [...sessions, ...archivedSessions]) {
+    for (const session of sessions) {
       const previous = evidence.get(session.id);
       if (!previous || (session.archiveVersion ?? 0) > (previous.archiveVersion ?? 0)) {
         evidence.set(session.id, session);
       }
     }
     return evidence;
-  }, [archiveOverrides, sessions, archivedSessions]);
+  }, [archiveOverrides, sessions]);
   useEffect(() => {
     setArchiveOverrides(new Map());
   }, [rail.workspaceId]);
@@ -510,10 +479,6 @@ export function SessionList() {
     }
     return [...rows.values()];
   }, [activeGroupContinuations]);
-  const archivedExtraSessions = useMemo(
-    () => activeGroupContinuations.find(([key]) => key === "archived")?.[1].sessions ?? [],
-    [activeGroupContinuations],
-  );
   const authoritativeExtraSessionEvidence = useMemo(
     () =>
       activeGroupContinuations.flatMap(([key, continuation]) =>
@@ -558,7 +523,7 @@ export function SessionList() {
     branchSummaryKeys.current.clear();
     activeBranchHydration.current = null;
     setChildPages(new Map());
-  }, [rail.workspaceId, hierarchyMode]);
+  }, [rail.workspaceId, hierarchyMode, browseSortBy, browseStatus]);
   // Short-lived optimistic projections only. The page returned by the server
   // remains canonical; after each mutation we replace the projection with that
   // returned row and refresh once to reconcile tabs/devices/offline recovery.
@@ -879,7 +844,7 @@ export function SessionList() {
     const archiveProjected = projectSessionArchiveMembership(
       [...source.values()],
       archiveMembershipEvidence,
-      false,
+      browseStatus === "all" ? "all" : browseStatus === "archived",
       rail.workspaceId,
     );
     const projectedAttention = new Map(attentionOverrides);
@@ -909,6 +874,7 @@ export function SessionList() {
     pinOverrides,
     rail.workspaceId,
     serverSessions,
+    browseStatus,
   ]);
 
   const verifySessionChannelMove = useCallback(
@@ -1047,55 +1013,32 @@ export function SessionList() {
     );
   }, [allSessions, hierarchyMode]);
   const creatorLabels = useMemo(() => sessionCreatorLabelMap(creatorSessions), [creatorSessions]);
-  const creatorOptions = useMemo(() => {
-    return [...creatorLabels].map(([value, label]) => ({ value, label }));
-  }, [creatorLabels]);
-  const activeBrowseCreator = normalizeSessionBrowseCreator(
-    browseCreator,
-    creatorLabels,
-    hierarchyMode,
+  const paginationBrowseFilter = useMemo<SessionPaginationBrowseFilter>(
+    () => ({
+      creator: null,
+      dateField: "activity",
+      dateRange: "any",
+    }),
+    [],
   );
-  const paginationBrowseFilter = useMemo<SessionPaginationBrowseFilter>(() => {
-    const creatorSession = activeBrowseCreator
-      ? creatorSessions.find((session) => sessionCreatorKey(session) === activeBrowseCreator)
-      : undefined;
-    return {
-      creator: creatorSession
-        ? {
-            kind: creatorSession.createdBy.kind,
-            subjectId: creatorSession.createdBy.subjectId,
-          }
-        : null,
-      dateField: browseDateField,
-      dateRange: browseDateRange,
-    };
-  }, [activeBrowseCreator, browseDateField, browseDateRange, creatorSessions]);
   const browseControlsActive =
-    browseGroupBy !== "activity" || browseDateRange !== "any" || activeBrowseCreator !== null;
+    browseGroupBy !== "activity" ||
+    browseSortBy !== "updatedAt" ||
+    browseStatus !== "active" ||
+    showEmptyGroups;
   const browseSessions = useMemo(
     () =>
-      filterSessionsForBrowse(
-        allSessions.filter((session) => {
-          if (archiveTransitions.has(session.rootSessionId)) return false;
-          // Child rows inherit their root's archive membership from the
-          // lineage query. Only roots carry the personal archive projection.
-          return session.parentSessionId !== null || !session.archived;
-        }),
-        {
-          creator: activeBrowseCreator,
-          dateField: browseDateField,
-          dateRange: browseDateRange,
-          hierarchical: hierarchyMode,
-        },
-      ),
-    [
-      allSessions,
-      archiveTransitions,
-      activeBrowseCreator,
-      browseDateField,
-      browseDateRange,
-      hierarchyMode,
-    ],
+      allSessions.filter((session) => {
+        if (archiveTransitions.has(session.rootSessionId)) return false;
+        // Child rows inherit their root's archive membership from the
+        // lineage query. Only roots carry the personal archive projection.
+        return (
+          session.parentSessionId !== null ||
+          browseStatus === "all" ||
+          Boolean(session.archived) === (browseStatus === "archived")
+        );
+      }),
+    [allSessions, archiveTransitions, browseStatus],
   );
 
   // A complete pins-only page makes presence authoritative, but absence does
@@ -1274,48 +1217,47 @@ export function SessionList() {
   const railSections = useMemo(
     () =>
       buildPinnedRailSections(projectedSessions, new Date(), {
-        groupSites: hierarchyMode && !browseControlsActive,
+        groupSites: hierarchyMode && browseGroupBy === "project",
       }),
-    [projectedSessions, hierarchyMode, browseControlsActive],
+    [projectedSessions, hierarchyMode, browseGroupBy],
   );
   const forest = useMemo(
     () =>
-      browseGroupBy === "activity"
-        ? railSections.ordinary
-        : groupSessionForestForBrowse(railSections.ordinary, browseGroupBy, { creatorLabels }),
-    [browseGroupBy, creatorLabels, railSections.ordinary],
+      sortSessionForest(
+        browseGroupBy === "activity"
+          ? railSections.ordinary
+          : groupSessionForestForBrowse(railSections.ordinary, browseGroupBy, { creatorLabels }),
+        browseSortBy,
+      ),
+    [browseGroupBy, browseSortBy, creatorLabels, railSections.ordinary],
   );
-  const pinnedNodes = railSections.pinned;
+  // Keep personal pin order while applying the selected sort to shortcut descendants.
+  const pinnedNodes = useMemo(
+    () =>
+      railSections.pinned.map((node) => ({
+        ...node,
+        children: sortSessionForest({ running: node.children, grouped: [] }, browseSortBy).running,
+      })),
+    [railSections.pinned, browseSortBy],
+  );
   // The hierarchy rail always has the same shape: unfiled Recents first, then
   // workstreams. A workspace with no created workstreams should not fall back
   // to a completely different recency UI.
-  const channelMode = hierarchyMode && !browseControlsActive;
+  const channelMode = browseGroupBy === "project";
   const channelSections = useMemo(
-    () => (channelMode ? channelRailSections(forest, channels) : []),
-    [channelMode, forest, channels],
+    () =>
+      channelMode
+        ? channelRailSections(forest, channels)
+            .map((section) => ({
+              ...section,
+              sessions: [...section.sessions].sort((a, b) =>
+                compareSessionBrowse(a.session, b.session, browseSortBy),
+              ),
+            }))
+            .filter((section) => showEmptyGroups || section.sessions.length > 0)
+        : [],
+    [channelMode, forest, channels, browseSortBy, showEmptyGroups],
   );
-  const archivedNodes = useMemo(() => {
-    const rows = new Map(archivedSessions.map((session) => [session.id, session]));
-    for (const session of archivedExtraSessions) rows.set(session.id, session);
-    const archiveForest = buildPinnedRailSections(
-      projectSessionArchiveMembership(
-        [...rows.values()],
-        archiveMembershipEvidence,
-        true,
-        rail.workspaceId,
-      ).filter((session) => !archiveTransitions.has(session.rootSessionId)),
-    ).complete;
-    return [
-      ...archiveForest.running,
-      ...archiveForest.grouped.flatMap((group) => group.sessions),
-    ].sort((a, b) => compareSessionArchiveOrder(a.session, b.session));
-  }, [
-    archiveMembershipEvidence,
-    archiveTransitions,
-    archivedExtraSessions,
-    archivedSessions,
-    rail.workspaceId,
-  ]);
   // Workstreams open on first paint. A user collapse is local interaction
   // state; new or newly loaded sections therefore remain open by default.
   const [collapsedChannelSections, setCollapsedChannelSections] = useState<ReadonlySet<string>>(
@@ -1738,7 +1680,8 @@ export function SessionList() {
               limit: 50,
               parentSessionId,
               ...(pageCursor ? { cursor: pageCursor } : {}),
-              archivedOnly: false,
+              archiveStatus: browseStatus,
+              sortBy: browseSortBy,
             }),
           cursor === undefined
             ? Math.max(50, childPagesRef.current.get(parentSessionId)?.channelGenerations.size ?? 0)
@@ -1768,7 +1711,14 @@ export function SessionList() {
         setChildPages((current) => failSessionBranchRequest(current, parentSessionId, requestId));
       }
     },
-    [context.client, context.sessionChannelProjectionAuthority, rail.workspaceId, rootReadRevision],
+    [
+      context.client,
+      context.sessionChannelProjectionAuthority,
+      rail.workspaceId,
+      rootReadRevision,
+      browseSortBy,
+      browseStatus,
+    ],
   );
   // The active route supplies exact child + ancestor detail even before the
   // lazy branch query catches up. Commit that projection into the branch cache
@@ -2077,9 +2027,7 @@ export function SessionList() {
   const loadedGroupWindows = useRef(
     new Map<string, { generation: number; group: SessionPaginationGroup; pages: number }>(),
   );
-  loadedSessionIdsRef.current = new Set(
-    [...allSessions, ...archivedSessions, ...archivedExtraSessions].map((session) => session.id),
-  );
+  loadedSessionIdsRef.current = new Set(allSessions.map((session) => session.id));
   const loadMoreInGroup = useCallback(
     async (group: SessionPaginationGroup, refreshWindow = false) => {
       const requestGeneration = pageGeneration;
@@ -2127,6 +2075,8 @@ export function SessionList() {
           ...(group.kind !== "archived" && search ? { search } : {}),
           ...(group.kind === "archived" || hierarchyMode ? { parentSessionId: null } : {}),
           ...groupQuery,
+          archiveStatus: browseStatus,
+          sortBy: browseSortBy,
         });
         return { page, readGeneration };
       };
@@ -2289,6 +2239,8 @@ export function SessionList() {
       paginationBrowseFilter,
       rail.workspaceId,
       search,
+      browseSortBy,
+      browseStatus,
     ],
   );
 
@@ -2331,6 +2283,7 @@ export function SessionList() {
   const paginationGroupForBucket = (
     bucket: SessionForest["grouped"][number],
   ): SessionPaginationGroup | null => {
+    if (browseGroupBy === "none") return { key: "workspace", label: "sessions", kind: "results" };
     if (browseGroupBy === "activity") {
       return {
         key: `activity:${bucket.group}`,
@@ -2363,11 +2316,12 @@ export function SessionList() {
   );
   // Default is also a move destination: keep its header when its last row
   // leaves, even if there is no next page of unfiled sessions.
-  const renderedChannelSections = channelSections.some((section) => section.channelId === null)
-    ? channelSections
-    : [...channelSections, { key: "default", channelId: null, name: "Default", sessions: [] }];
+  const renderedChannelSections =
+    !showEmptyGroups || channelSections.some((section) => section.channelId === null)
+      ? channelSections
+      : [...channelSections, { key: "default", channelId: null, name: "Default", sessions: [] }];
   const renderedGroupedBuckets =
-    browseGroupBy === "creator"
+    browseGroupBy === "creator" || browseGroupBy === "none" || browseGroupBy === "project"
       ? forest.grouped
       : SESSION_GROUP_ORDER.flatMap((group) => {
           const key = browseGroupBy === "created" ? `created:${group}` : group;
@@ -2387,12 +2341,7 @@ export function SessionList() {
                 : SESSION_GROUP_LABELS[group],
             sessions: [],
           };
-          const paginationGroup = paginationGroupForBucket(bucket);
-          return paginationGroup &&
-            sessionPaginationGroupQuery(paginationGroup, paginationBrowseFilter) &&
-            paginationForGroup(paginationGroup, nextCursor)
-            ? [bucket]
-            : [];
+          return showEmptyGroups ? [bucket] : [];
         });
   // The discovery cursor is workspace-wide, so it cannot prove that any
   // individual project contains older rows. Keep its control outside projects.
@@ -2610,7 +2559,7 @@ export function SessionList() {
               type="button"
               variant="ghost"
               size="icon-xs"
-              aria-label={browseControlsActive ? "Session filters, active" : "Session filters"}
+              aria-label={browseControlsActive ? "Session view, customized" : "Session view"}
               className={cn(
                 "relative shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11",
                 browseControlsActive && "bg-surface-2 text-fg",
@@ -2625,86 +2574,14 @@ export function SessionList() {
           <DropdownMenuContent align="end" className="w-56">
             <SessionBrowseOrderControls
               groupBy={browseGroupBy}
-              onGroupByChange={setBrowseGroupBy}
+              onGroupByChange={(groupBy) => updateBrowsePreferences({ groupBy })}
+              sortBy={browseSortBy}
+              onSortByChange={(sortBy) => updateBrowsePreferences({ sortBy })}
+              status={browseStatus}
+              onStatusChange={(status) => updateBrowsePreferences({ status })}
+              showEmptyGroups={showEmptyGroups}
+              onShowEmptyGroupsChange={(show) => updateBrowsePreferences({ showEmptyGroups: show })}
             />
-            <DropdownMenuSeparator />
-            <DropdownMenuLabel>Filter by</DropdownMenuLabel>
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
-                Date filter field
-                <span className="ml-auto mr-1 text-2xs text-fg-subtle">
-                  {browseDateField === "activity" ? "Activity" : "Created"}
-                </span>
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className="w-44">
-                <DropdownMenuRadioGroup
-                  value={browseDateField}
-                  onValueChange={(value) => setBrowseDateField(value as SessionBrowseDateField)}
-                >
-                  <DropdownMenuRadioItem value="activity">Last activity</DropdownMenuRadioItem>
-                  <DropdownMenuRadioItem value="created">Created date</DropdownMenuRadioItem>
-                </DropdownMenuRadioGroup>
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
-                Date range
-                <span className="ml-auto mr-1 text-2xs text-fg-subtle">
-                  {browseDateRange === "any"
-                    ? "Any"
-                    : browseDateRange === "today"
-                      ? "Today"
-                      : browseDateRange === "week"
-                        ? "7d"
-                        : "30d"}
-                </span>
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className="w-40">
-                <DropdownMenuRadioGroup
-                  value={browseDateRange}
-                  onValueChange={(value) => setBrowseDateRange(value as SessionBrowseDateRange)}
-                >
-                  <DropdownMenuRadioItem value="any">Any time</DropdownMenuRadioItem>
-                  <DropdownMenuRadioItem value="today">Today</DropdownMenuRadioItem>
-                  <DropdownMenuRadioItem value="week">Last 7 days</DropdownMenuRadioItem>
-                  <DropdownMenuRadioItem value="month">Last 30 days</DropdownMenuRadioItem>
-                </DropdownMenuRadioGroup>
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
-                Creator
-                <span className="ml-auto mr-1 max-w-20 truncate text-2xs text-fg-subtle">
-                  {activeBrowseCreator
-                    ? creatorOptions.find((option) => option.value === activeBrowseCreator)?.label
-                    : "Anyone"}
-                </span>
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className="max-h-(--radix-dropdown-menu-content-available-height) w-52 overflow-x-hidden overflow-y-auto">
-                <DropdownMenuRadioGroup
-                  value={activeBrowseCreator ?? "all"}
-                  onValueChange={(value) => updateBrowseCreator(value === "all" ? null : value)}
-                >
-                  <DropdownMenuRadioItem value="all">Anyone</DropdownMenuRadioItem>
-                  {creatorOptions.map((option) => (
-                    <DropdownMenuRadioItem key={option.value} value={option.value}>
-                      <span className="truncate">{option.label}</span>
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-            {browseControlsActive ? (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={clearBrowseControls}>Reset view</DropdownMenuItem>
-              </>
-            ) : null}
-            <DropdownMenuSeparator />
-            <p className="px-2 py-1 text-2xs leading-4 text-fg-subtle">
-              Active work stays first. Pins and Archived keep their own order. Each group loads more
-              sessions as you reach its end.
-            </p>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -2750,7 +2627,7 @@ export function SessionList() {
               Retry
             </button>
           </div>
-        ) : flat.length === 0 && (search || browseControlsActive) ? (
+        ) : flat.length === 0 && !showEmptyGroups && (search || browseControlsActive) ? (
           <div className="px-2 py-4 text-center text-xs text-fg-subtle">
             <p>No sessions match this view.</p>
             {matchingResultsPagination ? (
@@ -2851,7 +2728,8 @@ export function SessionList() {
               ))
             ) : (
               <>
-                {forest.running.length > 0 || activePagination ? (
+                {browseGroupBy !== "none" &&
+                (forest.running.length > 0 || (showEmptyGroups && activePagination)) ? (
                   <SessionGroup
                     label="Active"
                     nodes={forest.running}
@@ -2888,6 +2766,7 @@ export function SessionList() {
                     <SessionGroup
                       key={bucket.group}
                       label={bucket.label}
+                      hideHeading={browseGroupBy === "none"}
                       nodes={bucket.sessions}
                       pagination={
                         paginationGroup
@@ -2938,40 +2817,8 @@ export function SessionList() {
                 ) : null}
               </>
             )}
-            {channelMode && workspacePagination ? (
+            {browseGroupBy !== "none" && workspacePagination ? (
               <SessionGroupPaginationControl {...workspacePagination} />
-            ) : null}
-            {channelMode ? (
-              <SessionGroup
-                label="Archived"
-                sectionId="archived"
-                channelHeader
-                allowNewSession={false}
-                showSummary={false}
-                sectionExpanded={archivedOpen}
-                onToggleSection={() => setArchivedOpen((current) => !current)}
-                nodes={archivedNodes}
-                pagination={paginationForGroup(
-                  { key: "archived", label: "Archived", kind: "archived" },
-                  archivedNextCursor,
-                )}
-                localDeliveryAttention={localDeliveryAttention}
-                flat={flat}
-                activeSessionId={activeSessionId}
-                focusIndex={focusIndex}
-                onFocusSession={setFocusedSessionId}
-                expanded={expanded}
-                onToggleExpand={toggleExpand}
-                childPages={childPages}
-                onLoadMoreChildren={loadChildPage}
-                onRename={context.updateSessionTitle}
-                onPin={onPin}
-                channels={channels}
-                onMoveToChannel={onMoveToChannel}
-                onUpdateAttention={onUpdateAttention}
-                onArchive={onArchive}
-                onRequestDelete={setSessionPendingDelete}
-              />
             ) : null}
           </>
         )}
@@ -3094,6 +2941,7 @@ function SessionGroupPaginationControl(
 
 function SessionGroup(props: {
   label: string;
+  hideHeading?: boolean;
   /**
    * Stable DOM id suffix. Required for folder sections: labels are
    * user-controlled, so slugging them can collide with each other and with
@@ -3280,7 +3128,11 @@ function SessionGroup(props: {
         <p
           id={sectionId}
           tabIndex={-1}
-          className="px-1.5 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wider text-fg-muted"
+          className={
+            props.hideHeading
+              ? "sr-only"
+              : "px-1.5 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wider text-fg-muted"
+          }
         >
           {props.label}
         </p>

@@ -277,14 +277,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
       await page.getByRole("link", { name: /^Open Grouping preference proof/ }).waitFor();
 
-      await page.getByRole("button", { name: "Session filters" }).click();
+      await page.getByRole("button", { name: /^Session view/ }).click();
       await page.getByRole("menuitem", { name: /^Group by/ }).hover();
       await page.getByRole("menuitemradio", { name: "Creator" }).click();
-      await page.getByRole("button", { name: "Session filters, active" }).waitFor();
+      await page.getByRole("button", { name: "Session view, customized" }).waitFor();
 
       await page.reload();
       await page.getByRole("link", { name: /^Open Grouping preference proof/ }).waitFor();
-      await page.getByRole("button", { name: "Session filters, active" }).click();
+      await page.getByRole("button", { name: "Session view, customized" }).click();
       await page.getByRole("menuitem", { name: /^Group by/ }).hover();
       expect(
         await page.getByRole("menuitemradio", { name: "Creator" }).getAttribute("aria-checked"),
@@ -571,20 +571,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const search = page.getByRole("searchbox", { name: "Search sessions" });
       await search.fill("Created grouping child");
       await page.getByText("1 matching session.").waitFor();
-      await page.getByRole("button", { name: "Session filters" }).click();
-      await page.getByRole("menuitem", { name: /^Creator/ }).hover();
-      await page.getByRole("menuitemradio", { name: "Child-only creator" }).click();
-
-      // A creator offered only by flat child search is not a valid root filter.
-      // Leaving search clears that scoped choice instead of painting an empty
-      // hierarchy or leaving the submenu with a generic "Selected" value.
+      // Leaving flat child search returns to root browsing; creator filters
+      // are no longer offered by the compact view menu.
       await search.fill("");
       await managerRow.waitFor();
-      await page.getByRole("button", { name: "Session filters" }).click();
+      await page.getByRole("button", { name: /^Session view/ }).click();
       expect(await page.getByText("Selected", { exact: true }).count()).toBe(0);
       await page.getByRole("menuitem", { name: /^Group by/ }).hover();
       await page.getByRole("menuitemradio", { name: "Created date" }).click();
-      await page.getByRole("button", { name: "Session filters, active" }).waitFor();
+      await page.getByRole("button", { name: "Session view, customized" }).waitFor();
       const liveRegion = rail.locator('[aria-live="polite"]');
       await page.waitForFunction(() => {
         const message = document.querySelector(
@@ -3175,7 +3170,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         discovery.sessions.some((row) => row.id === activeRoot.id || row.id === ancestor.id),
       ).toBe(false);
       expect(discovery.nextCursor).toBeTruthy();
-      await page.getByRole("button", { name: "Session filters", exact: true }).click();
+      await page.getByRole("button", { name: /^Session view/ }).click();
       await page.getByRole("menuitem", { name: /^Group by/ }).hover();
       await page.getByRole("menuitemradio", { name: "Creator", exact: true }).click();
       const activeGroup = page.getByRole("group", { name: "Active", exact: true });
@@ -3349,6 +3344,15 @@ async function workspaceFromPage(page: Page): Promise<string> {
       { cause: error },
     );
   }
+  // These existing pin/move scenarios exercise project folders, now an
+  // explicit view choice instead of the implicit default activity grouping.
+  await page.getByRole("button", { name: /^Session view/ }).click();
+  await page.getByRole("menuitem", { name: /^Group by/ }).hover();
+  await page.getByRole("menuitemradio", { name: "Project", exact: true }).click();
+  await page.getByRole("button", { name: /^Session view/ }).click();
+  const emptyGroups = page.getByRole("menuitemcheckbox", { name: "Show empty groups" });
+  if ((await emptyGroups.getAttribute("aria-checked")) !== "true") await emptyGroups.click();
+  else await page.keyboard.press("Escape");
   return page.url().match(/\/workspaces\/([^/]+)\/sessions/)![1]!;
 }
 

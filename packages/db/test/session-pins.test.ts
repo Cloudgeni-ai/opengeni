@@ -1480,7 +1480,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       Buffer.from(firstPage.nextCursor!, "base64url").toString("utf8"),
     ) as Record<string, unknown>;
     expect(rollingEnvelope).toMatchObject({
-      version: 2,
+      version: 4,
       snapshotId: "00000000-0000-4000-8000-000000000000",
       offset: 0,
     });
@@ -2231,6 +2231,193 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     ).toContain(root.id);
   });
 
+  test("sorts bounded root/child/filter pages with archive modes and stable ties", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:sort-modes";
+    await grantMember(workspace, subjectId);
+    const roots = [];
+    for (const message of ["sort z", "sort alpha", "sort Alpha", "sort blank"]) {
+      roots.push(await session({ ...workspace, message }));
+    }
+    const children = [];
+    for (const message of ["sort child z", "sort child a", "sort child A"]) {
+      children.push(await session({ ...workspace, message, parentSessionId: roots[0]!.id }));
+    }
+    const rows = [...roots, ...children];
+    const titles = ["Zulu", " alpha ", "ALPHA", "", "Zulu", "alpha", "ALPHA"];
+    for (let index = 0; index < rows.length; index++) {
+      await executeSessionActivity(
+        workspace.workspaceId,
+        sql`update sessions
+        set title = ${titles[index]!}, created_at = '2026-01-01T00:00:00.123456Z'::timestamptz,
+          updated_at = '2026-02-01T00:00:00.123456Z'::timestamptz
+        where id = ${rows[index]!.id}`,
+      );
+    }
+    await setSessionArchive(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: roots[0]!.id,
+      archived: true,
+      expectedVersion: 0,
+    });
+
+    const walk = async (
+      options: Omit<Parameters<typeof listSessionsForSubject>[2], "subjectId">,
+    ) => {
+      const ids: string[] = [];
+      let cursor: ReturnType<typeof decodeSessionListCursor> = null;
+      for (let pageIndex = 0; pageIndex <= rows.length; pageIndex++) {
+        const page = await listSessionsForSubject(db, workspace.workspaceId, {
+          subjectId,
+          limit: 1,
+          ...options,
+          ...(cursor ? { cursor } : {}),
+        });
+        expect(page.sessions.length).toBeLessThanOrEqual(1);
+        ids.push(...page.sessions.map((row) => row.id));
+        if (!page.nextCursor) return ids;
+        cursor = decodeSessionListCursor(page.nextCursor);
+        expect(cursor).not.toBeNull();
+      }
+      throw new Error("session pagination did not terminate");
+    };
+    const nameIds = (indices: number[]) =>
+      indices
+        .sort((a, b) => {
+          const left = titles[a]!.replace(/^ +| +$/g, "").toLowerCase();
+          const right = titles[b]!.replace(/^ +| +$/g, "").toLowerCase();
+          return left < right ? -1 : left > right ? 1 : rows[a]!.id < rows[b]!.id ? -1 : 1;
+        })
+        .map((index) => rows[index]!.id);
+    expect(await walk({ parentSessionId: null, archiveStatus: "all", sortBy: "name" })).toEqual(
+      nameIds([0, 1, 2, 3]),
+    );
+    expect(await walk({ parentSessionId: null, archiveStatus: "active", sortBy: "name" })).toEqual(
+      nameIds([1, 2, 3]),
+    );
+    expect(
+      await walk({ parentSessionId: roots[0]!.id, archiveStatus: "archived", sortBy: "name" }),
+    ).toEqual(nameIds([4, 5, 6]));
+    expect(
+      await walk({ parentSessionId: roots[0]!.id, archiveStatus: "active", sortBy: "name" }),
+    ).toEqual([]);
+    expect(
+      await walk({
+        parentSessionId: null,
+        archiveStatus: "all",
+        sortBy: "name",
+        search: "alpha",
+        channelId: null,
+      }),
+    ).toEqual(nameIds([1, 2]));
+    for (const sortBy of ["createdAt", "updatedAt"] as const) {
+      expect(await walk({ parentSessionId: null, archiveStatus: "all", sortBy })).toEqual(
+        roots
+          .map((row) => row.id)
+          .sort()
+          .reverse(),
+      );
+      expect(
+        await walk({ parentSessionId: roots[0]!.id, archiveStatus: "archived", sortBy }),
+      ).toEqual(
+        children
+          .map((row) => row.id)
+          .sort()
+          .reverse(),
+      );
+    }
+    const first = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+      sortBy: "name",
+      archiveStatus: "all",
+    });
+    const cursor = decodeSessionListCursor(first.nextCursor!)!;
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        cursor,
+        sortBy: "createdAt",
+        archiveStatus: "all",
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorExpiredError);
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        cursor,
+        sortBy: "name",
+        archiveStatus: "active",
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions
+      set created_at = '2026-01-02T00:00:00.123456Z'::timestamptz,
+        updated_at = '2026-01-31T00:00:00.123456Z'::timestamptz
+      where id = ${roots[1]!.id}`,
+    );
+    const otherRoots = [roots[0]!.id, roots[2]!.id, roots[3]!.id].sort().reverse();
+    expect(
+      await walk({ parentSessionId: null, archiveStatus: "all", sortBy: "createdAt" }),
+    ).toEqual([roots[1]!.id, ...otherRoots]);
+    expect(
+      await walk({ parentSessionId: null, archiveStatus: "all", sortBy: "updatedAt" }),
+    ).toEqual([...otherRoots, roots[1]!.id]);
+    // Oppose id ordering with timestamps inside the same millisecond. Both the
+    // cursor and public selected date field must retain all six fractional digits.
+    const orderedIds = roots.map((row) => row.id).sort();
+    const timestamps = [456, 455, 454, 453].map(
+      (fraction) => `2026-03-01T00:00:00.123${fraction}Z`,
+    );
+    for (let index = 0; index < orderedIds.length; index++) {
+      await executeSessionActivity(
+        workspace.workspaceId,
+        sql`update sessions
+        set created_at = ${timestamps[index]!}::timestamptz,
+          updated_at = ${timestamps[index]!}::timestamptz
+        where id = ${orderedIds[index]!}`,
+      );
+    }
+    for (const sortBy of ["createdAt", "updatedAt"] as const) {
+      expect(await walk({ parentSessionId: null, archiveStatus: "all", sortBy })).toEqual(
+        orderedIds,
+      );
+      for (const materializeSnapshot of [true, false]) {
+        const page = await listSessionsForSubject(db, workspace.workspaceId, {
+          subjectId,
+          parentSessionId: null,
+          archiveStatus: "all",
+          sortBy,
+          limit: 4,
+          materializeSnapshot,
+        });
+        expect(page.sessions.map((row) => row.id)).toEqual(orderedIds);
+        expect(page.sessions.map((row) => row[sortBy])).toEqual(timestamps);
+      }
+      const firstDatePage = await listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        parentSessionId: null,
+        archiveStatus: "all",
+        sortBy,
+        limit: 1,
+      });
+      const continuation = decodeSessionListCursor(firstDatePage.nextCursor!);
+      expect(continuation).toMatchObject({ sortAt: timestamps[0] });
+      expect(firstDatePage.sessions[0]![sortBy]).toBe(timestamps[0]!);
+      const second = await listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        parentSessionId: null,
+        archiveStatus: "all",
+        sortBy,
+        limit: 1,
+        cursor: continuation!,
+      });
+      expect(second.sessions[0]![sortBy]).toBe(timestamps[1]!);
+    }
+  }, 60_000);
+
   test("pages archives by personal root archive time with exact ties and live re-archiving", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -2316,7 +2503,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     ).toEqual([]);
 
     const envelope = JSON.parse(Buffer.from(first.nextCursor!, "base64url").toString("utf8"));
-    expect(envelope.version).toBe(3);
+    expect(envelope.version).toBe(4);
     for (const version of [undefined, 2]) {
       const legacy = decodeSessionListCursor(
         Buffer.from(JSON.stringify({ ...envelope, version })).toString("base64url"),

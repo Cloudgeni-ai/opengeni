@@ -430,7 +430,58 @@ export type SessionForest = {
   }[];
 };
 
-export type SessionBrowseGroupBy = "activity" | "created" | "creator";
+export type SessionBrowseGroupBy = "activity" | "project" | "none" | "created" | "creator";
+export type SessionBrowseSortBy = "updatedAt" | "createdAt" | "name";
+
+const sessionNameEncoder = new TextEncoder();
+function sessionNameSortKey(title: string | null | undefined): Uint8Array {
+  return sessionNameEncoder.encode(
+    (title ?? "").replace(/^ +| +$/g, "").replace(/[A-Z]/g, (letter) => letter.toLowerCase()),
+  );
+}
+
+function sessionSortMicroseconds(value: string): number {
+  const fraction = value.match(/\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/)?.[1] ?? "";
+  return Number(fraction.padEnd(6, "0").slice(3, 6));
+}
+
+/** The same ordering as the server page, reapplied after live projection merges. */
+export function compareSessionBrowse(
+  left: Session,
+  right: Session,
+  sortBy: SessionBrowseSortBy,
+): number {
+  if (sortBy === "name") {
+    const a = sessionNameSortKey(left.title);
+    const b = sessionNameSortKey(right.title);
+    for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+      if (a[index] !== b[index]) return a[index]! - b[index]!;
+    }
+    return a.length - b.length || left.id.localeCompare(right.id);
+  }
+  return (
+    Date.parse(right[sortBy]) - Date.parse(left[sortBy]) ||
+    sessionSortMicroseconds(right[sortBy]) - sessionSortMicroseconds(left[sortBy]) ||
+    right.id.localeCompare(left.id)
+  );
+}
+
+export function sortSessionForest(
+  forest: SessionForest,
+  sortBy: SessionBrowseSortBy,
+): SessionForest {
+  const sortNodes = (nodes: SessionTreeNode[]): SessionTreeNode[] =>
+    nodes
+      .map((node) => ({ ...node, children: sortNodes(node.children) }))
+      .sort((a, b) => compareSessionBrowse(a.session, b.session, sortBy));
+  return {
+    running: sortNodes(forest.running),
+    grouped: forest.grouped.map((bucket) => ({
+      ...bucket,
+      sessions: sortNodes(bucket.sessions),
+    })),
+  };
+}
 export type SessionBrowseDateField = "activity" | "created";
 export type SessionBrowseDateRange = "any" | "today" | "week" | "month";
 
@@ -590,6 +641,9 @@ export function groupSessionForestForBrowse(
 ): SessionForest {
   const now = options.now ?? new Date();
   const roots = forestRoots(forest);
+  if (groupBy === "none" || groupBy === "project") {
+    return { running: [], grouped: [{ group: "none", label: "Sessions", sessions: roots }] };
+  }
   const running = roots
     .filter(nodeIsActive)
     .sort((left, right) => compareSessionActivity(left.session, right.session));

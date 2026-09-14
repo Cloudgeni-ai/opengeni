@@ -1,6 +1,7 @@
 import { SessionWaitStatus } from "../src/components/session/session-wait-status";
 import { SessionBrowseOrderControls } from "../src/components/rail/session-browse-order-controls";
-import type { SessionBrowseGroupBy } from "../src/lib/sessions-group";
+import type { SessionBrowseGroupBy, SessionBrowseSortBy } from "../src/lib/sessions-group";
+import type { SessionBrowseStatus } from "../src/lib/session-browse-preferences";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -45,6 +46,9 @@ const cases = [
 
 function SessionRailRowMetadataFixture() {
   const [groupBy, setGroupBy] = useState<SessionBrowseGroupBy>("activity");
+  const [sortBy, setSortBy] = useState<SessionBrowseSortBy>("updatedAt");
+  const [status, setStatus] = useState<SessionBrowseStatus>("active");
+  const [showEmptyGroups, setShowEmptyGroups] = useState(false);
   const [waitSession, setWaitSession] = useState({
     id: "waiting",
     workspaceId: "workspace",
@@ -78,7 +82,16 @@ function SessionRailRowMetadataFixture() {
       <DropdownMenu>
         <DropdownMenuTrigger>Session view</DropdownMenuTrigger>
         <DropdownMenuContent className="w-56">
-          <SessionBrowseOrderControls groupBy={groupBy} onGroupByChange={setGroupBy} />
+          <SessionBrowseOrderControls
+            groupBy={groupBy}
+            onGroupByChange={setGroupBy}
+            sortBy={sortBy}
+            onSortByChange={setSortBy}
+            status={status}
+            onStatusChange={setStatus}
+            showEmptyGroups={showEmptyGroups}
+            onShowEmptyGroupsChange={setShowEmptyGroups}
+          />
         </DropdownMenuContent>
       </DropdownMenu>
       <aside

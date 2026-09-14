@@ -4,6 +4,8 @@ import {
   readSessionBrowseGroupBy,
   sessionBrowsePreferenceStorageId,
   writeSessionBrowseGroupBy,
+  readSessionBrowsePreferences,
+  writeSessionBrowsePreferences,
 } from "./session-browse-preferences";
 
 function memoryStorage(): Pick<Storage, "getItem" | "setItem"> {
@@ -15,6 +17,27 @@ function memoryStorage(): Pick<Storage, "getItem" | "setItem"> {
 }
 
 describe("session browse preferences", () => {
+  test("persists the complete view independently for each workspace and subject", () => {
+    const storage = memoryStorage();
+    const id = sessionBrowsePreferenceStorageId("user:one", "workspace:one");
+    const other = sessionBrowsePreferenceStorageId("user:one", "workspace:two");
+    const view = { groupBy: "none", sortBy: "name", status: "all", showEmptyGroups: true } as const;
+    writeSessionBrowsePreferences(id, view, storage);
+    expect(readSessionBrowsePreferences(id, storage)).toEqual(view);
+    expect(readSessionBrowsePreferences(other, storage)).toEqual({
+      groupBy: "activity",
+      sortBy: "updatedAt",
+      status: "active",
+      showEmptyGroups: false,
+    });
+    storage.setItem(
+      `${id}:view`,
+      '{"groupBy":"bad","sortBy":"bad","status":"bad","showEmptyGroups":"true"}',
+    );
+    expect(readSessionBrowsePreferences(id, storage)).toEqual(
+      readSessionBrowsePreferences(other, storage),
+    );
+  });
   test("isolates the grouping preference by subject", () => {
     const first = sessionBrowsePreferenceStorageId("user:one");
     const otherUser = sessionBrowsePreferenceStorageId("user:two");

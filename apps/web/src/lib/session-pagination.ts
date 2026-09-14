@@ -91,7 +91,7 @@ export function applySessionArchiveProjection(current: Session, updated: Session
 export function projectSessionArchiveMembership(
   sessions: readonly Session[],
   overrides: ReadonlyMap<string, Session>,
-  archived: boolean,
+  archived: boolean | "all",
   workspaceId: string,
 ): Session[] {
   const rows = new Map(sessions.map((session) => [session.id, session]));
@@ -103,7 +103,7 @@ export function projectSessionArchiveMembership(
   return [...rows.values()].flatMap((session) => {
     // A cached descendant follows its root instead of becoming an orphan row.
     const root = rows.get(session.rootSessionId ?? session.id);
-    if (Boolean(root?.archived ?? session.archived) !== archived) return [];
+    if (archived !== "all" && Boolean(root?.archived ?? session.archived) !== archived) return [];
     return [
       root && root.id !== session.id
         ? { ...session, archived: root.archived, archivedAt: root.archivedAt }

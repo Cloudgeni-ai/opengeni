@@ -33815,7 +33815,7 @@ export type SessionListSnapshotCursor = {
   offset: number;
   parentSessionFilter: string;
   search: string | null;
-  archiveMode: "active" | "archived";
+  archiveMode: "active" | "archived" | "all";
   /** Additive filter identity; absent on legacy snapshot cursors. */
   filter?: string;
 };
@@ -33823,15 +33823,15 @@ export type SessionListSnapshotCursor = {
 export type SessionListKeysetCursor = {
   kind: "keyset";
   /** Absent on v2 cursors, which always used session updatedAt. */
-  sortBy?: "updatedAt" | "archivedAt";
+  sortBy?: "updatedAt" | "archivedAt" | "createdAt" | "name";
   /** Decimal committed workspace activity revision frozen on page one. */
   snapshotRevision: string;
-  /** Exact PostgreSQL timestamp text, including microseconds. */
+  /** Exact PostgreSQL timestamp (including microseconds), or normalized name for name order. */
   sortAt: string;
   id: string;
   parentSessionFilter: string;
   search: string | null;
-  archiveMode: "active" | "archived";
+  archiveMode: "active" | "archived" | "all";
   /** Canonical identity for channel, creator, and time-bound filters. */
   filter?: string;
 };
@@ -33866,6 +33866,8 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions &
     pinsOnly?: boolean | undefined;
     /** List personally archived chats instead of active chats. */
     archivedOnly?: boolean | undefined;
+    sortBy?: "updatedAt" | "createdAt" | "name" | undefined;
+    archiveStatus?: "active" | "archived" | "all" | undefined;
     /** Return a continuation cursor. Disable for legacy one-page array reads. */
     materializeSnapshot?: boolean | undefined;
     authorizationScope?: SessionAuthorizationListScope | undefined;
@@ -34644,6 +34646,7 @@ function sessionFilters(
     | "search"
     | "subjectId"
     | "archivedOnly"
+    | "archiveStatus"
     | "channelId"
     | "originSiteId"
     | "createdBy"
@@ -34677,7 +34680,10 @@ function sessionFilters(
       and archive_state.session_id = ${schema.sessions.rootSessionId}
       and archive_state.archived = true
   )`;
-  filters.push(options.archivedOnly ? archivedRoot : sql`not (${archivedRoot})`);
+  const archiveStatus = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
+  if (archiveStatus !== "all") {
+    filters.push(archiveStatus === "archived" ? archivedRoot : sql`not (${archivedRoot})`);
+  }
   if (options.authorizationScope) {
     filters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
   }
@@ -34902,7 +34908,8 @@ export function encodeSessionListCursor(cursor: SessionListCursor): string {
     JSON.stringify(
       cursor.kind === "keyset"
         ? {
-            version: cursor.sortBy === "archivedAt" ? 3 : 2,
+            version: 4,
+            sortBy: cursor.sortBy ?? "updatedAt",
             // Preserve the old cursor envelope until every pre-v2 replica has
             // rolled away. It resolves only to the typed expiry/rebase path.
             snapshotId: SESSION_LIST_KEYSET_LEGACY_SNAPSHOT_ID,
@@ -34932,6 +34939,7 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
   try {
     const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
       version?: unknown;
+      sortBy?: unknown;
       snapshotId?: unknown;
       offset?: unknown;
       snapshotRevision?: unknown;
@@ -34951,17 +34959,24 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
         parentSessionFilter === "null" ||
         (typeof parentSessionFilter === "string" && UUID_PATTERN.test(parentSessionFilter))) &&
       (search === null || (typeof search === "string" && search.length <= 200)) &&
-      (archiveMode === "active" || archiveMode === "archived") &&
+      (archiveMode === "active" ||
+        archiveMode === "archived" ||
+        (parsed.version === 4 && archiveMode === "all")) &&
       typeof filter === "string" &&
       filter.length <= 2_048;
     if (!filtersAreValid) return null;
 
-    if (parsed.version === 2 || parsed.version === 3) {
+    if (parsed.version === 2 || parsed.version === 3 || parsed.version === 4) {
+      const sortBy =
+        parsed.version === 4 ? parsed.sortBy : parsed.version === 3 ? "archivedAt" : "updatedAt";
       if (
-        (parsed.version === 3 && archiveMode !== "archived") ||
+        !["updatedAt", "createdAt", "name", "archivedAt"].includes(sortBy as string) ||
+        (sortBy === "archivedAt" && archiveMode !== "archived") ||
         typeof parsed.snapshotRevision !== "string" ||
         typeof parsed.sortAt !== "string" ||
-        !isSessionListCursorTimestamp(parsed.sortAt) ||
+        (sortBy !== "name" && !isSessionListCursorTimestamp(parsed.sortAt)) ||
+        (sortBy === "name" &&
+          (parsed.sortAt.length > 10_000 || parsed.sortAt.includes("\u0000"))) ||
         typeof parsed.id !== "string" ||
         !UUID_PATTERN.test(parsed.id)
       ) {
@@ -34969,7 +34984,9 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       }
       return {
         kind: "keyset",
-        ...(parsed.version === 3 ? { sortBy: "archivedAt" as const } : {}),
+        ...(parsed.version !== 2
+          ? { sortBy: sortBy as NonNullable<SessionListKeysetCursor["sortBy"]> }
+          : {}),
         snapshotRevision: normalizeSessionActivityRevision(
           parsed.snapshotRevision,
           "cursor snapshot revision",
@@ -34983,6 +35000,7 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       };
     }
 
+    if (parsed.version !== undefined) return null;
     const offset = parsed.offset;
     if (
       typeof parsed.snapshotId !== "string" ||
@@ -35099,28 +35117,52 @@ export async function listSessionsForSubject(
           workspaceId,
         );
 
+        const archiveMode = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
+        const sortBy = options.sortBy ?? (archiveMode === "archived" ? "archivedAt" : "updatedAt");
+        if (options.archivedOnly && archiveMode !== "archived") {
+          throw new SessionListCursorError("archivedOnly conflicts with archiveStatus");
+        }
         const filters = [eq(schema.sessions.workspaceId, workspaceId), ...sessionFilters(options)];
-        const ordinaryPinFilter = options.archivedOnly
-          ? sql`true`
-          : or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false))!;
+        const ordinaryPinFilter =
+          archiveMode === "archived"
+            ? sql`true`
+            : or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false))!;
         const parentFilter = sessionParentFilter(options.parentSessionId);
         const searchFilter = sessionSearchFilter(options.search);
-        const archiveMode = options.archivedOnly ? "archived" : "active";
         // Descendants inherit their root's subject-specific archive ordering,
         // just as they inherit its archive visibility in sessionFilters.
-        const ordinarySortAt = options.archivedOnly
-          ? sql`(select archive_order.archived_at
+        const archiveSortAt = sql`(select archive_order.archived_at
               from ${schema.sessionPins} archive_order
               where archive_order.workspace_id = ${schema.sessions.workspaceId}
                 and archive_order.subject_id = ${options.subjectId}
                 and archive_order.session_id = ${schema.sessions.rootSessionId}
-                and archive_order.archived = true)`
-          : schema.sessions.updatedAt;
-        const exactOrdinarySortAt = sql<string>`to_char(${ordinarySortAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+                and archive_order.archived = true)`;
+        // Locale-independent normalization shared with the UI contract. Do not
+        // use localeCompare/lower(): those depend on deployment/client locale.
+        const ordinarySortAt =
+          sortBy === "name"
+            ? sql`translate(btrim(coalesce(${schema.sessions.title}, '')), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') collate "C"`
+            : sortBy === "createdAt"
+              ? schema.sessions.createdAt
+              : sortBy === "archivedAt"
+                ? archiveSortAt
+                : schema.sessions.updatedAt;
+        const exactOrdinarySortAt =
+          sortBy === "name"
+            ? sql<string>`${ordinarySortAt}`
+            : sql<string>`to_char(${ordinarySortAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+        const exactArchiveSortAt =
+          archiveMode === "active"
+            ? sql<string>`null`
+            : sql<string>`to_char(${archiveSortAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+        const ordinaryOrder =
+          sortBy === "name"
+            ? [asc(ordinarySortAt), asc(schema.sessions.id)]
+            : [desc(ordinarySortAt), desc(schema.sessions.id)];
         const listFilter = sessionListFilterIdentity(options);
         const now = new Date();
 
-        if (options.pinsOnly && options.archivedOnly) {
+        if (options.pinsOnly && archiveMode === "archived") {
           throw new SessionListCursorError(
             "pins-only and archived session lists cannot be combined",
           );
@@ -35128,13 +35170,14 @@ export async function listSessionsForSubject(
         if (options.pinsOnly && options.cursor) {
           throw new SessionListCursorError("pins-only session lists do not accept a cursor");
         }
-        // Never reinterpret an updatedAt boundary as an archivedAt boundary.
-        // v3 envelopes retain the reserved snapshot id so older replicas also
+        // Never reinterpret a boundary from a different ordering domain.
+        // v4 envelopes retain the reserved snapshot id so older replicas also
         // take the typed expiry/rebase path instead of mixing sort domains.
         if (
           options.cursor &&
-          options.cursor.archiveMode === "archived" &&
-          (options.cursor.kind === "snapshot" || options.cursor.sortBy !== "archivedAt")
+          ((options.cursor.kind === "snapshot" &&
+            (sortBy !== "updatedAt" || archiveMode !== "active")) ||
+            (options.cursor.kind === "keyset" && (options.cursor.sortBy ?? "updatedAt") !== sortBy))
         ) {
           throw new SessionListCursorExpiredError();
         }
@@ -35153,6 +35196,9 @@ export async function listSessionsForSubject(
         // Keep archive ordering precision in the public root projection as well
         // as the cursor. Drizzle's Date hydration otherwise loses microseconds.
         const exactArchiveTimestamps = new Map<string, string>();
+        // The public selected date key must match the SQL/cursor key so clients
+        // merging pages do not collapse sub-millisecond ordering into id ties.
+        const exactOrdinaryTimestamps = new Map<string, string>();
         if (options.pinsOnly) {
           // The rail polls the complete personal pin section independently from
           // its root page. Do not turn that cheap projection into an O(N)
@@ -35255,6 +35301,7 @@ export async function listSessionsForSubject(
               session: schema.sessions,
               pin: schema.sessionPins,
               sortAt: exactOrdinarySortAt,
+              archiveAt: exactArchiveSortAt,
             })
             .from(schema.sessions)
             .leftJoin(
@@ -35266,12 +35313,15 @@ export async function listSessionsForSubject(
               ),
             )
             .where(and(...filters, ordinaryPinFilter))
-            .orderBy(desc(ordinarySortAt), desc(schema.sessions.id))
+            .orderBy(...ordinaryOrder)
             .limit(limit);
           pageIds = ordinaryIdRows.map((row) => row.id);
           selectedOrdinaryRows = ordinaryIdRows;
-          if (options.archivedOnly) {
-            for (const row of ordinaryIdRows) exactArchiveTimestamps.set(row.id, row.sortAt);
+          if (sortBy === "updatedAt" || sortBy === "createdAt") {
+            for (const row of ordinaryIdRows) exactOrdinaryTimestamps.set(row.id, row.sortAt);
+          }
+          if (archiveMode !== "active") {
+            for (const row of ordinaryIdRows) exactArchiveTimestamps.set(row.id, row.archiveAt);
           }
         } else {
           const cursor = options.cursor?.kind === "keyset" ? options.cursor : undefined;
@@ -35288,13 +35338,21 @@ export async function listSessionsForSubject(
             ? normalizeSessionActivityRevision(cursor.snapshotRevision, "cursor snapshot revision")
             : await readWorkspaceSessionActivityRevision(tx, workspaceId);
           const cursorPredicate = cursor
-            ? or(
-                sql`${ordinarySortAt} < ${cursor.sortAt}::text::timestamptz`,
-                and(
-                  sql`${ordinarySortAt} = ${cursor.sortAt}::text::timestamptz`,
-                  lt(schema.sessions.id, cursor.id),
-                ),
-              )
+            ? sortBy === "name"
+              ? or(
+                  sql`${ordinarySortAt} > ${cursor.sortAt}::text collate "C"`,
+                  and(
+                    sql`${ordinarySortAt} = ${cursor.sortAt}::text collate "C"`,
+                    gt(schema.sessions.id, cursor.id),
+                  ),
+                )
+              : or(
+                  sql`${ordinarySortAt} < ${cursor.sortAt}::text::timestamptz`,
+                  and(
+                    sql`${ordinarySortAt} = ${cursor.sortAt}::text::timestamptz`,
+                    lt(schema.sessions.id, cursor.id),
+                  ),
+                )
             : undefined;
           const ordinaryIdRows = await tx
             .select({
@@ -35302,6 +35360,7 @@ export async function listSessionsForSubject(
               session: schema.sessions,
               pin: schema.sessionPins,
               sortAt: exactOrdinarySortAt,
+              archiveAt: exactArchiveSortAt,
             })
             .from(schema.sessions)
             .leftJoin(
@@ -35320,20 +35379,23 @@ export async function listSessionsForSubject(
                 cursorPredicate,
               ),
             )
-            .orderBy(desc(ordinarySortAt), desc(schema.sessions.id))
+            .orderBy(...ordinaryOrder)
             .limit(limit + 1);
           const hasMore = ordinaryIdRows.length > limit;
           const page = ordinaryIdRows.slice(0, limit);
           pageIds = page.map((row) => row.id);
           selectedOrdinaryRows = page;
-          if (options.archivedOnly) {
-            for (const row of page) exactArchiveTimestamps.set(row.id, row.sortAt);
+          if (sortBy === "updatedAt" || sortBy === "createdAt") {
+            for (const row of page) exactOrdinaryTimestamps.set(row.id, row.sortAt);
+          }
+          if (archiveMode !== "active") {
+            for (const row of page) exactArchiveTimestamps.set(row.id, row.archiveAt);
           }
           const last = page.at(-1);
           if (hasMore && last) {
             nextCursor = encodeSessionListCursor({
               kind: "keyset",
-              ...(options.archivedOnly ? { sortBy: "archivedAt" as const } : {}),
+              sortBy,
               snapshotRevision,
               sortAt: last.sortAt,
               id: last.id,
@@ -35344,22 +35406,23 @@ export async function listSessionsForSubject(
             });
           }
         }
-        const pinnedLookaheadRows = options.archivedOnly
-          ? []
-          : await tx
-              .select({ session: schema.sessions, pin: schema.sessionPins })
-              .from(schema.sessionPins)
-              .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionPins.sessionId))
-              .where(
-                and(
-                  eq(schema.sessionPins.workspaceId, workspaceId),
-                  eq(schema.sessionPins.subjectId, options.subjectId),
-                  eq(schema.sessionPins.pinned, true),
-                  ...filters,
-                ),
-              )
-              .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id))
-              .limit(SESSION_LIST_MAX_PINNED + 1);
+        const pinnedLookaheadRows =
+          archiveMode === "archived"
+            ? []
+            : await tx
+                .select({ session: schema.sessions, pin: schema.sessionPins })
+                .from(schema.sessionPins)
+                .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionPins.sessionId))
+                .where(
+                  and(
+                    eq(schema.sessionPins.workspaceId, workspaceId),
+                    eq(schema.sessionPins.subjectId, options.subjectId),
+                    eq(schema.sessionPins.pinned, true),
+                    ...filters,
+                  ),
+                )
+                .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id))
+                .limit(SESSION_LIST_MAX_PINNED + 1);
         const pinnedTruncated = pinnedLookaheadRows.length > SESSION_LIST_MAX_PINNED;
         const pinnedRows = pinnedLookaheadRows.slice(0, SESSION_LIST_MAX_PINNED);
         const ordinaryRows =
@@ -35450,6 +35513,12 @@ export async function listSessionsForSubject(
                   },
                   { subjectId: options.subjectId, activated: tenancyActivated },
                 ),
+                ...(sortBy === "updatedAt" && exactOrdinaryTimestamps.has(session.id)
+                  ? { updatedAt: exactOrdinaryTimestamps.get(session.id)! }
+                  : {}),
+                ...(sortBy === "createdAt" && exactOrdinaryTimestamps.has(session.id)
+                  ? { createdAt: exactOrdinaryTimestamps.get(session.id)! }
+                  : {}),
                 treeStats: treeStats.get(session.id) ?? EMPTY_SESSION_TREE_STATS,
               },
               requiresActionSince,
@@ -35462,6 +35531,8 @@ export async function listSessionsForSubject(
           pinnedTruncated,
           sessions: pageRows.map(mapListSession),
           nextCursor,
+          sortBy,
+          archiveStatus: archiveMode,
         };
       },
       { isolationLevel: "read committed" },

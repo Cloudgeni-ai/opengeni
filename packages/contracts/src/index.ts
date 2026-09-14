@@ -12743,6 +12743,10 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
   z.object({
     pinned: z.array(Session),
     filtersApplied: z.literal(true).optional(),
+    /** Effective server ordering; name uses ASCII-space trim, ASCII case fold,
+     * UTF-8 byte order, then id ASC. Date keys and their id ties use DESC. */
+    sortBy: z.enum(["updatedAt", "createdAt", "name", "archivedAt"]).optional(),
+    archiveStatus: z.enum(["active", "archived", "all"]).optional(),
     originSiteId: z.string().uuid().optional(),
     /** True when older matching pins were omitted from this bounded page. */
     pinnedTruncated: z.boolean().optional(),
