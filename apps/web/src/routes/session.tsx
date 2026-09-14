@@ -80,10 +80,8 @@ import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "@/components/session/artifact-link-boundary";
-import {
-  SessionVariableSetPicker,
-  type SessionVariableSetPickerSharedState,
-} from "@/components/session/session-variable-set-picker";
+import { SessionVariableSetPicker } from "@/components/session/session-variable-set-picker";
+import { useSessionVariableSetPickerState } from "@/lib/use-session-variable-set-picker-state";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
@@ -1555,11 +1553,9 @@ function SessionChatPane(props: {
   const onVoiceActiveChange = useCallback((active: boolean) => {
     setVoiceActive(active);
   }, []);
-  const [variableSetPickerState, setVariableSetPickerState] =
-    useState<SessionVariableSetPickerSharedState>({
-      saving: false,
-      committedSelection: null,
-    });
+  const [variableSetPickerState, setVariableSetPickerState] = useSessionVariableSetPickerState(
+    props.session,
+  );
   const variableSetComposerBlocked =
     variableSetPickerState.saving ||
     variableSetPickerState.committedSelection?.sessionId === props.session.id;
