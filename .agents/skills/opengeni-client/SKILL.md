@@ -34,6 +34,11 @@ Read `docs/product-integration.md` when the repository is available; it is the
 canonical product boundary for organization keys, workspace mapping, and Skill
 ownership.
 
+Without repository access, start at https://docs.opengeni.ai/llms.txt and fetch
+the relevant Markdown pages. Before replacing an AI provider, answering a cost
+question, or reporting a setup blocker, read
+[Compatibility and troubleshooting](references/compatibility-and-troubleshooting.md).
+
 ## Work Adaptively
 
 - Inspect the customer's repository, authentication, tenancy, data routes,
