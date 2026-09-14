@@ -82,6 +82,25 @@ The separate EXPLAIN executions took 174,627.83 and 1,178.29 ms. Both wrote 526
 temporary blocks: the unchanged materialized candidate work can still spill.
 This larger comparison runs only the collection request, not the root/flat cases.
 
+## Smaller collections and JIT control, limit 20 (+1 sentinel)
+
+A supplemental run used 10, 50, and 250 members with the same fixture shape.
+Each size reused one fixture across both implementations and both JIT settings;
+each combination had one warmup and five measured runs. Complete response JSON
+matched throughout. Medians:
+
+| Members | JIT on: baseline → optimized | JIT off: baseline → optimized |
+| --- | ---: | ---: |
+| 10 | 79.94 → 26.59 ms | 80.01 → 27.20 ms |
+| 50 | 607.56 → 60.97 ms | 609.16 → 60.45 ms |
+| 250 | 4,130.98 → 146.80 ms | 4,129.14 → 144.83 ms |
+
+These comparisons are approximately 3x, 10x, and 28x faster. JIT had negligible
+effect; the evidence supports narrowing endpoint lookups, not changing JIT
+configuration. Each size has a separate account/fixture with ANALYZE, and other
+fixture accounts coexist. The separate 240- and 250-member runs are not a
+controlled cross-run scaling comparison.
+
 ## Verification and reproduction
 
 ```sh
@@ -113,8 +132,10 @@ used the stricter owner-migrated fixture described above.
 ## Limits
 
 These are synthetic warm-cache local measurements, not production telemetry or
-latency guarantees. The standard harness's PostgreSQL 16 Docker variant was not
-available here; PostgreSQL 17 was exercised. No external provider was contacted.
+latency guarantees. Timed requests use limit 20; the UI requests 50, so these are
+not measurements of its exact page size. Local benchmarks exercised PostgreSQL
+17, not the standard harness's PostgreSQL 16 Docker variant. No external provider
+was contacted.
 The existing source/evidence authorization functions remain authoritative and
 unchanged. Dense evidence graphs, cold storage, high concurrency, and very large
 endpoint arrays can have different costs. Candidate visibility still scales with
