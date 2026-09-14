@@ -253,6 +253,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/react-compiled-css.browser.e2e.ts": ["@opengeni/react"],
+  "test/e2e/preview-loading.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/restored-attachment-preview.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",

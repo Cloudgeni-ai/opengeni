@@ -40,6 +40,9 @@ const legacyBrowserUnusedMethods = [
   "gitShow",
   "githubConnectUrl",
   "importLegacyWorkspaceInstructionPolicyDraft",
+  // Retain the existing public SDK method after the browser's duplicate
+  // override-settings navigation was removed in #2490.
+  "listAgentLearningOverrides",
   "listDocuments",
   "listGoalRevisionPage",
   "listGoalRevisions",
