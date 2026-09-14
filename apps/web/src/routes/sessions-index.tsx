@@ -32,11 +32,7 @@ import {
 } from "@opengeni/react";
 import { resolveWorkspaceSessionToolDefaults } from "@opengeni/contracts";
 import { MACHINES_COMPOSER_POLL_MS, type MachineView } from "@opengeni/react/machines";
-import {
-  NewSessionRealtimeControl,
-  RealtimeVoiceModelPanel,
-  useRealtimeModelSelection,
-} from "@opengeni/react/realtime";
+import { NewSessionRealtimeControl, useRealtimeModelSelection } from "@opengeni/react/realtime";
 import {
   OpenGeniApiError,
   type NewSessionSelectionHistory,
@@ -1362,7 +1358,7 @@ function SessionsIndexRouteContent({
             placeholder="Describe a task for the agent…"
             controlsLeading={
               <ComposerMobilePlus
-                expandedPanelPresentation="dialog"
+                menuSide="bottom"
                 draftChatSettings={{
                   workspaceId,
                   scope:
@@ -1427,22 +1423,10 @@ function SessionsIndexRouteContent({
                       },
                     }
                   : {})}
-                voiceModel={{
-                  selectedLabel: voiceSelection.selectedModel.label,
-                  disabled: busy || newSessionDraft.loading || personalMachineSelected,
-                  panel: (
-                    <RealtimeVoiceModelPanel
-                      models={voiceSelection.models}
-                      selectedModel={voiceSelection.selectedModel}
-                      disabled={busy || newSessionDraft.loading || personalMachineSelected}
-                      onSelect={voiceSelection.selectModel}
-                    />
-                  ),
-                }}
               />
             }
-            actions={
-              <>
+            controls={
+              <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
                 <SessionModelControl
                   hasImageAttachments={attachments.attachments.some(
                     (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
@@ -1451,6 +1435,10 @@ function SessionsIndexRouteContent({
                   policyError={newSessionPolicyError}
                   disabled={busy || newSessionDraft.loading}
                 />
+              </div>
+            }
+            actions={
+              <>
                 <NewSessionRealtimeControl
                   client={context.client}
                   workspaceId={workspaceId}
@@ -1458,7 +1446,7 @@ function SessionsIndexRouteContent({
                   models={voiceSelection.models}
                   selectedModel={voiceSelection.selectedModel}
                   onSelectModel={voiceSelection.selectModel}
-                  modelMenu="split-desktop"
+                  modelMenu="split"
                   disabled={
                     busy ||
                     newSessionDraft.loading ||
@@ -1730,7 +1718,7 @@ function SessionModelControl({
       disabled={disabled}
       loading={modelCatalog.loading}
       error={modelCatalog.error ?? policyError}
-      className="max-w-[8.5rem] shrink sm:max-w-[13rem] sm:shrink-0"
+      menuSide="bottom"
       onModelChange={context.setModel}
       onEffortChange={context.setReasoningEffort}
       onLatencyModeChange={context.setLatencyMode}
