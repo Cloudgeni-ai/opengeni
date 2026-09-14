@@ -3,6 +3,7 @@ import { ChevronRightIcon } from "lucide-react";
 import type {
   ConnectorToolPermission,
   ConnectorToolPermissionsResponse,
+  UpdateConnectorToolPermissionsRequest,
 } from "@opengeni/contracts";
 import { request } from "@/api";
 import { Button } from "@/components/ui/button";
@@ -94,7 +95,10 @@ export function ConnectorToolPermissions({
       });
     return () => controller.abort();
   }, [path, generation]);
-  async function update(toolNames: string[], permission: ConnectorToolPermission) {
+  async function update(
+    selection: { target: "default" } | { target: "tools"; toolNames: string[] },
+    permission: ConnectorToolPermission,
+  ) {
     if (!data || busy || mutationController.current) return;
     const currentScope = { ...scope.current };
     if (currentScope.path !== path) return;
@@ -110,17 +114,22 @@ export function ConnectorToolPermissions({
         method: "PATCH",
         signal: controller.signal,
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ connectionId: data.connectionId, toolNames, permission }),
+        body: JSON.stringify({
+          connectionId: data.connectionId,
+          ...selection,
+          permission,
+        } satisfies UpdateConnectorToolPermissionsRequest),
       });
       if (!isCurrent()) return;
       setData((current) =>
         current
           ? {
               ...current,
-              ...(toolNames.includes("*") ? { defaultPermission: permission } : {}),
+              ...(selection.target === "default" ? { defaultPermission: permission } : {}),
               tools: current.tools.map((tool) =>
-                toolNames.includes(tool.name) || (toolNames.includes("*") && tool.inherited)
-                  ? { ...tool, permission, inherited: toolNames.includes("*") }
+                (selection.target === "tools" && selection.toolNames.includes(tool.name)) ||
+                (selection.target === "default" && tool.inherited)
+                  ? { ...tool, permission, inherited: selection.target === "default" }
                   : tool,
               ),
             }
@@ -162,7 +171,7 @@ export function ConnectorToolPermissions({
               label="Default tool permission"
               value={data.defaultPermission ?? "default"}
               disabled={busy || !data.canManage}
-              onChange={(value) => void update(["*"], value)}
+              onChange={(value) => void update({ target: "default" }, value)}
             />
           </div>
           <p className="text-xs text-fg-subtle">
@@ -195,7 +204,7 @@ export function ConnectorToolPermissions({
                     disabled={busy || !data.canManage}
                     onChange={(value) =>
                       void update(
-                        tools.map((tool) => tool.name),
+                        { target: "tools", toolNames: tools.map((tool) => tool.name) },
                         value,
                       )
                     }
@@ -218,7 +227,9 @@ export function ConnectorToolPermissions({
                         label={`Permission for ${tool.title ?? tool.name}`}
                         value={tool.permission}
                         disabled={busy || !data.canManage}
-                        onChange={(value) => void update([tool.name], value)}
+                        onChange={(value) =>
+                          void update({ target: "tools", toolNames: [tool.name] }, value)
+                        }
                       />
                     </div>
                   ))}

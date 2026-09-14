@@ -158,6 +158,7 @@ describe("connector tool permissions API", () => {
   test("discovers MCP annotations and persists scoped defaults and overrides without executing tools", async () => {
     if (!available || !client) return;
     let invocations = 0;
+    let advertiseWildcard = false;
     const server = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
@@ -188,6 +189,15 @@ describe("connector tool permissions API", () => {
                       annotations: { readOnlyHint: true, destructiveHint: true },
                     },
                     { name: "unknown_action", inputSchema: { type: "object" } },
+                    ...(advertiseWildcard
+                      ? [
+                          {
+                            name: "*",
+                            inputSchema: { type: "object" },
+                            annotations: { readOnlyHint: true },
+                          },
+                        ]
+                      : []),
                   ],
                 }
               : (++invocations, { content: [{ type: "text", text: "executed" }] });
@@ -246,19 +256,26 @@ describe("connector tool permissions API", () => {
       ]);
       expect(initial.connectionId).toMatch(/^session-mcp:/);
       const write = (
-        toolNames: string[],
+        target: { target: "default" } | { target: "tools"; toolNames: string[] },
         permission: string,
         connectionId = initial.connectionId,
       ) =>
         app!.request(path, {
           method: "PATCH",
           headers,
-          body: JSON.stringify({ connectionId, toolNames, permission }),
+          body: JSON.stringify({ connectionId, ...target, permission }),
         });
-      expect((await write(["*"], "ask")).status).toBe(200);
-      expect((await write(["read_item"], "allow")).status).toBe(200);
-      expect((await write(["delete_item"], "block")).status).toBe(200);
-      expect((await write(["read_item"], "block", "different-account")).status).toBe(409);
+      expect((await write({ target: "default" }, "ask")).status).toBe(200);
+      expect((await write({ target: "tools", toolNames: ["read_item"] }, "allow")).status).toBe(
+        200,
+      );
+      expect((await write({ target: "tools", toolNames: ["delete_item"] }, "block")).status).toBe(
+        200,
+      );
+      expect(
+        (await write({ target: "tools", toolNames: ["read_item"] }, "block", "different-account"))
+          .status,
+      ).toBe(409);
       const saved = await (await app!.request(path, { headers })).json();
       expect(saved.defaultPermission).toBe("ask");
       expect(saved.tools.map((tool: { permission: string }) => tool.permission)).toEqual([
@@ -272,6 +289,28 @@ describe("connector tool permissions API", () => {
         connectionId: initial.connectionId,
       });
       expect(policies).toHaveLength(3);
+      advertiseWildcard = true;
+      const wildcardCatalog = await (await app!.request(path, { headers })).json();
+      expect(wildcardCatalog.discoveryError).toContain('tool named "*"');
+      expect(wildcardCatalog.tools.map((tool: { name: string }) => tool.name)).toEqual([
+        "read_item",
+        "delete_item",
+        "unknown_action",
+      ]);
+      expect((await write({ target: "tools", toolNames: ["*"] }, "allow")).status).toBe(400);
+      expect(
+        (await write({ target: "tools", toolNames: ["read_item", "*"] }, "allow")).status,
+      ).toBe(400);
+      const afterRejectedWildcard = await (await app!.request(path, { headers })).json();
+      expect(afterRejectedWildcard.defaultPermission).toBe("ask");
+      expect(afterRejectedWildcard.tools).toEqual(saved.tools);
+      expect(
+        await listConnectorToolPermissionPolicies(client.db, {
+          accountId,
+          workspaceId,
+          connectionId: initial.connectionId,
+        }),
+      ).toEqual(policies);
       const reader = await signDelegatedAccessToken(DELEGATION_SECRET, {
         accountId,
         workspaceId,
@@ -287,7 +326,7 @@ describe("connector tool permissions API", () => {
             headers: { ...headers, authorization: `Bearer ${reader}` },
             body: JSON.stringify({
               connectionId: initial.connectionId,
-              toolNames: ["*"],
+              target: "default",
               permission: "allow",
             }),
           })
@@ -308,7 +347,7 @@ describe("connector tool permissions API", () => {
             headers: { ...headers, authorization: `Bearer ${service}` },
             body: JSON.stringify({
               connectionId: initial.connectionId,
-              toolNames: ["*"],
+              target: "default",
               permission: "allow",
             }),
           })

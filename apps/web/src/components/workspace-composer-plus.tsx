@@ -163,7 +163,10 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
         error,
         busyId,
       }}
-      onOpenConnectors={() => void reload()}
+      onOpenConnectors={() => {
+        void reload();
+        void refreshRuntime.current(workspaceId);
+      }}
     />
   );
 }

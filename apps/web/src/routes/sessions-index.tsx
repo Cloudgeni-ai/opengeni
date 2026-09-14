@@ -2,7 +2,11 @@ import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
-import { changedConnectorExclusions, defaultConnectorSelection } from "@/lib/composer-connectors";
+import {
+  addsConnectorOutsideDefaults,
+  changedConnectorExclusions,
+  defaultConnectorSelection,
+} from "@/lib/composer-connectors";
 // The sessions index: the centered "Start a session" composer. The form is
 // organised top-down — (A) message + model/tools/repos pills → (B) WHERE SHOULD
 // THIS RUN? (when machines exist) → (C) rig/variable-set or machine fields.
@@ -584,7 +588,16 @@ function SessionsIndexRouteContent({
   const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
   const [connectorExclusions, setConnectorExclusions] = useState<string[]>([]);
   const changeConnectorSelection = (selection: SessionToolSelection) => {
-    if (!toolSelectionExplicit)
+    if (
+      !toolSelectionExplicit &&
+      addsConnectorOutsideDefaults(
+        context.selectedCapabilityToolIds,
+        selection.mcpServerIds,
+        context.workspaceDefaultToolIds,
+      )
+    ) {
+      setToolSelectionExplicit(true);
+    } else if (!toolSelectionExplicit) {
       setConnectorExclusions((current) =>
         changedConnectorExclusions(
           current,
@@ -592,6 +605,7 @@ function SessionsIndexRouteContent({
           selection.mcpServerIds,
         ),
       );
+    }
     context.setSelectedCapabilityToolIds(selection.mcpServerIds);
   };
   const [submitting, setSubmitting] = useState(false);

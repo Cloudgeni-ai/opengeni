@@ -8408,6 +8408,5 @@ export type ConnectorToolPermissionsResponse = {
 };
 export type UpdateConnectorToolPermissionsRequest = {
   connectionId: string;
-  toolNames: string[];
   permission: ConnectorToolPermission;
-};
+} & ({ target: "default" } | { target: "tools"; toolNames: string[] });

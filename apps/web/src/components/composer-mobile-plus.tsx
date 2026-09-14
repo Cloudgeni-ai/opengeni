@@ -124,7 +124,8 @@ export function ComposerMobilePlus(props: ComposerPlusProps) {
   ).length;
   const repositories = props.repositories;
   const voiceModel = props.voiceModel;
-  const dialogOpen = open && panel !== "root" && props.expandedPanelPresentation === "dialog";
+  const dialogOpen =
+    open && panel !== "root" && panel !== "tools" && props.expandedPanelPresentation === "dialog";
 
   const backButton = (
     <button

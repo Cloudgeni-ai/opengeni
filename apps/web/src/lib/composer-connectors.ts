@@ -60,13 +60,27 @@ export function defaultConnectorSelection(
   return new Set([...defaultIds].filter((id) => !excluded.has(id)));
 }
 
+/** A newly enabled connector outside defaults is an explicit session override. */
+export function addsConnectorOutsideDefaults(
+  before: ReadonlySet<string>,
+  after: ReadonlySet<string>,
+  defaultIds: Iterable<string>,
+): boolean {
+  const defaults = new Set(defaultIds);
+  return [...after].some((id) => !before.has(id) && !defaults.has(id));
+}
+
 /** Connector switches change only connectors, preserving hidden refs and builtin choices. */
 export function connectorSelectionUpdate(
   session: Pick<Session, "tools" | "toolPolicy" | "toolPolicyVersion" | "firstPartyMcpTools">,
   before: ReadonlySet<string>,
   after: ReadonlySet<string>,
+  workspaceDefaultIds: Iterable<string>,
 ): UpdateSessionToolPolicyRequest {
-  if (session.toolPolicy.mode === "workspace_default") {
+  if (
+    session.toolPolicy.mode === "workspace_default" &&
+    !addsConnectorOutsideDefaults(before, after, workspaceDefaultIds)
+  ) {
     return {
       mode: "workspace_default",
       excludedMcpServerIds: changedConnectorExclusions(
@@ -78,7 +92,15 @@ export function connectorSelectionUpdate(
     };
   }
   const removed = new Set([...before].filter((id) => !after.has(id)));
-  const tools = session.tools.filter((tool) => tool.id !== "opengeni" && !removed.has(tool.id));
+  const excluded = new Set(
+    session.toolPolicy.mode === "workspace_default" ? session.toolPolicy.excludedMcpServerIds : [],
+  );
+  const tools = session.tools.filter(
+    (tool) =>
+      tool.id !== "opengeni" &&
+      !removed.has(tool.id) &&
+      (!excluded.has(tool.id) || after.has(tool.id)),
+  );
   const persistedIds = new Set(tools.map((tool) => tool.id));
   for (const id of after) {
     if (!persistedIds.has(id)) tools.push({ kind: "mcp", id });

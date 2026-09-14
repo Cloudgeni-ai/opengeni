@@ -235,9 +235,12 @@ outcome-unknown external tool call or resume a failed turn.
 
 The workspace connector detail sheet loads the server's current MCP tool catalog
 through `GET /v1/workspaces/:workspaceId/capabilities/:capabilityId/tool-permissions`.
-`PATCH` on the same route accepts the displayed connection identity, a bounded
-list of unprefixed tool names (`*` for the server default), and `allow`, `ask`, or
-`block`. `OpenGeniClient.getConnectorToolPermissions` and
+`PATCH` on the same route accepts the displayed connection identity, `allow`,
+`ask`, or `block`, and an explicit target: `target: "default"` changes the server
+default; `target: "tools"` requires a bounded `toolNames` list of unprefixed tool
+names. Tool targets reject the reserved name `*`. A connector advertising that
+literal tool name omits it from editable groups with an explicit discovery notice;
+the server default still governs it. `OpenGeniClient.getConnectorToolPermissions` and
 `updateConnectorToolPermissions` expose the same contract.
 
 Policies require `capabilities:manage`; agent attempts and services cannot change

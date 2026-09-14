@@ -26,13 +26,34 @@ export type ConnectorToolPermissionsResponse = z.infer<typeof ConnectorToolPermi
 
 // Group changes name the currently displayed tools explicitly. MCP annotations
 // organize the UI only; they never grant future tools permission automatically.
-export const UpdateConnectorToolPermissionsRequest = z
-  .object({
-    connectionId: z.string().min(1).max(512),
-    toolNames: z.array(z.string().min(1).max(512)).min(1).max(2048),
-    permission: ConnectorToolPermission,
-  })
-  .strict();
+export const UpdateConnectorToolPermissionsRequest = z.discriminatedUnion("target", [
+  z
+    .object({
+      connectionId: z.string().min(1).max(512),
+      target: z.literal("default"),
+      permission: ConnectorToolPermission,
+    })
+    .strict(),
+  z
+    .object({
+      connectionId: z.string().min(1).max(512),
+      target: z.literal("tools"),
+      toolNames: z
+        .array(
+          z
+            .string()
+            .min(1)
+            .max(512)
+            .refine((name) => name !== "*", {
+              message: "The wildcard is reserved for connector defaults.",
+            }),
+        )
+        .min(1)
+        .max(2048),
+      permission: ConnectorToolPermission,
+    })
+    .strict(),
+]);
 export type UpdateConnectorToolPermissionsRequest = z.infer<
   typeof UpdateConnectorToolPermissionsRequest
 >;

@@ -224,6 +224,11 @@ export async function getConnectorToolPermissions(
   let discoveryError: string | null = null;
   try {
     tools = await listTools(input, target);
+    if (tools.some((tool) => tool.name === "*")) {
+      tools = tools.filter((tool) => tool.name !== "*");
+      discoveryError =
+        'The connector exposes a tool named "*". Individual permissions for this reserved name are unsupported, so it is omitted from tool groups. The connector default still applies to it.';
+    }
   } catch {
     discoveryError =
       "Could not load the connector's tools. Try again or reconnect. Your saved permissions still apply.";
@@ -267,6 +272,8 @@ export async function updateConnectorToolPermissions(
 ): Promise<void> {
   if (!canManageConnectorPermissions(input.grant))
     throw new HTTPException(403, { message: "Connector management permission required" });
+  if (input.payload.target === "tools" && input.payload.toolNames.includes("*"))
+    throw new HTTPException(400, { message: "The wildcard is reserved for connector defaults." });
   const target = await resolveTarget(input);
   // Prevent a reconnect while the sheet is open from applying old choices to a new account.
   if (target.connectionId !== input.payload.connectionId)
@@ -279,7 +286,7 @@ export async function updateConnectorToolPermissions(
     subjectId: input.grant.subjectId,
     connectionId: target.connectionId,
     serverId: target.server.id,
-    toolNames: input.payload.toolNames,
+    toolNames: input.payload.target === "default" ? ["*"] : input.payload.toolNames,
     policy: input.payload.permission,
   });
 }

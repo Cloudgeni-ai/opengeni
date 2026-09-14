@@ -1766,6 +1766,7 @@ function SessionChatPane(props: {
             durableToolsSnapshot,
             durableToolSelection.mcpServerIds,
             next.mcpServerIds,
+            context.workspaceDefaultToolIds,
           ),
         );
         if (durableToolsSessionId.current !== targetSessionId) return;

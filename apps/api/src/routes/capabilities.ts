@@ -145,6 +145,8 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         "capabilities:manage",
       );
+      const payload = UpdateConnectorToolPermissionsRequest.safeParse(await c.req.json());
+      if (!payload.success) return c.json({ error: "Invalid connector permission target" }, 400);
       await updateConnectorToolPermissions({
         db,
         settings,
@@ -152,7 +154,7 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
         grant: access.grant,
         capabilityId: decodeURIComponent(c.req.param("capabilityId")),
         personalOwnerVerified: isPersonalConnectionOwnerPrincipal(access),
-        payload: UpdateConnectorToolPermissionsRequest.parse(await c.req.json()),
+        payload: payload.data,
       });
       return c.json({ saved: true });
     },
