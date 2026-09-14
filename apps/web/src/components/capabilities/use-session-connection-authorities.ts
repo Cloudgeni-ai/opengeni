@@ -11,7 +11,8 @@ export function useSessionConnectionAuthorities(
   session: Session,
   catalog: CapabilityCatalogItem[],
 ) {
-  const identity = `${session.workspaceId}:${session.id}:${session.tenancy?.visibility}:${session.tenancy?.authorityEpoch}`;
+  const context = session.connectionContext ?? session.tenancy;
+  const identity = `${session.workspaceId}:${session.id}:${context?.visibility}:${context?.authorityEpoch}`;
   const selectedIds =
     session.effectiveToolPolicy?.selectedIds ?? session.tools.map((tool) => tool.id);
   const selectedKey = selectedIds.join("\u0000");

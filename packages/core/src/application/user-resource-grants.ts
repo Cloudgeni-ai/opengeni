@@ -76,12 +76,12 @@ export async function listManagedHumanUserResourceAuthorities(
   input: { resourceKind: UserResourceKind; cursor?: string | undefined; limit: number },
 ) {
   requireOwnerAuthority(authorization, workspaceId, LIST_PERMISSIONS[input.resourceKind]);
-  // Before activation there cannot be usable personal-resource authority in
-  // this organization. Discovery therefore has an exact empty answer; only
-  // issue/revoke and runtime use remain behind the forward-only product gate.
-  // This keeps ordinary workspace-owned Rig/Variable Set selection independent
-  // from an optional personal-resource product that is not enabled.
-  if (!(await sessionTenancyProductActivated(deps.db, workspaceId))) {
+  // Personal Connection execution already has its own exact delegation and
+  // live-use fences. Private-session rollout gates the other resource kinds.
+  if (
+    input.resourceKind !== "connection" &&
+    !(await sessionTenancyProductActivated(deps.db, workspaceId))
+  ) {
     return { authorities: [], nextCursor: null };
   }
   return await listSelfUserResourceAuthorities(deps.db, {
@@ -119,10 +119,12 @@ export async function issueManagedHumanUserResourceGrant(
       workspaceSharedAcknowledged: request.workspaceSharedAcknowledged,
     });
   }
-  await requireOwnerProductGate(deps, authorization, workspaceId, [
-    ...ISSUE_PERMISSIONS[request.resourceKind],
-    ...modePermissions,
-  ]);
+  const permissions = [...ISSUE_PERMISSIONS[request.resourceKind], ...modePermissions];
+  if (request.resourceKind === "connection" && request.mode === "session") {
+    requireOwnerAuthority(authorization, workspaceId, permissions);
+  } else {
+    await requireOwnerProductGate(deps, authorization, workspaceId, permissions);
+  }
 
   if (request.mode === "session") {
     // Contract refinement guarantees both fields. Keep the defensive check so
@@ -159,7 +161,9 @@ export async function revokeManagedHumanUserResourceGrant(
 ) {
   // Revocation narrows authority. It intentionally does not require the
   // resource-specific permission that may have been removed since issuance.
-  await requireOwnerProductGate(deps, authorization, workspaceId, []);
+  // The database resolves the exact owner-bound grant kind: Connection grants
+  // can be revoked before private-session activation; other kinds keep their gate.
+  requireOwnerAuthority(authorization, workspaceId, []);
   return await revokeSelfUserResourceGrant(deps.db, {
     accountId: authorization.grant.accountId,
     workspaceId,
