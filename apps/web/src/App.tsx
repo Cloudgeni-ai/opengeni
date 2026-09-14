@@ -62,7 +62,6 @@ type WorkspaceSettingsSection =
   | "learning"
   | "general"
   | "members"
-  | "tools"
   | "plugins"
   | "models"
   | "api-keys"
@@ -415,14 +414,13 @@ const workspaceSettingsRoute = createRoute({
       search.section === "general" ||
       search.section === "learning" ||
       search.section === "members" ||
-      search.section === "tools" ||
       search.section === "plugins" ||
       search.section === "models" ||
       search.section === "api-keys" ||
       search.section === "danger"
         ? search.section
-        : search.section === "capabilities" || search.section === "permissions"
-          ? "tools"
+        : search.section === "capabilities"
+          ? "plugins"
           : undefined;
     return section ? { section } : {};
   },

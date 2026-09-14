@@ -185,7 +185,7 @@ export function WorkspaceCapabilityDefaultsView({
   };
   return (
     <section
-      aria-label={permissions ? "Built-in tool defaults" : "Plugin defaults"}
+      aria-label={permissions ? "Built-in tool defaults" : "Connector defaults"}
       className="grid min-w-0 gap-4"
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -362,7 +362,9 @@ export function WorkspaceCapabilityDefaultsView({
               </div>
             ))}
         {!permissions && connectedServers.length === 0 ? (
-          <p className="py-3 text-xs text-fg-muted">No plugins are available in this workspace.</p>
+          <p className="py-3 text-xs text-fg-muted">
+            No connectors are available in this workspace.
+          </p>
         ) : null}
       </div>
     </section>

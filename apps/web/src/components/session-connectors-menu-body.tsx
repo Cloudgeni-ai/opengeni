@@ -1,12 +1,8 @@
-import { Settings2Icon, RefreshCwIcon, Loader2Icon } from "lucide-react";
+import { RefreshCwIcon, Loader2Icon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
-import {
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-} from "@/components/ui/dropdown-menu";
+import { DropdownMenuItem, DropdownMenuLabel } from "@/components/ui/dropdown-menu";
 import type { SessionToolSelection } from "@/components/pickers";
 import type { McpServerOption } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
@@ -18,7 +14,6 @@ export type SessionConnectorsMenuProps = {
   selection: SessionToolSelection;
   onChange: (selection: SessionToolSelection) => void;
   leading?: ReactNode;
-  onOpenCapabilities?: () => void;
   onReconnect?: (serverId: string) => void;
   loading?: boolean;
   error?: string | null;
@@ -38,19 +33,6 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
         {props.leading}
         <DropdownMenuLabel className="text-sm">Connectors</DropdownMenuLabel>
       </div>
-      {props.onOpenCapabilities ? (
-        <>
-          <ConnectorAction
-            presentation={props.presentation}
-            className="min-h-10 shrink-0"
-            onAction={props.onOpenCapabilities}
-          >
-            <Settings2Icon className="size-4" />
-            Capabilities
-          </ConnectorAction>
-          <DropdownMenuSeparator />
-        </>
-      ) : null}
       <div className="min-h-0 shrink overflow-y-auto overscroll-contain">
         {props.loading && !connectors.length ? (
           <p className="px-2 py-4 text-xs text-fg-muted" role="status">

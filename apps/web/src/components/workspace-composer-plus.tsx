@@ -96,7 +96,7 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
       toast.error(message);
     }
   }, [reload, workspaceId]);
-  const manage = (serverId?: string) => {
+  const manage = (serverId: string) => {
     const item = current?.items.find((candidate) => candidate.runtime.mcpServerId === serverId);
     window.location.assign(
       `/workspaces/${encodeURIComponent(workspaceId)}/plugins${item ? `?suggested_capability=${encodeURIComponent(item.id)}` : ""}`,
@@ -153,7 +153,6 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
         (path) => client.catalogAssetUrl(path),
       )}
       connectorActions={{
-        onOpenCapabilities: () => manage(),
         onReconnect: (id) => void reconnect(id),
         loading,
         error,

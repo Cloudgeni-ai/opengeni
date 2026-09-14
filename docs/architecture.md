@@ -1128,8 +1128,8 @@ Capabilities define integration/tool shapes. Connections bind credentials and
 ownership. Session policy selects authorized tools.
 MCP/Codemode execute tools; neither grants authority.
 
-The composer exposes connected apps and session exclusions; workspace Agent tools
-settings own built-in defaults. Workspace-default sessions track new MCP connections
+The composer exposes connected apps and session exclusions. Built-in runtime tools
+follow deployment defaults without a granular workspace settings UI. Workspace-default sessions track new MCP connections
 when inheritance is enabled; explicit selections stay exact.
 `packages/core/src/domain/session-tool-policy.ts` resolves that selection.
 `packages/core/src/domain/connector-tool-permissions.ts` discovers MCP tool catalogs
