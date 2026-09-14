@@ -1,5 +1,17 @@
 # @opengeni/db
 
+## 5.0.1
+
+### Patch Changes
+
+- de5569f: Allow native full organization API keys to administer host MCP resolver registrations. Align request authorization, live-key revalidation, and the database write trigger with the public key contract without granting human organization-admin permissions. Read-only, workspace-scoped, delegated, external-user, expired, and revoked credentials remain denied.
+- 7746251: Prevent agent-authored workspace instruction changes from replacing the complete active policy, fence unsafe older pending revisions at approval, and show reviewers the current and proposed instruction text before approval.
+- Updated dependencies [7746251]
+- Updated dependencies [85cafd0]
+  - @opengeni/contracts@4.1.0
+  - @opengeni/codemode@0.5.9
+  - @opengeni/config@1.2.2
+
 ## 5.0.0
 
 ### Major Changes
