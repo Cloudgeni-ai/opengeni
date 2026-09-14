@@ -16,7 +16,7 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
 const migrationPath = new URL(
-  "../drizzle/0471_organization_usage_analytical_capability.sql",
+  "../drizzle/0473_organization_usage_analytical_capability.sql",
   import.meta.url,
 );
 const signature =
@@ -31,7 +31,7 @@ beforeAll(async () => {
   if (!owned) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1")
       throw new Error("Organization usage owner-RLS fixture unavailable");
-    console.warn("SKIPPED 0471 real owner/FORCE-RLS capability assertions: PostgreSQL unavailable");
+    console.warn("SKIPPED 0473 real owner/FORCE-RLS capability assertions: PostgreSQL unavailable");
     return;
   }
   hostileRole = `${owned.ownerRole}_hostile`.slice(0, 63);
@@ -83,7 +83,7 @@ async function expectState(action: () => Promise<unknown>, code: string) {
   expect(nestedPostgresSqlState(failure)).toBe(code);
 }
 
-describe("0471 organization usage analytical capability", () => {
+describe("0473 organization usage analytical capability", () => {
   test("source keeps tenant/session RLS and account-only owner capability with initPlan first", async () => {
     const source = await readFile(migrationPath, "utf8");
     expect(source).toContain("-- deployment-mode: rolling");

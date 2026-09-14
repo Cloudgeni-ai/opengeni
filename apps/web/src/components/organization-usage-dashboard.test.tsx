@@ -1,8 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import type { OrganizationUsageSummary } from "@opengeni/contracts";
 import { formatExactUsage, organizationUsageChart } from "./organization-usage-dashboard";
+import { usageMetricLabel, usageUnitLabel } from "@/lib/usage-metric";
 
 describe("organization usage presentation", () => {
+  test("human labels preserve unknown metrics and distinct accounting units", () => {
+    expect(usageMetricLabel("model.cost")).toBe("Model spend");
+    expect(usageMetricLabel("model.tokens")).toBe("Model tokens");
+    expect(usageMetricLabel("sandbox.warm_seconds")).toBe("Warm sandbox time");
+    expect(usageMetricLabel("custom.metric")).toBe("custom.metric");
+    expect(usageUnitLabel("usd_micros")).toBe("USD");
+    expect(usageUnitLabel("tokens")).toBe("tokens");
+  });
   test("keeps exact micros and negative corrections without number coercion", () => {
     expect(formatExactUsage("9007199254740993", "usd_micros")).toBe("$9,007,199,254.740993");
     expect(formatExactUsage("-1", "usd_micros")).toBe("-$0.000001");

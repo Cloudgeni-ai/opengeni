@@ -9,6 +9,7 @@ import { LoadErrorState } from "@/components/common";
 import { AreaChart } from "@/components/insights/charts";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
+import { usageMetricLabel, usageUnitLabel } from "@/lib/usage-metric";
 
 type Total = OrganizationUsageSummary["totals"][number];
 const periods: Array<[OrganizationUsagePeriod, string]> = [
@@ -187,7 +188,7 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
             >
               {data.totals.map((total) => (
                 <option key={metricKey(total)} value={metricKey(total)}>
-                  {total.eventType} ({total.unit})
+                  {usageMetricLabel(total.eventType)} ({usageUnitLabel(total.unit)})
                 </option>
               ))}
             </Select>
@@ -203,7 +204,7 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
               series={[
                 {
                   id: "usage",
-                  label: selected.eventType,
+                  label: usageMetricLabel(selected.eventType),
                   values: chart.values.map((value) => Math.max(0, value)),
                   className: "text-brand",
                 },
@@ -252,7 +253,9 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
               <thead>
                 <tr className="border-b border-border text-fg-muted">
                   <th className="py-2 font-medium">Workspace</th>
-                  <th className="py-2 text-right font-medium">{selected?.eventType} total</th>
+                  <th className="py-2 text-right font-medium">
+                    {selected ? usageMetricLabel(selected.eventType) : "Usage"} total
+                  </th>
                 </tr>
               </thead>
               <tbody>
