@@ -553,7 +553,7 @@ export class Observability {
       });
       this.registerSandboxRolloutConfig();
       this.registerTenancyCompatibilityLanes();
-      if (options.component === "worker" || options.component === "api") {
+      if (["worker", "worker-control", "worker-turn", "api"].includes(options.component)) {
         // Publish the finite series at startup so a first failure has a zero
         // baseline and healthy zeroes differ from a missing instrumentation path.
         for (const backend of [...SANDBOX_OPERATION_BACKENDS, "unknown"]) {
@@ -564,6 +564,14 @@ export class Observability {
               amount: 0,
             });
           }
+        }
+      }
+      if (options.component === "worker" || options.component === "worker-control") {
+        for (const outcome of WORKFLOW_WAKE_OUTCOMES) {
+          this.incrementCounter({ ...WORKFLOW_WAKE_METRIC, labels: { outcome }, amount: 0 });
+        }
+        for (const reason of [...WORKFLOW_WAKE_ADMISSION_BLOCKERS, "unknown"]) {
+          this.incrementCounter({ ...WORKFLOW_WAKE_BLOCKER_METRIC, labels: { reason }, amount: 0 });
         }
       }
     }
@@ -1168,6 +1176,87 @@ export function workspaceInsightsMetricObserver(
 
 function boundedMetricEnum(allowed: ReadonlySet<string>, value: string): string {
   return allowed.has(value) ? value : "unknown";
+}
+
+const WORKFLOW_WAKE_ADMISSION_BLOCKERS = new Set([
+  "pending_agent_steer",
+  "pending_prompt_turn",
+  "pending_quiescence",
+  "pending_machine_input",
+  "pending_input_wait",
+]);
+const WORKFLOW_WAKE_OUTCOMES = [
+  "signal_accepted",
+  "acknowledged",
+  "pending_admission",
+  "unconfirmed",
+  "failed",
+] as const;
+const WORKFLOW_WAKE_METRIC = {
+  name: "opengeni_session_workflow_wake_observations_total",
+  help: "Workflow wake dispatch observations; signal acceptance overlaps with admission outcomes, and retries are counted again.",
+};
+const WORKFLOW_WAKE_BLOCKER_METRIC = {
+  name: "opengeni_session_workflow_wake_admission_blockers_total",
+  help: "Workflow wake dispatch attempts awaiting durable admission, by bounded blocker; repeated revisions count again.",
+};
+
+/** Dispatcher observations count attempts, including repeated observations of
+ * the same revision. Transport acceptance is never an admission receipt. */
+export function recordWorkflowWakeReconciliation(
+  observability: Observability,
+  result: {
+    signaled: number;
+    delivered: number;
+    pendingAdmission: number;
+    unconfirmed: number;
+    failed: number;
+    pendingAdmissionBlockers: Record<string, number | undefined>;
+  },
+): void {
+  const count = (value: number | undefined) =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  try {
+    for (const [outcome, amount] of [
+      ["signal_accepted", result.signaled],
+      ["acknowledged", result.delivered],
+      ["pending_admission", result.pendingAdmission],
+      ["unconfirmed", result.unconfirmed],
+      ["failed", result.failed],
+    ] as const) {
+      observability.incrementCounter({
+        ...WORKFLOW_WAKE_METRIC,
+        labels: { outcome },
+        amount: count(amount),
+      });
+      if (count(amount) > 0) {
+        // Use the reviewed public telemetry vocabulary. Arbitrary aggregate
+        // property names are intentionally omitted by the external sink.
+        observability.info("Session workflow wake dispatch observed", {
+          surface: "session_workflow_wake",
+          outcome,
+          attempts: count(amount),
+        });
+      }
+    }
+    for (const [blocker, amount] of Object.entries(result.pendingAdmissionBlockers)) {
+      if (count(amount) === 0) continue;
+      const reason = boundedMetricEnum(WORKFLOW_WAKE_ADMISSION_BLOCKERS, blocker);
+      observability.incrementCounter({
+        ...WORKFLOW_WAKE_BLOCKER_METRIC,
+        labels: { reason },
+        amount: count(amount),
+      });
+      observability.info("Session workflow wake admission pending", {
+        surface: "session_workflow_wake",
+        outcome: "pending_admission",
+        reason,
+        attempts: count(amount),
+      });
+    }
+  } catch {
+    recordObserverFailure(observability, "session_workflow_wake");
+  }
 }
 
 function boundedMetricDuration(durationMs: number): number {
