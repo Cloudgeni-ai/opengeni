@@ -129,7 +129,10 @@ const CustomApiSetupDialog = lazy(async () => {
   return { default: module.CustomApiSetupDialog };
 });
 
-import type { IntegrationViewModel } from "@/components/capabilities/integration-view-model";
+import {
+  catalogStatusForChip,
+  type IntegrationViewModel,
+} from "@/components/capabilities/integration-view-model";
 
 import type {
   AccessContext,
@@ -444,6 +447,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                 : model.name,
           description: model.description,
           status: model.chip.label,
+          state: catalogStatusForChip(model.chip),
           connected: model.chip.label === "Connected" || model.chip.label === "Needs attention",
           onOpen: () => {
             integrationOpenerRef.current =
@@ -465,6 +469,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             item,
             connectionHealth(item, connections ?? [], connectionsLoaded),
           ).label,
+          state: catalogStatusForChip(
+            capabilityStateChip(item, connectionHealth(item, connections ?? [], connectionsLoaded)),
+          ),
           connected: item.enabled,
           onOpen: () => openItem(item),
         },
@@ -1592,6 +1599,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                             description: item.description ?? undefined,
                             status: "Available",
                             connected: false,
+                            state: "available",
                             onOpen: () => openItem(item, true),
                           },
                         ],

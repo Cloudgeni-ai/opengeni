@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { ChevronDownIcon, PlusIcon } from "lucide-react";
+import { BookOpenIcon, ChevronDownIcon, PlusIcon } from "lucide-react";
+import { CapabilityCatalogRow } from "@opengeni/react/connect";
+import "@opengeni/react/connect.css";
 import type {
   SkillRecord,
   SkillScope,
@@ -11,6 +13,13 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { CapabilityDialogContent } from "@/components/capabilities/detail-dialog";
+import {
+  Dialog as Sheet,
+  DialogDescription as SheetDescription,
+  DialogHeader as SheetHeader,
+  DialogTitle as SheetTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -63,6 +72,9 @@ export function SkillsPanelContent({
 }) {
   const { client } = context;
   const editorId = useId();
+  const openerRef = useRef<HTMLElement | null>(null);
+  const newSkillRef = useRef<HTMLButtonElement | null>(null);
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
   const grant = context.accessContext.workspaceGrants.find(
     (entry) => entry.workspaceId === workspaceId,
   );
@@ -179,6 +191,7 @@ export function SkillsPanelContent({
     setNewPath("");
   }
   async function open(skillId: string, revisionId?: string) {
+    if (!record) openerRef.current = document.activeElement as HTMLElement | null;
     const current = ++generation.current;
     setBusy(true);
     setError(null);
@@ -199,6 +212,7 @@ export function SkillsPanelContent({
     }
   }
   function create(scope: SkillScope) {
+    openerRef.current = newSkillRef.current;
     generation.current++;
     setHistory([]);
     setError(null);
@@ -329,7 +343,9 @@ export function SkillsPanelContent({
         className="flex flex-wrap items-center justify-between gap-3"
       >
         <div>
-          <h2 className="text-lg font-semibold">Your skills</h2>
+          <h2 ref={headingRef} tabIndex={-1} className="text-lg font-semibold">
+            Your skills
+          </h2>
           <p hidden={Boolean(query.trim())} className="text-sm text-fg-subtle">
             Create and manage your agent’s instructions.
           </p>
@@ -341,7 +357,7 @@ export function SkillsPanelContent({
             .map((scope) => (
               <DropdownMenu key={scope}>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="default" disabled={busy}>
+                  <Button ref={newSkillRef} variant="default" disabled={busy}>
                     <PlusIcon aria-hidden="true" />
                     New skill
                     <ChevronDownIcon aria-hidden="true" />
@@ -364,7 +380,7 @@ export function SkillsPanelContent({
             ))}
         </div>
       </div>
-      {error ? (
+      {error && !record ? (
         <p role="alert" className="text-sm text-status-error">
           {error}{" "}
           <Button
@@ -376,7 +392,7 @@ export function SkillsPanelContent({
           </Button>
         </p>
       ) : null}
-      {notice ? (
+      {notice && !record ? (
         <p role="status" className="text-sm">
           {notice}
         </p>
@@ -387,35 +403,35 @@ export function SkillsPanelContent({
           No Skills yet. Create one here or install one from the catalog.
         </p>
       ) : null}
-      <div className="skill-list">
+      <div className="grid gap-1">
         {matchingSkills.map((skill) => (
-          <button
-            type="button"
-            className="skill-list-row"
+          <CapabilityCatalogRow
             key={skill.id}
+            name={skill.title || skill.stableKey}
+            description={skill.description ?? undefined}
+            icon={<BookOpenIcon aria-hidden="true" />}
+            status={
+              skill.pendingRevisionIds.length
+                ? "attention"
+                : skill.status === "active"
+                  ? "added"
+                  : "unavailable"
+            }
+            statusLabel={
+              skill.pendingRevisionIds.length
+                ? skill.status === "active"
+                  ? "Pending changes"
+                  : "Pending changes · not active"
+                : skill.status === "active"
+                  ? undefined
+                  : `Not active · ${skill.status}`
+            }
+            aria-haspopup="dialog"
             aria-expanded={record?.id === skill.id}
             aria-controls={record?.id === skill.id ? editorId : undefined}
             disabled={busy}
-            onClick={() =>
-              navigate(() => {
-                if (record?.id === skill.id) setRecord(null);
-                else void open(skill.id);
-              })
-            }
-          >
-            <span className="min-w-0">
-              <span className="block truncate font-medium">{skill.title || skill.stableKey}</span>
-              {skill.status !== "active" || skill.pendingRevisionIds.length ? (
-                <span className="mt-1 block text-xs text-fg-subtle">
-                  {skill.pendingRevisionIds.length ? "Pending changes" : skill.status}
-                </span>
-              ) : null}
-            </span>
-            <ChevronDownIcon
-              aria-hidden="true"
-              className={`size-4 shrink-0 text-fg-subtle transition-transform ${record?.id === skill.id ? "rotate-180" : ""}`}
-            />
-          </button>
+            onOpen={() => navigate(() => void open(skill.id))}
+          />
         ))}
         {nextCursor ? (
           <Button variant="outline" disabled={busy} onClick={() => void loadMore()}>
@@ -423,156 +439,184 @@ export function SkillsPanelContent({
           </Button>
         ) : null}
       </div>
-      {record ? (
-        <div
-          id={editorId}
-          className="skill-editor space-y-4 rounded-xl border border-border p-4 sm:p-5"
-        >
-          <div className="flex items-center justify-between gap-3">
-            <h3 className="font-medium">{record.title || record.stableKey || "New skill"}</h3>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={busy}
-              onClick={() => navigate(() => setRecord(null))}
-            >
-              Collapse <ChevronDownIcon aria-hidden="true" className="rotate-180" />
-            </Button>
-          </div>
-          <div className="flex flex-wrap items-center gap-3 text-xs text-fg-subtle">
-            {record.source
-              ? "Installed Skill · workspace edits preserve the upstream source"
-              : "Authored Skill"}{" "}
-            <Select
-              aria-label="Skill scope"
-              value={record.scope}
-              disabled={busy || !canManage(record.scope)}
-              onChange={(event) => void changeScope(event.target.value as SkillScope)}
-            >
-              {(["user", "workspace", "organization"] as const)
-                .filter((scope) => scope === record.scope || canManage(scope))
-                .map((scope) => (
-                  <option key={scope} value={scope}>
-                    {scope === "user"
-                      ? "Personal"
-                      : scope === "workspace"
-                        ? "Workspace"
-                        : "Organization"}
-                  </option>
-                ))}
-            </Select>
-          </div>
-          <p className="text-sm text-muted-foreground">
-            Edit the name and description at the top of SKILL.md.
-          </p>
-          {history.length ? (
-            <label className="flex flex-wrap items-center gap-3 text-sm">
-              History
-              <Select
-                aria-label="History"
-                value={record.revisionId ?? ""}
-                disabled={busy}
-                onChange={(event) => {
-                  const revisionId = event.target.value;
-                  navigate(() => void open(record.id, revisionId));
-                }}
-              >
-                {history.map((revision) => (
-                  <option key={revision.id} value={revision.id}>
-                    Version {revision.revision}
-                    {revision.id === record.activeRevisionId ? " · active" : ""}
-                    {record.pendingRevisionIds.includes(revision.id) ? " · pending" : ""}
-                  </option>
-                ))}
-              </Select>
-            </label>
-          ) : null}
-          <label className="flex flex-wrap items-center gap-3 text-sm">
-            File
-            <Select
-              aria-label="File"
-              value={path}
-              onChange={(event) => setPath(event.target.value)}
-            >
-              {files.map((file) => (
-                <option key={file.path} value={file.path}>
-                  {file.path}
-                </option>
-              ))}
-            </Select>
-          </label>
-          <Textarea
-            aria-label={`Contents of ${path}`}
-            value={selected?.content ?? ""}
-            disabled={!editable || busy}
-            className="min-h-72 font-mono"
-            onChange={(event) =>
-              setFiles((current) =>
-                current.map((file) =>
-                  file.path === path ? { ...file, content: event.target.value } : file,
-                ),
-              )
-            }
-          />
-          {editable ? (
-            <div className="flex flex-wrap gap-2">
-              <Input
-                aria-label="New relative file path"
-                placeholder="references/example.md"
-                value={newPath}
-                onChange={(event) => setNewPath(event.target.value)}
-                disabled={busy}
-                className="max-w-sm"
-              />
-              <Button
-                variant="outline"
-                disabled={busy || !newPath || files.some((file) => file.path === newPath)}
-                onClick={() => {
-                  setFiles((current) => [...current, { path: newPath, content: "" }]);
-                  setPath(newPath);
-                  setNewPath("");
-                }}
-              >
-                Add text file
-              </Button>
-              <Button
-                variant="outline"
-                disabled={busy || path === "SKILL.md"}
-                onClick={() => {
-                  setFiles((current) => current.filter((file) => file.path !== path));
-                  setPath("SKILL.md");
-                }}
-              >
-                Remove selected file
-              </Button>
-              <Button
-                disabled={
-                  busy || !files.some((file) => file.path === "SKILL.md" && file.content.trim())
+      <Sheet
+        open={record !== null}
+        onOpenChange={(isOpen) => {
+          if (!isOpen && !busy) navigate(() => setRecord(null));
+        }}
+      >
+        {record ? (
+          <CapabilityDialogContent
+            id={editorId}
+            showCloseButton={!busy}
+            onEscapeKeyDown={(event) => {
+              if (busy) event.preventDefault();
+            }}
+            onInteractOutside={(event) => {
+              if (busy) event.preventDefault();
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              const opener = openerRef.current;
+              openerRef.current = null;
+              if (opener?.isConnected && !opener.matches(":disabled")) opener.focus();
+              else headingRef.current?.focus();
+            }}
+          >
+            <SheetHeader className="shrink-0 border-b border-border px-6 py-5 pr-12 text-left">
+              <SheetTitle className="break-words text-xl font-semibold tracking-tight">
+                {record.title || record.stableKey || "New skill"}
+              </SheetTitle>
+              <SheetDescription>
+                Edit the name and description at the top of SKILL.md.
+              </SheetDescription>
+            </SheetHeader>
+            <div className="skill-editor min-h-0 space-y-4 overflow-y-auto px-6 py-5">
+              {error ? (
+                <p role="alert" className="text-sm text-status-error">
+                  {error}
+                </p>
+              ) : null}
+              {notice ? (
+                <p role="status" className="text-sm">
+                  {notice}
+                </p>
+              ) : null}
+              <div className="flex flex-wrap items-center gap-3 text-xs text-fg-subtle">
+                {record.source
+                  ? "Installed Skill · workspace edits preserve the upstream source"
+                  : "Authored Skill"}{" "}
+                <Select
+                  aria-label="Skill scope"
+                  value={record.scope}
+                  disabled={busy || !canManage(record.scope)}
+                  onChange={(event) => void changeScope(event.target.value as SkillScope)}
+                >
+                  {(["user", "workspace", "organization"] as const)
+                    .filter((scope) => scope === record.scope || canManage(scope))
+                    .map((scope) => (
+                      <option key={scope} value={scope}>
+                        {scope === "user"
+                          ? "Personal"
+                          : scope === "workspace"
+                            ? "Workspace"
+                            : "Organization"}
+                      </option>
+                    ))}
+                </Select>
+              </div>
+              {history.length ? (
+                <label className="flex flex-wrap items-center gap-3 text-sm">
+                  History
+                  <Select
+                    aria-label="History"
+                    value={record.revisionId ?? ""}
+                    disabled={busy}
+                    onChange={(event) => {
+                      const revisionId = event.target.value;
+                      navigate(() => void open(record.id, revisionId));
+                    }}
+                  >
+                    {history.map((revision) => (
+                      <option key={revision.id} value={revision.id}>
+                        Version {revision.revision}
+                        {revision.id === record.activeRevisionId ? " · active" : ""}
+                        {record.pendingRevisionIds.includes(revision.id) ? " · pending" : ""}
+                      </option>
+                    ))}
+                  </Select>
+                </label>
+              ) : null}
+              <label className="flex flex-wrap items-center gap-3 text-sm">
+                File
+                <Select
+                  aria-label="File"
+                  value={path}
+                  onChange={(event) => setPath(event.target.value)}
+                >
+                  {files.map((file) => (
+                    <option key={file.path} value={file.path}>
+                      {file.path}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+              <Textarea
+                aria-label={`Contents of ${path}`}
+                value={selected?.content ?? ""}
+                disabled={!editable || busy}
+                className="min-h-72 font-mono"
+                onChange={(event) =>
+                  setFiles((current) =>
+                    current.map((file) =>
+                      file.path === path ? { ...file, content: event.target.value } : file,
+                    ),
+                  )
                 }
-                onClick={() => void mutate("save")}
-              >
-                Save Skill
-              </Button>
+              />
+              {editable ? (
+                <div className="flex flex-wrap gap-2">
+                  <Input
+                    aria-label="New relative file path"
+                    placeholder="references/example.md"
+                    value={newPath}
+                    onChange={(event) => setNewPath(event.target.value)}
+                    disabled={busy}
+                    className="max-w-sm"
+                  />
+                  <Button
+                    variant="outline"
+                    disabled={busy || !newPath || files.some((file) => file.path === newPath)}
+                    onClick={() => {
+                      setFiles((current) => [...current, { path: newPath, content: "" }]);
+                      setPath(newPath);
+                      setNewPath("");
+                    }}
+                  >
+                    Add text file
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={busy || path === "SKILL.md"}
+                    onClick={() => {
+                      setFiles((current) => current.filter((file) => file.path !== path));
+                      setPath("SKILL.md");
+                    }}
+                  >
+                    Remove selected file
+                  </Button>
+                  <Button
+                    disabled={
+                      busy || !files.some((file) => file.path === "SKILL.md" && file.content.trim())
+                    }
+                    onClick={() => void mutate("save")}
+                  >
+                    Save Skill
+                  </Button>
+                </div>
+              ) : null}
+              {canManage(record.scope) &&
+              record.revisionId &&
+              record.revisionId !== record.activeRevisionId ? (
+                <Button
+                  disabled={busy}
+                  onClick={() =>
+                    void mutate(
+                      record.pendingRevisionIds.includes(record.revisionId!)
+                        ? "approve"
+                        : "restore",
+                    )
+                  }
+                >
+                  {record.pendingRevisionIds.includes(record.revisionId)
+                    ? "Approve this revision"
+                    : "Restore as a new revision"}
+                </Button>
+              ) : null}
             </div>
-          ) : null}
-          {canManage(record.scope) &&
-          record.revisionId &&
-          record.revisionId !== record.activeRevisionId ? (
-            <Button
-              disabled={busy}
-              onClick={() =>
-                void mutate(
-                  record.pendingRevisionIds.includes(record.revisionId!) ? "approve" : "restore",
-                )
-              }
-            >
-              {record.pendingRevisionIds.includes(record.revisionId)
-                ? "Approve this revision"
-                : "Restore as a new revision"}
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
+          </CapabilityDialogContent>
+        ) : null}
+      </Sheet>
       <ConfirmDialog
         open={discardAction !== null}
         onOpenChange={(isOpen) => {

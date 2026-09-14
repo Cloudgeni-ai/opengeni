@@ -225,7 +225,8 @@ export function CapabilityBrowseSection({
                   onLoadMore();
                   queueMicrotask(() => {
                     if (button.isConnected || !grid?.isConnected) return;
-                    grid.children[focusIndex]?.querySelector<HTMLButtonElement>("button")?.focus();
+                    const row = grid.children[focusIndex];
+                    if (row instanceof HTMLButtonElement) row.focus();
                   });
                 }}
               >

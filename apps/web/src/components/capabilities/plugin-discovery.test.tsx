@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 
-// Other suites mock dialog primitives or initialize Radix without a DOM.
-// Keep the real Skills editor portals and governance checks in a fresh module graph.
-test("Skills dialog interactions preserve editing and governance boundaries", async () => {
+// Radix caches DOM availability when first imported. Other tests deliberately
+// import it for SSR, so exercise real dialog portals in a fresh module graph.
+test("plugin dialog interactions preserve installation and authorization boundaries", async () => {
   const child = Bun.spawn({
-    cmd: [process.execPath, "test", "./skills-panel.dom-fixture.tsx"],
+    cmd: [process.execPath, "test", "./plugin-discovery.dom-fixture.tsx"],
     cwd: import.meta.dir,
     stdout: "pipe",
     stderr: "pipe",

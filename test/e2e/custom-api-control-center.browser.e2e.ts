@@ -433,7 +433,7 @@ describe("custom API control center browser acceptance", () => {
         .getByRole("button", { name: /^Outlook Mail\s/ })
         .filter({ hasText: "Connected" });
       await expectVisible(row);
-      expect(await row.locator(".og-connection-catalog-status").textContent()).toBe("Connected");
+      expect(await row.locator(".og-capability-catalog-sr-only").textContent()).toBe("Connected");
       // Keyboard journey: opening from the focused row must return focus to it.
       await row.focus();
       await row.press("Enter");
@@ -532,7 +532,7 @@ async function openCapabilities(page: Page): Promise<void> {
 /** Opens the one Outlook Mail provider row's detail sheet (its accounts live there). */
 async function openOutlookMailSheet(page: Page) {
   const row = page
-    .locator(".og-connection-catalog-row")
+    .locator(".og-capability-catalog-row")
     .and(page.getByRole("button", { name: /^Outlook Mail\s/ }));
   await expectVisible(row);
   await row.click();

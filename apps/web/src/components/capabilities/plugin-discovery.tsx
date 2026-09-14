@@ -4,11 +4,18 @@ import {
   type PluginInstallationSummary,
 } from "@opengeni/contracts";
 import { useEffect, useRef, useState } from "react";
-import { PluginDiscovery as Catalog, PluginDetails } from "@opengeni/react/connect";
+import {
+  CapabilityCatalogRow,
+  ConnectionLogo,
+  PluginDiscovery as Catalog,
+  PluginDetails,
+} from "@opengeni/react/connect";
+import { BoxesIcon } from "lucide-react";
 import type { PluginDiscoveryItem } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { Sheet, SheetContent, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+import { Dialog, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { CapabilityDialogContent } from "./detail-dialog";
 
 const EMPTY_INSTALLED_PLUGINS: PluginInstallationSummary[] = [];
 
@@ -114,9 +121,15 @@ export function PluginDiscovery({
   }
   const [busy, setBusy] = useState(false);
   const [installed, setInstalled] = useState<Set<string>>(new Set());
+  const installedIds = new Set([
+    ...installed,
+    ...installedPlugins
+      .filter((plugin) => plugin.pluginKey.startsWith("marketplace/"))
+      .map((plugin) => plugin.pluginKey.slice("marketplace/".length).replace("/", ":")),
+  ]);
   const [error, setError] = useState<string | null>(null);
   async function install(item: PluginDiscoveryItem) {
-    if (!item.sourceUrl || !canManage || busy) return;
+    if (!item.sourceUrl || !canManage || busy || installedIds.has(item.id)) return;
     setBusy(true);
     setError(null);
     try {
@@ -156,34 +169,27 @@ export function PluginDiscovery({
               .filter((plugin) =>
                 (plugin.name + " " + plugin.description)
                   .toLowerCase()
-                  .includes(query.toLowerCase()),
+                  .includes(query.trim().toLowerCase()),
               )
               .map((plugin) => (
-                <button
+                <CapabilityCatalogRow
                   key={plugin.pluginKey}
                   data-installed-plugin={plugin.pluginKey}
-                  type="button"
-                  className="og-plugin-discovery-row"
-                  onClick={() => void openInstalled(plugin)}
-                >
-                  {plugin.logoUrl ? (
-                    <img
-                      src={plugin.logoUrl}
-                      alt=""
-                      loading="lazy"
-                      onError={(event) => {
-                        event.currentTarget.style.display = "none";
-                      }}
+                  name={plugin.name}
+                  description={plugin.description}
+                  status={plugin.status === "needs_attention" ? "attention" : "added"}
+                  statusLabel={
+                    plugin.status === "needs_attention" ? "Needs attention" : "Installed"
+                  }
+                  onOpen={() => void openInstalled(plugin)}
+                  icon={
+                    <ConnectionLogo
+                      src={plugin.logoUrl ?? null}
+                      name={plugin.name}
+                      fallback={<BoxesIcon aria-hidden="true" />}
                     />
-                  ) : null}
-                  <span className="min-w-0 flex-1">
-                    <strong className="block text-sm font-medium">{plugin.name}</strong>
-                    <span className="block line-clamp-1 text-xs text-fg-muted">
-                      {plugin.description}
-                    </span>
-                  </span>
-                  <span className="text-xs text-fg-muted">Installed ›</span>
-                </button>
+                  }
+                />
               ))}
           </div>
         </section>
@@ -193,6 +199,7 @@ export function PluginDiscovery({
         client={client}
         workspaceId={workspaceId}
         query={query}
+        installedIds={installedIds}
         onOpen={(item) => {
           opener.current =
             document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -201,35 +208,29 @@ export function PluginDiscovery({
           setSelected(item);
         }}
       />
-      <Sheet
+      <Dialog
         open={selected !== null}
         onOpenChange={(open) => {
           if (!open) setSelected(null);
         }}
       >
-        <SheetContent
-          className="flex flex-col gap-0 overflow-y-auto bg-bg p-0 w-full sm:max-w-[36rem]"
+        <CapabilityDialogContent
           onCloseAutoFocus={(event) => {
             event.preventDefault();
             opener.current?.focus();
           }}
         >
           {selected ? (
-            <>
-              <SheetTitle className="sr-only">{selected.displayName}</SheetTitle>
-              <SheetDescription className="sr-only">
+            <div className="min-h-0 overflow-y-auto overscroll-contain">
+              <DialogTitle className="sr-only">{selected.displayName}</DialogTitle>
+              <DialogDescription className="sr-only">
                 Plugin overview and included capabilities
-              </SheetDescription>
+              </DialogDescription>
               <PluginDetails
                 key={selected.id}
                 item={selected}
                 busy={busy}
-                installed={
-                  installed.has(selected.id) ||
-                  installedPlugins.some(
-                    (plugin) => plugin.pluginKey === "marketplace/" + selected.id.replace(":", "/"),
-                  )
-                }
+                installed={installedIds.has(selected.id)}
                 connections={Object.fromEntries(
                   (selected.mcpServers ?? []).map((server) => [
                     server.endpoint ?? "",
@@ -245,10 +246,11 @@ export function PluginDiscovery({
                 error={error}
                 {...(canManage ? { onInstall: () => void install(selected) } : {})}
               />
-              {selectedInstallation && onManageInstalled ? (
+              {canManage && selectedInstallation && onManageInstalled ? (
                 <div className="border-t border-border p-4">
                   <Button
                     variant="outline"
+                    disabled={busy}
                     onClick={(event) => {
                       setSelected(null);
                       onManageInstalled(
@@ -261,10 +263,10 @@ export function PluginDiscovery({
                   </Button>
                 </div>
               ) : null}
-            </>
+            </div>
           ) : null}
-        </SheetContent>
-      </Sheet>
+        </CapabilityDialogContent>
+      </Dialog>
     </>
   );
 }

@@ -32,6 +32,7 @@ function Fixture() {
                   "Browse selected folders and Shared Drives for read-only knowledge sync.",
                 status: "Connected",
                 connected: true,
+                state: "added",
                 onOpen: () => {
                   opener.current = document.activeElement as HTMLElement;
                   setOpen(true);

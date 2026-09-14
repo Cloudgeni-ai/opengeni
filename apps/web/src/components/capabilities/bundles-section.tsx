@@ -18,7 +18,7 @@ import { InstalledStrip } from "./installed-strip";
  * quick-connect fast path: the trailing state indicator stays decorative.
  */
 import type { usePacks } from "@opengeni/react";
-import { PackagePlusIcon, PlusIcon, PuzzleIcon } from "lucide-react";
+import { BookOpenIcon, PackagePlusIcon, PlusIcon, PuzzleIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -373,7 +373,7 @@ export function BundlesSection({
         ) : null}
 
         {visible.length > 0 ? (
-          <div className="grid gap-2" data-bundle-list>
+          <div className="grid gap-x-6 gap-y-1 sm:grid-cols-2" data-bundle-list>
             {visible.map((row) => (
               <IntegrationRow
                 key={row.id}
@@ -390,6 +390,7 @@ export function BundlesSection({
                     : row
                 }
                 busy={row.busy}
+                icon={row.kind === "skill" ? <BookOpenIcon aria-hidden="true" /> : undefined}
                 onOpen={() => open(row, document.activeElement)}
               />
             ))}

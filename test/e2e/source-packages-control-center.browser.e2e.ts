@@ -272,7 +272,9 @@ describe("Bundles section browser acceptance", () => {
       );
       await page.keyboard.press("Escape");
       await expectHidden(pluginSheet);
-      await page.waitForFunction(() => document.activeElement?.matches(".og-plugin-discovery-row"));
+      await page.waitForFunction(() =>
+        document.activeElement?.matches(".og-capability-catalog-row"),
+      );
       expect(state.pluginInstallRequests).toHaveLength(0);
       expect(state.pluginRemoveRequests).toHaveLength(0);
       expect(state.skillInstallRequests).toHaveLength(0);
@@ -399,7 +401,7 @@ async function openBundleSheet(page: Page, rowId: string): Promise<void> {
     return;
   }
   await page.getByRole("tab", { name: "Skills", exact: true }).click();
-  await page.locator(`[data-integration-row="${rowId}"] > button`).first().click();
+  await page.locator(`button[data-integration-row="${rowId}"]`).first().click();
 }
 
 async function installApi(page: Page, state: UiState): Promise<void> {

@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { BookOpenIcon } from "lucide-react";
+import { CapabilityCatalogRow } from "./capability-catalog-row";
 
 export type SkillDiscoveryItem = {
   id: string;
@@ -108,30 +110,18 @@ function DiscoveryResults({
                 entry.name.toLowerCase() === skill.name.toLowerCase()),
           );
           return (
-            <button
+            <CapabilityCatalogRow
               key={skill.id}
-              type="button"
-              className="og-skill-discovery-item"
               disabled={!canManage}
-              onClick={() => onImport(skill.url)}
-            >
-              <span className="og-skill-discovery-copy">
-                <strong>{skill.name}</strong>
-                <span>{skill.source}</span>
-                <small>{skill.installs.toLocaleString()} installs</small>
-              </span>
-              <span className="og-skill-discovery-action">
-                {installed ? (
-                  <>
-                    <span aria-hidden="true">✓ </span>Installed
-                  </>
-                ) : !canManage ? (
-                  "Admin required"
-                ) : (
-                  "Preview →"
-                )}
-              </span>
-            </button>
+              name={skill.name}
+              description={skill.source}
+              icon={<BookOpenIcon aria-hidden="true" />}
+              status={!canManage ? "unavailable" : installed ? "added" : "available"}
+              statusLabel={
+                !canManage ? "Admin required" : installed ? "Installed" : "Available to add"
+              }
+              onOpen={() => onImport(skill.url)}
+            />
           );
         })}
       </div>

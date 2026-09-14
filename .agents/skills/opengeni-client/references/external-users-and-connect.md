@@ -189,6 +189,18 @@ Providing `returnUrl` to `ConnectAccounts` enables explicit reconnect bound to
 the selected account's provider, ownership and ID; `ConnectPanel` wires this
 automatically. Reconnect does not silently substitute a different account.
 
+For a host-owned capability library, `CapabilityCatalogRow` from the same
+subpath supplies the shared icon/name/description row. Provide explicit
+`status` (`available`, `added`, `attention`, `unavailable`, or `loading`) and
+`onOpen`; the plus/check is decorative, not a second action. Normal status
+labels remain accessible and exceptions remain visible. Use one setup entry
+point from the catalog and conversation. Keep provider authentication,
+workspace/account sharing, and explicit Plugin/Skill installation separate;
+matching visual components never grants authority or implies installation.
+When using `ConnectionCatalog`, provide each option's typed `state` to use the
+quiet glyph treatment. Omitting it preserves the existing visible `status`
+string, so older integrations cannot silently lose provider warnings.
+
 Wire session timeline `onReconnect` to the host's connection experience. Use
 `findConnectRecoveryAccount` from `@opengeni/connect` with fresh account metadata
 and the event's exact connection ID, then begin setup for that account. A missing

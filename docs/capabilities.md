@@ -544,23 +544,16 @@ separate so autonomous pull-request creation never implies autonomous review or
 merge. The stock UI reads and writes the public GitHub action-policy endpoints;
 it does not mutate connector-policy rows directly.
 
-- Each row shows mark, name, one-line description, and a compact circular
-  connection-state indicator in place of a text chip: a filled check for
-  `Connected`, a triangle for `Needs attention`, a plus for `Not connected`
-  *when a fast connect path exists*, a muted dot for every other
-  non-interactive state (`Set up by an admin`, and `Not connected` with no
-  fast path), and a spinner while `Loading` or while that row's own mutation
-  is in flight. The click target is split: the large body button opens the
-  detail sheet, and its accessible name is `"<name>. <state>"`; the small
-  trailing indicator is a separate sibling button that is the one fast connect
-  path when the current state is `Not connected`, a dialog-free or one-dialog
-  connect action exists, and nothing is already running (guarding on that
-  in-flight state is what stops a double click from starting two redirects) -
-  for every other state it is purely decorative, never a dead click target,
-  and carries its state as visually hidden text so colour and shape are never
-  the only signal. There is one sheet, always the same one; there is no
-  lightweight preview variant. No inline scope text or per-provider buttons on
-  the row itself.
+- Connections, Skills, and Plugins share `CapabilityCatalogRow` from
+  `@opengeni/react/connect`: icon, name, short description, and a decorative
+  plus for available or quiet check for added. The whole row is one button;
+  clicking the name or glyph opens the same setup/management dialog. There is
+  no extra connection preview or separate glyph action. Normal state text is
+  available to assistive technology; warnings, pending review, and unavailable
+  states remain visible. Type, provenance, and component counts belong in
+  details, not in the catalog description. Multi-option services expand their
+  real connection choices before setup. Hosts provide explicit health state;
+  display labels never determine credential authority.
 - The detail sheet is a fixed frame with blocks in fixed order, empty blocks
   omitted. **Connection** is label/value facts; **Access** is the scoped
   resources (channels, repositories, folders, projects and spaces) with
@@ -608,8 +601,7 @@ it does not mutate connector-policy rows directly.
   so there is no account-naming form first. The one shared
   `quick-connect-dialog.tsx` component exists for the two authKind cases that
   do need a screen (`api_key`: one field, no scope bullet list; unreviewed
-  `oauth2`: one line naming the domain), and is reused by both the "+ Add
-  account" action and the Connectors row-icon fast path described below.
+  `oauth2`: one line naming the domain), and is reused by account actions.
   Gmail is not a multi-account provider: it is a single personal-only
   Connector, not an API integration definition (see the Gmail section below).
 
@@ -617,17 +609,14 @@ it does not mutate connector-policy rows directly.
 APIs (OpenAPI/GraphQL) - there is no third bucket. The existing `authKind`
 field (`"none" | "oauth2" | "api_key" | "unknown"`) already carries every
 behavioral difference the connect flow needs, so Custom API connectors use the
-exact same click-split/quick-connect treatment as any other Connector.
+same single-row setup treatment as any other Connector.
 Connection setup defaults to workspace-owned; a personal connection requires
-the explicit **Connect only for me** choice (official Gmail and Slack's hosted
-MCP are the personal-only exceptions). The row-icon fast path resolves that
-ownership through exactly the same rule as the detail sheet
-(`capabilityQuickConnectPlan` in `apps/web/src/lib/capabilities.ts`), so a
-one-click connect can never start a workspace-owned binding for a personal-only
-connector. It also stores an api-key credential under the field's **wire header
-name**, never its human label, and declines the fast path entirely for a
-connector declaring more than one required header - a single-field dialog would
-otherwise store half a credential that only fails later as a 401.
+the explicit **Only me** choice (official Gmail and Slack's hosted MCP are the
+personal-only exceptions). The shared setup dialog explains that workspace
+sharing uses the account or credentials the human authorizes, not a new
+workspace identity. It preserves provider-specific ownership rules and stores
+API-key credentials under each field's **wire header name**, never its human
+label. Connecting does not silently install bundled Skills.
 Inside that section a **Featured** strip of tiles driven by curated
 `metadata.curation.featured` leads, followed by the searchable long tail: the
 enabled catalog strip, then a **Custom APIs** list of already-installed
@@ -643,11 +632,9 @@ Plugin, or Pack row can appear in any of them and the chip counts describe what
 that grid can actually show. `CAPABILITY_FILTERS` therefore offers exactly
 `All`, `MCP servers`, and `APIs`. Skills, Plugins, and Packs have their own
 search in the Bundles section below.
-Tile badges are only `Official` (curated `metadata.curation.official`) and
-`Built by OpenGeni` (first-party bridges such as Fiken); nothing is ever
-labelled reviewed or verified. Every tile shows the same connection-state
-indicator and click-split as an Integrations row: the icon is the fast
-connect path, the rest of the tile opens the detail sheet. Custom API
+Catalog rows omit routine badges and technical metadata; provenance remains
+available in details. Every tile uses the same single-action shared row as an
+Integration, Skill, or Plugin. Custom API
 *creation* (paste an OpenAPI/GraphQL source URL, preview, pick tools,
 authenticate, create) stays its own multi-phase wizard
 (`custom-api-setup-dialog.tsx`, reachable from the Custom APIs list's own
@@ -683,8 +670,8 @@ chip vocabulary is the widened closed set in `integration-view-model.ts`
 (`Installed`, `Not installed`, `Update available`, `Installing`, plus
 `Needs attention`); a Bundle is never labelled `Connected`.
 
-Three provenances coexist and each is named on the row itself, as
-`<Kind> · <Provenance> · <description>`:
+Three provenances coexist in structured details and accessible row names;
+the visible row description contains only the actual description:
 
 - **Curated by OpenGeni** - the reviewed curated Skill library, and the Pack
   manifests OpenGeni ships (`source: "built_in"` catalog rows).
@@ -697,8 +684,7 @@ Three provenances coexist and each is named on the row itself, as
 
 A Pack's provenance is read from its `pack:<id>` catalog row, and Packs and the
 catalog load independently, so "no matching row yet" resolves to *unknown*
-rather than `built_in`: the row simply omits the provenance segment until the
-catalog arrives instead of briefly claiming OpenGeni curated it. The row's
+rather than `built_in`: no provenance is claimed before the catalog arrives. The row's
 `aria-label` replaces its own contents, so each row also supplies an
 `accessibleDetail` ("Pack, curated by OpenGeni") that `IntegrationRow` speaks
 between the name and the state - it renders whatever string it is given and
@@ -758,8 +744,10 @@ Ordinary new sessions include two first-party OpenGeni tools:
 
 The recommendation card resolves the catalog again at click time. A removed or
 changed item is never authorized from stale event data. Compact cards keep the
-provider identity visible while supported credential forms and reviewed Skill
-setup expand in the conversation. Reassurance and the action share the bottom
+provider identity visible while the first Connect action opens the same
+centered setup frame used by Capabilities. Supported credential forms and
+reviewed Skill setup stay in that dialog, with focus restored to the chat
+opener on close. Reassurance and the action share the bottom
 row on desktop and stack on mobile; verified completion uses the application's
 neutral theme tokens. OAuth-backed MCPs use the normal provider redirect and
 return to the same session, enabling the capability against the exact new
@@ -768,7 +756,7 @@ the event or model-visible tool result. Provider-specific prerequisites retain
 their existing protected setup paths and permission checks.
 
 Reviewed library Skills install for the workspace. Their source/version review
-is available in the expanded card; personal and conversation-only library
+is available in the setup dialog; personal and conversation-only library
 installation are not supported by this path. Completing setup makes the
 capability available to subsequent authorized work, but does not automatically
 replay an earlier tool call or submit a new agent message. Existing explicit

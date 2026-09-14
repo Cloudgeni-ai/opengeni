@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { PluginDiscoveryItem, PluginDiscoveryPage } from "@opengeni/sdk";
+import { BoxesIcon } from "lucide-react";
+import { CapabilityCatalogRow } from "./capability-catalog-row";
+import { ConnectionLogo } from "./connection-logo";
+
+const EMPTY_INSTALLED_IDS: ReadonlySet<string> = new Set();
+
 export type PluginDiscoveryProps = {
   client: {
     discoverPlugins(
@@ -9,6 +15,8 @@ export type PluginDiscoveryProps = {
   };
   workspaceId: string;
   query: string;
+  /** Discovery identities already installed in the current workspace. */
+  installedIds?: ReadonlySet<string>;
   onOpen: (item: PluginDiscoveryItem) => void;
 };
 export function PluginDiscovery(props: PluginDiscoveryProps) {
@@ -47,6 +55,7 @@ function Results({
   workspaceId,
   query,
   provider,
+  installedIds = EMPTY_INSTALLED_IDS,
   onOpen,
 }: PluginDiscoveryProps & { provider: string }) {
   const [items, setItems] = useState<PluginDiscoveryItem[]>([]);
@@ -106,38 +115,22 @@ function Results({
       ) : null}
       <div className="og-plugin-discovery-grid">
         {items.map((item) => (
-          <button
+          <CapabilityCatalogRow
             key={item.id}
-            className="og-plugin-discovery-row"
-            type="button"
-            onClick={() => onOpen(item)}
-          >
-            {item.logoUrl ? (
-              <img
+            data-plugin-id={item.id}
+            name={item.displayName.replace(/-/g, " ")}
+            description={item.description}
+            status={installedIds.has(item.id) ? "added" : "available"}
+            statusLabel={installedIds.has(item.id) ? "Installed" : "Available to install"}
+            onOpen={() => onOpen(item)}
+            icon={
+              <ConnectionLogo
                 src={item.logoUrl}
-                alt=""
-                loading="lazy"
-                onError={(event) => {
-                  event.currentTarget.style.display = "none";
-                }}
+                name={item.displayName}
+                fallback={<BoxesIcon aria-hidden="true" />}
               />
-            ) : null}
-            <span className="og-plugin-copy">
-              <span className="og-plugin-title">
-                <strong>{item.displayName.replace(/-/g, " ")}</strong>
-                <small>
-                  {item.provider === "openai"
-                    ? "OpenAI plugin registry"
-                    : "Anthropic plugin registry"}
-                </small>
-              </span>
-              <span className="og-plugin-description">{item.description}</span>
-              {item.category ? <span className="og-plugin-category">{item.category}</span> : null}
-            </span>
-            <span className="og-plugin-open" aria-hidden="true">
-              ›
-            </span>
-          </button>
+            }
+          />
         ))}
       </div>
       {loading ? <p role="status">Loading plugins…</p> : null}

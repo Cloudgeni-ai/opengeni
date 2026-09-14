@@ -157,7 +157,7 @@ describe("BundlesSection", () => {
     const rendered = await renderSection({ onOpenCatalogItem });
     try {
       const row = rendered.container.querySelector<HTMLElement>(
-        '[data-integration-row="skill:terraform"] button',
+        'button[data-integration-row="skill:terraform"]',
       );
       await act(async () => row!.click());
       expect(onOpenCatalogItem).toHaveBeenCalledTimes(1);
@@ -208,7 +208,7 @@ describe("BundlesSection", () => {
       />,
     );
     try {
-      const card = rendered.container.querySelector<HTMLButtonElement>(".og-plugin-discovery-row");
+      const card = rendered.container.querySelector<HTMLButtonElement>("[data-installed-plugin]");
       expect(card?.textContent).toContain("Research suite");
       await act(async () => card!.click());
       expect(getInstalledPluginDetails).toHaveBeenCalledTimes(1);
@@ -248,7 +248,7 @@ function rowIds(container: ParentNode): string[] {
 }
 
 function rowNames(container: ParentNode): string[] {
-  return [...container.querySelectorAll("[data-integration-row] > button")].map(
+  return [...container.querySelectorAll("button[data-integration-row]")].map(
     (row) => row.getAttribute("aria-label") ?? "",
   );
 }
