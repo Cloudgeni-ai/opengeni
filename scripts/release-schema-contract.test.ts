@@ -233,6 +233,12 @@ describe("release schema contract", () => {
     const knowledgeRelationshipProjection = completeSourceContract.migrations.some(
       (migration) => migration.path === "0468_knowledge_relationship_projection.sql",
     );
+    const usageEventsAccountRecentIndex = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0471_usage_events_account_recent_index.sql",
+    );
+    const usageEventsWorkspaceRecentIndex = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0472_usage_events_workspace_recent_index.sql",
+    );
     const mcpOperations = completeSourceContract.migrations.some(
       (migration) => migration.path === "0459_mcp_operations.sql",
     );
@@ -262,6 +268,8 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (usageEventsAccountRecentIndex ? 1 : 0) +
+        (usageEventsWorkspaceRecentIndex ? 1 : 0) +
         (knowledgeSourceDiscovery ? 1 : 0) +
         (knowledgeRelationshipProjection ? 1 : 0) +
         (hostResolverFullOrganizationKeys ? 1 : 0) +
@@ -393,10 +401,16 @@ describe("release schema contract", () => {
       ...(knowledgeSourceDiscovery
         ? { latestMigration: "0469_knowledge_source_discovery.sql" }
         : {}),
+      ...(usageEventsAccountRecentIndex
+        ? { latestMigration: "0471_usage_events_account_recent_index.sql" }
+        : {}),
+      ...(usageEventsWorkspaceRecentIndex
+        ? { latestMigration: "0472_usage_events_workspace_recent_index.sql" }
+        : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: "0469_knowledge_source_discovery.sql",
-      deploymentMode: "maintenance",
+      path: "0472_usage_events_workspace_recent_index.sql",
+      deploymentMode: "rolling",
     });
     expect(
       completeSourceContract.migrations.find(
@@ -1507,6 +1521,12 @@ describe("release schema contract", () => {
     const knowledgeRelationshipProjection = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0468_knowledge_relationship_projection.sql",
     );
+    const usageEventsAccountRecentIndex = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0471_usage_events_account_recent_index.sql",
+    );
+    const usageEventsWorkspaceRecentIndex = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0472_usage_events_workspace_recent_index.sql",
+    );
     let completeSourceContract = await contractWithoutMigrations([
       "0463_host_mcp_resolver_registration.sql",
       "0461_unified_knowledge.sql",
@@ -1961,6 +1981,8 @@ describe("release schema contract", () => {
       "0467_host_resolver_full_organization_keys.sql",
       "0468_knowledge_relationship_projection.sql",
       "0469_knowledge_source_discovery.sql",
+      "0471_usage_events_account_recent_index.sql",
+      "0472_usage_events_workspace_recent_index.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2329,8 +2351,20 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0469_knowledge_source_discovery.sql",
       };
+    if (usageEventsAccountRecentIndex)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0471_usage_events_account_recent_index.sql",
+      };
+    if (usageEventsWorkspaceRecentIndex)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0472_usage_events_workspace_recent_index.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (usageEventsAccountRecentIndex ? 1 : 0) +
+        (usageEventsWorkspaceRecentIndex ? 1 : 0) +
         (knowledgeSourceDiscovery ? 1 : 0) +
         (knowledgeRelationshipProjection ? 1 : 0) +
         (hostResolverFullOrganizationKeys ? 1 : 0) +
@@ -2662,6 +2696,12 @@ describe("release schema contract", () => {
         : {}),
       ...(knowledgeSourceDiscovery
         ? { latestMigration: "0469_knowledge_source_discovery.sql" }
+        : {}),
+      ...(usageEventsAccountRecentIndex
+        ? { latestMigration: "0471_usage_events_account_recent_index.sql" }
+        : {}),
+      ...(usageEventsWorkspaceRecentIndex
+        ? { latestMigration: "0472_usage_events_workspace_recent_index.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
