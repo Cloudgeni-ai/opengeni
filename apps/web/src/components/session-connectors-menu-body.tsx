@@ -1,4 +1,4 @@
-import { CompassIcon, Settings2Icon, RefreshCwIcon, Loader2Icon } from "lucide-react";
+import { Settings2Icon, RefreshCwIcon, Loader2Icon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
@@ -18,8 +18,7 @@ export type SessionConnectorsMenuProps = {
   selection: SessionToolSelection;
   onChange: (selection: SessionToolSelection) => void;
   leading?: ReactNode;
-  onBrowse?: () => void;
-  onManage?: () => void;
+  onOpenCapabilities?: () => void;
   onReconnect?: (serverId: string) => void;
   loading?: boolean;
   error?: string | null;
@@ -35,32 +34,24 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
   const connectors = props.servers.filter(isComposerConnector);
   return (
     <>
-      <div className="flex items-center gap-1 px-1 pb-1">
+      <div className="flex shrink-0 items-center gap-1 px-1 pb-1">
         {props.leading}
         <DropdownMenuLabel className="text-sm">Connectors</DropdownMenuLabel>
       </div>
-      {props.onBrowse ? (
-        <ConnectorAction
-          presentation={props.presentation}
-          className="min-h-10"
-          onAction={props.onBrowse}
-        >
-          <CompassIcon className="size-4" />
-          Browse connectors
-        </ConnectorAction>
+      {props.onOpenCapabilities ? (
+        <>
+          <ConnectorAction
+            presentation={props.presentation}
+            className="min-h-10 shrink-0"
+            onAction={props.onOpenCapabilities}
+          >
+            <Settings2Icon className="size-4" />
+            Capabilities
+          </ConnectorAction>
+          <DropdownMenuSeparator />
+        </>
       ) : null}
-      {props.onManage ? (
-        <ConnectorAction
-          presentation={props.presentation}
-          className="min-h-10"
-          onAction={props.onManage}
-        >
-          <Settings2Icon className="size-4" />
-          Manage connectors
-        </ConnectorAction>
-      ) : null}
-      {(props.onBrowse || props.onManage) && <DropdownMenuSeparator />}
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+      <div className="min-h-0 shrink overflow-y-auto overscroll-contain">
         {props.loading && !connectors.length ? (
           <p className="px-2 py-4 text-xs text-fg-muted" role="status">
             Loading connectors…
@@ -155,7 +146,9 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
           {props.error}
         </p>
       ) : null}
-      <p className="px-2 pt-2 pb-1 text-2xs text-fg-subtle">Switches apply to this conversation.</p>
+      <p className="shrink-0 px-2 pt-2 pb-1 text-2xs text-fg-subtle">
+        Switches apply to this conversation.
+      </p>
     </>
   );
 }

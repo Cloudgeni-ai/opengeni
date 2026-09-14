@@ -63,8 +63,7 @@ function Preview() {
               selection={selection}
               onToolSelectionChange={setSelection}
               connectorActions={{
-                onBrowse: () => setStatus("Browse opens the connector catalog in the app."),
-                onManage: () => setStatus("Manage opens connection settings in the app."),
+                onOpenCapabilities: () => setStatus("Opens Capabilities in the app."),
                 onReconnect: (id) => {
                   setServers((current) =>
                     current.map((s) => (s.id === id ? { ...s, connectionStatus: "ready" } : s)),

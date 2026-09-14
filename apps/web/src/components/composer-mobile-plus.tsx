@@ -68,7 +68,7 @@ type Panel = "root" | "tools" | "repos" | "voice" | "variables";
 export type ComposerPlusProps = {
   connectorActions?: Pick<
     SessionConnectorsMenuProps,
-    "onBrowse" | "onManage" | "onReconnect" | "loading" | "error" | "busyId"
+    "onOpenCapabilities" | "onReconnect" | "loading" | "error" | "busyId"
   >;
   onOpenConnectors?: () => void;
   /** Centered composers need viewport-sized panels rather than trigger-side space. */
@@ -177,6 +177,7 @@ export function ComposerMobilePlus(props: ComposerPlusProps) {
             dialog={dialogOpen}
             panel={panel}
             triggerRef={triggerRef}
+            side={props.expandedPanelPresentation === "dialog" ? "bottom" : "top"}
             className={
               panel === "tools"
                 ? SESSION_TOOLS_PANEL_CLASS
@@ -352,6 +353,7 @@ export function ComposerMobilePlus(props: ComposerPlusProps) {
 
 function ComposerPanelContent(props: {
   dialog: boolean;
+  side: "top" | "bottom";
   panel: Panel;
   triggerRef: { current: HTMLButtonElement | null };
   className: string;
@@ -398,7 +400,7 @@ function ComposerPanelContent(props: {
   return (
     <DropdownMenuContent
       align="start"
-      side="top"
+      side={props.side}
       sideOffset={8}
       collisionPadding={12}
       className={props.className}

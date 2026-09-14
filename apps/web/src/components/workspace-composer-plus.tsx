@@ -43,7 +43,7 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
       setCatalog({ client, workspaceId, items: result.items, connections });
       setError(
         connections === null
-          ? "Connection status couldn't be checked. Manage connectors to retry."
+          ? "Connection status couldn't be checked. Open Capabilities to check the connection."
           : null,
       );
     } catch (failure) {
@@ -153,11 +153,7 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
         (path) => client.catalogAssetUrl(path),
       )}
       connectorActions={{
-        onBrowse: () =>
-          window.location.assign(
-            `/workspaces/${encodeURIComponent(workspaceId)}/plugins#connectors-browse`,
-          ),
-        onManage: () => manage(),
+        onOpenCapabilities: () => manage(),
         onReconnect: (id) => void reconnect(id),
         loading,
         error,
