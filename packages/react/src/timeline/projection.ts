@@ -140,7 +140,8 @@ export function buildTimeline(
   // interactive fence). Never parse that suffix as a complete Markdown source.
   // Keep the raw events available for pagination; a completed receipt restores
   // the authoritative message without requiring an unbounded history fetch.
-  let missingMessagePrefix = options.partialStart === true;
+  let completeHistoryPrefix = options.partialStart !== true;
+  const knownMessagePrefixTurns = new Set<string | null>();
   const incompleteMessageKeys = new Set<string>();
   const pendingWaitOutcomeByTurn = new Map<string | null, PendingWaitOutcome>();
   const latestAgentResponseByTurn = new Map<string | null, TrackedAgentResponse>();
@@ -308,12 +309,17 @@ export function buildTimeline(
   for (const event of ordered) {
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
-    if (
-      event.type === "session.created" ||
-      event.type === "user.message" ||
-      event.type === "turn.started"
+    if (event.type === "session.created") {
+      completeHistoryPrefix = true;
+    } else if (
+      event.type === "turn.started" ||
+      (event.type === "user.message" &&
+        payload.delivery !== "steer" &&
+        payload.routing !== "accepted_for_steering")
     ) {
-      missingMessagePrefix = false;
+      // Accepted Steer is visible before its replacement turn starts. It says
+      // nothing about the prefix of a still-streaming message from the old turn.
+      knownMessagePrefixTurns.add(turnId);
     }
     startupEvent = event;
     startupTurnId = turnId;
@@ -431,7 +437,10 @@ export function buildTimeline(
         }
         const messageId = stringValue(payload.messageId);
         const messageKey = messageId ? JSON.stringify([turnId, messageId]) : null;
-        if (missingMessagePrefix || (messageKey && incompleteMessageKeys.has(messageKey))) {
+        if (
+          (!completeHistoryPrefix && !knownMessagePrefixTurns.has(turnId)) ||
+          (messageKey && incompleteMessageKeys.has(messageKey))
+        ) {
           if (messageKey) incompleteMessageKeys.add(messageKey);
           break;
         }
@@ -490,7 +499,7 @@ export function buildTimeline(
       }
 
       case "agent.message.completed": {
-        missingMessagePrefix = false;
+        knownMessagePrefixTurns.add(turnId);
         const text = stringValue(payload.text);
         const messageId = stringValue(payload.messageId);
         const messageKey = messageId ? JSON.stringify([turnId, messageId]) : null;

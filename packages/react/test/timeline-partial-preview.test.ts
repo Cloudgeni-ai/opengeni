@@ -61,3 +61,47 @@ test("late deltas for a missing-prefix message do not leak after another receipt
   expect(items).toHaveLength(1);
   expect(items[0]).toMatchObject({ text: "Another response" });
 });
+
+test("accepted Steer cannot expose the old turn's partial preview", () => {
+  for (const steer of [{ delivery: "steer" }, { routing: "accepted_for_steering" }]) {
+    const accepted = {
+      ...event(500, "user.message", { text: "Change direction", ...steer }),
+      turnId: null,
+    };
+    const suffix = event(501, "agent.message.delta", {
+      messageId: "old-preview",
+      text: "body { color: red; }",
+    });
+    const partial = buildTimeline([accepted, suffix], { partialStart: true });
+    expect(partial.filter((item) => item.kind === "agent-message")).toEqual([]);
+    const text = "```opengeni-html\n<style>body { color: red; }</style>\n```";
+    const restored = buildTimeline(
+      [
+        accepted,
+        suffix,
+        event(502, "agent.message.completed", { messageId: "old-preview", text }),
+        { ...event(503, "turn.started", {}), turnId: "replacement" },
+        {
+          ...event(504, "agent.message.delta", { messageId: "new", text: "New direction" }),
+          turnId: "replacement",
+        },
+      ],
+      { partialStart: true },
+    );
+    expect(restored.filter((item) => item.kind === "agent-message")).toMatchObject([
+      { text, streaming: false },
+      { text: "New direction", streaming: true },
+    ]);
+  }
+});
+
+test("a boundary in another turn does not authorize an old message suffix", () => {
+  const items = buildTimeline(
+    [
+      { ...event(500, "turn.started", {}), turnId: "replacement" },
+      event(501, "agent.message.delta", { messageId: "old-preview", text: "body { color: red; }" }),
+    ],
+    { partialStart: true },
+  );
+  expect(items.filter((item) => item.kind === "agent-message")).toEqual([]);
+});
