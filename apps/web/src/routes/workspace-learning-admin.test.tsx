@@ -108,12 +108,14 @@ test("shows all three defaults together and saves one change without resetting t
       settings: { knowledge: "off", instructions: "review_first", skills: "review_first" },
     });
     expect(view.container.textContent).toContain("Saved. Applies from the next agent run.");
-    expect(view.container.textContent).toContain("Read support feedback");
+    expect(view.container.textContent).not.toContain("Chat and task overrides");
+    expect(view.container.textContent).not.toContain("Read support feedback");
+    expect(listOverrides).not.toHaveBeenCalled();
   } finally {
     await view.dispose();
   }
 });
-test("personal defaults use their own settings and override inventory", async () => {
+test("personal defaults use their own settings without loading override inventory", async () => {
   const view = await render();
   try {
     const select = view.container.querySelector(
@@ -124,7 +126,7 @@ test("personal defaults use their own settings and override inventory", async ()
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
     expect(getSettings.mock.calls.some((call) => call[1] === "personal")).toBe(true);
-    expect(listOverrides.mock.calls.at(-1)).toEqual([workspaceId, "personal"]);
+    expect(listOverrides).not.toHaveBeenCalled();
     expect(saveSettings).not.toHaveBeenCalled();
   } finally {
     await view.dispose();

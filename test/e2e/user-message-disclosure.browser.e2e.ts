@@ -36,6 +36,11 @@ describe("long sent user-message browser acceptance", () => {
       ...(executablePath ? { executablePath } : {}),
       args: ["--no-sandbox", "--disable-dev-shm-usage"],
     });
+    // An HTTP response from Vite does not mean the browser harness has compiled
+    // and mounted. Establish fixture readiness within the setup deadline, not
+    // the first interaction test's deadline. Tests still use fresh contexts.
+    const readyPage = await openHarness(browser, baseUrl, { width: 390, height: 844 });
+    await readyPage.context().close();
     if (evidenceDir) {
       await mkdir(evidenceDir, { recursive: true });
     }

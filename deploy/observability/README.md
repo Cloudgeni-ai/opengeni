@@ -16,6 +16,15 @@ The wrapper is intentionally separate from `deploy/helm/opengeni`:
   Alertmanager receivers, remote write, scheduling, and environment-only rules
   or dashboards.
 
+The Runtime Failures dashboard separates workflow wake transport acceptance
+from durable admission outcomes. Its admission-blocker panel explains whether
+queued prompts, Steer, machine input, input-wait settlement, or prior-attempt
+quiescence remain pending. These metrics count dispatch observations, including
+retries of the same revision, rather than unique sessions or running turns.
+The structured logs retain the same bounded `outcome`, `reason`, and `attempts`
+fields; per-session state remains available through the authenticated session
+API. Metrics do not contain session identities or raw error text.
+
 ## Requirements
 
 - Kubernetes 1.25 or newer (the pinned upstream chart requirement)

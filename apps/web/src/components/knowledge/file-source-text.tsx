@@ -18,7 +18,12 @@ export function FileSourceText({ workspaceId, fileId }: { workspaceId: string; f
     setCursor(null);
     setError(null);
     void client
-      .listKnowledgeEntries(workspaceId, { fileId, kind: "source", limit: 20 })
+      .listKnowledgeEntries(workspaceId, {
+        fileId,
+        kind: "source",
+        includeEvidence: true,
+        limit: 20,
+      })
       .then((result) => {
         if (current) {
           setSources(result.entries);
@@ -43,6 +48,7 @@ export function FileSourceText({ workspaceId, fileId }: { workspaceId: string; f
       const result = await client.listKnowledgeEntries(workspaceId, {
         fileId,
         kind: "source",
+        includeEvidence: true,
         limit: 20,
         cursor,
       });

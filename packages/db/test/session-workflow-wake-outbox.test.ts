@@ -10,6 +10,7 @@ import {
   createSession,
   enqueueSessionWorkflowWake,
   getSessionTurn,
+  getSession,
   initializeSessionStartAtomically,
   listSessionEvents,
   listSessionTurns,
@@ -413,6 +414,18 @@ describe("transactional session workflow wake outbox", () => {
         wakeRevision: queued.wakeRevision,
         deliveredRevision: 0,
       });
+      const waiting = await getSession(client.db, ctx.grant.workspaceId!, ctx.session.id);
+      expect(waiting).toMatchObject({
+        status: "queued",
+        activeTurnId: null,
+        dispatchWait: { state: "pending", attempts: 1, lastError: null },
+      });
+      expect(waiting?.dispatchWait?.nextAttemptAt).toBeTruthy();
+      await markSessionWorkflowWakeFailed(client.db, claimedWake!, "Control worker unavailable");
+      expect(
+        (await getSession(client.db, ctx.grant.workspaceId!, ctx.session.id))?.dispatchWait
+          ?.lastError,
+      ).toBe("Control worker unavailable");
 
       const claimedTurn = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
         sessionId: ctx.session.id,
@@ -424,6 +437,9 @@ describe("transactional session workflow wake outbox", () => {
       });
       expect(claimedTurn.action).toBe("claimed");
       if (claimedTurn.action !== "claimed") throw new Error(`${delivery} turn was not claimed`);
+      expect(
+        (await getSession(client.db, ctx.grant.workspaceId!, ctx.session.id))?.dispatchWait,
+      ).toBeNull();
 
       expect(await markSessionWorkflowWakeDelivered(client.db, claimedWake!)).toEqual({
         action: "acknowledged",
