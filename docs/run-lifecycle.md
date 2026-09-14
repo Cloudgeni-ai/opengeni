@@ -347,6 +347,14 @@ them. A Codex-subscription manager therefore keeps its external billing path for
 workers by default instead of falling back to the deployment's OpenGeni-credit
 model.
 
+Session detail reads expose `dispatchWait` for active-control queued sessions
+without an active turn. It projects the existing workflow-wake ledger's pending
+revision, attempt count, retry time and last error; it is not an execution
+receipt. Acknowledged or unavailable delivery evidence never implies running.
+The visible queued session refreshes this non-event evidence while waiting.
+Sidebar queued/capacity counts use a clock and remain distinct from working
+counts; deliberate session waits retain their reason and recheck presentation.
+
 The prompt queue is not worker backlog. `session_turns.status = 'queued'` means
 the worker has not claimed the physical row; it does not decide whether the user
 sees a queued prompt. Immutable `session_turns.prompt_routing` records that

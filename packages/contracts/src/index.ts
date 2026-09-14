@@ -12508,6 +12508,16 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     workspaceId: z.string().uuid(),
     accountId: z.string().uuid(),
     status: SessionStatus,
+    /** Detail-only dispatch evidence. A wake delivery attempt is not turn execution. */
+    dispatchWait: z
+      .object({
+        state: z.enum(["pending", "acknowledged", "unavailable"]),
+        attempts: z.number().int().nonnegative(),
+        nextAttemptAt: z.string().nullable(),
+        lastError: z.string().nullable(),
+      })
+      .nullable()
+      .optional(),
     /** Detail-only failure evidence through lastSequence; independent of timeline paging. */
     failureDiagnostics: z
       .object({

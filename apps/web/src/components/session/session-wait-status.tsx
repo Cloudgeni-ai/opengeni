@@ -7,6 +7,76 @@ import { sessionInputWait } from "@/lib/session-rail";
 export function SessionWaitStatus({
   session,
 }: {
+  session: Pick<
+    Session,
+    "status" | "effectiveControl" | "inputWait" | "activeTurnId" | "dispatchWait"
+  >;
+}) {
+  if (
+    session.status === "queued" &&
+    !session.activeTurnId &&
+    session.effectiveControl.state === "active"
+  ) {
+    return <SessionDispatchWaitStatus wait={session.dispatchWait} />;
+  }
+  return <SessionInputWaitStatus session={session} />;
+}
+
+function SessionDispatchWaitStatus({ wait }: { wait: Session["dispatchWait"] }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, []);
+  const next = wait?.nextAttemptAt ? new Date(wait.nextAttemptAt) : null;
+  return (
+    <div className="shrink-0 px-4 py-2 sm:px-6" data-session-dispatch-wait="">
+      <div className="mx-auto flex w-full max-w-3xl items-start gap-2 text-sm text-fg-muted">
+        <Clock3Icon aria-hidden className="mt-0.5 size-4 shrink-0" />
+        <div className="min-w-0">
+          <div role="status">
+            <p className="font-medium text-fg">
+              {wait?.lastError
+                ? "Unable to start yet"
+                : (wait?.attempts ?? 0) > 1
+                  ? "Still waiting to start"
+                  : "Queued · waiting to start"}
+            </p>
+            <p className="mt-0.5 text-xs">No agent turn is running. Your messages remain queued.</p>
+            <p className="mt-0.5 text-xs">
+              {wait?.state === "pending" && next
+                ? next.getTime() <= now
+                  ? "Automatic start retry is due."
+                  : `Automatic start retry at ${next.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}.`
+                : wait?.state === "acknowledged"
+                  ? "The start request was accepted; a worker has not started the turn yet."
+                  : "Start confirmation is unavailable. The next turn has not begun executing."}
+            </p>
+          </div>
+          {wait && (wait.attempts > 0 || wait.lastError) ? (
+            <details className="mt-1 text-xs">
+              <summary className="cursor-pointer">Start details</summary>
+              <p className="mt-1">
+                {wait.attempts} dispatch attempt{wait.attempts === 1 ? "" : "s"} for the current
+                start request. Dispatch attempts do not mean the agent is running.
+              </p>
+              {wait.lastError ? (
+                <p className="mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap break-words">
+                  Last recorded dispatch error: {wait.lastError}
+                </p>
+              ) : null}
+            </details>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The agent's deliberate wait retains its own reason and deadline. */
+function SessionInputWaitStatus({
+  session,
+}: {
   session: Pick<Session, "status" | "effectiveControl" | "inputWait">;
 }) {
   const waiting = sessionInputWait(session);

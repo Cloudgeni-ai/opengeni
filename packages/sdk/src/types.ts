@@ -1372,6 +1372,16 @@ export type CancelSessionBackgroundCommandResult = {
 };
 
 export type Session = {
+  /** Detail-only dispatch evidence; delivery does not prove turn execution. */
+  dispatchWait?:
+    | {
+        state: "pending" | "acknowledged" | "unavailable";
+        attempts: number;
+        nextAttemptAt: string | null;
+        lastError: string | null;
+      }
+    | null
+    | undefined;
   /** Detail-only failure evidence through lastSequence; independent of timeline paging. */
   failureDiagnostics?:
     | {
