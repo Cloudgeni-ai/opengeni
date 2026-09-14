@@ -58,6 +58,49 @@ function harness(grants: unknown[] = []) {
   } as unknown as OpenGeniBrowserClient;
   return { client, issueUserResourceGrant };
 }
+test("sessions before sharing activation do not load or restore personal grants", async () => {
+  const h = harness([grant]);
+  const { tenancy: _tenancy, ...unactivatedSession } = session;
+  const listConnections = mock(h.client.listConnections);
+  const listUserResourceAuthorities = mock(h.client.listUserResourceAuthorities);
+  h.client.listConnections = listConnections;
+  h.client.listUserResourceAuthorities = listUserResourceAuthorities;
+
+  expect(await sessionConnectionAuthorities(h.client, unactivatedSession, [item])).toEqual([]);
+  expect(listConnections).not.toHaveBeenCalled();
+  expect(listUserResourceAuthorities).not.toHaveBeenCalled();
+  expect(h.issueUserResourceGrant).not.toHaveBeenCalled();
+});
+
+test("explicit personal connection authorization still requires session sharing metadata", async () => {
+  const h = harness();
+  const { tenancy: _tenancy, ...unactivatedSession } = session;
+  h.client.getSession = async () => unactivatedSession;
+
+  await expect(
+    authorizeSessionPersonalConnection(
+      h.client,
+      "workspace",
+      "session",
+      item,
+      "workspace",
+      true,
+      () => true,
+    ),
+  ).rejects.toThrow("visibility changed");
+  expect(h.issueUserResourceGrant).not.toHaveBeenCalled();
+});
+
+test("activated sessions still surface failed grant lookups", async () => {
+  const h = harness();
+  h.client.listUserResourceAuthorities = async () => {
+    throw new Error("user-resource authority denied");
+  };
+  await expect(sessionConnectionAuthorities(h.client, session, [item])).rejects.toThrow(
+    "user-resource authority denied",
+  );
+});
+
 test("private IDs resolve from owner metadata and only exact active session grants enter messages", async () => {
   const h = harness([
     { ...grant, mode: "always" },

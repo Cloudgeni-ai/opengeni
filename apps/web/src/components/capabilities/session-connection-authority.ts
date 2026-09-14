@@ -30,13 +30,16 @@ export async function sessionConnectionAuthorities(
   items: CapabilityCatalogItem[],
   knownConnections?: ConnectionMetadata[],
 ): Promise<McpConnectionAuthoritySelection[]> {
+  // Before sharing activation, the API intentionally omits tenancy. There are
+  // no session grants to restore, so ordinary messages need no personal lookup.
+  // Explicit authorization below still requires visibility and an exact epoch.
+  if (!session.tenancy) return [];
   const personal = items.filter(
     (item) =>
       item.enabled && item.connectionRef?.subjectScope === "subject" && item.runtime.mcpServerId,
   );
   if (personal.length === 0) return [];
   const connections = knownConnections ?? (await client.listConnections(session.workspaceId));
-  if (!session.tenancy) throw new Error("Conversation sharing authority is not available.");
   const authorityEpoch = session.tenancy.authorityEpoch;
   const visibility =
     session.tenancy.visibility === "workspace" ? "workspace_shared" : "user_private";
