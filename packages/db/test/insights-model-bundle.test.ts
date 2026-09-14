@@ -359,6 +359,63 @@ describe("Workspace Insights model bundle", () => {
     expect(source.match(/left join sessions root/g)).toHaveLength(1);
     expect(source).not.toContain("left join sessions session");
     expect(source).toContain("selected_sessions as materialized");
+    expect(source).not.toContain("count(distinct id)");
+    expect(source).toContain("count(*) filter (where first_source)");
+  });
+
+  test("counts each fact once per source while preserving sums, including DB-accepted null sources", async () => {
+    if (!shared) return;
+    const entries = [
+      { source: "company_profile", items: 1, utf8Bytes: 80, estimatedTokens: 20 },
+      { source: null, items: 2, utf8Bytes: 40, estimatedTokens: 10 },
+      { source: null, items: 3, utf8Bytes: 60, estimatedTokens: 15 },
+    ];
+    const [valid] = await shared.admin`
+      select opengeni_private.model_context_contributions_valid(${shared.admin.json(entries)}) as accepted,
+        opengeni_private.model_context_contributions_valid(${shared.admin.json([entries[0]!, entries[0]!])}) as duplicate_named`;
+    expect(valid?.accepted).toBe(true);
+    expect(valid?.duplicate_named).toBe(false);
+    const [constraint] = await shared.admin`
+      select convalidated from pg_constraint
+      where conrelid = 'model_call_facts'::regclass
+        and conname = 'model_call_facts_context_contributions_check'`;
+    expect(constraint?.convalidated).toBe(true);
+
+    // Include repeated sources across facts, empty coverage, and unknown coverage.
+    const rows = await shared.admin`
+      with facts(id, context_contributions) as (values
+        (1, ${shared.admin.json(entries)}::jsonb),
+        (2, ${shared.admin.json(entries)}::jsonb),
+        (3, '[]'::jsonb), (4, null::jsonb)
+      ), legacy as (
+        select entry->>'source' as source,
+          sum((entry->>'items')::bigint)::bigint as items,
+          sum((entry->>'utf8Bytes')::bigint)::bigint as utf8_bytes,
+          sum((entry->>'estimatedTokens')::bigint)::bigint as estimated_tokens,
+          count(distinct id)::bigint as calls
+        from facts cross join lateral jsonb_array_elements(context_contributions) entry
+        group by entry->>'source'
+      ), candidate as (
+        select contribution.entry->>'source' as source,
+          sum((contribution.entry->>'items')::bigint)::bigint as items,
+          sum((contribution.entry->>'utf8Bytes')::bigint)::bigint as utf8_bytes,
+          sum((contribution.entry->>'estimatedTokens')::bigint)::bigint as estimated_tokens,
+          count(*) filter (where case
+            when contribution.entry->>'source' is not null then true
+            else not exists (
+              select 1 from jsonb_array_elements(context_contributions)
+                with ordinality earlier(entry, ordinal)
+              where earlier.ordinal < contribution.ordinal
+                and earlier.entry->>'source' is null
+            ) end)::bigint as calls
+        from facts cross join lateral jsonb_array_elements(context_contributions)
+          with ordinality contribution(entry, ordinal)
+        group by contribution.entry->>'source'
+      )
+      (select * from legacy except all select * from candidate)
+      union all
+      (select * from candidate except all select * from legacy)`;
+    expect(rows).toHaveLength(0);
   });
 
   test("matches the legacy helpers for shared/private visibility, filters, and UTC buckets", async () => {

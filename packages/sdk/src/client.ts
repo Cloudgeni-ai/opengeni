@@ -7923,6 +7923,7 @@ export class OpenGeniClient {
       range?: InsightsRange;
       provider?: string;
       model?: string;
+      signal?: AbortSignal;
     } = {},
   ): Promise<WorkspaceInsightsResponse> {
     return await this.requestJson<WorkspaceInsightsResponse>(
@@ -7934,6 +7935,7 @@ export class OpenGeniClient {
         ...(options.provider !== undefined ? { provider: options.provider } : {}),
         ...(options.model !== undefined ? { model: options.model } : {}),
       },
+      { signal: options.signal },
     );
   }
 
