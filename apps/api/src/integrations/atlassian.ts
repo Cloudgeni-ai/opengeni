@@ -1,3 +1,5 @@
+import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
+import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
 import {
   scheduledTaskKnowledgeSource,
   requireScheduledTaskKnowledgeSource,
@@ -44,7 +46,6 @@ import {
   ConnectionDisconnectGenerationError,
   ConnectionDisconnectIdempotencyError,
   consumeIntegrationOAuthStateNonce,
-  claimConnectOperation,
   finishConnectOperation,
   getConnectAttempt,
   decryptEnvironmentValue,
@@ -132,6 +133,7 @@ export async function startAtlassianOAuth(
     externalContinuation?: ExternalActorContinuation;
   },
 ): Promise<AtlassianOAuthStartResponse> {
+  await withOrganizationIntegrationAcquisition(deps.db, input, ["atlassian"], async () => {});
   const oauth = requireAtlassianSettings(deps.settings);
   const existing = input.payload.connectionId
     ? await getConnectionMetadata(
@@ -208,12 +210,18 @@ export async function completeAtlassianOAuthCallback(
         operationId: `oauth:${state.nonce}`,
         inputDigest: createHash("sha256").update(input.state!).digest("hex"),
       };
-      const claim = await claimConnectOperation(deps.db, state, {
-        ...operation,
-        expectedRevision: stored.attempt.revision,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
-      });
+      const claim = await claimOAuthAcquisition(
+        deps.db,
+        state,
+        {
+          ...operation,
+          expectedRevision: stored.attempt.revision,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        },
+        "atlassian",
+        Boolean(input.code && !input.error),
+      );
       if (claim.status === "replayed") return { redirectTo: exactReturnUrl, exactReturn: true };
     }
     await requireCallbackGrant(deps, state);
@@ -247,6 +255,7 @@ export async function completeAtlassianOAuthCallback(
     }
     if (input.error) throw new AtlassianCallbackError("provider_denied");
     if (!input.code) throw new AtlassianCallbackError("missing_code");
+    await withOrganizationIntegrationAcquisition(deps.db, state, ["atlassian"], async () => {});
 
     const oauth = requireAtlassianSettings(deps.settings);
     const redirectUri = `${baseUrl}/v1/integrations/atlassian/callback`;
@@ -360,36 +369,46 @@ export async function completeAtlassianOAuthCallback(
           });
     };
     if (operation) {
-      await finishConnectOperation(deps.db, acceptedState, {
-        ...operation,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
-        commit: async (tx, current) => {
-          const connection = await persist(tx);
-          if (!connection) throw new AtlassianCallbackError("connection_conflict");
-          return {
-            ...current,
-            revision: current.revision + 1,
-            state: "complete",
-            credentialsCommitted: true,
-            nextAction: { type: "none" },
-            account: {
-              id: connection.id,
-              version: connection.version,
-              providerId: "atlassian",
-              label: profile.displayName ?? "Atlassian",
-              ownership: "personal",
-              status: "connected",
-            },
-          };
+      await finishOAuthAcquisition(
+        deps.db,
+        acceptedState,
+        {
+          ...operation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+          commit: async (tx, current) => {
+            const connection = await persist(tx);
+            if (!connection) throw new AtlassianCallbackError("connection_conflict");
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete",
+              credentialsCommitted: true,
+              nextAction: { type: "none" },
+              account: {
+                id: connection.id,
+                version: connection.version,
+                providerId: "atlassian",
+                label: profile.displayName ?? "Atlassian",
+                ownership: "personal",
+                status: "connected",
+              },
+            };
+          },
         },
-      });
+        "atlassian",
+      );
       return { redirectTo: exactReturnUrl!, exactReturn: true };
     }
-    const connection = await deps.db.transaction(async (tx) => {
-      await requireCallbackGrant({ ...deps, db: tx }, acceptedState);
-      return persist(tx);
-    });
+    const connection = await withOrganizationIntegrationAcquisition(
+      deps.db,
+      acceptedState,
+      ["atlassian"],
+      async (tx) => {
+        await requireCallbackGrant({ ...deps, db: tx }, acceptedState);
+        return persist(tx);
+      },
+    );
     if (!connection) throw new AtlassianCallbackError("connection_conflict");
     return {
       redirectTo: returnUrl(returnBaseUrl, state.returnPath, "connected", connection.id),

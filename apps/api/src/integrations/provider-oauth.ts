@@ -1,3 +1,5 @@
+import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
+import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 
@@ -18,7 +20,11 @@ import {
   type ApiIntegrationOAuthStartRequest,
   type ConnectionOwnership,
 } from "@opengeni/contracts";
-import { requireEnvironmentEncryption, type ApiRouteDeps } from "@opengeni/core";
+import {
+  integrationKeyForConnectProvider,
+  requireEnvironmentEncryption,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import {
   consumeIntegrationOAuthStateNonce,
@@ -28,7 +34,6 @@ import {
   loadConnectionCredentialForBroker,
   persistProviderOAuthConnection,
   getConnectAttempt,
-  claimConnectOperation,
   finishConnectOperation,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
@@ -149,6 +154,7 @@ export async function startApiIntegrationProviderOAuth(
   },
 ): Promise<OAuthStartResponse> {
   const definition = requiredDefinition(input.payload.definitionId);
+  await withOrganizationIntegrationAcquisition(deps.db, input, [definition.id], async () => {});
   const providerDomain = integrationDefinitionProviderDomain(definition);
   const existing = input.payload.connectionId
     ? await getConnectionMetadata(
@@ -307,12 +313,18 @@ export async function completeApiIntegrationProviderOAuth(
         operationId: `oauth:${state.nonce}`,
         inputDigest: createHash("sha256").update(input.state!).digest("hex"),
       };
-      const claim = await claimConnectOperation(deps.db, state, {
-        ...connectOperation,
-        expectedRevision: stored.attempt.revision,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
-      });
+      const claim = await claimOAuthAcquisition(
+        deps.db,
+        state,
+        {
+          ...connectOperation,
+          expectedRevision: stored.attempt.revision,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        },
+        integrationKeyForConnectProvider(state.definitionId),
+        Boolean(input.code && !input.error),
+      );
       if (claim.status === "replayed") return { redirectTo: exactReturnUrl, exactReturn: true };
     }
     requireProviderOAuthOwner(state);
@@ -350,6 +362,7 @@ export async function completeApiIntegrationProviderOAuth(
 
     const definition = integrationDefinitionById(state.definitionId);
     if (!definition) throw new ProviderOAuthCallbackError("state_invalid");
+    await withOrganizationIntegrationAcquisition(deps.db, state, [definition.id], async () => {});
     if (
       state.definitionFingerprint !== providerDefinitionFingerprint(definition) ||
       state.providerDomain !== integrationDefinitionProviderDomain(definition) ||
@@ -480,32 +493,42 @@ export async function completeApiIntegrationProviderOAuth(
     const persist = (database: import("@opengeni/db").Database) =>
       persistProviderOAuthConnection(database, persistenceInput);
     if (connectOperation) {
-      await finishConnectOperation(deps.db, state, {
-        ...connectOperation,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
-        commit: async (tx, current) => {
-          const connection = await persist(tx);
-          if (!connection) throw new ProviderOAuthCallbackError("connection_conflict");
-          return {
-            ...current,
-            revision: current.revision + 1,
-            state: "connected_but_incomplete",
-            credentialsCommitted: true,
-            nextAction: { type: "none" },
-            account: {
-              id: connection.id,
-              providerId: current.providerId,
-              label: identity.displayName ?? identity.email ?? identity.principalId,
-              ownership: current.ownership,
-              status: "connected",
-            },
-          };
+      await finishOAuthAcquisition(
+        deps.db,
+        state,
+        {
+          ...connectOperation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+          commit: async (tx, current) => {
+            const connection = await persist(tx);
+            if (!connection) throw new ProviderOAuthCallbackError("connection_conflict");
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "connected_but_incomplete",
+              credentialsCommitted: true,
+              nextAction: { type: "none" },
+              account: {
+                id: connection.id,
+                providerId: current.providerId,
+                label: identity.displayName ?? identity.email ?? identity.principalId,
+                ownership: current.ownership,
+                status: "connected",
+              },
+            };
+          },
         },
-      });
+        definition.id,
+      );
       return { redirectTo: exactReturnUrl!, exactReturn: true };
     }
-    const connection = await persist(deps.db);
+    const connection = await withOrganizationIntegrationAcquisition(
+      deps.db,
+      state,
+      [definition.id],
+      persist,
+    );
     if (!connection) throw new ProviderOAuthCallbackError("connection_conflict");
     return {
       redirectTo: providerOAuthReturnUrl(returnBaseUrl, state.returnPath, "success", {

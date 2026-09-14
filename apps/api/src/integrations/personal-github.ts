@@ -1,3 +1,5 @@
+import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
+import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import { requireConnectOwnerAuthority } from "./connect-authority";
@@ -23,7 +25,6 @@ import {
 } from "@opengeni/core";
 import {
   consumeIntegrationOAuthStateNonce,
-  claimConnectOperation,
   finishConnectOperation,
   getConnectAttempt,
   type Database,
@@ -216,6 +217,7 @@ export async function startPersonalGitHubOAuth(
 ) {
   const oauth = requirePersonalGitHubOAuthSettings(deps.settings);
   const { grant } = input.access;
+  await withOrganizationIntegrationAcquisition(deps.db, grant, ["github-personal"], async () => {});
   const existing = input.connectionId
     ? await getConnectionMetadata(deps.db, input.workspaceId, input.connectionId, grant.subjectId)
     : null;
@@ -301,12 +303,18 @@ export async function completePersonalGitHubOAuthCallback(
         operationId: `oauth:${state.nonce}`,
         inputDigest: createHash("sha256").update(input.state!).digest("hex"),
       };
-      const claim = await claimConnectOperation(deps.db, state, {
-        ...operation,
-        expectedRevision: stored.attempt.revision,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
-      });
+      const claim = await claimOAuthAcquisition(
+        deps.db,
+        state,
+        {
+          ...operation,
+          expectedRevision: stored.attempt.revision,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        },
+        "github-personal",
+        Boolean(input.code && !input.error),
+      );
       if (claim.status === "replayed") return { redirectTo: exactReturnUrl, exactReturn: true };
     }
     await requirePersonalGitHubCallbackGrant(deps, state);
@@ -340,6 +348,12 @@ export async function completePersonalGitHubOAuthCallback(
     }
     if (input.error) throw new PersonalGitHubCallbackError("provider_denied");
     if (!input.code) throw new PersonalGitHubCallbackError("missing_code");
+    await withOrganizationIntegrationAcquisition(
+      deps.db,
+      state,
+      ["github-personal"],
+      async () => {},
+    );
 
     const oauth = requirePersonalGitHubOAuthSettings(deps.settings);
     if (
@@ -474,33 +488,43 @@ export async function completePersonalGitHubOAuthCallback(
       });
     };
     if (operation) {
-      await finishConnectOperation(deps.db, acceptedState, {
-        ...operation,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
-        commit: async (tx, current) => {
-          const connection = await persist(tx);
-          if (!connection) throw new PersonalGitHubCallbackError("connection_conflict");
-          return {
-            ...current,
-            revision: current.revision + 1,
-            state: "complete",
-            credentialsCommitted: true,
-            nextAction: { type: "none" },
-            account: {
-              id: connection.id,
-              version: connection.version,
-              providerId: "github-personal",
-              label: identity.login,
-              ownership: "personal",
-              status: "connected",
-            },
-          };
+      await finishOAuthAcquisition(
+        deps.db,
+        acceptedState,
+        {
+          ...operation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+          commit: async (tx, current) => {
+            const connection = await persist(tx);
+            if (!connection) throw new PersonalGitHubCallbackError("connection_conflict");
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete",
+              credentialsCommitted: true,
+              nextAction: { type: "none" },
+              account: {
+                id: connection.id,
+                version: connection.version,
+                providerId: "github-personal",
+                label: identity.login,
+                ownership: "personal",
+                status: "connected",
+              },
+            };
+          },
         },
-      });
+        "github-personal",
+      );
       return { redirectTo: exactReturnUrl!, exactReturn: true };
     }
-    const connection = await persist(deps.db);
+    const connection = await withOrganizationIntegrationAcquisition(
+      deps.db,
+      acceptedState,
+      ["github-personal"],
+      persist,
+    );
     if (!connection) throw new PersonalGitHubCallbackError("connection_conflict");
     return {
       redirectTo: personalGitHubCallbackReturnUrl(returnBaseUrl, state.returnPath, "success", {

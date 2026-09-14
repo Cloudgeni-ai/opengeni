@@ -1,3 +1,5 @@
+import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
+import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
 import {
   scheduledTaskKnowledgeSource,
   requireScheduledTaskKnowledgeSource,
@@ -68,7 +70,6 @@ import {
   ConnectionDisconnectGenerationError,
   ConnectionDisconnectIdempotencyError,
   consumeIntegrationOAuthStateNonce,
-  claimConnectOperation,
   finishConnectOperation,
   getConnectAttempt,
   type Database,
@@ -254,6 +255,7 @@ export async function startGoogleDriveOAuth(
     externalContinuation?: ExternalActorContinuation;
   },
 ): Promise<GoogleDriveOAuthStartResponse> {
+  await withOrganizationIntegrationAcquisition(deps.db, input, ["google-drive"], async () => {});
   const google = requireGoogleDriveSettings(deps.settings);
   const existing = input.payload.connectionId
     ? await getConnectionMetadata(
@@ -364,12 +366,18 @@ export async function completeGoogleDriveOAuthCallback(
         operationId: `oauth:${state.nonce}`,
         inputDigest: createHash("sha256").update(input.state!).digest("hex"),
       };
-      const claim = await claimConnectOperation(deps.db, state, {
-        ...operation,
-        expectedRevision: stored.attempt.revision,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
-      });
+      const claim = await claimOAuthAcquisition(
+        deps.db,
+        state,
+        {
+          ...operation,
+          expectedRevision: stored.attempt.revision,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        },
+        "google-drive",
+        Boolean(input.code && !input.error),
+      );
       if (claim.status === "replayed") return { redirectTo: exactReturnUrl, exactReturn: true };
     }
     await requireGoogleDriveCallbackGrant(deps, state);
@@ -409,6 +417,7 @@ export async function completeGoogleDriveOAuthCallback(
     if (!input.code) {
       throw new GoogleDriveCallbackError("missing_code");
     }
+    await withOrganizationIntegrationAcquisition(deps.db, state, ["google-drive"], async () => {});
 
     const google = requireGoogleDriveSettings(deps.settings);
     const key = requireEnvironmentEncryption(deps.settings);
@@ -562,36 +571,46 @@ export async function completeGoogleDriveOAuthCallback(
           });
     };
     if (operation) {
-      await finishConnectOperation(deps.db, acceptedState, {
-        ...operation,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
-        commit: async (tx, current) => {
-          const connection = await persist(tx);
-          if (!connection) throw new GoogleDriveCallbackError("connection_conflict");
-          return {
-            ...current,
-            revision: current.revision + 1,
-            state: "complete",
-            credentialsCommitted: true,
-            nextAction: { type: "none" },
-            account: {
-              id: connection.id,
-              version: connection.version,
-              providerId: current.providerId,
-              label: identity.emailAddress ?? identity.displayName,
-              ownership: "personal",
-              status: "connected",
-            },
-          };
+      await finishOAuthAcquisition(
+        deps.db,
+        acceptedState,
+        {
+          ...operation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+          commit: async (tx, current) => {
+            const connection = await persist(tx);
+            if (!connection) throw new GoogleDriveCallbackError("connection_conflict");
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete",
+              credentialsCommitted: true,
+              nextAction: { type: "none" },
+              account: {
+                id: connection.id,
+                version: connection.version,
+                providerId: current.providerId,
+                label: identity.emailAddress ?? identity.displayName,
+                ownership: "personal",
+                status: "connected",
+              },
+            };
+          },
         },
-      });
+        "google-drive",
+      );
       return { redirectTo: exactReturnUrl!, exactReturn: true };
     }
-    const connection = await deps.db.transaction(async (tx) => {
-      await requireGoogleDriveCallbackGrant({ ...deps, db: tx }, acceptedState);
-      return persist(tx);
-    });
+    const connection = await withOrganizationIntegrationAcquisition(
+      deps.db,
+      acceptedState,
+      ["google-drive"],
+      async (tx) => {
+        await requireGoogleDriveCallbackGrant({ ...deps, db: tx }, acceptedState);
+        return persist(tx);
+      },
+    );
     if (!connection) {
       throw new GoogleDriveCallbackError("connection_conflict");
     }

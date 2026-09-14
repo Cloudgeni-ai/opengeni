@@ -1,3 +1,5 @@
+import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
+import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
 import { parseSocialOauthClientsJson, type Settings } from "@opengeni/config";
 import {
   OAuthStartResponse,
@@ -15,7 +17,6 @@ import {
   loadSocialConnectionCredential,
   updateSocialConnectionCredential,
   upsertSocialOAuthConnection,
-  claimConnectOperation,
   finishConnectOperation,
   getConnectAttempt,
   type Database,
@@ -196,6 +197,7 @@ export async function startSocialOAuth(
 ): Promise<OAuthStartResponse> {
   const { settings } = deps;
   const provider = SOCIAL_OAUTH_PROVIDERS[context.payload.provider];
+  await withOrganizationIntegrationAcquisition(deps.db, context, [provider.id], async () => {});
   const client = socialOAuthClientFor(settings, provider.id);
   const redirectUri = socialOAuthRedirectUri(settings, context.requestUrl);
   const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
@@ -323,6 +325,7 @@ export async function completeSocialOAuthCallback(
   }
   try {
     const provider = SOCIAL_OAUTH_PROVIDERS[state.provider];
+    await withOrganizationIntegrationAcquisition(db, state, [provider.id], async () => {});
     const client = socialOAuthClientFor(settings, provider.id);
     const key = requireEnvironmentEncryption(settings);
     const verifier = state.encryptedPkceVerifier
@@ -344,18 +347,31 @@ export async function completeSocialOAuthCallback(
       ...(token.scope ? { scope: token.scope } : {}),
     };
     const grantedScopes = token.scope ? token.scope.split(/[\s,]+/).filter(Boolean) : state.scopes;
-    const connection = await upsertSocialOAuthConnection(db, {
-      accountId: state.accountId,
-      workspaceId: state.workspaceId,
-      subjectId: state.ownership === "personal" ? state.subjectId : null,
-      provider: provider.id,
-      accountHandle: identity.handle,
-      accountName: identity.name ?? null,
-      externalAccountId: identity.externalAccountId,
-      scopes: grantedScopes,
-      credentialEncrypted: encryptEnvironmentValue(key, JSON.stringify(bundle)),
-      tokenMetadata: publicTokenMetadata(bundle),
-    });
+    const acceptedState = state;
+    const connection = await withOrganizationIntegrationAcquisition(
+      db,
+      acceptedState,
+      [provider.id],
+      async (tx) => {
+        await requireConnectOwnerAuthority(
+          tx,
+          acceptedState,
+          acceptedState.ownership === "workspace" ? "workspace:admin" : "workspace:read",
+        );
+        return upsertSocialOAuthConnection(tx, {
+          accountId: acceptedState.accountId,
+          workspaceId: acceptedState.workspaceId,
+          subjectId: acceptedState.ownership === "personal" ? acceptedState.subjectId : null,
+          provider: provider.id,
+          accountHandle: identity.handle,
+          accountName: identity.name ?? null,
+          externalAccountId: identity.externalAccountId,
+          scopes: grantedScopes,
+          credentialEncrypted: encryptEnvironmentValue(key, JSON.stringify(bundle)),
+          tokenMetadata: publicTokenMetadata(bundle),
+        });
+      },
+    );
     return {
       redirectTo: callbackReturnPath(state.returnPath, "success", {
         connectionId: connection.id,
@@ -407,10 +423,16 @@ async function completeSocialConnect(
     authorize,
   };
   try {
-    const claim = await claimConnectOperation(deps.db, state, {
-      ...operation,
-      expectedRevision: stored.attempt.revision,
-    });
+    const claim = await claimOAuthAcquisition(
+      deps.db,
+      state,
+      {
+        ...operation,
+        expectedRevision: stored.attempt.revision,
+      },
+      state.provider,
+      Boolean(input.code && !input.error),
+    );
     if (claim.status === "replayed") return { redirectTo: stored.returnUrl, exactReturn: true };
     if (!personalOwnerStateAccepted(state))
       throw new HTTPException(403, { message: PERSONAL_CONNECTION_PRINCIPAL_MESSAGE });
@@ -455,46 +477,51 @@ async function completeSocialConnect(
         ...(token.expiresAt ? { expiresAt: token.expiresAt } : {}),
         ...(token.scope ? { scope: token.scope } : {}),
       };
-      await finishConnectOperation(deps.db, state, {
-        ...operation,
-        commit: async (tx, current) => {
-          const connection = await upsertSocialOAuthConnection(tx, {
-            accountId: state.accountId,
-            workspaceId: state.workspaceId,
-            ...(current.account
-              ? {
-                  expectedConnection: {
-                    id: current.account.id.slice("social:".length),
-                    version: current.account.version!,
-                  },
-                }
-              : {}),
-            subjectId: state.ownership === "personal" ? state.subjectId : null,
-            provider: provider.id,
-            accountHandle: identity.handle,
-            accountName: identity.name ?? null,
-            externalAccountId: identity.externalAccountId,
-            scopes: token.scope ? token.scope.split(/[\s,]+/).filter(Boolean) : state.scopes,
-            credentialEncrypted: encryptEnvironmentValue(key, JSON.stringify(bundle)),
-            tokenMetadata: publicTokenMetadata(bundle),
-          });
-          return {
-            ...current,
-            revision: current.revision + 1,
-            state: "complete",
-            credentialsCommitted: true,
-            nextAction: { type: "none" },
-            account: {
-              id: `social:${connection.id}`,
-              providerId: provider.id,
-              version: connection.version!,
-              label: identity.handle,
-              ownership: state.ownership,
-              status: "connected",
-            },
-          };
+      await finishOAuthAcquisition(
+        deps.db,
+        state,
+        {
+          ...operation,
+          commit: async (tx, current) => {
+            const connection = await upsertSocialOAuthConnection(tx, {
+              accountId: state.accountId,
+              workspaceId: state.workspaceId,
+              ...(current.account
+                ? {
+                    expectedConnection: {
+                      id: current.account.id.slice("social:".length),
+                      version: current.account.version!,
+                    },
+                  }
+                : {}),
+              subjectId: state.ownership === "personal" ? state.subjectId : null,
+              provider: provider.id,
+              accountHandle: identity.handle,
+              accountName: identity.name ?? null,
+              externalAccountId: identity.externalAccountId,
+              scopes: token.scope ? token.scope.split(/[\s,]+/).filter(Boolean) : state.scopes,
+              credentialEncrypted: encryptEnvironmentValue(key, JSON.stringify(bundle)),
+              tokenMetadata: publicTokenMetadata(bundle),
+            });
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete",
+              credentialsCommitted: true,
+              nextAction: { type: "none" },
+              account: {
+                id: `social:${connection.id}`,
+                providerId: provider.id,
+                version: connection.version!,
+                label: identity.handle,
+                ownership: state.ownership,
+                status: "connected",
+              },
+            };
+          },
         },
-      });
+        state.provider,
+      );
     }
   } catch (error) {
     // An uncertain exchange stays occupied: do not replay a consumed OAuth code.
