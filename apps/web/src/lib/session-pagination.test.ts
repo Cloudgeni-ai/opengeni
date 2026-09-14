@@ -20,6 +20,63 @@ import {
 const row = (id: string) => ({ id, workspaceId: "workspace-a" }) as Session;
 
 describe("session continuation pagination", () => {
+  test("flat archived search retains child-only pages and applies root decisions without injecting rows", () => {
+    const child = {
+      ...row("match"),
+      rootSessionId: "root",
+      parentSessionId: "root",
+      archived: false,
+    } as Session;
+    const continuation = mergeSessionContinuation(
+      emptySessionContinuation(1),
+      1,
+      1,
+      {
+        sessions: [{ ...child, id: "later-match" }],
+        nextCursor: null,
+      },
+      1,
+    );
+    const rows = [child, ...continuation.sessions];
+    const project = (overrides: ReadonlyMap<string, Session>, archived: boolean = true) =>
+      projectSessionArchiveMembership(rows, overrides, archived, "workspace-a", { flat: true });
+    expect(project(new Map()).map((item) => item.id)).toEqual(["match", "later-match"]);
+    const root = {
+      ...row("root"),
+      rootSessionId: "root",
+      archived: true,
+      archiveVersion: 2,
+    } as Session;
+    expect(project(new Map([[root.id, root]])).map((item) => item.id)).toEqual([
+      "match",
+      "later-match",
+    ]);
+    const restored = { ...root, archived: false, archiveVersion: 3 };
+    expect(project(new Map([[root.id, restored]]))).toEqual([]);
+    expect(project(new Map([[root.id, restored]]), false).map((item) => item.id)).toEqual([
+      "match",
+      "later-match",
+    ]);
+    expect(project(new Map([[root.id, root]]), false)).toEqual([]);
+    expect(
+      project(new Map([[root.id, { ...restored, workspaceId: "workspace-b" }]])).map(
+        (item) => item.id,
+      ),
+    ).toEqual(["match", "later-match"]);
+    expect(
+      project(new Map([["unrelated", { ...root, id: "unrelated" }]])).map((item) => item.id),
+    ).toEqual(["match", "later-match"]);
+    expect(
+      projectSessionArchiveMembership(
+        [restored, ...rows],
+        new Map([[root.id, root]]),
+        true,
+        "workspace-a",
+        { flat: true },
+      ),
+    ).toEqual([]);
+  });
+
   test("combines archive pages without losing microseconds, including offset timestamps", () => {
     const latest = { ...row("a-latest"), archivedAt: "2026-09-08T12:00:00.123456Z" };
     const older = { ...row("z-older"), archivedAt: "2026-09-08T12:00:00.123455Z" };

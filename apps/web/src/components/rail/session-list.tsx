@@ -846,6 +846,7 @@ export function SessionList() {
       archiveMembershipEvidence,
       browseStatus === "all" ? "all" : browseStatus === "archived",
       rail.workspaceId,
+      { flat: !hierarchyMode },
     );
     const projectedAttention = new Map(attentionOverrides);
     const active = activeSessionId
@@ -869,6 +870,7 @@ export function SessionList() {
     activeSessionId,
     archiveMembershipEvidence,
     attentionOverrides,
+    hierarchyMode,
     channelMoveOverrides,
     documentForeground,
     pinOverrides,

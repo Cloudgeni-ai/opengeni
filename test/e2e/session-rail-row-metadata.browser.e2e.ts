@@ -78,7 +78,11 @@ describe("Session rail row metadata in Chromium", () => {
         .getAttribute("aria-disabled"),
     ).toBe("true");
     expect(await menu.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
-    await page.screenshot({ path: "/workspace/compact-session-menu-desktop.png", fullPage: true });
+    await page.screenshot({
+      path: "test-results/compact-session-menu-desktop.png",
+      fullPage: true,
+    });
+    expect(await Bun.file("test-results/compact-session-menu-desktop.png").exists()).toBe(true);
     await page.keyboard.press("Escape");
     expect(
       await page
@@ -146,9 +150,10 @@ describe("Session rail row metadata in Chromium", () => {
         "Archived",
       );
       await touchPage.screenshot({
-        path: "/workspace/compact-session-menu-touch.png",
+        path: "test-results/compact-session-menu-touch.png",
         fullPage: true,
       });
+      expect(await Bun.file("test-results/compact-session-menu-touch.png").exists()).toBe(true);
     } finally {
       await touchPage.close();
     }
