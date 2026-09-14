@@ -2310,13 +2310,12 @@ async function assertProviderCanSeeMaterializedPath(
     tty: false,
   };
   let output: string;
+  let result: unknown;
   if (!session.execCommand && !session.exec) {
     throw new RoutingUnsupportedError("materializeEntry.verify", "unknown");
   }
   try {
-    output = session.execCommand
-      ? await session.execCommand(args)
-      : formatExecResult(await session.exec!(args));
+    result = session.execCommand ? await session.execCommand(args) : await session.exec!(args);
   } catch (cause) {
     retainMaterializationVerificationDiagnostic(cause, {
       reason: "command_error",
@@ -2329,6 +2328,24 @@ async function assertProviderCanSeeMaterializedPath(
       causeMessage: cause instanceof Error ? cause.message : String(cause),
     });
     throw cause;
+  }
+  try {
+    output = formatExecResult(result);
+  } catch (cause) {
+    const record = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+    const returnedOutput = [record.output, record.stderr, record.stdout]
+      .filter((value): value is string => typeof value === "string")
+      .join("\n");
+    throw new SandboxMaterializationVerificationError({
+      reason: "invalid_response",
+      path,
+      workdir: args.workdir,
+      command,
+      output: returnedOutput || null,
+      exitCode: null,
+      providerSessionId: null,
+      causeMessage: cause instanceof Error ? cause.message : String(cause),
+    });
   }
   const status = parseExecResponseBanner(output);
   const markerPresent = stripExecBanner(output).includes(MATERIALIZED_PATH_MARKER);

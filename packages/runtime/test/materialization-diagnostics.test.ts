@@ -109,6 +109,30 @@ for (const [output, reason, exitCode, providerSessionId] of [
   });
 }
 
+test("retains malformed structured provider output as invalid response evidence", async () => {
+  const proxy = new RoutingSandboxSession({
+    readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+    resolveActiveBackend: async () => ({
+      sandboxId: null,
+      kind: "modal",
+      session: {
+        async materializeEntry() {},
+        async exec() {
+          return { stdout: "original returned provider evidence" };
+        },
+      },
+    }),
+  });
+  await expect(proxy.materializeEntry({ path: "repos/example", entry: {} })).rejects.toMatchObject({
+    code: "sandbox_materialization_verification_failed",
+    diagnostic: {
+      reason: "invalid_response",
+      output: "original returned provider evidence",
+      causeMessage: "sandbox process-control exec reported neither session id nor exit code",
+    },
+  });
+});
+
 test("retains thrown provider error identity and diagnostics without misreporting a missing path", async () => {
   const cause = new Error("exact provider transport detail");
   const backend: RoutableBackendSession = {

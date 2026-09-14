@@ -75,7 +75,9 @@ invisible destination, unsuccessful shell exit, still-running check, invalid
 confirmation, and a thrown provider error. These are bounded reason categories,
 not raw error-message labels. Exact checked path, workspace root, command,
 returned output, exit code, and yielded provider handle are preserved in the
-authenticated `turn.failed` event's `materializationDiagnostic` field. Use the
+authenticated `turn.failed` or `turn.recovery.requested` event's
+`materializationDiagnostic` field. Provider errors keep their existing recovery
+classification. Use the
 session events API with `payloadMode=full` to retrieve them. The detail-only
 `failureDiagnostics` summary is intentionally smaller than that event.
 An unfinished check is not evidence that a directory is absent. This telemetry
