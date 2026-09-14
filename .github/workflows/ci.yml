@@ -850,7 +850,10 @@ jobs:
         run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/workbench.browser.e2e.ts
 
       - name: Upload browser account acceptance evidence
-        if: ${{ matrix.lane == 'accounts' && steps.browser_accounts.outcome == 'success' }}
+        if: >-
+          ${{ always() && matrix.lane == 'accounts' &&
+          (steps.browser_accounts.outcome == 'success' ||
+          steps.browser_accounts.outcome == 'failure') }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: browser-account-acceptance-${{ matrix.engine }}
