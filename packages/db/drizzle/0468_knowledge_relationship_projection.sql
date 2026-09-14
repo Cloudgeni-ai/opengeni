@@ -20,3 +20,11 @@ RETURNS jsonb LANGUAGE sql VOLATILE SET search_path FROM CURRENT AS $$
         FROM knowledge_entries e
         WHERE e.account_id=p_account AND e.id=(l.value->>'entryId')::uuid)), '[]'::jsonb))
 $$;
+
+-- CREATE OR REPLACE replaces proconfig too. Preserve 0461's final hardening,
+-- including the actual embedded target schema and pg_temp explicitly last.
+DO $secure$
+BEGIN
+  EXECUTE format('ALTER FUNCTION %I.knowledge_entry_visible_body(uuid,jsonb,boolean) SET search_path = %I, pg_catalog, pg_temp',
+    current_schema(),current_schema());
+END $secure$;

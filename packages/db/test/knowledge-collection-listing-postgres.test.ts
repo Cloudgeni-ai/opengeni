@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import { readFile } from "node:fs/promises";
 import type { SharedTestDatabase } from "@opengeni/testing";
 import {
   installListingBaseline,
@@ -31,6 +32,76 @@ async function parity(request: Record<string, postgres.JSONValue>, f = fixture) 
 }
 
 describe("Knowledge relationship projection", () => {
+  test("projection and historical baseline retain the hardened function metadata", async () => {
+    const rows = await shared.admin`SELECT p.proname,p.prosecdef,p.provolatile,
+      p.proconfig,pg_get_userbyid(p.proowner) AS owner,n.nspname,
+      has_function_privilege(${decodeURIComponent(new URL(shared.appUrl).username)},p.oid,'EXECUTE') AS app_execute
+      FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+      WHERE p.oid IN ('knowledge_entry_read(uuid,uuid,jsonb,jsonb)'::regprocedure,
+        'knowledge_entry_read_baseline(uuid,uuid,jsonb,jsonb)'::regprocedure,
+        'knowledge_entry_visible_body(uuid,jsonb,boolean)'::regprocedure,
+        'knowledge_entry_visible_body_baseline(uuid,jsonb,boolean)'::regprocedure)`;
+    expect(rows).toHaveLength(4);
+    const owner = rows.find((row) => row.proname === "knowledge_entry_read")!.owner;
+    for (const row of rows) {
+      const [path] =
+        await shared.admin`SELECT format('search_path=%I, pg_catalog, pg_temp',${row.nspname}::text) AS value`;
+      expect(row.proconfig).toEqual([path!.value]);
+      expect(row.owner).toBe(owner);
+      expect(row.provolatile).toBe("v");
+      expect(row.prosecdef).toBe(row.proname.startsWith("knowledge_entry_read"));
+      expect(row.app_execute).toBe(row.proname.startsWith("knowledge_entry_read"));
+    }
+  }, 180_000);
+
+  test("an app-owned temporary relation cannot shadow privileged endpoint projection", async () => {
+    const [member] = await readListing(app, fixture, { groupId: fixture.groupId, limit: 1 });
+    const request = { operation: "get", entryId: member!.id };
+    const expected = await readListing(app, fixture, request);
+    expect(expected[0]!.revision.groupIds).toEqual([fixture.groupId]);
+    const [owner] = await shared.admin`SELECT pg_get_userbyid(proowner) AS name FROM pg_proc
+      WHERE oid='knowledge_entry_read(uuid,uuid,jsonb,jsonb)'::regprocedure`;
+    // An empty sentinel only: no executable payload or forged content. Give the
+    // capability owner read access so the test detects wrong relation resolution,
+    // rather than passing/failing merely because the sentinel lacks a grant.
+    await app`CREATE TEMP TABLE knowledge_entries(id uuid,account_id uuid,archived boolean,
+      published_revision_id uuid,latest_revision_id uuid)`;
+    try {
+      await app`GRANT SELECT ON pg_temp.knowledge_entries TO ${app(owner!.name as string)}`;
+      expect(await readListing(app, fixture, request)).toEqual(expected);
+      expect(await readListing(app, fixture, request, true)).toEqual(expected);
+    } finally {
+      await app`DROP TABLE pg_temp.knowledge_entries`;
+    }
+  }, 180_000);
+
+  test("the migration pins the actual embedded schema, not public or an implicit temp path", async () => {
+    const migration = await readFile(
+      new URL("../drizzle/0468_knowledge_relationship_projection.sql", import.meta.url),
+      "utf8",
+    );
+    const schema = `Knowledge_embedded_${crypto.randomUUID().replaceAll("-", "")}`;
+    const rollback = new Error("rollback metadata-only embedded fixture");
+    try {
+      await shared.admin.begin(async (tx) => {
+        await tx`CREATE SCHEMA ${tx(schema)}`;
+        await tx`SET LOCAL search_path = ${tx(schema)}, public`;
+        // This test checks migration metadata only. The app-role test above
+        // executes the real migrated routines, tables and recursive ACL checks.
+        await tx`SET LOCAL check_function_bodies = off`;
+        await tx.unsafe(migration);
+        const [row] =
+          await tx`SELECT p.proconfig,format('search_path=%I, pg_catalog, pg_temp',${schema}::text) AS expected
+          FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+          WHERE n.nspname=${schema} AND p.proname='knowledge_entry_visible_body'`;
+        expect(row!.proconfig).toEqual([row!.expected]);
+        throw rollback;
+      });
+    } catch (error) {
+      if (error !== rollback) throw error;
+    }
+  }, 180_000);
+
   test("exact JSON parity for root/collection lists, search, history, details and cursor boundaries", async () => {
     for (const request of [
       { rootOnly: true },

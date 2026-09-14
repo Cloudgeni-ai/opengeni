@@ -106,38 +106,52 @@ export async function seedListingFixture(connection: postgres.Sql, count = 240) 
 export type ListingFixture = Awaited<ReturnType<typeof seedListingFixture>>;
 
 /** Install historical comparison functions only in the disposable test database. */
-export async function installListingBaseline(admin: postgres.Sql, appUrl: string) {
+export async function installListingBaseline(connection: postgres.Sql, appUrl: string) {
   const source = await readFile(
     new URL("../../drizzle/0461_unified_knowledge.sql", import.meta.url),
     "utf8",
   );
-  const [ownerRow] = await admin`SELECT pg_get_userbyid(proowner) AS owner FROM pg_proc
-    WHERE oid='knowledge_entry_read(uuid,uuid,jsonb,jsonb)'::regprocedure`;
-  if (!ownerRow) throw new Error("Knowledge read capability is missing");
-  const owner = ownerRow.owner as string;
-  const appRole = decodeURIComponent(new URL(appUrl).username);
-  for (const name of ["knowledge_entry_visible_body", "knowledge_entry_read"]) {
-    const start = source.indexOf(`CREATE FUNCTION ${name}(`);
-    const end = source.indexOf("\n$$;", start);
-    const plpgsqlEnd = source.indexOf("\nEND $$;", start);
-    const finish =
-      name === "knowledge_entry_read" ? plpgsqlEnd + "\nEND $$;".length : end + "\n$$;".length;
-    if (start < 0 || finish <= start) throw new Error(`Missing historical function ${name}`);
-    let definition = source
-      .slice(start, finish)
-      .replace(`CREATE FUNCTION ${name}(`, `CREATE OR REPLACE FUNCTION ${name}_baseline(`);
-    if (name === "knowledge_entry_read")
-      definition = definition.replaceAll(
-        "knowledge_entry_visible_body(",
-        "knowledge_entry_visible_body_baseline(",
-      );
-    await admin.unsafe(definition);
-    const signature =
-      name === "knowledge_entry_read" ? "uuid,uuid,jsonb,jsonb" : "uuid,jsonb,boolean";
-    await admin`ALTER FUNCTION ${admin(name + "_baseline")}(${admin.unsafe(signature)}) OWNER TO ${admin(owner)}`;
-    await admin.unsafe(`REVOKE ALL ON FUNCTION ${name}_baseline(${signature}) FROM PUBLIC`);
-    await admin`GRANT EXECUTE ON FUNCTION ${admin(name + "_baseline")}(${admin.unsafe(signature)}) TO ${admin(appRole)}`;
-  }
+  // Publish the historical bodies and their final security metadata together.
+  await connection.begin(async (admin) => {
+    const [ownerRow] = await admin`SELECT pg_get_userbyid(p.proowner) AS owner,
+    n.nspname AS schema,format('%I',n.nspname) AS quoted_schema
+    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE p.oid='knowledge_entry_read(uuid,uuid,jsonb,jsonb)'::regprocedure`;
+    if (!ownerRow) throw new Error("Knowledge read capability is missing");
+    const owner = ownerRow.owner as string;
+    const schema = ownerRow.schema as string;
+    const appRole = decodeURIComponent(new URL(appUrl).username);
+    for (const name of ["knowledge_entry_visible_body", "knowledge_entry_read"]) {
+      const start = source.indexOf(`CREATE FUNCTION ${name}(`);
+      const end = source.indexOf("\n$$;", start);
+      const plpgsqlEnd = source.indexOf("\nEND $$;", start);
+      const finish =
+        name === "knowledge_entry_read" ? plpgsqlEnd + "\nEND $$;".length : end + "\n$$;".length;
+      if (start < 0 || finish <= start) throw new Error(`Missing historical function ${name}`);
+      let definition = source
+        .slice(start, finish)
+        .replace(
+          `CREATE FUNCTION ${name}(`,
+          `CREATE OR REPLACE FUNCTION ${ownerRow.quoted_schema}.${name}_baseline(`,
+        );
+      if (name === "knowledge_entry_read")
+        definition = definition.replaceAll(
+          "knowledge_entry_visible_body(",
+          "knowledge_entry_visible_body_baseline(",
+        );
+      await admin.unsafe(definition);
+      const signature =
+        name === "knowledge_entry_read" ? "uuid,uuid,jsonb,jsonb" : "uuid,jsonb,boolean";
+      await admin`ALTER FUNCTION ${admin(schema)}.${admin(name + "_baseline")}(${admin.unsafe(signature)}) OWNER TO ${admin(owner)}`;
+      // 0461's final $secure$ block is part of the historical contract too;
+      // extracting only CREATE FUNCTION would benchmark an unhardened routine.
+      await admin`ALTER FUNCTION ${admin(schema)}.${admin(name + "_baseline")}(${admin.unsafe(signature)}) SET search_path = ${admin(schema)}, pg_catalog, pg_temp`;
+      await admin`REVOKE ALL ON FUNCTION ${admin(schema)}.${admin(name + "_baseline")}(${admin.unsafe(signature)}) FROM PUBLIC`;
+      await admin`REVOKE ALL ON FUNCTION ${admin(schema)}.${admin(name + "_baseline")}(${admin.unsafe(signature)}) FROM ${admin(appRole)}`;
+      if (name === "knowledge_entry_read")
+        await admin`GRANT EXECUTE ON FUNCTION ${admin(schema)}.${admin(name + "_baseline")}(${admin.unsafe(signature)}) TO ${admin(appRole)}`;
+    }
+  });
 }
 
 export async function readListing(
