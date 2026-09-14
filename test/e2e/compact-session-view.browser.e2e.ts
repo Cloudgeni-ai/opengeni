@@ -231,16 +231,29 @@ describe("compact session view on the live local workspace route (API fixture)",
       return json({ message: "Not supplied by browser fixture" }, 404);
     });
     await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions`, { waitUntil: "networkidle" });
+    // The rail renders before draft hydration finishes the composer's initial autofocus.
+    await page
+      .getByRole("textbox", { name: "Message the agent", exact: true })
+      .and(page.locator(":focus"))
+      .waitFor();
   }, 60_000);
   afterAll(async () => {
     await Promise.allSettled([browser?.close(), web?.stop()]);
   });
 
   const choose = async (menu: string, choice: string) => {
-    await page.getByRole("button", { name: /^Session view/ }).click();
+    // Keep keyboard mode and wait for Radix's focus handoffs before the next key.
+    await page.getByRole("button", { name: /^Session view/ }).press("Enter");
+    await page.getByRole("menuitem").first().and(page.locator(":focus")).waitFor();
     await page.getByRole("menuitem", { name: new RegExp(`^${menu}`) }).focus();
     await page.keyboard.press("ArrowRight");
-    await page.getByRole("menuitemradio", { name: choice, exact: true }).click();
+    await page.getByRole("menuitemradio").first().and(page.locator(":focus")).waitFor();
+    await page.getByRole("menuitemradio", { name: choice, exact: true }).press("Enter");
+    await page.getByRole("menu").waitFor({ state: "hidden" });
+    await page
+      .getByRole("button", { name: /^Session view/ })
+      .and(page.locator(":focus"))
+      .waitFor();
   };
   test("sorts pages, persists preferences, filters archives, and controls empty project groups", async () => {
     const rail = page.locator("[data-sessionpin-session-list]");
@@ -273,6 +286,10 @@ describe("compact session view on the live local workspace route (API fixture)",
     expect(titles[0]).toContain("Session 01");
     expect(titles.at(-1)).toContain("Session 64");
     await page.reload({ waitUntil: "networkidle" });
+    await page
+      .getByRole("textbox", { name: "Message the agent", exact: true })
+      .and(page.locator(":focus"))
+      .waitFor();
     await page.getByRole("button", { name: /^Session view/ }).click();
     expect(await page.getByRole("menuitem", { name: /^Sort by/ }).innerText()).toContain("Name");
     expect(
@@ -290,7 +307,7 @@ describe("compact session view on the live local workspace route (API fixture)",
     await rail.getByRole("group", { name: "Empty project", exact: true }).waitFor();
     await page.getByRole("button", { name: /^Session view/ }).click();
     await page.screenshot({
-      path: "/workspace/compact-session-view-route-desktop.png",
+      path: "test-results/compact-session-view-route-desktop.png",
       fullPage: true,
     });
     expect(

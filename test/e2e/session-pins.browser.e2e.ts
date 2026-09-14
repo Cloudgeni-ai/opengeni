@@ -1517,7 +1517,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const page = await context.newPage();
     try {
       await page.goto(webBaseUrl);
-      const workspaceId = await workspaceFromPage(page);
+      const workspaceId = await workspaceFromPage(page, "Last activity");
       const batch = `Expired cursor batch ${Date.now()}`;
       let sentinel: BrowserSession | null = null;
       // Bootstrap authority through the public API, then seed the remaining
@@ -2736,7 +2736,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     const page = await context.newPage();
     await page.goto(webBaseUrl);
-    const workspaceId = await workspaceFromPage(page);
+    // This pin/header scenario starts with the mobile navigation drawer closed
+    // and does not require project grouping.
+    const workspaceId = await workspaceFromPage(page, null);
     const target = await createSessionThroughApi(
       page,
       apiBaseUrl,
@@ -3329,7 +3331,10 @@ async function reactCommitCount(page: Page): Promise<number> {
   );
 }
 
-async function workspaceFromPage(page: Page): Promise<string> {
+async function workspaceFromPage(
+  page: Page,
+  groupBy: "Project" | "Last activity" | null = "Project",
+): Promise<string> {
   try {
     await waitFor(() => /\/workspaces\/[^/]+\/sessions/.test(page.url()), {
       timeoutMs: 15_000,
@@ -3344,15 +3349,39 @@ async function workspaceFromPage(page: Page): Promise<string> {
       { cause: error },
     );
   }
-  // These existing pin/move scenarios exercise project folders, now an
-  // explicit view choice instead of the implicit default activity grouping.
-  await page.getByRole("button", { name: /^Session view/ }).click();
-  await page.getByRole("menuitem", { name: /^Group by/ }).hover();
-  await page.getByRole("menuitemradio", { name: "Project", exact: true }).click();
-  await page.getByRole("button", { name: /^Session view/ }).click();
-  const emptyGroups = page.getByRole("menuitemcheckbox", { name: "Show empty groups" });
-  if ((await emptyGroups.getAttribute("aria-checked")) !== "true") await emptyGroups.click();
-  else await page.keyboard.press("Escape");
+  // Project scenarios need explicit folders; activity pagination and mobile
+  // header scenarios must retain their own view preconditions.
+  if (groupBy !== null) {
+    // The rail is available before draft hydration performs its initial autofocus.
+    await page
+      .getByRole("textbox", { name: "Message the agent", exact: true })
+      .and(page.locator(":focus"))
+      .waitFor();
+    await page.getByRole("button", { name: /^Session view/ }).press("Enter");
+    await page.getByRole("menuitem").first().and(page.locator(":focus")).waitFor();
+    await page.getByRole("menuitem", { name: /^Group by/ }).focus();
+    await page.keyboard.press("ArrowRight");
+    await page.getByRole("menuitemradio").first().and(page.locator(":focus")).waitFor();
+    await page.getByRole("menuitemradio", { name: groupBy, exact: true }).press("Enter");
+    await page.getByRole("menu").waitFor({ state: "hidden" });
+    await page
+      .getByRole("button", { name: /^Session view/ })
+      .and(page.locator(":focus"))
+      .waitFor();
+  }
+  if (groupBy === "Project") {
+    await page.getByRole("button", { name: /^Session view/ }).press("Enter");
+    await page.getByRole("menuitem").first().and(page.locator(":focus")).waitFor();
+    const emptyGroups = page.getByRole("menuitemcheckbox", { name: "Show empty groups" });
+    if ((await emptyGroups.getAttribute("aria-checked")) !== "true")
+      await emptyGroups.press("Enter");
+    else await page.keyboard.press("Escape");
+    await page.getByRole("menu").waitFor({ state: "hidden" });
+    await page
+      .getByRole("button", { name: /^Session view/ })
+      .and(page.locator(":focus"))
+      .waitFor();
+  }
   return page.url().match(/\/workspaces\/([^/]+)\/sessions/)![1]!;
 }
 
