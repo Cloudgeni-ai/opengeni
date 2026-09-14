@@ -85,6 +85,13 @@ does not retry materialization or an agent turn, and a later successful Continue
 does not prove the earlier cause. Existing historical generic failures cannot
 be enriched retrospectively with output that was never retained.
 
+Modal's fixed visibility probe observes its own provider output cursor rather
+than a retained agent command. Its bounded observation deadline remains a
+`command_pending` failure, not proof of a missing path or process termination.
+When known, `materializationDiagnostic.providerExecution` preserves the exact
+sandbox/task/exec identity for investigation; it is not a durable command alias.
+Neither those identities nor raw output enter public metric labels.
+
 Enable scraping via the chart:
 
 ```yaml

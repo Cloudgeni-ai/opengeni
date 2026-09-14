@@ -916,6 +916,18 @@ turn that attached them; historical attachment ids do not cause sandbox work.
 Active model-history images are independently read from object storage. This-turn generated-video files may still copy onto the
 box before dispatch; a copy miss is deferred like generated images (the
 durable File remains) and does not fail the turn.
+
+Modal materialization verification uses a fixed read-only provider probe inside
+the original routed operation and capture gate. It starts once and advances its
+own ephemeral output cursor until both streams are terminal; an initial output
+page is not completion. It never borrows the parent workspace mutation's retained
+command handle, weakens command persistence, or retries the clone/check/turn.
+Success requires exit zero and the exact visibility marker. A 30-second
+observation deadline and turn cancellation abort outstanding provider RPCs;
+aborting observation does not prove process termination. Deadline failures stay
+unconfirmed and preserve the known provider execution identity in authenticated
+materialization diagnostics. Other providers retain their existing verification
+contract, and Connected Machine materialization remains a no-op.
 Source-bearing `generate_video` calls join that same single-flight provisioner
 immediately before inspecting their `/workspace` references and use the active
 routed session. Text-to-video requests do not acquire a sandbox.
