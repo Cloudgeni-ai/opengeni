@@ -487,3 +487,37 @@ test("StrictMode effect replay shares the pending first-page request", async () 
     await tree.close();
   }
 });
+
+test("supporting evidence selection follows expanded collection reads and invalidates prior rows", async () => {
+  list.mockReset();
+  list.mockImplementation(async (_workspace, request) => ({
+    entries: [
+      entry(
+        request.includeEvidence ? "source" : "finding",
+        request.includeEvidence ? "Supporting screenshot" : "Saved decision",
+      ),
+    ],
+    nextCursor: null,
+  }));
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const props = {
+    workspaceId: "workspace",
+    entries: [entry("collection", "Product", true)],
+    refresh: 0,
+    canEdit: false,
+    onOpen: () => {},
+    onCreate: () => {},
+  };
+  await act(async () => root.render(<KnowledgeTree {...props} />));
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('button[aria-label="Product"]')!.click(),
+  );
+  expect(container.textContent).toContain("Saved decision");
+  expect(list.mock.calls.at(-1)?.[1].includeEvidence).toBeUndefined();
+  await act(async () => root.render(<KnowledgeTree {...props} includeEvidence />));
+  expect(container.textContent).toContain("Supporting screenshot");
+  expect(container.textContent).not.toContain("Saved decision");
+  expect(list.mock.calls.at(-1)?.[1].includeEvidence).toBe(true);
+  await act(async () => root.unmount());
+});

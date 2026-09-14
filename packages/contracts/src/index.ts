@@ -810,6 +810,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "goal_pause",
   "goal_resume",
   "knowledge_search",
+  "knowledge_prepare_save",
   "knowledge_get",
   "knowledge_browse",
   "knowledge_save",
@@ -12508,6 +12509,16 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     workspaceId: z.string().uuid(),
     accountId: z.string().uuid(),
     status: SessionStatus,
+    /** Detail-only dispatch evidence. A wake delivery attempt is not turn execution. */
+    dispatchWait: z
+      .object({
+        state: z.enum(["pending", "acknowledged", "unavailable"]),
+        attempts: z.number().int().nonnegative(),
+        nextAttemptAt: z.string().nullable(),
+        lastError: z.string().nullable(),
+      })
+      .nullable()
+      .optional(),
     /** Detail-only failure evidence through lastSequence; independent of timeline paging. */
     failureDiagnostics: z
       .object({
@@ -17292,6 +17303,7 @@ export * from "./model-context-inspector";
 export * from "./workspace-learning-policy";
 export * from "./agent-learning";
 export * from "./knowledge-entries";
+export * from "./knowledge-preparation";
 export * from "./workspace-learning-administration";
 export * from "./workspace-state";
 export * from "./preference-registry";

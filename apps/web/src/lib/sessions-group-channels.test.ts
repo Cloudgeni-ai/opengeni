@@ -207,11 +207,11 @@ describe("summarizeRailNodes", () => {
     });
   });
 
-  test("treats capacity waits as working, not as needing user input", () => {
+  test("treats capacity waits as waiting to run, not as active execution", () => {
     const forest = buildRailForest([session({ id: "waiting", status: "waiting_capacity" })]);
     expect(summarizeRailNodes(forest.running)).toMatchObject({
-      kind: "active",
-      label: "1 working",
+      kind: "queued",
+      label: "1 waiting to run",
     });
   });
 

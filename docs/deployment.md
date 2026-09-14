@@ -1,5 +1,22 @@
 # Deployment
 
+## Selective Knowledge source discovery (0469)
+
+`0469_knowledge_source_discovery.sql` requires maintenance. Stop every API,
+control-worker and turn-worker using this database. Supply every old/new runtime
+login through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or
+`applicationDatabaseRoles` for programmatic migration). Missing/invalid roles or
+a live listed identity abort with SQLSTATE `55000`. Apply migrations and start
+only the new source-purpose-aware binaries. Pre-0469 strict readers reject the
+new `source.purpose` field; do not restart them after activation.
+
+The migration changes discovery, not retained content. Typed historical chat and
+agent-prepared file evidence disappears from default published search/listing;
+explicit evidence reads, review, references, original files and revision history
+remain available. No customer content is deleted or rewritten. Ordinary chat
+attachments stop creating source entries automatically. See [Knowledge](knowledge.md).
+
+
 ## Unified Knowledge cutover (0461)
 
 `0461_unified_knowledge.sql` is a maintenance migration. Stop every API,

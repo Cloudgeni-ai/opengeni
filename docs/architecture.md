@@ -87,15 +87,15 @@ Canonical: `apps/worker/src/workflows/session.ts` and
 
 ### 3.3 Logical turns and physical attempts are different
 
-A **turn** is accepted work; an **attempt**, physical execution. Recovery,
-interruption or capacity waiting may replace attempts without duplicating turns/effects.
+A **turn** is accepted work; an **attempt**, replaceable execution without duplicate
+effects. Updates form atomic batches; resumed attempts append batches, preserving
+ordered, exactly-once history.
 
-Internal-update delivery is atomic per batch, not unique per logical turn:
-resumed attempts may append a new batch while retaining earlier receipts.
-Canonical model history owns their ordered, exactly-once inclusion.
-
-Successful `wait_for_input` ends model execution after tool-batch settlement;
-trusted runtime state and immutable same-turn deadlines preserve wait/wake authority.
+`wait_for_input` ends execution after tool-batch settlement, preserving trusted
+wait authority and immutable same-turn deadlines. Command results remain durable;
+alone, they wake only explicit waits. Notices cannot block other inbox input.
+Different causal turns may coalesce only with equivalent human/execution authority,
+preserving lineage. See [`run-lifecycle.md`](run-lifecycle.md).
 
 `runAgentTurn` is non-retryable by default: model/tool/sandbox/Git/connector/cloud
 operations have external effects. Recovery is explicit and attempt-fenced.
@@ -176,12 +176,12 @@ Stores are not interchangeable:
 
 [Chat delivery](run-lifecycle.md): lossless content, windowed history.
 
-Knowledge is the canonical retrieval system after maintenance migration 0461.
-Original file bytes stay in object storage; exact source/finding/group revisions,
-pinned evidence, relationships, publication decisions and review receipts live
-in Postgres. Keyword and embedding indexes are rebuildable. The same schema
-serves personal, workspace and organization scopes; access precedes ranking and
-relationships never grant access. Conversation history and task notes are separate.
+Knowledge stores exact revisions, evidence and publication receipts in Postgres;
+original files stay in object storage. Scoped access precedes search ranking.
+Chat attachments remain conversation resources. Agents select lasting findings
+and reference sources; supporting evidence is excluded from default discovery.
+Read-only save preparation fetches collections and published/pending matches on
+demand. See [`knowledge.md`](knowledge.md).
 
 Agent learning centralizes Knowledge, instructions and Skills in Automatic,
 Review first and Off settings, with sparse chat/task overrides and immutable

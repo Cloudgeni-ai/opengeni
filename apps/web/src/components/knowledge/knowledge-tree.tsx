@@ -116,6 +116,7 @@ type TreeProps = {
   workspaceId: string;
   entries: KnowledgeEntrySummary[];
   scope?: KnowledgeEntryScope;
+  includeEvidence?: boolean;
   refresh: number;
   canEdit: boolean;
   canWriteOrganization?: boolean;
@@ -137,7 +138,15 @@ export function KnowledgeTree(props: TreeProps) {
   const requests = useMemo(
     () => new KnowledgeCollectionRequests(),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- these identities invalidate retained Knowledge, not constructor inputs
-    [client, accessContext, workspaceStateOwnerId, props.workspaceId, props.scope, props.refresh],
+    [
+      client,
+      accessContext,
+      workspaceStateOwnerId,
+      props.workspaceId,
+      props.scope,
+      props.includeEvidence,
+      props.refresh,
+    ],
   );
   // Paths, rather than IDs: a record can belong to several collections.
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -328,6 +337,7 @@ function CollectionChildren({
   const request: KnowledgeEntryListRequest = {
     groupId: entry.id,
     scope: state.scope,
+    ...(state.includeEvidence ? { includeEvidence: true } : {}),
     view: "published",
     limit: 50,
   };

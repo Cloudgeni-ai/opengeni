@@ -179,6 +179,7 @@ export type RailAggregateStatusKind =
   | "needs_attention"
   | "failed"
   | "active"
+  | "queued"
   | "unread"
   | "active_work"
   | "neutral";
@@ -206,6 +207,7 @@ type RailStatusCounts = {
   attentionSince: string | null;
   failed: number;
   active: number;
+  queued: number;
   unread: number;
   activeWork: number;
 };
@@ -234,10 +236,13 @@ function ownRailStatusCounts(
       session.backgroundCommandActivity ||
       (hasActiveEffectiveControl(session) &&
         (session.status === "running" ||
-          session.status === "queued" ||
           session.status === "recovering" ||
-          session.status === "waiting_capacity" ||
           Boolean(sessionInputWait(session))))
+        ? 1
+        : 0,
+    queued:
+      hasActiveEffectiveControl(session) &&
+      (session.status === "queued" || session.status === "waiting_capacity")
         ? 1
         : 0,
     unread: session.unread ? 1 : 0,
@@ -252,6 +257,7 @@ function addRailStatusCounts(target: RailStatusCounts, source: RailStatusCounts)
   target.attentionSince = earliestIso(target.attentionSince, source.attentionSince);
   target.failed += source.failed;
   target.active += source.active;
+  target.queued += source.queued;
   target.unread += source.unread;
   target.activeWork += source.activeWork;
 }
@@ -268,6 +274,7 @@ function railStatusCounts(
       "attention",
       "failed",
       "active",
+      "queued",
       "unread",
       "activeWork",
     ] as const)
@@ -284,8 +291,8 @@ function railStatusCounts(
     counts.attention += stats.attentionDescendants;
     counts.attentionSince = earliestIso(counts.attentionSince, stats.attentionSince);
     counts.failed += stats.unreadFailedDescendants ?? stats.failedDescendants;
-    counts.active +=
-      stats.runningDescendants + stats.queuedDescendants + (stats.waitingDescendants ?? 0);
+    counts.active += stats.runningDescendants + (stats.waitingDescendants ?? 0);
+    counts.queued += stats.queuedDescendants;
     counts.unread += stats.unreadDescendants ?? 0;
     counts.activeWork += stats.activelyWorkingDescendants ?? 0;
 
@@ -338,6 +345,7 @@ export function summarizeRailNodes(
     attentionSince: null,
     failed: 0,
     active: 0,
+    queued: 0,
     unread: 0,
     activeWork: 0,
   };
@@ -382,6 +390,14 @@ export function summarizeRailNodes(
       count: counts.active,
       total: counts.total,
       label: `${counts.active} working`,
+    };
+  }
+  if (counts.queued > 0) {
+    return {
+      kind: "queued",
+      count: counts.queued,
+      total: counts.total,
+      label: `${counts.queued} waiting to run`,
     };
   }
   if (counts.unread > 0) {
