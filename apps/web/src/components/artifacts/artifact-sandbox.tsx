@@ -150,7 +150,7 @@ export function ArtifactSandbox(props: {
         style={!focused && props.height ? { height: props.height } : undefined}
         toolBridge={props.toolBridge}
         className={cn(
-          "h-[clamp(30rem,62vh,48rem)] w-full border-0 bg-white",
+          "block h-[clamp(30rem,62vh,48rem)] w-full border-0 bg-white",
           props.fill && "h-0 min-h-0 flex-1",
           focused && "min-h-0 flex-1",
         )}

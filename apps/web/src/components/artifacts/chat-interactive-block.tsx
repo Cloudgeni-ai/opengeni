@@ -7,6 +7,13 @@ import { loadSiteSnapshot } from "@opengeni/react/sites";
 import { useAppContext } from "@/context";
 import { createSiteToolBridge } from "@/lib/site-tool-bridge";
 import { ArtifactSandbox } from "./artifact-sandbox";
+import { DeferredChatMedia } from "./deferred-chat-media";
+
+// Fixed chat viewports keep async Site loads and fragment resize messages from
+// moving the conversation. Full-screen remains available for larger content.
+const INLINE_PREVIEW_HEIGHT = 360;
+const SITE_PREVIEW_HEIGHT = 400;
+const PREVIEW_CHROME_HEIGHT = 50;
 
 export type ChatInteractiveBlockProps = {
   workspaceId: string;
@@ -15,6 +22,22 @@ export type ChatInteractiveBlockProps = {
 };
 
 export function ChatInteractiveBlock(props: ChatInteractiveBlockProps) {
+  const height =
+    (props.kind === "html" ? INLINE_PREVIEW_HEIGHT : SITE_PREVIEW_HEIGHT) + PREVIEW_CHROME_HEIGHT;
+  return (
+    <DeferredChatMedia
+      key={`${props.workspaceId}:${props.kind}:${props.kind === "site" ? props.content : "inline"}`}
+      height={height}
+      label={props.kind === "html" ? "preview" : "Site preview"}
+    >
+      <div style={{ height }}>
+        <LoadedChatInteractiveBlock {...props} />
+      </div>
+    </DeferredChatMedia>
+  );
+}
+
+function LoadedChatInteractiveBlock(props: ChatInteractiveBlockProps) {
   if (props.kind === "html") return <InlineHtml {...props} />;
   try {
     const value = JSON.parse(props.content);
@@ -58,8 +81,9 @@ function InlineHtml({ workspaceId, content }: ChatInteractiveBlockProps) {
       showLiveStatus={false}
       html={html}
       toolBridge={toolBridge}
-      height={360}
-      autoHeight
+      height={INLINE_PREVIEW_HEIGHT}
+      className="h-full"
+      fill
       theme={resolvedTheme}
     />
   );
@@ -151,7 +175,9 @@ function SiteEmbedContent({
       title={snapshot.detail.artifact.title}
       html={content.html}
       toolBridge={toolBridge}
-      height={400}
+      height={SITE_PREVIEW_HEIGHT}
+      className="h-full"
+      fill
       headerControls={
         <>
           <Select
