@@ -28,6 +28,7 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
   "test/e2e/editable-artifacts.browser.e2e.ts",
 ] as const;
 const AI_GATEWAY_CONNECTION_E2E = "test/e2e/ai-gateway-connection.browser.e2e.ts";
+const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
 const PERSONAL_WORKSPACE_ACCESSIBILITY_E2E =
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts";
 const PERSONAL_RESOURCE_ATTACHMENTS_E2E = "test/e2e/personal-resource-attachments.browser.e2e.ts";
@@ -44,7 +45,6 @@ const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
 const TIMELINE_TIP_FOLLOW_BROWSER_E2E = "test/e2e/timeline-tip-follow.browser.e2e.ts";
 const RESTORED_ATTACHMENT_PREVIEW_E2E = "test/e2e/restored-attachment-preview.browser.e2e.ts";
 const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
-const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
   test("documentation-only changes retain every non-runtime public guard", () => {
