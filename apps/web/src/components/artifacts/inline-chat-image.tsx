@@ -6,15 +6,11 @@ import { useAppContext } from "@/context";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { Button } from "@/components/ui/button";
 import { Link } from "@tanstack/react-router";
+import { DeferredChatMedia } from "./deferred-chat-media";
 
-export function InlineChatImage({
-  workspaceId,
-  artifactId,
-  alt,
-  thumbnail = false,
-  showArtifactLink = false,
-  fromSession,
-}: {
+const CHAT_IMAGE_HEIGHT = 360;
+
+type InlineChatImageProps = {
   workspaceId: string;
   artifactId: string;
   alt: string;
@@ -22,7 +18,31 @@ export function InlineChatImage({
   thumbnail?: boolean;
   showArtifactLink?: boolean;
   fromSession?: string;
-}) {
+};
+
+export function InlineChatImage(props: InlineChatImageProps) {
+  if (props.thumbnail) return <InlineChatImageBody {...props} />;
+  return (
+    <DeferredChatMedia height={CHAT_IMAGE_HEIGHT} label="Loading image…">
+      {/* Metadata must not change the height reserved before viewport entry. */}
+      <div
+        className="flex w-full min-w-0 flex-col overflow-hidden rounded-md"
+        style={{ height: CHAT_IMAGE_HEIGHT }}
+      >
+        <InlineChatImageBody {...props} />
+      </div>
+    </DeferredChatMedia>
+  );
+}
+
+function InlineChatImageBody({
+  workspaceId,
+  artifactId,
+  alt,
+  thumbnail = false,
+  showArtifactLink = false,
+  fromSession,
+}: InlineChatImageProps) {
   const { client, accessKeyVersion } = useAppContext();
   const [loaded, setLoaded] = useState<{
     client: typeof client;
@@ -84,22 +104,27 @@ export function InlineChatImage({
         Loading image…
       </span>
     );
+  const image = (
+    <LoadedImage
+      key={`${workspaceId}:${artifactId}:${retry}`}
+      artifact={loaded.artifact}
+      load={load}
+      alt={alt}
+      thumbnail={thumbnail}
+      onRetry={() => setRetry((v) => v + 1)}
+    />
+  );
   return (
     <>
-      <LoadedImage
-        key={`${workspaceId}:${artifactId}:${retry}`}
-        artifact={loaded.artifact}
-        load={load}
-        alt={alt}
-        thumbnail={thumbnail}
-        onRetry={() => setRetry((v) => v + 1)}
-      />
+      {thumbnail ? image : (
+        <div className="flex min-h-0 flex-1 items-center justify-center">{image}</div>
+      )}
       {showArtifactLink && !thumbnail ? (
         <Link
           to="/workspaces/$workspaceId/artifacts/files/$artifactId"
           params={{ workspaceId, artifactId }}
           search={fromSession ? { fromSession } : {}}
-          className="mt-1 inline-flex min-h-9 items-center text-xs text-fg-muted underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="mt-1 inline-flex min-h-9 shrink-0 items-center text-xs text-fg-muted underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           Open in Artifacts
         </Link>
@@ -145,10 +170,12 @@ function LoadedImage({
       src={state.url}
       alt={alt}
       loading="lazy"
+      width={artifact.dimensions?.width}
+      height={artifact.dimensions?.height}
       className={
         thumbnail
           ? "h-full w-full object-contain"
-          : "my-3 max-h-[70dvh] max-w-full rounded-md object-contain"
+          : "h-full w-full min-w-0 rounded-md object-contain"
       }
       onError={() => setFailed(true)}
     />
@@ -157,7 +184,7 @@ function LoadedImage({
     <button
       type="button"
       aria-label={`Expand ${alt || "image"}`}
-      className="block max-w-full cursor-zoom-in rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
+      className="block h-full w-full min-w-0 cursor-zoom-in rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
       onClick={(event) => lightbox.open(state.url, alt, event.currentTarget, "Image")}
     >
       {image}
