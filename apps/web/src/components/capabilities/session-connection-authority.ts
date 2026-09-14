@@ -26,20 +26,22 @@ function personalConnections(item: CapabilityCatalogItem, connections: Connectio
 
 export async function sessionConnectionAuthorities(
   client: OpenGeniBrowserClient,
-  session: Pick<Session, "id" | "workspaceId" | "tenancy">,
+  session: Pick<Session, "id" | "workspaceId" | "tenancy" | "connectionContext">,
   items: CapabilityCatalogItem[],
   knownConnections?: ConnectionMetadata[],
 ): Promise<McpConnectionAuthoritySelection[]> {
+  const context = session.connectionContext ?? session.tenancy;
+  // Older API generations may omit both projections. They cannot supply the
+  // exact context needed to restore grants; ordinary messages still work.
+  if (!context) return [];
   const personal = items.filter(
     (item) =>
       item.enabled && item.connectionRef?.subjectScope === "subject" && item.runtime.mcpServerId,
   );
   if (personal.length === 0) return [];
   const connections = knownConnections ?? (await client.listConnections(session.workspaceId));
-  if (!session.tenancy) throw new Error("Conversation sharing authority is not available.");
-  const authorityEpoch = session.tenancy.authorityEpoch;
-  const visibility =
-    session.tenancy.visibility === "workspace" ? "workspace_shared" : "user_private";
+  const authorityEpoch = context.authorityEpoch;
+  const visibility = context.visibility === "workspace" ? "workspace_shared" : "user_private";
   const authorities: UserResourceAuthoritySummary[] = [];
   let cursor: string | undefined;
   do {
@@ -112,11 +114,12 @@ export async function authorizeSessionPersonalConnection(
     client.listConnections(workspaceId),
   ]);
   if (!stillCurrent()) throw new Error("Connection setup was interrupted.");
-  if (!session.tenancy || session.tenancy.visibility !== reviewedVisibility)
+  const context = session.connectionContext ?? session.tenancy;
+  if (!context || context.visibility !== reviewedVisibility)
     throw new Error(
       "The conversation's visibility changed. Close and review the connection again.",
     );
-  if (session.tenancy.visibility === "workspace" && !sharedOutputAcknowledged)
+  if (context.visibility === "workspace" && !sharedOutputAcknowledged)
     throw new Error("Acknowledge shared results before using your personal account here.");
   const matches = personalConnections(item, connections);
   if (matches.length > 1)
@@ -136,9 +139,8 @@ export async function authorizeSessionPersonalConnection(
     resourceKind: "connection",
     mode: "session",
     sessionId,
-    expectedAuthorityEpoch: session.tenancy.authorityEpoch,
-    context: session.tenancy.visibility === "workspace" ? "workspace_shared" : "user_private",
-    workspaceSharedAcknowledged:
-      session.tenancy.visibility === "workspace" && sharedOutputAcknowledged,
+    expectedAuthorityEpoch: context.authorityEpoch,
+    context: context.visibility === "workspace" ? "workspace_shared" : "user_private",
+    workspaceSharedAcknowledged: context.visibility === "workspace" && sharedOutputAcknowledged,
   });
 }

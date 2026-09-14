@@ -1652,6 +1652,7 @@ function SessionChatPane(props: {
     await reloadSessionAfterSetup();
     await refreshConnectionAuthorities();
   }, [reloadSessionAfterSetup, refreshConnectionAuthorities]);
+  const connectionContext = props.session.connectionContext ?? props.session.tenancy;
   const renderAuthNeeded = useCallback(
     (item: AuthNeededItem) => {
       const recommendation = sessionAuthRecommendation(item, context.workspaceCapabilityCatalog);
@@ -1664,11 +1665,11 @@ function SessionChatPane(props: {
           }
         >
           <SessionCapabilityCard
-            key={`${props.session.id}:${props.session.tenancy?.authorityEpoch}:${item.id}`}
+            key={`${props.session.id}:${connectionContext?.visibility}:${connectionContext?.authorityEpoch}:${item.id}`}
             item={recommendation}
             workspaceId={props.session.workspaceId}
             sessionId={props.session.id}
-            visibility={props.session.tenancy?.visibility ?? "workspace"}
+            visibility={connectionContext?.visibility ?? "workspace"}
             onConfigured={afterConnectionSetup}
           />
         </Suspense>
@@ -1678,8 +1679,8 @@ function SessionChatPane(props: {
       context.workspaceCapabilityCatalog,
       props.session.id,
       props.session.workspaceId,
-      props.session.tenancy?.visibility,
-      props.session.tenancy?.authorityEpoch,
+      connectionContext?.visibility,
+      connectionContext?.authorityEpoch,
       afterConnectionSetup,
     ],
   );

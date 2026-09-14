@@ -236,6 +236,9 @@ describe("release schema contract", () => {
     const knowledgeRelationshipProjection = completeSourceContract.migrations.some(
       (migration) => migration.path === "0468_knowledge_relationship_projection.sql",
     );
+    const personalConnectionSessionConsent = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0474_personal_connection_session_consent.sql",
+    );
     const organizationUsageAnalyticalCapability = completeSourceContract.migrations.some(
       (migration) => migration.path === "0473_organization_usage_analytical_capability.sql",
     );
@@ -275,6 +278,7 @@ describe("release schema contract", () => {
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (organizationIntegrationPolicy ? 1 : 0) +
+        (personalConnectionSessionConsent ? 1 : 0) +
         (organizationUsageAnalyticalCapability ? 1 : 0) +
         (usageEventsAccountRecentIndex ? 1 : 0) +
         (usageEventsWorkspaceRecentIndex ? 1 : 0) +
@@ -421,11 +425,16 @@ describe("release schema contract", () => {
       ...(organizationUsageAnalyticalCapability
         ? { latestMigration: "0473_organization_usage_analytical_capability.sql" }
         : {}),
+      ...(personalConnectionSessionConsent
+        ? { latestMigration: "0474_personal_connection_session_consent.sql" }
+        : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: organizationUsageAnalyticalCapability
-        ? "0473_organization_usage_analytical_capability.sql"
-        : "0472_usage_events_workspace_recent_index.sql",
+      path: personalConnectionSessionConsent
+        ? "0474_personal_connection_session_consent.sql"
+        : organizationUsageAnalyticalCapability
+          ? "0473_organization_usage_analytical_capability.sql"
+          : "0472_usage_events_workspace_recent_index.sql",
       deploymentMode: "rolling",
     });
     expect(
@@ -1540,6 +1549,9 @@ describe("release schema contract", () => {
     const knowledgeRelationshipProjection = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0468_knowledge_relationship_projection.sql",
     );
+    const personalConnectionSessionConsent = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0474_personal_connection_session_consent.sql",
+    );
     const organizationUsageAnalyticalCapability = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0473_organization_usage_analytical_capability.sql",
     );
@@ -2007,6 +2019,7 @@ describe("release schema contract", () => {
       "0471_usage_events_account_recent_index.sql",
       "0472_usage_events_workspace_recent_index.sql",
       "0473_organization_usage_analytical_capability.sql",
+      "0474_personal_connection_session_consent.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2395,9 +2408,15 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0473_organization_usage_analytical_capability.sql",
       };
+    if (personalConnectionSessionConsent)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0474_personal_connection_session_consent.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (organizationIntegrationPolicy ? 1 : 0) +
+        (personalConnectionSessionConsent ? 1 : 0) +
         (organizationUsageAnalyticalCapability ? 1 : 0) +
         (usageEventsAccountRecentIndex ? 1 : 0) +
         (usageEventsWorkspaceRecentIndex ? 1 : 0) +
@@ -2744,6 +2763,9 @@ describe("release schema contract", () => {
         : {}),
       ...(organizationUsageAnalyticalCapability
         ? { latestMigration: "0473_organization_usage_analytical_capability.sql" }
+        : {}),
+      ...(personalConnectionSessionConsent
+        ? { latestMigration: "0474_personal_connection_session_consent.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(

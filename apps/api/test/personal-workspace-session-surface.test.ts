@@ -15,6 +15,10 @@ import {
   ensureExternalIdentity,
   getExternalLinkTurnAuthorization,
   createDb,
+  createConnection,
+  claimSessionWorkForAttempt,
+  resolveAcceptedConnectionUse,
+  type UserResourceAuthorityGrant,
   createOrganizationInvitation,
   createSession,
   ensureManagedAccessForUserWithOrganizationMemberships,
@@ -2108,6 +2112,153 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
       },
     );
     expect(issueResponse.status).toBe(403);
+  }, 180_000);
+
+  test("Gmail consent and accepted use work before private-session activation in Personal and shared workspaces", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const app = buildApp(undefined, true, {
+      mcpServers: [
+        {
+          id: "gmail",
+          url: "https://gmailmcp.googleapis.com/mcp/v1",
+          connectionRef: {
+            providerDomain: "gmailmcp.googleapis.com",
+            kind: "oauth2",
+            subjectScope: "subject",
+          },
+        },
+      ],
+    });
+    const headers = { cookie: human.cookie, "content-type": "application/json" };
+    for (const workspaceId of [human.personalWorkspaceId, human.legacyWorkspaceId]) {
+      const connection = await createConnection(client.db, {
+        accountId: human.accountId,
+        workspaceId,
+        subjectId: human.subjectId,
+        providerDomain: "gmailmcp.googleapis.com",
+        kind: "oauth2",
+        credentialEncrypted: "fixture-not-decrypted",
+        createdBySubjectId: human.subjectId,
+      });
+      expect(connection.authorityId).toBeString();
+      const session = await createSession(client.db, {
+        accountId: human.accountId,
+        workspaceId,
+        initialMessage: "",
+        resources: [],
+        metadata: {},
+        createdBy: { kind: "subject", subjectId: human.subjectId },
+        subjectId: human.subjectId,
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        tools: [{ kind: "mcp", id: "gmail" }],
+      });
+      const base = `http://x/v1/workspaces/${workspaceId}`;
+      const read = await app.request(`${base}/sessions/${session.id}`, { headers });
+      expect(read.status).toBe(200);
+      const projection = (await read.json()) as { tenancy?: unknown; connectionContext?: unknown };
+      expect(projection.tenancy).toBeUndefined();
+      expect(projection.connectionContext).toEqual({ visibility: "workspace", authorityEpoch: 1 });
+      const list = await app.request(
+        `${base}/user-resource-authorities?scope=user&resourceKind=connection`,
+        { headers },
+      );
+      expect(list.status).toBe(200);
+      expect(
+        ((await list.json()) as { authorities: Array<{ authorityId: string }> }).authorities.map(
+          (a) => a.authorityId,
+        ),
+      ).toContain(connection.authorityId!);
+      const issue = (overrides: Record<string, unknown> = {}) =>
+        app.request(`${base}/user-resource-authorities/${connection.authorityId}/grants`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            scope: "user",
+            resourceKind: "connection",
+            mode: "session",
+            sessionId: session.id,
+            expectedAuthorityEpoch: 1,
+            context: "workspace_shared",
+            workspaceSharedAcknowledged: true,
+            ...overrides,
+          }),
+        });
+      expect((await issue({ workspaceSharedAcknowledged: false })).status).toBe(422);
+      expect((await issue({ expectedAuthorityEpoch: 2 })).status).toBe(403);
+      expect(
+        (await issue({ mode: "always", sessionId: undefined, expectedAuthorityEpoch: undefined }))
+          .status,
+      ).toBe(403);
+      const issued = await issue();
+      expect(issued.status).toBe(200);
+      const { grant } = (await issued.json()) as { grant: UserResourceAuthorityGrant };
+      const replay = await issue();
+      expect(replay.status).toBe(200);
+      expect(((await replay.json()) as { grant: UserResourceAuthorityGrant }).grant.grantId).toBe(
+        grant.grantId,
+      );
+      const sent = await app.request(`${base}/sessions/${session.id}/events`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          type: "user.message",
+          clientEventId: crypto.randomUUID(),
+          payload: {
+            text: "Read my inbox",
+            connectionAuthorities: [
+              { serverId: "gmail", connectionId: connection.id, userDelegation: grant.delegation },
+            ],
+          },
+        }),
+      });
+      expect({ status: sent.status, body: await sent.clone().text() }).toMatchObject({
+        status: 202,
+      });
+      const attemptId = crypto.randomUUID();
+      const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claim.action !== "claimed") throw new Error(`turn not claimed: ${claim.reason}`);
+      const use = () =>
+        resolveAcceptedConnectionUse(client!.db, {
+          accountId: human.accountId,
+          workspaceId,
+          sessionId: session.id,
+          turnId: claim.turn.id,
+          attemptId,
+          executionGeneration: claim.turn.executionGeneration,
+          physicalRequestId: crypto.randomUUID(),
+          usePhase: "provider_request",
+          serverId: "gmail",
+          connectionId: connection.id,
+          providerDomain: "gmailmcp.googleapis.com",
+          connectionKind: "oauth2",
+          subjectScope: "subject",
+          ownerSubjectId: human.subjectId,
+        });
+      expect(await use()).toMatchObject({
+        status: "authorized",
+        attribution: { scope: "user", grantId: grant.grantId },
+      });
+      const revoked = await app.request(
+        `${base}/user-resource-authorities/grants/${grant.grantId}?scope=user`,
+        { method: "DELETE", headers },
+      );
+      expect(revoked.status).toBe(200);
+      expect(await use()).toMatchObject({ status: "denied" });
+    }
+    const [activation] =
+      await shared.admin`select count(*)::int as count from session_tenancy_activations where account_id = ${human.accountId}`;
+    expect(activation!.count).toBe(0);
   }, 180_000);
 
   test("returns RFC3339 expiry/revoke times, reissues expiry, and revokes without connections:read", async () => {
