@@ -169,8 +169,8 @@ describe("compact session view on the live local workspace route (API fixture)",
               permissions: ["account:admin", "workspace:admin"],
             },
           ],
-          workspaceGrants: [workspaceId, otherWorkspaceId].map((workspaceId) => ({
-            workspaceId,
+          workspaceGrants: [workspaceId, otherWorkspaceId].map((grantedWorkspaceId) => ({
+            workspaceId: grantedWorkspaceId,
             accountId,
             subjectId: "fixture",
             permissions: ["workspace:admin", "sessions:read", "sessions:write"],
@@ -386,10 +386,10 @@ describe("compact session view on the live local workspace route (API fixture)",
   }, 45_000);
 
   const invalidate = async () => {
-    await page.evaluate(async (workspaceId) => {
+    await page.evaluate(async (targetWorkspaceId) => {
       const modulePath = "/src/lib/session-list-invalidation.ts";
       const { notifySessionListChanged } = await import(modulePath);
-      notifySessionListChanged({ workspaceId, sessionId: "remote-change" });
+      notifySessionListChanged({ workspaceId: targetWorkspaceId, sessionId: "remote-change" });
     }, workspaceId);
   };
   const settleRead = async () => {
@@ -402,8 +402,8 @@ describe("compact session view on the live local workspace route (API fixture)",
     );
   };
 
-  for (const { localArchived, continuationFirst } of [true, false].flatMap((localArchived) =>
-    [false, true].map((continuationFirst) => ({ localArchived, continuationFirst })),
+  for (const { localArchived, continuationFirst } of [true, false].flatMap((archived) =>
+    [false, true].map((first) => ({ localArchived: archived, continuationFirst: first })),
   )) {
     test(`retained local ${localArchived ? "archive" : "restore"} receipt yields only to later-started child search reads${continuationFirst ? " with stale first-page overlap" : ""}`, async () => {
       const root = {
