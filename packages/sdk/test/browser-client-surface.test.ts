@@ -45,7 +45,6 @@ const legacyBrowserUnusedMethods = [
   "listGoalRevisions",
   "listPackInstallations",
   "listTranscriptionRecordings",
-  "listWorkspaceInstructionPolicies",
   "moveDocument",
   "openExternalBrowserAuthFlow",
   "pauseGoal",

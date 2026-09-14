@@ -184,6 +184,12 @@ and attempt receipts commit together, and callback replay does not repeat the
 provider exchange. Hosts poll the retained attempt ID after an exact stored
 return URL redirect, without added query parameters. OAuth completion records
 `connected_but_incomplete` for curated integrations, not integration readiness.
+The named `gmail` Connect adapter reuses generic MCP OAuth with the reviewed
+Gmail endpoint fixed server-side. It permits personal ownership only, including
+reconnect, and lists existing exact-endpoint Gmail accounts under the same provider.
+Connecting an account does not install or grant a mail capability; normal capability
+selection, named-user authority, and tool approval policy still apply.
+
 Generic MCP attempts collect a server URL and complete only the connection
 requirement; no integration or blanket tool grant is implied. Curated advance reuses
 native preview resolution and shared install validation from

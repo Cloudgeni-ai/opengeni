@@ -4,6 +4,7 @@ import { act, type ReactNode, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import type { SessionVariableSetPickerSharedState } from "./session-variable-set-picker";
+import { useSessionVariableSetPickerState } from "@/lib/use-session-variable-set-picker-state";
 
 const variableSetId = "11111111-1111-4111-8111-111111111111";
 const personalVariableSetId = "44444444-4444-4444-8444-444444444444";
@@ -65,10 +66,9 @@ function ResponsivePickerPair(props: {
   onReloadSession: () => Promise<void>;
   session?: Parameters<typeof SessionVariableSetPicker>[0]["session"];
 }) {
-  const [sharedState, setSharedState] = useState<SessionVariableSetPickerSharedState>({
-    saving: false,
-    committedSelection: null,
-  });
+  const [sharedState, setSharedState] = useSessionVariableSetPickerState(
+    props.session ?? sessionFixture,
+  );
   const picker = (triggerClassName: string) => (
     <SessionVariableSetPicker
       session={props.session ?? sessionFixture}
@@ -107,6 +107,68 @@ afterAll(() => {
 });
 
 describe("SessionVariableSetPicker", () => {
+  test("unblocks Send after the picker closes before refreshed props arrive", async () => {
+    updateSessionVariableSets.mockClear();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const reloadSession = mock(async () => undefined);
+    function Composer(props: { session: typeof sessionFixture }) {
+      const [sharedState, setSharedState] = useSessionVariableSetPickerState(props.session);
+      const [open, setOpen] = useState(true);
+      return (
+        <>
+          <button disabled={sharedState.saving || sharedState.committedSelection !== null}>
+            Send
+          </button>
+          {open ? (
+            <SessionVariableSetPicker
+              session={props.session}
+              canControl
+              canAttach
+              canUse
+              canList
+              embedded
+              sharedState={sharedState}
+              setSharedState={setSharedState}
+              onReloadSession={reloadSession}
+              onClose={() => setOpen(false)}
+            />
+          ) : null}
+        </>
+      );
+    }
+    try {
+      await act(async () => root.render(<Composer session={sessionFixture} />));
+      const select = container.querySelector("select")!;
+      await act(async () => {
+        select.value = variableSetId;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await act(async () => {
+        [...container.querySelectorAll("button")].find((b) => b.textContent === "Save")!.click();
+        await flush();
+      });
+      expect(updateSessionVariableSets).toHaveBeenCalledTimes(1);
+      expect(reloadSession).toHaveBeenCalledTimes(1);
+      expect(container.querySelector("select")).toBeNull();
+      const send = container.querySelector("button")!;
+      expect(send.textContent).toBe("Send");
+      expect(send.disabled).toBe(true);
+      // An unrelated render with stale session data must not release the guard.
+      await act(async () => root.render(<Composer session={{ ...sessionFixture }} />));
+      expect(send.disabled).toBe(true);
+      await act(async () =>
+        root.render(<Composer session={{ ...sessionFixture, variableSetIds: [variableSetId] }} />),
+      );
+      expect(send.disabled).toBe(false);
+      expect(container.querySelector("select")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("blocks personal detach when live status changes before activeTurnId refreshes", async () => {
     updateSessionVariableSets.mockClear();
     const container = document.createElement("div");

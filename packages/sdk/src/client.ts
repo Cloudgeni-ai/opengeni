@@ -1,3 +1,4 @@
+import type { ArtifactCatalogListOptions, ArtifactCatalogListResponse } from "./artifact-catalog";
 import type {
   KnowledgeOriginalFileDownload,
   AgentLearningContext,
@@ -6826,6 +6827,33 @@ export class OpenGeniClient {
     return await this.requestJson<CapabilityInstallation>(
       "POST",
       `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/disable`,
+    );
+  }
+
+  /** Read-only, permission-filtered workspace or session output discovery. */
+  async listArtifactCatalog(
+    workspaceId: string,
+    options: ArtifactCatalogListOptions & { signal?: AbortSignal } = {},
+  ): Promise<ArtifactCatalogListResponse> {
+    const query = new URLSearchParams();
+    for (const key of [
+      "sourceSessionId",
+      "q",
+      "kind",
+      "sort",
+      "status",
+      "limit",
+      "cursor",
+    ] as const) {
+      if (options[key] !== undefined) query.set(key, String(options[key]));
+    }
+    const suffix = query.size ? `?${query.toString()}` : "";
+    return this.requestJson<ArtifactCatalogListResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/artifact-catalog${suffix}`,
+      undefined,
+      undefined,
+      options,
     );
   }
 

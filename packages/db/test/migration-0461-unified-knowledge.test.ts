@@ -50,7 +50,10 @@ import { knowledgeMigrationId } from "../src/knowledge-migration";
 import { toPostgresLosslessText } from "../src/lossless-json";
 
 const migration = "0461_unified_knowledge.sql";
-const forwardMigrations = ["0462_agent_instruction_non_destructive_edits.sql"];
+const forwardMigrations = [
+  "0462_agent_instruction_non_destructive_edits.sql",
+  "0466_agent_instruction_activation_preservation.sql",
+];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;
 let app: ReturnType<typeof createDb>;

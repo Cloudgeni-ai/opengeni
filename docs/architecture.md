@@ -1280,6 +1280,12 @@ without hashes/sizes. Source JSON allows 64 MiB; HTML follows storage limits.
 Retrieval yields download URLs; the opaque-origin srcDoc viewer/bridge also
 serves session docks, filtered before pagination by version `sourceSessionId`.
 
+Workspace/session discovery shares `/artifact-catalog` across Sites, editable
+artifacts, generated images, and published files, preserving existing content
+authority. File provenance stays separate from bytes; `kind:id` identifies list
+entries. Browsing never executes Sites or wakes compute. See
+[`artifact-library.md`](artifact-library.md).
+
 Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
 [`connected-machines.md`](connected-machines.md).
@@ -1660,7 +1666,8 @@ current participant's selection. See [remote host MCP credentials](remote-mcp-cr
 
 Native remote MCP resolver registration is organization-owned configuration,
 keyed by the authoritative workspace `externalSource`. Only a live organization
-service-admin key administers it; participants cannot choose callback routes.
+service key with full (`workspace:admin`) access administers it; participants
+cannot choose callback routes. Human `account:admin` is not granted to these keys.
 Any retained registration opts the organization into exact namespace routing,
 with no static fallback. Endpoint/secret updates preserve registration identity
 and accepted authority but increment a live physical-use transport generation.

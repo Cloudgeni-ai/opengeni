@@ -58,7 +58,7 @@ async function administered<T>(
       sql`select id from api_keys where account_id = ${actor.accountId}::uuid
       and 'api_key:' || id::text = ${actor.subjectId} and workspace_id is null and credential_kind = 'organization'
       and revoked_at is null and (expires_at is null or expires_at > clock_timestamp())
-      and permissions ? 'account:admin' for share`,
+      and permissions ? 'workspace:admin' for share`,
     );
     if (!key) throw new HostMcpResolverError(403, "organization service administration required");
     await tx.execute(

@@ -140,6 +140,7 @@ export function useSessionEvents(
   const [eventWindow, setEventWindow] = useState<BrowserSessionEventWindow>(EMPTY_EVENT_WINDOW);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [error, setError] = useState<Error | null>(null);
+  const [newerError, setNewerError] = useState<Error | null>(null);
   const [hasOlder, setHasOlder] = useState(false);
   const [hasNewer, setHasNewer] = useState(false);
   const [sessionStatusProjection, setSessionStatusProjection] = useState<SessionStatus | null>(
@@ -186,6 +187,7 @@ export function useSessionEvents(
   // Navigation belongs to the session/client lifetime, not the transport.
   useEffect(() => {
     navigationGenerationRef.current += 1;
+    setNewerError(null);
     loadingOlderRef.current = false;
     loadingNewerRef.current = false;
     loadingOldestRef.current = false;
@@ -691,6 +693,7 @@ export function useSessionEvents(
       initialWindowLoadedRef.current = true;
       viewModeRef.current = "history";
       loadingOldestRef.current = false;
+      setNewerError(null);
       startTransition(() => {
         if (status !== undefined) {
           setSessionStatusProjection(status);
@@ -736,6 +739,7 @@ export function useSessionEvents(
         return false;
       }
       if (window.events.length === 0) {
+        setNewerError(null);
         hasNewerRef.current = false;
         setHasNewer(false);
         // Caught up with durable history — resume the live tip stream.
@@ -788,6 +792,7 @@ export function useSessionEvents(
         resumeLive = true;
       }
       loadingNewerRef.current = false;
+      setNewerError(null);
       startTransition(() => {
         if (status !== undefined) {
           setSessionStatusProjection(status);
@@ -803,6 +808,16 @@ export function useSessionEvents(
       });
       published = true;
       return newer;
+    } catch (reason) {
+      // A settled request from an old navigation lifetime is not a failure of
+      // the current session. Preserve current loading/error state as well.
+      if (navigationGenerationRef.current !== generation) {
+        return false;
+      }
+      setNewerError(reason instanceof Error ? reason : new Error(String(reason)));
+      // Keep authorization and integrity failures actionable for callers;
+      // timeline-owned invocations attach their own explicit recovery UI.
+      throw reason;
     } finally {
       if (!published && navigationGenerationRef.current === generation) {
         loadingNewerRef.current = false;
@@ -817,6 +832,7 @@ export function useSessionEvents(
     }
     loadingLatestRef.current = true;
     setLoadingLatest(true);
+    setNewerError(null);
     let published = false;
     try {
       streamAbortRef.current?.abort();
@@ -873,7 +889,7 @@ export function useSessionEvents(
     loadOldest,
     loadingLatest: !identityMatches ? false : loadingLatest,
     jumpToLatest,
-    error: identityMatches ? error : null,
+    error: identityMatches ? (newerError ?? error) : null,
   };
 }
 

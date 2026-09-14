@@ -61,7 +61,7 @@ describe("Agent Knowledge surface", () => {
     expect(prompt).toContain("instruction_policy_save");
     expect(prompt).toContain("Preserve every unrelated existing command exactly");
     expect(prompt).toContain("editMode=append");
-    expect(prompt).toContain("replace only when the user explicitly asks");
+    expect(prompt).toContain("Agents cannot replace the complete instruction");
     expect(prompt).toContain("Off prevents agent authoring");
     expect(prompt).toContain("Report the actual receipt");
   });

@@ -3,19 +3,16 @@ import type {
   ToolGatewayIdentity,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
-  WorkspaceArtifactListResponse,
 } from "@opengeni/sdk";
 import type { PublishedHtmlArtifactToolBridge } from "@opengeni/react/artifacts";
-import { loadSiteSnapshot, type SiteClient } from "@opengeni/react/sites";
+import { loadSiteSnapshot } from "@opengeni/react/sites";
 import { SiteConversations } from "@/components/artifacts/site-conversations";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   ArchiveIcon,
   ArchiveRestoreIcon,
-  Clock3Icon,
   FilesIcon,
-  Globe2Icon,
   PanelsTopLeftIcon,
   PlugZapIcon,
   RotateCcwIcon,
@@ -24,7 +21,10 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
+import { LoadErrorState, PageHeader } from "@/components/common";
+import { ArtifactLibrary } from "@/components/artifacts/artifact-library";
+import { defaultArtifactFilters } from "@/lib/artifact-catalog";
+import { useArtifactCatalog } from "@/lib/use-artifact-catalog";
 import { ArtifactSandbox } from "@/components/artifacts/artifact-sandbox";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -45,21 +45,6 @@ function asError(error: unknown): Error {
 }
 
 const NO_SITE_TOOLS: readonly ToolGatewayIdentity[] = [];
-function useArtifacts(workspaceId: string, client: Pick<SiteClient, "listWorkspaceArtifacts">) {
-  const [data, setData] = useState<WorkspaceArtifactListResponse | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  const load = useCallback(async () => {
-    try {
-      setError(null);
-      setData(await client.listWorkspaceArtifacts(workspaceId));
-    } catch (nextError) {
-      setData(null);
-      setError(nextError);
-    }
-  }, [workspaceId, client]);
-  useEffect(() => void load(), [load]);
-  return { data, error, load };
-}
 
 export function ArtifactsRoute({
   workspaceId,
@@ -86,10 +71,19 @@ export function ArtifactsRoute({
 function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const { data, error, load } = useArtifacts(workspaceId, context.client);
+  const [filters, setFilters] = useState(defaultArtifactFilters);
+  const catalog = useArtifactCatalog(
+    context.client,
+    workspaceId,
+    filters,
+    context.accessKeyVersion,
+  );
   const startSession = async () => {
     const created = await context.startSession(workspaceId, {
-      text: "Help me build a workspace Site.",
+      text:
+        filters.kind === "all" || filters.kind === "file"
+          ? "Help me create a workspace artifact. Ask what I want to make before creating it."
+          : `Help me create a workspace ${filters.kind}. Ask what it should contain before creating it.`,
     });
     if (created)
       await navigate({
@@ -98,72 +92,29 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
       });
   };
   return (
-    <ContentPage width="standard">
+    <ContentPage width="wide">
       <PageHeader
         icon={<PanelsTopLeftIcon className="size-4" />}
-        title="Sites"
-        description="Interactive pages, dashboards, and tools built for this workspace."
+        title="Artifacts"
+        description="Sites, images, documents, and files created with Geni."
         actions={
           <Button onClick={() => void startSession()} disabled={context.busy}>
             <SparklesIcon className="mr-2 size-4" />
-            Build a Site
+            New artifact
           </Button>
         }
       />
-      {!data && !error ? (
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Skeleton className="h-36" />
-          <Skeleton className="h-36" />
-        </div>
-      ) : null}
-      {error && !data ? (
-        <LoadErrorState
-          title="Couldn't load Sites"
-          error={asError(error)}
-          onRetry={() => void load()}
-        />
-      ) : null}
-      {data?.artifacts.length === 0 ? (
-        <EmptyState>No Sites yet. Ask Geni to build the first one for this workspace.</EmptyState>
-      ) : null}
-      {data?.artifacts.length ? (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {data.artifacts.map((artifact) => (
-            <Link
-              key={artifact.id}
-              to="/workspaces/$workspaceId/artifacts/$artifactId"
-              params={{ workspaceId, artifactId: artifact.id }}
-              className="group rounded-xl border border-border bg-surface p-4 shadow-xs transition-[border-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-brand/30 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="rounded-lg bg-brand/10 p-2.5 text-brand transition-colors group-hover:bg-brand/15">
-                  <Globe2Icon className="size-4" />
-                </div>
-                <div className="flex items-center gap-2">
-                  <Badge
-                    variant={artifact.status === "active" ? "secondary" : "outline"}
-                    className="text-2xs font-normal"
-                  >
-                    {artifact.status === "active" ? "Live" : "Archived"}
-                  </Badge>
-                  <span className="text-2xs text-fg-subtle">
-                    {artifact.currentVersion ? `v${artifact.currentVersion.revision}` : "Draft"}
-                  </span>
-                </div>
-              </div>
-              <h2 className="mt-4 font-semibold text-fg">{artifact.title}</h2>
-              <p className="mt-1 line-clamp-2 text-sm text-fg-muted">
-                {artifact.description || "No description"}
-              </p>
-              <p className="mt-4 flex items-center gap-1 text-2xs text-fg-subtle">
-                <Clock3Icon className="size-3" />
-                {artifact.status === "archived" ? "Archived" : "Updated"}{" "}
-                {formatDate(artifact.updatedAt)}
-              </p>
-            </Link>
-          ))}
-        </div>
-      ) : null}
+      <ArtifactLibrary
+        workspaceId={workspaceId}
+        items={catalog.items}
+        filters={filters}
+        onFiltersChange={setFilters}
+        loading={catalog.loading}
+        error={catalog.error}
+        onRetry={catalog.retry}
+        nextCursor={catalog.nextCursor}
+        onLoadMore={catalog.loadMore}
+      />
     </ContentPage>
   );
 }
@@ -339,7 +290,7 @@ export function ArtifactDetailRoute({
           className="mb-3 inline-flex w-fit items-center gap-1.5 text-xs font-medium text-fg-subtle transition-colors hover:text-fg"
         >
           <ArrowLeftIcon className="size-3.5" />
-          All Sites
+          All artifacts
         </Link>
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div className="min-w-0">

@@ -10,9 +10,11 @@ export function sessionArtifactFromHref(href: string, origin: string, workspaceI
     if (parts[1] !== "workspaces" || parts[2] !== workspaceId || parts[3] !== "artifacts")
       return null;
     const editable = parts[4] === "editable";
-    const id = parts[editable ? 5 : 4];
-    if (parts.length !== (editable ? 6 : 5) || !id || !UUID.test(id)) return null;
-    return { id, editable };
+    const kind = parts[4] === "files" ? ("file" as const) : undefined;
+    const nested = editable || kind !== undefined;
+    const id = parts[nested ? 5 : 4];
+    if (parts.length !== (nested ? 6 : 5) || !id || !UUID.test(id)) return null;
+    return { id, editable, ...(kind ? { kind } : {}) };
   } catch {
     return null;
   }

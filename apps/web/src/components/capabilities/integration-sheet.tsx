@@ -15,15 +15,15 @@ import {
   type IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
 import { Button } from "@/components/ui/button";
+import { CapabilityDialogContent } from "@/components/capabilities/detail-dialog";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+  Dialog as Sheet,
+  DialogDescription as SheetDescription,
+  DialogHeader as SheetHeader,
+  DialogTitle as SheetTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 /** Stable element id for a disclosure so affordances can aria-describedby it. */
@@ -59,8 +59,7 @@ export function IntegrationSheet({
 }) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent
-        className="flex w-full flex-col gap-0 border-border bg-bg p-0 sm:max-w-[32rem]"
+      <CapabilityDialogContent
         aria-labelledby={model ? `integration-sheet-title-${model.id}` : undefined}
         onCloseAutoFocus={(event) => {
           const opener = restoreFocusRef?.current ?? null;
@@ -71,7 +70,7 @@ export function IntegrationSheet({
         }}
       >
         {model ? <IntegrationSheetBody model={model} /> : null}
-      </SheetContent>
+      </CapabilityDialogContent>
     </Sheet>
   );
 }
@@ -85,23 +84,25 @@ export function IntegrationSheetBody({ model }: { model: IntegrationViewModel })
       role="region"
       aria-label={`${model.name} settings`}
     >
-      <SheetHeader className="flex-row items-center gap-3 border-b border-border px-5 py-4 pr-12">
+      <SheetHeader className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-4 gap-y-3 border-b border-border p-6 pr-12 text-left sm:flex sm:flex-row sm:items-center sm:p-8 sm:pr-14">
         <IntegrationMarkView mark={model.mark} name={model.name} />
         <div className="min-w-0 flex-1">
           <SheetTitle
             id={`integration-sheet-title-${model.id}`}
-            className="truncate text-base text-fg"
+            className="text-xl font-semibold tracking-tight text-fg"
           >
             {model.name}
           </SheetTitle>
-          <SheetDescription className="line-clamp-2 text-xs text-fg-muted">
+          <SheetDescription className="mt-1 text-sm leading-6 text-fg-muted">
             {model.description}
           </SheetDescription>
         </div>
-        <IntegrationChipView chip={model.chip} />
+        <div className="col-start-2 sm:shrink-0">
+          <IntegrationChipView chip={model.chip} />
+        </div>
       </SheetHeader>
 
-      <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-5">
+      <div className="min-h-0 flex-1 space-y-6 overflow-y-auto p-6 sm:p-8">
         {model.notice ? (
           <div className="space-y-2">
             <Notice
@@ -245,7 +246,7 @@ function Block({
   return (
     <section className="space-y-2" aria-label={title}>
       <div className="flex items-baseline justify-between gap-3">
-        <h3 className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">{title}</h3>
+        <h3 className="text-sm font-medium text-fg">{title}</h3>
         {action}
       </div>
       {children}
@@ -488,7 +489,7 @@ function IntegrationFooterView({
     <div
       className={cn(
         "flex flex-wrap items-center gap-2",
-        !inline && "border-t border-border bg-surface px-5 py-3",
+        !inline && "border-t border-border bg-surface px-6 py-4 sm:px-8",
       )}
     >
       {footer.kind === "locked" ? (

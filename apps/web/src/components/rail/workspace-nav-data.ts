@@ -64,8 +64,8 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
   {
     to: "/workspaces/$workspaceId/artifacts",
     icon: "panels-top-left",
-    label: "Sites",
-    description: "Interactive pages and tools built with Geni",
+    label: "Artifacts",
+    description: "Sites, images, documents, and files built with Geni",
   },
 ];
 

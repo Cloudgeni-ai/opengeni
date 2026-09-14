@@ -31,4 +31,5 @@ export const embeddingMigrationTail = [
   // Patches the instruction writer introduced by 0461, so historical fixtures
   // must replay it after that writer rather than before its original creation.
   "0462_agent_instruction_non_destructive_edits.sql",
+  "0466_agent_instruction_activation_preservation.sql",
 ];

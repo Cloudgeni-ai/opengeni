@@ -2,6 +2,10 @@ import { RollingActivity } from "../timeline/rolling-activity";
 import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
+import { parseSandboxFileArtifactReceipt } from "@opengeni/sdk";
+import { unwrapMcpOutput } from "../timeline/parsers";
+import { isRetainedImageContentType } from "../timeline/retained-image";
+import { mcpToolLeaf } from "../timeline/tool-display-name";
 import type {
   DraftTimelineAnnotation,
   MediaGenerationResult,
@@ -225,8 +229,8 @@ export type MessageTimelineProps = {
   hasNewer?: boolean | undefined;
   /** A newer history page is being fetched. */
   loadingNewer?: boolean | undefined;
-  /** Page forward through history without loading the whole gap to the tip. */
-  onLoadNewer?: (() => void) | undefined;
+  /** Page forward through history. Return the request promise to enable inline error/retry. */
+  onLoadNewer?: (() => unknown) | undefined;
   /**
    * Reload the live tip window. When omitted, Jump to latest only re-pins and
    * scrolls the in-memory window.
@@ -457,6 +461,67 @@ export function MessageTimeline({
   // can acquire a different first-delta id when older text arrives).
   const sourceItems = events ?? items;
   const olderBoundaryKey = sourceItems?.[0]?.id;
+  const newerBoundaryKey = `${events?.[0]?.sessionId ?? ""}:${olderBoundaryKey ?? ""}`;
+  const newerScopeRef = useRef(newerBoundaryKey);
+  newerScopeRef.current = newerBoundaryKey;
+  const newerAttemptRef = useRef<{ pending: boolean } | null>(null);
+  const newerRetryButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [newerRetryPending, setNewerRetryPending] = useState(false);
+  const [newerFailure, setNewerFailure] = useState<{ key: string; message: string } | null>(null);
+  useEffect(() => {
+    newerScopeRef.current = newerBoundaryKey;
+    newerAttemptRef.current = null;
+    setNewerFailure(null);
+    setNewerRetryPending(false);
+    return () => {
+      newerScopeRef.current = "";
+      newerAttemptRef.current = null;
+    };
+  }, [newerBoundaryKey]);
+  const requestNewer = useCallback(
+    (explicitRetry = false) => {
+      if (
+        newerScopeRef.current !== newerBoundaryKey ||
+        !onLoadNewer ||
+        loadingNewer ||
+        (newerAttemptRef.current && (!explicitRetry || newerAttemptRef.current.pending))
+      ) {
+        return;
+      }
+      const attempt = { pending: true };
+      newerAttemptRef.current = attempt;
+      if (explicitRetry) setNewerRetryPending(true);
+      const isCurrent = () =>
+        newerAttemptRef.current === attempt && newerScopeRef.current === newerBoundaryKey;
+      // Both synchronous host errors and rejected promises belong to this
+      // boundary. Retain the failed attempt so observers cannot hot-retry it.
+      void Promise.resolve()
+        .then(() => (isCurrent() ? onLoadNewer() : undefined))
+        .then(
+          () => {
+            if (!isCurrent()) return;
+            newerAttemptRef.current = null;
+            // The successful page removes the recovery control. Return focus
+            // to the reading surface without moving the reader's viewport.
+            if (document.activeElement === newerRetryButtonRef.current) {
+              scrollRef.current?.focus({ preventScroll: true });
+            }
+            setNewerFailure(null);
+            setNewerRetryPending(false);
+          },
+          (reason: unknown) => {
+            if (!isCurrent()) return;
+            attempt.pending = false;
+            setNewerRetryPending(false);
+            setNewerFailure({
+              key: newerBoundaryKey,
+              message: reason instanceof Error ? reason.message : String(reason),
+            });
+          },
+        );
+    },
+    [onLoadNewer, loadingNewer, newerBoundaryKey],
+  );
   const previousSourceIdsRef = useRef(new Set<string>());
   const previousSourceBoundaryRef = useRef<string | undefined>(undefined);
   const readingAnchorRef = useRef<TimelineAnchor | null>(null);
@@ -1582,14 +1647,14 @@ export function MessageTimeline({
         // An underfilled history window has both sentinels visible. Advancing
         // it automatically would undo an explicit older-page navigation.
         if (maxScrollOf(root) > 1 && entries.some((entry) => entry.isIntersecting)) {
-          onLoadNewer();
+          requestNewer();
         }
       },
       { root, rootMargin: "0px 0px 1200px 0px" },
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [hasNewer, loadingNewer, onLoadNewer, firstGroupKey]);
+  }, [hasNewer, loadingNewer, onLoadNewer, requestNewer, firstGroupKey]);
 
   // Late layout that React commits cannot see (images decoding, fonts, code
   // blocks) grows content without a commit. While pinned, soft-follow the tip;
@@ -2056,6 +2121,29 @@ export function MessageTimeline({
                           })}
                           {groups.length > 0 && trailingState ? (
                             <div data-og-timeline-trailing-state="">{trailingState}</div>
+                          ) : null}
+                          {hasNewer && newerFailure?.key === newerBoundaryKey ? (
+                            <div
+                              data-og-newer-error=""
+                              className="flex flex-col items-center gap-2 px-4 py-3 text-center text-og-menu text-og-fg-muted"
+                            >
+                              <p role="status" className="max-w-prose [overflow-wrap:anywhere]">
+                                Couldn’t load later activity. {newerFailure.message}
+                              </p>
+                              <button
+                                ref={newerRetryButtonRef}
+                                type="button"
+                                data-og-retry-newer=""
+                                className="min-h-11 rounded-og-md border border-og-border px-3 py-2 text-og-fg hover:bg-og-surface-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-og-accent"
+                                aria-disabled={loadingNewer || newerRetryPending}
+                                aria-busy={newerRetryPending}
+                                onClick={() => requestNewer(true)}
+                              >
+                                {newerRetryPending
+                                  ? "Retrying later activity…"
+                                  : "Retry later activity"}
+                              </button>
+                            </div>
                           ) : null}
                           {hasNewer ? (
                             <div
@@ -2537,9 +2625,15 @@ const TimelineGroupView = memo(function TimelineGroupView({
   // Settled (or live-fold) activity clusters get a chip. Inside an expanded
   // turn that is the second layer — quiet nested chips under the outer turn
   // summary when contiguous activity naturally clusters (≥2 only).
+  const containsPresentedImage = timelineGroupContainsPresentedImage(group);
+  const hasRememberedImageFold =
+    group.kind === "activity" && containsPresentedImage && foldMemory?.has(group.id);
+  // Primary images stay visible through live narration and the turn wrap.
+  // Manual collapse still belongs to TurnSummary's existing fold memory.
   const activityShouldFold =
-    group.kind === "activity" && !!(group.outcome || (foldLiveCluster && clusterIsSettled(group)));
-  const containsGeneratedImage = timelineGroupContainsGeneratedImage(group);
+    group.kind === "activity" &&
+    !containsPresentedImage &&
+    !!(group.outcome || (foldLiveCluster && clusterIsSettled(group)));
   // Latch live→folded so a top-level shell that was already mounted open can
   // start the settle beat without remounting bare rail → wrapper.
   const liveActivitySettle = useLiveSettleFold(activityShouldFold && !insideTurn);
@@ -2548,7 +2642,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
     group.kind === "turn" &&
     (group.outcome === "failed" ||
       timelineGroupContainsAuthNeeded(group) ||
-      containsGeneratedImage);
+      containsPresentedImage);
   // activity-* → turn-* remount: carry resting state so settleFold does not
   // re-open a chip the reader already watched collapse.
   if (group.kind === "turn" && foldMemory && !insideTurn) {
@@ -2589,6 +2683,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
       if (
         turnSummary?.rolling &&
         !startupDetails &&
+        !hasRememberedImageFold &&
         group.items.filter((item) => item.kind !== "startup-phase").length === 1
       ) {
         return (
@@ -2620,8 +2715,12 @@ const TimelineGroupView = memo(function TimelineGroupView({
           !startupDetails &&
           visibleActivity.length === 1 &&
           visibleActivity[0]?.kind === "reasoning";
+        // Untouched images stay primary output, but a reader-owned image fold
+        // must keep its shell across a multi-cluster wrap. A bare rail would
+        // bypass the remembered choice; retaining either state also lets the
+        // reader reopen and close the same chip after settlement.
         const useNestedChip =
-          nestClusterChips && activityShouldFold && !containsGeneratedImage && !singleThought;
+          nestClusterChips && (activityShouldFold || hasRememberedImageFold) && !singleThought;
         if (!useNestedChip) {
           return (
             <ActivityRail
@@ -2663,16 +2762,24 @@ const TimelineGroupView = memo(function TimelineGroupView({
       // flips settleFold (collapse) instead of remounting bare rail → wrapper.
       return (
         <TurnSummary
+          // Apply the primary-output default when a rolling activity first
+          // produces an image; the stable foldKey still preserves user choices.
+          key={containsPresentedImage ? "primary-image" : "activity"}
           items={group.items}
           outcome={group.outcome}
           failureText={group.failureText}
           defaultOpen={
-            group.outcome === "failed" || (!turnSummary?.rolling && !activityShouldFold)
+            group.outcome === "failed" ||
+            containsPresentedImage ||
+            (!turnSummary?.rolling && !activityShouldFold)
               ? true
               : undefined
           }
           liveHeader={
-            turnSummary?.rolling && !group.outcome && !foldLiveCluster ? (
+            turnSummary?.rolling &&
+            !containsPresentedImage &&
+            !group.outcome &&
+            !foldLiveCluster ? (
               <RollingActivity
                 items={group.items}
                 toolRegistry={toolRegistry}
@@ -2862,17 +2969,24 @@ function timelineGroupContainsAuthNeeded(group: TimelineGroup): boolean {
   }
 }
 
-/** Generated images are primary user-visible output, not incidental activity. */
-function timelineGroupContainsGeneratedImage(group: TimelineGroup): boolean {
+/** Deliberately published images are primary output, not incidental screenshots. */
+function timelineGroupContainsPresentedImage(group: TimelineGroup): boolean {
   switch (group.kind) {
     case "item":
       return false;
     case "activity":
-      return group.items.some(
-        (item) => item.kind === "tool-call" && item.name === "generate_image",
-      );
+      return group.items.some((item) => {
+        if (item.kind !== "tool-call") return false;
+        const name = mcpToolLeaf(item.name);
+        if (name === "generate_image" || name === "image_generation_call") return true;
+        if (item.status !== "complete" || name !== "sandbox_file_publish") return false;
+        const output = unwrapMcpOutput(item.output);
+        if (output.isError) return false;
+        const receipt = parseSandboxFileArtifactReceipt(output.text);
+        return receipt !== null && isRetainedImageContentType(receipt.artifact.contentType);
+      });
     case "turn":
-      return group.groups.some(timelineGroupContainsGeneratedImage);
+      return group.groups.some(timelineGroupContainsPresentedImage);
   }
 }
 

@@ -51,6 +51,9 @@ function BehaviorReviewList({
   const [skillCursor, setSkillCursor] = useState<string | null>(null);
   const [skill, setSkill] = useState<SkillRecord | null>(null);
   const [instruction, setInstruction] = useState<AgentInstructionReviewItem | null>(null);
+  const [instructionBaseline, setInstructionBaseline] = useState<string | null | undefined>();
+  const [instructionBaselineError, setInstructionBaselineError] = useState<string | null>(null);
+  const [comparisonRetry, setComparisonRetry] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refresh, setRefresh] = useState(0);
@@ -58,6 +61,45 @@ function BehaviorReviewList({
     value.scope === "user" || (value.scope === "organization" ? canManageOrganization : canManage);
   const errorText = (reason: unknown) =>
     reason instanceof Error ? reason.message : String(reason);
+  useEffect(() => {
+    let current = true;
+    setInstructionBaseline(undefined);
+    setInstructionBaselineError(null);
+    if (!instruction) return () => undefined;
+    const target = instruction.target;
+    void context.client
+      .listWorkspaceInstructionPolicies(workspaceId, {
+        kind: target.kind,
+        scope: target.scope,
+        ...(target.roleKey ? { roleKey: target.roleKey } : {}),
+        limit: 1,
+      })
+      .then(async (policies) => {
+        const head = policies.activeHeads.find(
+          (candidate) =>
+            candidate.kind === target.kind &&
+            candidate.scope === target.scope &&
+            candidate.roleKey === target.roleKey,
+        );
+        if (!head) return null;
+        return await context.client.getWorkspaceInstructionPolicyRevision(
+          workspaceId,
+          head.revisionId,
+        );
+      })
+      .then((baseline) => {
+        if (current) setInstructionBaseline(baseline?.content ?? null);
+      })
+      .catch((reason: unknown) => {
+        if (current) {
+          setInstructionBaselineError(errorText(reason));
+          setInstructionBaseline(undefined);
+        }
+      });
+    return () => {
+      current = false;
+    };
+  }, [context.client, workspaceId, instruction, comparisonRetry]);
   useEffect(() => {
     let current = true;
     setInstructions([]);
@@ -246,7 +288,30 @@ function BehaviorReviewList({
           </DialogHeader>
           {instruction ? (
             <>
-              <p className="whitespace-pre-wrap text-sm leading-6">{instruction.content}</p>
+              {instructionBaselineError ? (
+                <p role="alert" className="text-sm text-status-error">
+                  Couldn&apos;t load the current instruction for comparison. Approval is disabled to
+                  prevent an unseen replacement. {instructionBaselineError}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setComparisonRetry((value) => value + 1)}
+                  >
+                    Retry comparison
+                  </Button>
+                </p>
+              ) : instructionBaseline === undefined ? (
+                <p role="status" className="text-sm text-fg-muted">
+                  Loading the current instruction for comparison…
+                </p>
+              ) : instructionBaseline === null ? (
+                <InstructionText label="New instruction" content={instruction.content} proposed />
+              ) : (
+                <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+                  <InstructionText label="Current" content={instructionBaseline} />
+                  <InstructionText label="Proposed" content={instruction.content} proposed />
+                </div>
+              )}
               <p className="text-xs text-fg-muted">{instruction.reason}</p>
             </>
           ) : (
@@ -265,7 +330,14 @@ function BehaviorReviewList({
             </p>
           ) : null}
           <div className="flex gap-2">
-            <Button disabled={busy} onClick={() => void decide("approve")}>
+            <Button
+              disabled={
+                busy ||
+                (instruction !== null &&
+                  (instructionBaseline === undefined || instructionBaselineError !== null))
+              }
+              onClick={() => void decide("approve")}
+            >
               Approve
             </Button>
             <Button variant="outline" disabled={busy} onClick={() => void decide("reject")}>
@@ -274,6 +346,37 @@ function BehaviorReviewList({
           </div>
         </DialogContent>
       </Dialog>
+    </section>
+  );
+}
+
+function InstructionText({
+  label,
+  content,
+  proposed = false,
+}: {
+  label: string;
+  content: string;
+  proposed?: boolean;
+}) {
+  return (
+    <section
+      className={`min-w-0 rounded-lg border p-4 ${proposed ? "border-t-[3px] bg-brand/5" : "bg-bg"}`}
+      style={
+        proposed
+          ? {
+              borderColor: "color-mix(in oklab, var(--color-brand) 30%, var(--color-border))",
+              borderTopColor: "var(--color-brand)",
+            }
+          : { borderColor: "var(--color-border-strong)" }
+      }
+    >
+      <h3 className={`mb-2 text-xs font-semibold ${proposed ? "text-fg" : "text-fg-muted"}`}>
+        {label}
+      </h3>
+      <p className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-6">
+        {content}
+      </p>
     </section>
   );
 }

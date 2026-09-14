@@ -5512,6 +5512,36 @@ export const files = pgTable(
   }),
 );
 
+/** Immutable publication receipt; content and ownership remain in files. */
+export const sandboxFilePublications = opengeniPrivateSchema.table(
+  "sandbox_file_publications",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    fileId: uuid("file_id").notNull(),
+    sourceSessionId: uuid("source_session_id"),
+    publishedAt: timestamp("published_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "sandbox_file_publications_pk",
+      columns: [table.accountId, table.workspaceId, table.fileId],
+    }),
+    file: foreignKey({
+      name: "sandbox_file_publications_file_fk",
+      columns: [table.accountId, table.workspaceId, table.fileId],
+      foreignColumns: [files.accountId, files.workspaceId, files.id],
+    }).onDelete("cascade"),
+    // SQL owns the composite session FK with column-specific SET NULL.
+    session: index("sandbox_file_publications_session_idx").on(
+      table.workspaceId,
+      table.sourceSessionId,
+      table.publishedAt,
+      table.fileId,
+    ),
+  }),
+);
+
 export const fileUploads = pgTable(
   "file_uploads",
   {

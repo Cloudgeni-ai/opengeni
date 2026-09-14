@@ -547,6 +547,389 @@ describe("SiteArtifactRenderer", () => {
   });
 });
 
+describe("published file presentation", () => {
+  const artifactId = "33333333-3333-4333-8333-333333333333";
+  function receipt(contentType = "image/png", filename = "implementation.png") {
+    return {
+      type: "sandbox_file",
+      sandboxPath: `/workspace/${filename}`,
+      filename,
+      artifact: {
+        available: true,
+        artifactId,
+        kind: "file",
+        contentType,
+        originalBytes: 1024,
+        sha256: "c".repeat(64),
+        retainedAt: "2026-09-12T00:00:00.000Z",
+        retention: { policy: "workspace_file", expiresAt: null },
+        retrieval: {
+          method: "GET",
+          path: `/v1/workspaces/11111111-1111-4111-8111-111111111111/artifacts/${artifactId}/content`,
+          acceptRanges: "bytes",
+          maxRangeBytes: 1024 * 1024,
+        },
+      },
+    };
+  }
+
+  test("published images are visible after a settled turn without filesystem access", async () => {
+    resetTimelineEvents();
+    const loads: string[] = [];
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.message", { text: "Show the implementation" }),
+          timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }),
+          timelineEvent("agent.toolCall.created", {
+            id: "published-image",
+            name: "opengeni__sandbox_file_publish",
+            arguments: { path: "/workspace/implementation.png" },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: "published-image",
+            output: { content: [{ type: "text", text: JSON.stringify(receipt()) }] },
+          }),
+          timelineEvent("agent.message.completed", { text: "Here is the implementation." }),
+          timelineEvent("turn.completed", {}),
+        ]}
+        loadRetainedArtifact={async (artifact) => {
+          loads.push(artifact.artifactId);
+          return { url: "https://objects.example/implementation.png" };
+        }}
+      />,
+    );
+    await flush();
+    await flush();
+    expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+    expect(r.container.textContent).toContain("Published implementation.png");
+    expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+    expect(r.container.querySelector('button[aria-label="Expand image"]')).not.toBeNull();
+    expect(
+      r.container
+        .querySelector('a[aria-label="Open implementation.png in Artifacts"]')
+        ?.getAttribute("href"),
+    ).toBe(`/workspaces/11111111-1111-4111-8111-111111111111/artifacts/files/${artifactId}`);
+    expect(r.container.textContent).not.toContain("Retry live file");
+    expect(loads).toEqual([artifactId]);
+    await r.unmount();
+  });
+
+  function publicationEvents(name = "opengeni__sandbox_file_publish") {
+    return [
+      timelineEvent("user.message", { text: "Show the implementation" }),
+      timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "prepare-image",
+        name: "exec_command",
+        arguments: { cmd: "prepare implementation image" },
+      }),
+      timelineEvent("agent.toolCall.output", { id: "prepare-image", output: "ready" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "published-image",
+        name,
+        arguments: { path: "/workspace/implementation.png" },
+      }),
+    ];
+  }
+
+  test.each([false, true])(
+    "streamed publications stay visible through narration and turn settlement (rolling=%p)",
+    async (rolling) => {
+      resetTimelineEvents();
+      const events = publicationEvents();
+      const loadRetainedArtifact = async () => ({
+        url: "https://objects.example/implementation.png",
+      });
+      const timeline = (nextEvents: SessionEvent[], status: "running" | "idle" = "running") => (
+        <MessageTimeline
+          events={nextEvents}
+          status={status}
+          turnSummary={{ rolling }}
+          loadRetainedArtifact={loadRetainedArtifact}
+        />
+      );
+      const r = await renderComponent(timeline(events));
+      try {
+        const published = [
+          ...events,
+          timelineEvent("agent.toolCall.output", { id: "published-image", output: receipt() }),
+        ];
+        await r.rerender(timeline(published));
+        await flush();
+        expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+        expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+
+        const narrated = [
+          ...published,
+          timelineEvent("agent.message.completed", { text: "Here is the implementation." }),
+        ];
+        await r.rerender(timeline(narrated));
+        await flush(2200);
+        expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+        expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+
+        await r.rerender(timeline([...narrated, timelineEvent("turn.completed", {})], "idle"));
+        await flush();
+        expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+        expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+      } finally {
+        await r.unmount();
+      }
+    },
+    10_000,
+  );
+
+  test.each([false, true])(
+    "explicit image-activity collapse survives narration and turn settlement (rolling=%p)",
+    async (rolling) => {
+      resetTimelineEvents();
+      const published = [
+        ...publicationEvents(),
+        timelineEvent("agent.toolCall.output", { id: "published-image", output: receipt() }),
+      ];
+      const loadRetainedArtifact = async () => ({
+        url: "https://objects.example/implementation.png",
+      });
+      const timeline = (events: SessionEvent[], status: "running" | "idle" = "running") => (
+        <MessageTimeline
+          events={events}
+          status={status}
+          turnSummary={{ rolling }}
+          loadRetainedArtifact={loadRetainedArtifact}
+        />
+      );
+      const r = await renderComponent(timeline(published));
+      try {
+        await flush();
+        const summary = turnSummaryTrigger(r.container);
+        expect(summary?.getAttribute("aria-expanded")).toBe("true");
+        await act(async () => summary?.click());
+        expect(summary?.getAttribute("aria-expanded")).toBe("false");
+
+        const narrated = [
+          ...published,
+          timelineEvent("agent.message.completed", { text: "Here is the implementation." }),
+        ];
+        await r.rerender(timeline(narrated));
+        await flush(2200);
+        expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("false");
+
+        await r.rerender(timeline([...narrated, timelineEvent("turn.completed", {})], "idle"));
+        await flush();
+        expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("false");
+        expect(r.container.querySelector('img[alt="implementation.png"]')).toBeNull();
+      } finally {
+        await r.unmount();
+      }
+    },
+    10_000,
+  );
+
+  test.each([false, true])(
+    "explicit image collapse survives a multi-cluster turn wrap (rolling=%p)",
+    async (rolling) => {
+      resetTimelineEvents();
+      const prepared = [
+        timelineEvent("user.message", { text: "Show the implementation" }),
+        timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }),
+        ...["inspect-project", "prepare-project"].flatMap((id) => [
+          timelineEvent("agent.toolCall.created", {
+            id,
+            name: "exec_command",
+            arguments: { cmd: id },
+          }),
+          timelineEvent("agent.toolCall.output", { id, output: "ready" }),
+        ]),
+      ];
+      const loadRetainedArtifact = async () => ({
+        url: "https://objects.example/implementation.png",
+      });
+      const timeline = (events: SessionEvent[], status: "running" | "idle" = "running") => (
+        <MessageTimeline
+          events={events}
+          status={status}
+          turnSummary={{ rolling }}
+          loadRetainedArtifact={loadRetainedArtifact}
+        />
+      );
+      const r = await renderComponent(timeline(prepared));
+      try {
+        const narrated = [
+          ...prepared,
+          timelineEvent("agent.message.completed", { text: "The project is ready." }),
+        ];
+        await r.rerender(timeline(narrated));
+        await flush(2200);
+        expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("false");
+
+        const published = [
+          ...narrated,
+          timelineEvent("agent.toolCall.created", {
+            id: "prepare-image",
+            name: "exec_command",
+            arguments: { cmd: "prepare implementation image" },
+          }),
+          timelineEvent("agent.toolCall.output", { id: "prepare-image", output: "ready" }),
+          timelineEvent("agent.toolCall.created", {
+            id: "published-image",
+            name: "opengeni__sandbox_file_publish",
+            arguments: { path: "/workspace/implementation.png" },
+          }),
+          timelineEvent("agent.toolCall.output", { id: "published-image", output: receipt() }),
+        ];
+        await r.rerender(timeline(published));
+        await flush();
+        const liveTriggers = turnSummaryTriggers(r.container);
+        expect(liveTriggers.map((trigger) => trigger.getAttribute("aria-expanded"))).toEqual([
+          "false",
+          "true",
+        ]);
+        expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+        await act(async () => liveTriggers[1]?.click());
+        expect(liveTriggers[1]?.getAttribute("aria-expanded")).toBe("false");
+
+        const settled = [
+          ...published,
+          timelineEvent("agent.message.completed", { text: "Here is the implementation." }),
+          timelineEvent("turn.completed", {}),
+        ];
+        await r.rerender(timeline(settled, "idle"));
+        await flush();
+        const settledTriggers = turnSummaryTriggers(r.container);
+        expect(settledTriggers.map((trigger) => trigger.getAttribute("aria-expanded"))).toEqual([
+          "true",
+          "false",
+          "false",
+        ]);
+        expect(r.container.querySelector('img[alt="implementation.png"]')).toBeNull();
+
+        // The remembered choice survives the settle window, but is not a lock:
+        // the reader can deliberately reopen the image's nested chip.
+        await flush(2200);
+        expect(r.container.querySelector('img[alt="implementation.png"]')).toBeNull();
+        await act(async () => settledTriggers[2]?.click());
+        await flush();
+        expect(settledTriggers[2]?.getAttribute("aria-expanded")).toBe("true");
+        expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+        await r.rerender(timeline(settled, "idle"));
+        await flush();
+        const reopenedTriggers = turnSummaryTriggers(r.container);
+        expect(reopenedTriggers).toHaveLength(3);
+        expect(reopenedTriggers[2]?.getAttribute("aria-expanded")).toBe("true");
+        await act(async () => reopenedTriggers[2]?.click());
+        expect(reopenedTriggers[2]?.getAttribute("aria-expanded")).toBe("false");
+      } finally {
+        await r.unmount();
+      }
+    },
+    10_000,
+  );
+
+  test.each([
+    "sandbox_file_publish",
+    "opengeni__sandbox_file_publish",
+    "customer__sandbox_file_publish",
+  ])("primary image presentation follows registry naming for %s", async (name) => {
+    resetTimelineEvents();
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          ...publicationEvents(name),
+          timelineEvent("agent.toolCall.output", { id: "published-image", output: receipt() }),
+          timelineEvent("agent.message.completed", { text: "Here is the implementation." }),
+          timelineEvent("turn.completed", {}),
+        ]}
+        loadRetainedArtifact={async () => ({ url: "https://objects.example/implementation.png" })}
+      />,
+    );
+    try {
+      await flush();
+      expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+      expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("standalone image renderers retain an on-demand named download without a lightbox", async () => {
+    const item = toolItem({ name: "sandbox_file_publish", output: receipt() });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const downloads: Array<{ href: string; filename: string }> = [];
+    const click = spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
+      function (this: HTMLAnchorElement) {
+        downloads.push({ href: this.href, filename: this.download });
+      },
+    );
+    let loads = 0;
+    const r = await renderComponent(
+      <Renderer
+        item={item}
+        loadRetainedArtifact={async () => {
+          loads++;
+          return { url: "https://objects.example/implementation.png" };
+        }}
+      />,
+    );
+    try {
+      await flush();
+      expect(r.container.querySelector('img[alt="implementation.png"]')).not.toBeNull();
+      expect(r.container.querySelector('button[aria-label="Expand image"]')).toBeNull();
+      expect(loads).toBe(1);
+      expect(downloads).toEqual([]);
+      const download = Array.from(r.container.querySelectorAll("button")).find(
+        (button) => button.textContent === "Download",
+      );
+      expect(download).toBeDefined();
+      await act(async () => download?.click());
+      await flush();
+      expect(loads).toBe(2);
+      expect(downloads).toEqual([
+        { href: "https://objects.example/implementation.png", filename: "implementation.png" },
+      ]);
+    } finally {
+      click.mockRestore();
+      await r.unmount();
+    }
+  });
+
+  test("HTML publications remain downloads and never mount an executable preview", async () => {
+    const item = toolItem({
+      name: "sandbox_file_publish",
+      output: receipt("text/html", "report.html"),
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    let loads = 0;
+    const r = await renderComponent(
+      <Renderer
+        item={item}
+        loadRetainedArtifact={async () => {
+          loads++;
+          return null;
+        }}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Download");
+    expect(r.container.querySelector("iframe, img")).toBeNull();
+    expect(loads).toBe(0);
+    await r.unmount();
+  });
+
+  test("missing retained image bytes have an explicit unavailable state", async () => {
+    const item = toolItem({ name: "sandbox_file_publish", output: receipt() });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(
+      <Renderer item={item} loadRetainedArtifact={async () => null} />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("bytes are unavailable");
+    expect(r.container.querySelector("img, iframe")).toBeNull();
+    expect(r.container.textContent).not.toContain("live file");
+    await r.unmount();
+  });
+});
+
 describe("tool-output truncation disclosure", () => {
   test("shows bounded delivery and non-retention facts only after expansion", async () => {
     const item = toolItem({

@@ -189,10 +189,10 @@ describe("Company Brain first-party MCP policy", () => {
         (candidate) => candidate.name === "instruction_policy_save",
       );
       expect(tool?.description).toContain("Use editMode=append by default");
-      expect(tool?.description).toContain("Use replace only when the user explicitly asks");
+      expect(tool?.description).toContain("Agents cannot replace the complete instruction");
       expect(tool?.inputSchema.required).toContain("editMode");
       expect(tool?.inputSchema.properties?.editMode).toMatchObject({
-        enum: ["append", "edit", "replace"],
+        enum: ["append", "edit"],
       });
     } finally {
       await Promise.all([client.close(), readOnly.close()]);

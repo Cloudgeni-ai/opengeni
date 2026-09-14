@@ -12,7 +12,7 @@ import {
 } from "../src";
 
 describe("workspace instruction-policy contracts", () => {
-  test("requires agent changes to choose append, exact edit, or explicit replacement", () => {
+  test("limits agent changes to append or one exact localized edit", () => {
     const base = {
       operationId: "00000000-0000-4000-8000-000000000020",
       target: { kind: "policy" as const, scope: "global" as const, roleKey: null },
@@ -36,12 +36,12 @@ describe("workspace instruction-policy contracts", () => {
       }),
     ).toMatchObject({ editMode: "edit", newText: "Surface blockers early." });
     expect(
-      AgentInstructionSaveRequest.parse({
+      AgentInstructionSaveRequest.safeParse({
         ...base,
         editMode: "replace",
         content: "Use only this complete instruction set.",
-      }).editMode,
-    ).toBe("replace");
+      }).success,
+    ).toBe(false);
     expect(
       AgentInstructionSaveRequest.safeParse({ ...base, content: "Unsafe implicit replacement." })
         .success,

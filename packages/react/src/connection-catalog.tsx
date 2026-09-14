@@ -26,22 +26,11 @@ export type ConnectionCatalogProps = {
   emptyMessage?: string;
 };
 
-function ConnectionDetailsAction({
-  option,
-  name = option.name,
-}: {
-  option: ConnectionCatalogOption;
-  name?: string;
-}) {
+function ConnectionDetailsIndicator() {
   return (
-    <button
-      type="button"
-      className="og-connection-details-action"
-      aria-label={`View ${name} details`}
-      onClick={option.onOpen}
-    >
-      <span aria-hidden>{option.connected ? "›" : "+"}</span>
-    </button>
+    <span aria-hidden className="og-connection-group-chevron">
+      ›
+    </span>
   );
 }
 
@@ -54,10 +43,9 @@ export function ConnectionOptionRow({ option }: { option: ConnectionCatalogOptio
           <span>{option.description}</span>
         </span>
         <span className="og-connection-catalog-status">{option.status}</span>
+        {!option.action ? <ConnectionDetailsIndicator /> : null}
       </button>
-      <span className="og-connection-option-action">
-        {option.action ?? <ConnectionDetailsAction option={option} />}
-      </span>
+      {option.action ? <span className="og-connection-option-action">{option.action}</span> : null}
     </div>
   );
 }
@@ -91,10 +79,9 @@ export function ConnectionServiceRow({ service }: { service: ConnectionCatalogSe
         onClick={service.options[0]!.onOpen}
       >
         {identity}
+        {!service.options[0]?.action ? <ConnectionDetailsIndicator /> : null}
       </button>
-      {service.options[0]?.action ?? (
-        <ConnectionDetailsAction option={service.options[0]!} name={service.name} />
-      )}
+      {service.options[0]?.action}
     </div>
   ) : (
     <details className="og-connection-catalog-service">

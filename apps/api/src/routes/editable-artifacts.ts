@@ -909,7 +909,7 @@ function normalizeArtifactIdList(value: readonly string[]): readonly string[] {
   return ids;
 }
 
-function isInvisibleListCandidate(error: unknown): boolean {
+export function isInvisibleListCandidate(error: unknown): boolean {
   return (
     (error instanceof EditableArtifactDomainError &&
       (error.code === "forbidden" || error.code === "not_found")) ||
@@ -1050,7 +1050,7 @@ async function readBoundedJson(request: Request, maxBytes: number): Promise<unkn
   }
 }
 
-function editableArtifactHttpError(error: unknown): unknown {
+export function editableArtifactHttpError(error: unknown): unknown {
   if (error instanceof EditableArtifactDurableExportError) {
     switch (error.code) {
       case "invalid_request":

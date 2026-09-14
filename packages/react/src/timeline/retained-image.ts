@@ -7,6 +7,18 @@ type RetainedImageState =
   | { kind: "unavailable"; label: string }
   | { kind: "error"; message: string };
 
+/** Shared browser preview allowlist; other published files remain downloads. */
+export function isRetainedImageContentType(contentType: string): boolean {
+  return [
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/avif",
+    "image/svg+xml",
+  ].includes(contentType);
+}
+
 export function useRetainedImageObjectUrl(
   artifact: RetainedArtifactReference,
   load: ToolRendererProps["loadRetainedArtifact"],
