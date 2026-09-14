@@ -58,6 +58,32 @@ async function read(
   return OrganizationIntegrationPolicy.parse(row?.policy ?? {});
 }
 
+/** Own only the subject setting this policy operation changes. The enclosing
+ * withRlsContext transaction/savepoint restores all settings on failure; on
+ * success it restores account/workspace only, so restore our subject explicitly.
+ * Do not run restoration after a failed SQL statement in an aborted transaction.
+ */
+async function withAdministratorSubject<T>(
+  tx: Database,
+  subjectId: string,
+  use: () => Promise<T>,
+): Promise<T> {
+  const [previous] = await rawRows<{ subject: string | null }>(
+    tx,
+    sql`select current_setting('opengeni.subject_id', true) as subject`,
+  );
+  await setSubjectRlsContext(tx, subjectId);
+  const result = await use();
+  const expected = previous?.subject ?? "";
+  const [restored] = await rawRows<{ subject: string }>(
+    tx,
+    sql`select set_config('opengeni.subject_id', ${expected}, true) as subject`,
+  );
+  if (restored?.subject !== expected)
+    throw new Error("Integration policy subject scope was not restored");
+  return result;
+}
+
 export async function getOrganizationIntegrationPolicy(
   db: Database,
   inputScope: OrganizationIntegrationPolicyScope,
@@ -72,12 +98,13 @@ export async function getOrganizationIntegrationPolicy(
     { ...scope, workspaceId: null },
     async (tx) => {
       await requireReadCommitted(tx);
-      await setSubjectRlsContext(tx, actor.subjectId);
-      // Live authority only: no policy or organization advisory lock on reads.
-      await tx.execute(
-        sql`select opengeni_private.assert_organization_integration_policy_administrator(${scope.accountId}::uuid, ${actor.subjectId})`,
-      );
-      return read(tx, scope);
+      return withAdministratorSubject(tx, actor.subjectId, async () => {
+        // Live authority only: no policy or organization advisory lock on reads.
+        await tx.execute(
+          sql`select opengeni_private.assert_organization_integration_policy_administrator(${scope.accountId}::uuid, ${actor.subjectId})`,
+        );
+        return read(tx, scope);
+      });
     },
     undefined,
     "none",
@@ -104,12 +131,13 @@ export async function updateOrganizationIntegrationPolicy(
     { ...scope, workspaceId: null },
     async (tx) => {
       await requireReadCommitted(tx);
-      await setSubjectRlsContext(tx, actor.subjectId);
-      const [row] = await rawRows<{ result: unknown }>(
-        tx,
-        sql`select opengeni_private.update_organization_integration_policy(${scope.accountId}::uuid, ${actor.subjectId}, ${JSON.stringify(request)}::jsonb) as result`,
-      );
-      return OrganizationIntegrationPolicy.parse(row?.result);
+      return withAdministratorSubject(tx, actor.subjectId, async () => {
+        const [row] = await rawRows<{ result: unknown }>(
+          tx,
+          sql`select opengeni_private.update_organization_integration_policy(${scope.accountId}::uuid, ${actor.subjectId}, ${JSON.stringify(request)}::jsonb) as result`,
+        );
+        return OrganizationIntegrationPolicy.parse(row?.result);
+      });
     },
     undefined,
     "none",
@@ -136,16 +164,16 @@ export async function withOrganizationIntegrationAcquisition<T>(
   acquire: (tx: Database) => Promise<T>,
 ): Promise<T> {
   const requested = acquisitionScope.parse(inputScope);
+  // Snapshot classifications before the first await, including workspace lookup.
+  const keys = [...integrationKeys];
+  if (!keys.length)
+    throw new Error("Acquisition requires at least one trusted integration classification");
   // Non-locking authoritative resolution before any new lock; repeat under the
   // policy fence below so a moved/deleted workspace cannot retain stale scope.
   const resolved = await rlsContextForWorkspace(db, requested.workspaceId);
   if (resolved.accountId !== requested.accountId)
     throw new Error("Organization integration policy workspace scope invalid");
   const scope = { accountId: resolved.accountId, workspaceId: requested.workspaceId };
-  // Snapshot caller classification so mutation while awaiting cannot change checks.
-  const keys = [...integrationKeys];
-  if (!keys.length)
-    throw new Error("Acquisition requires at least one trusted integration classification");
   return withRlsContext(
     db,
     scope,

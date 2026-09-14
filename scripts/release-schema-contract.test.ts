@@ -230,6 +230,9 @@ describe("release schema contract", () => {
     const knowledgeSourceDiscovery = completeSourceContract.migrations.some(
       (migration) => migration.path === "0469_knowledge_source_discovery.sql",
     );
+    const organizationIntegrationPolicy = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0470_organization_integration_policy.sql",
+    );
     const knowledgeRelationshipProjection = completeSourceContract.migrations.some(
       (migration) => migration.path === "0468_knowledge_relationship_projection.sql",
     );
@@ -262,6 +265,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (organizationIntegrationPolicy ? 1 : 0) +
         (knowledgeSourceDiscovery ? 1 : 0) +
         (knowledgeRelationshipProjection ? 1 : 0) +
         (hostResolverFullOrganizationKeys ? 1 : 0) +
@@ -393,9 +397,12 @@ describe("release schema contract", () => {
       ...(knowledgeSourceDiscovery
         ? { latestMigration: "0469_knowledge_source_discovery.sql" }
         : {}),
+      ...(organizationIntegrationPolicy
+        ? { latestMigration: "0470_organization_integration_policy.sql" }
+        : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: "0469_knowledge_source_discovery.sql",
+      path: "0470_organization_integration_policy.sql",
       deploymentMode: "maintenance",
     });
     expect(
@@ -1504,6 +1511,9 @@ describe("release schema contract", () => {
     const knowledgeSourceDiscovery = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0469_knowledge_source_discovery.sql",
     );
+    const organizationIntegrationPolicy = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0470_organization_integration_policy.sql",
+    );
     const knowledgeRelationshipProjection = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0468_knowledge_relationship_projection.sql",
     );
@@ -1961,6 +1971,7 @@ describe("release schema contract", () => {
       "0467_host_resolver_full_organization_keys.sql",
       "0468_knowledge_relationship_projection.sql",
       "0469_knowledge_source_discovery.sql",
+      "0470_organization_integration_policy.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2329,8 +2340,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0469_knowledge_source_discovery.sql",
       };
+    if (organizationIntegrationPolicy)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0470_organization_integration_policy.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (organizationIntegrationPolicy ? 1 : 0) +
         (knowledgeSourceDiscovery ? 1 : 0) +
         (knowledgeRelationshipProjection ? 1 : 0) +
         (hostResolverFullOrganizationKeys ? 1 : 0) +
@@ -2662,6 +2679,9 @@ describe("release schema contract", () => {
         : {}),
       ...(knowledgeSourceDiscovery
         ? { latestMigration: "0469_knowledge_source_discovery.sql" }
+        : {}),
+      ...(organizationIntegrationPolicy
+        ? { latestMigration: "0470_organization_integration_policy.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(

@@ -586,3 +586,66 @@ test("ordinary admin GET takes no policy or organization advisory lock", async (
     "none",
   );
 });
+
+test("nested administration restores the caller subject after success and rollback", async () => {
+  await withRlsContext(
+    client.db,
+    { accountId: scope.accountId, workspaceId: null },
+    async (tx) => {
+      const originalSubject = "user:example-original";
+      await setSubjectRlsContext(tx, originalSubject);
+      const currentSubject = async () =>
+        (
+          await rawRows<{ subject: string }>(
+            tx,
+            sql`select current_setting('opengeni.subject_id', true) as subject`,
+          )
+        )[0]?.subject;
+      const current = await getOrganizationIntegrationPolicy(tx, scope, authorize);
+      expect(await currentSubject()).toBe(originalSubject);
+      const changed = await updateOrganizationIntegrationPolicy(
+        tx,
+        scope,
+        request(current.revision, "unrestricted"),
+        authorize,
+      );
+      expect(await currentSubject()).toBe(originalSubject);
+      await expect(
+        updateOrganizationIntegrationPolicy(
+          tx,
+          scope,
+          request(changed.revision - 1, "restricted"),
+          authorize,
+        ),
+      ).rejects.toThrow();
+      expect(await currentSubject()).toBe(originalSubject);
+      await expect(
+        getOrganizationIntegrationPolicy(tx, scope, async () => ({
+          accountId: scope.accountId,
+          subjectId: "user:unknown",
+        })),
+      ).rejects.toThrow();
+      expect(await currentSubject()).toBe(originalSubject);
+    },
+    undefined,
+    "none",
+  );
+});
+
+test("acquisition classifications are snapshotted before asynchronous workspace resolution", async () => {
+  const current = await getOrganizationIntegrationPolicy(client.db, scope, authorize);
+  await updateOrganizationIntegrationPolicy(
+    client.db,
+    scope,
+    request(current.revision, "restricted", ["sample"]),
+    authorize,
+  );
+  const keys = ["unknown"];
+  let effect = false;
+  const acquisition = withOrganizationIntegrationAcquisition(client.db, scope, keys, async () => {
+    effect = true;
+  });
+  keys[0] = "sample";
+  await expect(acquisition).rejects.toThrow();
+  expect(effect).toBe(false);
+});
