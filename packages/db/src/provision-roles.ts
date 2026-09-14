@@ -2089,6 +2089,11 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    IF to_regclass('opengeni_private.organization_usage_read_capabilities') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.organization_usage_summary(uuid,timestamptz,timestamptz,text,uuid,boolean) FROM PUBLIC;
+    END IF;
     IF to_regclass('opengeni_private.sandbox_file_publications') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.sandbox_file_publications FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.sandbox_file_publications FROM PUBLIC;

@@ -533,6 +533,42 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
+  test("organization usage read capability forbids direct runtime DML and PUBLIC execution", () => {
+    const posture = safePosture();
+    posture.tables.push({ ...knowledgeAuthorityTables()[0]!, name: "usage_events" });
+    const table = {
+      name: "organization_usage_read_capabilities",
+      owner: "opengeni_migrator",
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    };
+    const routine = {
+      name: "organization_usage_summary(uuid, timestamp with time zone, timestamp with time zone, text, uuid, boolean)",
+      owner: "opengeni_migrator",
+      securityDefiner: true,
+      execute: true,
+      publicExecute: false,
+    };
+    posture.privateTables.push(table);
+    posture.privateRoutines.push(routine);
+    expect(
+      evaluateRuntimeDatabasePosture(posture, options).filter((value) =>
+        value.includes("organization usage"),
+      ),
+    ).toEqual([]);
+    table.insert = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "organization usage capability has unsafe owner or direct runtime privileges",
+    );
+    table.insert = false;
+    routine.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "organization usage aggregate capability is missing or unsafe",
+    );
+  });
+
   test("private publication capabilities preserve the rolling table inventory and forbid direct DML", () => {
     const posture = safePosture();
     const table = {

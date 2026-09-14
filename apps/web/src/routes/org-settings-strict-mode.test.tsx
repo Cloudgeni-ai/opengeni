@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { OrganizationUsageSummary, OrganizationUsageWorkspacePage } from "@opengeni/contracts";
 import { act, StrictMode, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import * as SonnerPackage from "sonner";
@@ -32,6 +33,30 @@ const getBillingEntitlements = mock(async () => ({
   mode: "managed" as const,
   entitlements: { seats: 10 },
 }));
+const getOrganizationUsageSummary = mock(
+  async (_options: unknown, _requestOptions?: unknown): Promise<OrganizationUsageSummary> => ({
+    accountId,
+    period: "month",
+    since: "2026-08-01T00:00:00.000Z",
+    until: timestamp,
+    granularity: "day",
+    totals: [],
+    buckets: [],
+    workspaces: [],
+    nextWorkspaceCursor: null,
+  }),
+);
+const getOrganizationUsageWorkspacePage = mock(
+  async (_options: unknown): Promise<OrganizationUsageWorkspacePage> => ({
+    accountId,
+    period: "month",
+    since: "2026-08-01T00:00:00.000Z",
+    until: timestamp,
+    granularity: "day",
+    workspaces: [{ workspaceId: "workspace-page-two", name: "Second page workspace", totals: [] }],
+    nextWorkspaceCursor: null,
+  }),
+);
 const createBillingCheckout = mock(async () => {
   throw new Error("bounded checkout failure");
 });
@@ -89,6 +114,8 @@ const context = {
   client: {
     getBilling,
     getBillingEntitlements,
+    getOrganizationUsageSummary,
+    getOrganizationUsageWorkspacePage,
     createBillingCheckout,
     createBillingPortalSession,
     listOrganizationApiKeys,
@@ -201,6 +228,18 @@ async function waitForOrganizationApiKeyReads() {
 
 beforeAll(() => {
   GlobalRegistrator.register();
+  window.matchMedia = ((query: string) => ({
+    matches: true,
+    media: query,
+    onchange: null,
+    addListener() {},
+    removeListener() {},
+    addEventListener() {},
+    removeEventListener() {},
+    dispatchEvent() {
+      return false;
+    },
+  })) as typeof window.matchMedia;
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -230,14 +269,40 @@ describe("organization billing StrictMode ownership", () => {
     expect(getBillingEntitlements.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(container.textContent).toContain("$25.00 available");
     expect(container.textContent).toContain("seats");
-    expect(useBillingUsage.mock.calls.at(-1)?.[0]).toEqual({
+    expect(getOrganizationUsageSummary.mock.calls.at(-1)?.[0]).toEqual({
       accountId,
-      enabled: true,
+      period: "month",
+      afterWorkspaceId: undefined,
     });
+    expect(container.textContent).toContain("No visible usage recorded in this period.");
+    expect(useBillingUsage).not.toHaveBeenCalled();
     expect(container.textContent).toContain(
       "View invoices and manage payment information in Stripe.",
     );
     expect(container.textContent).not.toContain("OG-0042");
+
+    const usageSection = container.querySelector('[aria-label="Organization usage dashboard"]')!;
+    const periodSelect = usageSection.querySelector<HTMLSelectElement>(
+      '[aria-label="Usage period"]',
+    )!;
+    const readsBeforeChange = getOrganizationUsageSummary.mock.calls.length;
+    await act(async () => {
+      periodSelect.value = "today";
+      periodSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    await flush();
+    expect(getOrganizationUsageSummary.mock.calls.length).toBe(readsBeforeChange + 1);
+    expect(getOrganizationUsageSummary.mock.calls.at(-1)?.[0]).toEqual({
+      accountId,
+      period: "today",
+    });
+    getOrganizationUsageSummary.mockImplementationOnce(async () => {
+      throw new Error("usage unavailable");
+    });
+    await act(async () => (usageSection.querySelector("button") as HTMLButtonElement).click());
+    await flush();
+    expect(usageSection.textContent).toContain("Couldn't load period usage");
+    expect(usageSection.textContent).not.toContain("No visible usage recorded");
 
     await act(async () => button(container, "Add credits").click());
     await flush();
@@ -259,6 +324,49 @@ describe("organization billing StrictMode ownership", () => {
     });
     expect(button(container, "Open Stripe billing").disabled).toBe(false);
 
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("workspace pagination retains totals and never refetches the organization summary", async () => {
+    getOrganizationUsageSummary.mockClear();
+    getOrganizationUsageWorkspacePage.mockClear();
+    const total = { eventType: "model.cost", unit: "usd_micros", quantity: "100", eventCount: "1" };
+    getOrganizationUsageSummary.mockImplementationOnce(async () => ({
+      accountId,
+      period: "month",
+      since: "2026-08-01T00:00:00.000Z",
+      until: timestamp,
+      granularity: "day",
+      totals: [total],
+      buckets: [],
+      workspaces: [{ workspaceId, name: "First page workspace", totals: [total] }],
+      nextWorkspaceCursor: workspaceId,
+    }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(<OrgSettingsRoute workspaceId={workspaceId} section="billing" />),
+    );
+    await flush();
+    expect(container.textContent).toContain("First page workspace");
+    await act(async () => button(container, "Next workspaces").click());
+    await flush();
+    expect(getOrganizationUsageSummary).toHaveBeenCalledTimes(1);
+    expect(getOrganizationUsageWorkspacePage).toHaveBeenCalledTimes(1);
+    expect(getOrganizationUsageWorkspacePage.mock.calls[0]?.[0]).toEqual({
+      accountId,
+      period: "month",
+      until: timestamp,
+      afterWorkspaceId: workspaceId,
+    });
+    expect(container.textContent).toContain("Second page workspace");
+    expect(container.textContent).toContain("$0.000100");
+    await act(async () => button(container, "First workspaces").click());
+    expect(container.textContent).toContain("First page workspace");
+    expect(getOrganizationUsageSummary).toHaveBeenCalledTimes(1);
+    expect(getOrganizationUsageWorkspacePage).toHaveBeenCalledTimes(1);
     await act(async () => root.unmount());
     container.remove();
   });
