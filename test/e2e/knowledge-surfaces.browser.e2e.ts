@@ -524,7 +524,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       const page = await context.newPage();
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
-      await page.evaluate(
+      const collectionFixture = await page.evaluate(
         async ({ apiBaseUrl: targetApiBaseUrl, workspaceId: targetWorkspaceId }) => {
           async function save(title: string, kind: "note" | "group", groupIds: string[] = []) {
             const entryId = crypto.randomUUID();
@@ -548,6 +548,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
           const contracts = await save("Contracts tree", "group", [acme]);
           const billing = await save("Billing tree", "group");
           await save("Nested renewal", "note", [contracts, billing]);
+          return { contracts };
         },
         { apiBaseUrl, workspaceId },
       );
@@ -561,6 +562,32 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await page.keyboard.press("ArrowRight");
       await tree.getByRole("button", { name: "Contracts tree", exact: true }).waitFor();
       await tree.getByRole("button", { name: "Contracts tree", exact: true }).click();
+      await tree.getByRole("button", { name: "Nested renewal", exact: true }).waitFor();
+      // A completed page must reauthorize on reopen, even when the browser's
+      // local access-context identity has not changed. Never redisplay its old
+      // titles from a client cache after the server denies the new request.
+      let deniedReopens = 0;
+      const denyCollection = async (route: Route) => {
+        if (route.request().postDataJSON()?.groupId === collectionFixture.contracts) {
+          deniedReopens++;
+          await route.fulfill({
+            status: 403,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "forbidden", message: "Collection access revoked" }),
+          });
+        } else await route.continue();
+      };
+      const collectionSearch = `**/v1/workspaces/${workspaceId}/knowledge/entries/search`;
+      await page.route(collectionSearch, denyCollection);
+      await tree.getByRole("button", { name: "Contracts tree", exact: true }).click();
+      await tree.getByRole("button", { name: "Contracts tree", exact: true }).click();
+      await tree.getByRole("alert").waitFor();
+      expect(deniedReopens).toBe(1);
+      expect(await tree.getByRole("button", { name: "Nested renewal", exact: true }).count()).toBe(
+        0,
+      );
+      await page.unroute(collectionSearch, denyCollection);
+      await tree.getByRole("button", { name: "Retry", exact: true }).click();
       await tree.getByRole("button", { name: "Nested renewal", exact: true }).waitFor();
       await tree.getByRole("button", { name: "Billing tree", exact: true }).click();
       await tree.getByRole("button", { name: "Nested renewal", exact: true }).nth(1).waitFor();
