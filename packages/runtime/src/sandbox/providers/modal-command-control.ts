@@ -218,11 +218,35 @@ export class ModalCommandControl {
     yieldTimeMs: number,
     signal?: AbortSignal,
   ): Promise<ModalProviderOutputPage> {
+    return this.readOutput(command, yieldTimeMs, signal);
+  }
+
+  /** Fixed internal probes own their cancellation controller and must drain
+   * both reads before relinquishing the surrounding provider-operation gate.
+   * Retained-command readers keep their existing signal/receipt contract.
+   */
+  async readProbe(
+    command: ModalProviderCommand,
+    yieldTimeMs: number,
+    cancellation: AbortController,
+  ): Promise<ModalProviderOutputPage> {
+    return this.readOutput(command, yieldTimeMs, cancellation.signal, (error) =>
+      cancellation.abort(error),
+    );
+  }
+
+  private async readOutput(
+    command: ModalProviderCommand,
+    yieldTimeMs: number,
+    signal?: AbortSignal,
+    cancelSiblings?: (error: unknown) => void,
+  ): Promise<ModalProviderOutputPage> {
     signal?.throwIfAborted();
     this.assertIdentity(command);
     const next = structuredClone(command);
-    const pages = await Promise.all(
-      (["stdout", "stderr"] as const).map(async (stream) => {
+    let failure: { error: unknown } | undefined;
+    const reads = (["stdout", "stderr"] as const)
+      .map(async (stream) => {
         const cursor = command.streams[stream];
         if (cursor.exitCode !== null) return null;
         const descriptor = stream === "stdout" ? 1 : 2;
@@ -261,8 +285,29 @@ export class ModalCommandControl {
           };
         }
         return null;
-      }),
-    );
+      })
+      .map((read) =>
+        !cancelSiblings
+          ? read
+          : read.catch((error: unknown) => {
+              // A logical read owns both output streams. Promise.all alone releases
+              // its caller on the first rejection while a sibling RPC may still be
+              // running. Cancel that sibling, retain the original error, and drain
+              // both reads before returning control to mutation/capture ownership.
+              failure ??= { error };
+              cancelSiblings(error);
+              throw error;
+            }),
+      );
+    const pages = cancelSiblings
+      ? await Promise.allSettled(reads).then((results) => {
+          if (failure) throw failure.error;
+          return results.map((result) => {
+            if (result.status === "rejected") throw result.reason;
+            return result.value;
+          });
+        })
+      : await Promise.all(reads);
     const stdoutExit = next.streams.stdout.exitCode;
     const stderrExit = next.streams.stderr.exitCode;
     if (stdoutExit !== null && stderrExit !== null && stdoutExit !== stderrExit)

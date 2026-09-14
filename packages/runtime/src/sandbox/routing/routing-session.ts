@@ -108,6 +108,8 @@ export interface RoutableBackendSession extends ProviderCommandSession {
   pathExists?(path: string, runAs?: string): Promise<boolean>;
   viewImage?(args: unknown): Promise<unknown>;
   materializeEntry?(args: unknown): Promise<void>;
+  /** Provider-owned fixed read-only probe; never an agent command surface. */
+  verifyMaterializedPath?(path: string, workdir: string): Promise<void>;
   supportsPty?(): boolean;
   resolveExposedPort?(port: number): Promise<ExposedPortEndpoint>;
   serializeSessionState?(): Promise<unknown>;
@@ -2299,6 +2301,9 @@ async function assertProviderCanSeeMaterializedPath(
   session: RoutableBackendSession,
   path: string,
 ): Promise<void> {
+  if (session.verifyMaterializedPath) {
+    return session.verifyMaterializedPath(path, providerManifestRoot(session) ?? "/workspace");
+  }
   const command = `test -e ${shellSingleQuote(path)} && printf %s ${shellSingleQuote(
     MATERIALIZED_PATH_MARKER,
   )}`;

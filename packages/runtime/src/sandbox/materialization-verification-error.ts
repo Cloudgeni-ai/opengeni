@@ -15,6 +15,8 @@ export type MaterializationVerificationDiagnostic = {
   output: string | null;
   exitCode: number | null;
   providerSessionId: number | null;
+  /** Exact ephemeral read-only probe identity, never a retained command alias. */
+  providerExecution?: { sandboxId: string; taskId: string; execId: string };
   causeMessage?: string;
 };
 

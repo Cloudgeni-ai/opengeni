@@ -91,6 +91,14 @@ OPENGENI_MODAL_TIMEOUT_SECONDS=900
 
 When explaining Modal, say OpenGeni selects the Modal sandbox backend through the OpenAI Agents SDK extension. Do not imply that all Docker-only mounting or networking behavior is identical unless runtime code proves it.
 
+For materialization visibility failures, inspect `modal-materialization-verification.ts`
+and `modal-command-session.ts` under runtime sandbox providers. The fixed read-only
+probe owns an ephemeral provider cursor, not its surrounding mutation's retained
+command alias. Terminal status and the marker are required; deadline/cancellation
+ends observation without proving process termination. Do not add clone/turn retries
+or weaken retained-command persistence to follow a setup probe. See run-lifecycle
+and the authenticated materialization diagnostic for exact current behavior.
+
 ### Private-registry sandbox images
 
 By default `OPENGENI_MODAL_IMAGE_REF` (and any pack `sandboxImage` that overrides it) is
