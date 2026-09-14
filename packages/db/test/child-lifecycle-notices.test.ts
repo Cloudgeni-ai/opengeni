@@ -4,6 +4,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import {
   acceptSessionApprovalDecision,
   acceptSessionHumanInputResponse,
+  adoptConnectedMachineSessionBackgroundCommand,
   addSessionSystemUpdateWithSourceMutation,
   applySessionTurnSettlement,
   armCodexCapacityWait,
@@ -34,6 +35,7 @@ import {
   peekSessionWork,
   recordSessionGoalProgressWithEvent,
   sessionSystemUpdateOutboxKindPayload,
+  settleConnectedMachineSessionBackgroundCommand,
   withWorkspaceSessionActivityRls,
   type SessionSystemUpdateOutboxDelivery,
 } from "../src/index";
@@ -132,6 +134,108 @@ async function startSession(
 }
 
 type Started = Awaited<ReturnType<typeof startSession>>;
+
+async function startCommand(grant: Grant, started: Started) {
+  const command = {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId: started.session.id,
+    commandId: crypto.randomUUID(),
+    controlWorkspaceId: grant.workspaceId,
+    enrollmentId: crypto.randomUUID(),
+    connectionInstanceId: crypto.randomUUID(),
+    opId: crypto.randomUUID(),
+  };
+  await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+    ...command,
+    turnId: started.turn.id,
+    attemptId: started.attemptId,
+    executionGeneration: started.turn.executionGeneration,
+    command: "printf finished",
+  });
+  return command;
+}
+
+test("command completion stays durable without waking an idle non-waiting session", async () => {
+  const grant = await workspace();
+  const started = await startSession(grant, { message: "work" });
+  const command = await startCommand(grant, started);
+  await settleIdle(grant, started);
+  await settleConnectedMachineSessionBackgroundCommand(client.db, {
+    ...command,
+    outcome: "exited",
+    exitCode: 0,
+    reason: "op_exit",
+  });
+  const events = await listSessionEvents(client.db, grant.workspaceId, started.session.id);
+  expect(events.some((event) => event.type === "session.command.finished")).toBe(true);
+  expect(await peekSessionWork(client.db, grant.workspaceId, started.session.id)).toEqual({
+    kind: "idle",
+  });
+  const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+    sessionId: started.session.id,
+    workflowId: `session-${started.session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  expect(claim.action).toBe("unclaimed");
+  const pending = await shared.admin`
+    select state from session_system_updates
+    where session_id=${started.session.id} and source_id=${command.commandId}`;
+  expect(pending).toMatchObject([{ state: "pending" }]);
+});
+
+test.each(["before", "after"])(
+  "command completion %s wait registration resumes exactly one waiting turn",
+  async (timing) => {
+    const grant = await workspace();
+    const started = await startSession(grant, { message: "work" });
+    const command = await startCommand(grant, started);
+    const complete = () =>
+      settleConnectedMachineSessionBackgroundCommand(client.db, {
+        ...command,
+        outcome: "exited",
+        exitCode: 0,
+        reason: "op_exit",
+      });
+    if (timing === "before") await complete();
+    await waitForSessionInputWithEvent(client.db, grant.workspaceId, started.session.id, {
+      reason: "waiting for command",
+      timeoutSeconds: 600,
+      command: {
+        accountId: grant.accountId,
+        actor: {
+          type: "agent_attempt",
+          attemptId: started.attemptId,
+          sessionId: started.session.id,
+          turnId: started.turn.id,
+          executionGeneration: started.turn.executionGeneration,
+        },
+        operationKey: crypto.randomUUID(),
+      },
+    });
+    await settleIdle(grant, started);
+    if (timing === "after") await complete();
+    expect(await peekSessionWork(client.db, grant.workspaceId, started.session.id)).toEqual({
+      kind: "runnable",
+    });
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: started.session.id,
+      workflowId: `session-${started.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+    const delivered = await shared.admin`
+      select state from session_system_updates
+      where session_id=${started.session.id} and source_id=${command.commandId}`;
+    expect(delivered).toMatchObject([{ state: "delivered" }]);
+  },
+);
 
 const questions = [
   {
