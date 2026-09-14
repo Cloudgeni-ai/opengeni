@@ -749,9 +749,7 @@
         "displayMode": "basic",
         "reduceOptions": {
           "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
+          "calcs": ["lastNotNull"],
           "fields": ""
         },
         "showUnfilled": true
