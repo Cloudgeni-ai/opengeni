@@ -22,6 +22,7 @@ describe("runtime failures dashboard", () => {
       "MCP tool-call p95 by outcome",
       "Failed startup phases",
       "Logical sandbox provision failures",
+      "Sandbox visibility-check failures",
       "API 5xx by route and status",
       "Core workspace and session read p95",
       "Durable append and live publish p99",
@@ -40,6 +41,7 @@ describe("runtime failures dashboard", () => {
       "opengeni_mcp_tool_call_duration_seconds_bucket",
       "opengeni_turn_startup_phase_duration_seconds_count",
       "opengeni_sandbox_provisions_total",
+      "opengeni_sandbox_materialization_verification_failures_total",
       "opengeni_http_requests_total",
       "opengeni_http_request_duration_seconds_bucket",
       "opengeni_session_event_append_seconds_bucket",
@@ -81,6 +83,26 @@ describe("runtime failures dashboard", () => {
     for (const target of ratio?.targets ?? []) {
       expect(target.expr).toContain("or vector(0)");
       expect(target.expr).toContain("clamp_min");
+    }
+  });
+
+  test("explains visibility failures with fixed readable categories and private evidence routing", async () => {
+    const dashboard = JSON.parse(
+      await readFile(new URL("./runtime-failures.json", import.meta.url), "utf8"),
+    );
+    const panel = dashboard.panels.find(
+      (entry: { title: string }) => entry.title === "Sandbox visibility-check failures",
+    );
+    expect(panel.type).toBe("bargauge");
+    expect(panel.description).toContain("materializationDiagnostic");
+    expect(panel.description).toContain("absence is not proven");
+    expect(panel.description).toContain("Scrape health");
+    expect(panel.targets).toHaveLength(6);
+    for (const target of panel.targets) {
+      expect(target.instant).toBe(true);
+      expect(target.range).toBe(false);
+      expect(target.legendFormat).not.toContain("{{reason}}");
+      expect(target.expr).not.toContain("or vector(0)");
     }
   });
 

@@ -15,6 +15,9 @@ import {
   isMcpTransportConnectivityError,
   isModalTaskExecStartDnsResolutionError,
   RoutingWorkspaceRootChangedError,
+  SandboxMaterializationVerificationError,
+  materializationVerificationDiagnostic,
+  type MaterializationVerificationDiagnostic,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
 } from "@opengeni/runtime";
@@ -851,6 +854,15 @@ function findPostgresDriverError(error: unknown): Record<string, unknown> | null
 export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  const failure = baseAgentRunFailurePayload(error, options);
+  const diagnostic = materializationVerificationDiagnostic(error);
+  return diagnostic ? { ...failure, materializationDiagnostic: diagnostic } : failure;
+}
+
+function baseAgentRunFailurePayload(
+  error: unknown,
+  options: { isCodexTurn?: boolean } = {},
 ): {
   error: string;
   code?: string;
@@ -870,7 +882,16 @@ export function agentRunFailurePayload(
   database?: Record<string, string>;
   historyPersistenceStage?: MandatoryHistoryPersistenceStage;
   mcpTransportDiagnostic?: McpTransportRequestFailureDiagnostic;
+  materializationDiagnostic?: MaterializationVerificationDiagnostic;
 } {
+  if (error instanceof SandboxMaterializationVerificationError) {
+    return {
+      error: error.message,
+      code: error.code,
+      retryable: false,
+      materializationDiagnostic: error.diagnostic,
+    };
+  }
   if (error instanceof RetainedAttachmentTransportLimitError) {
     return { error: error.message, code: "retained_attachment_transport_limit", retryable: false };
   }

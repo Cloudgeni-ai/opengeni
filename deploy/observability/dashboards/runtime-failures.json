@@ -3,7 +3,7 @@
   "title": "OpenGeni · Runtime Failures",
   "description": "One exact deployment's turn, MCP, sandbox, API, provider, and durable-write failures. Identity and error content stay in authenticated logs and durable events, never metric labels.",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "editable": true,
   "graphTooltip": 1,
   "timezone": "browser",
@@ -710,6 +710,108 @@
         }
       ],
       "gridPos": { "x": 12, "y": 53, "w": 12, "h": 8 }
+    },
+    {
+      "id": 24,
+      "type": "bargauge",
+      "title": "Sandbox visibility-check failures",
+      "description": "Repository or file setup returned, but its destination could not be verified. Destination not visible: the provider shell test exited 1; check the recorded workspace root, path, and permissions. Check exited with an error: inspect the recorded exit code and output. Check still running: the provider yielded a command handle, so absence is not proven. No valid confirmation: missing or malformed result. Provider check failed: the provider call threw before returning a result. Exact path, command, response, and provider handle remain in the authenticated turn.failed event under materializationDiagnostic; Grafana receives only these fixed reason categories. Counts describe checks across providers, not distinct sessions. Use Explore to group the metric by backend. Zero means no observed failures in the selected window. No data means missing samples or unavailable instrumentation; check Scrape health and the deployed version. Continue succeeding does not establish the original cause.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(opengeni_sandbox_materialization_verification_failures_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",reason=\"path_not_visible\"}[$__range]))",
+          "legendFormat": "Destination not visible",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(opengeni_sandbox_materialization_verification_failures_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",reason=\"command_failed\"}[$__range]))",
+          "legendFormat": "Check exited with an error",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "expr": "sum(increase(opengeni_sandbox_materialization_verification_failures_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",reason=\"command_pending\"}[$__range]))",
+          "legendFormat": "Check still running",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "D",
+          "expr": "sum(increase(opengeni_sandbox_materialization_verification_failures_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",reason=\"invalid_response\"}[$__range]))",
+          "legendFormat": "No valid confirmation",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "E",
+          "expr": "sum(increase(opengeni_sandbox_materialization_verification_failures_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",reason=\"command_error\"}[$__range]))",
+          "legendFormat": "Provider check failed",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "F",
+          "expr": "sum(increase(opengeni_sandbox_materialization_verification_failures_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",reason=\"unknown\"}[$__range]))",
+          "legendFormat": "Unclassified check failure",
+          "editorMode": "code",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 61,
+        "w": 24,
+        "h": 8
+      }
     }
   ]
 }
