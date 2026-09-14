@@ -78,14 +78,21 @@ afterAll(async () => {
   await owned?.release();
 }, 180_000);
 
-async function expectState(action: () => Promise<unknown>, code: string) {
+async function expectState(action: () => Promise<unknown>, code: string, label = "SQLSTATE") {
   let failure: unknown;
   try {
     await action();
   } catch (error) {
     failure = error;
   }
-  expect(nestedPostgresSqlState(failure)).toBe(code);
+  const actual = nestedPostgresSqlState(failure);
+  const detail =
+    failure instanceof Error
+      ? `${failure.name}: ${failure.message.slice(0, 240)}`
+      : failure === undefined
+        ? "No exception"
+        : "Non-Error exception";
+  expect(actual, `${label}: ${detail}; SQLSTATE=${actual ?? "none"}`).toBe(code);
 }
 
 describe("0473 organization usage analytical capability", () => {
@@ -159,7 +166,8 @@ describe("0473 organization usage analytical capability", () => {
       since = "2026-09-01T00:00:00Z",
       until = "2026-09-14T00:00:00Z",
     ) =>
-      tx`select opengeni_private.organization_usage_summary(${accountId}::uuid, ${since}::timestamptz, ${until}::timestamptz, 'day', null, true)`;
+      // Send text so the driver does not convert PostgreSQL infinities to invalid JS Dates.
+      tx`select opengeni_private.organization_usage_summary(${accountId}::uuid, ${since}::text::timestamptz, ${until}::text::timestamptz, 'day', null, true)`;
     await expectState(
       () =>
         app!.begin(async (tx) => {
@@ -196,6 +204,7 @@ describe("0473 organization usage analytical capability", () => {
             await call(tx, since, until);
           }),
         "22023",
+        `Invalid window ${since} to ${until}`,
       );
     }
     const [count] =
