@@ -155,7 +155,7 @@ test("a save finishing after workspace navigation cannot read or display old-wor
     expect(calls.filter((call) => call.method === "read")).toHaveLength(readCount);
     expect(view.container.querySelector("textarea")).toBeNull();
     expect(view.container.textContent).not.toContain("Skill saved and active.");
-    expect(view.container.textContent).toContain("No Skills yet.");
+    expect(view.container.textContent).toContain("No skills yet.");
   } finally {
     await view.dispose();
   }
@@ -197,7 +197,7 @@ test("catalog pagination appends metadata without opening Skill files", async ()
   }
 });
 
-test("quiet shared rows use Skill icons, real descriptions, and truthful active/pending/inactive indicators", async () => {
+test("installed shortcuts use Skill icons and truthful active/pending/inactive labels", async () => {
   const { context, calls } = fixture({
     async listWorkspaceSkills() {
       return {
@@ -219,20 +219,18 @@ test("quiet shared rows use Skill icons, real descriptions, and truthful active/
   });
   const view = await mount(context);
   try {
-    const rows = [...view.container.querySelectorAll(".og-capability-catalog-row")];
+    const rows = [...view.container.querySelectorAll(".og-connection-installed button")];
     expect(rows).toHaveLength(4);
     expect(rows.every((row) => row.querySelector(".lucide-book-open"))).toBe(true);
-    expect(
-      rows.map((row) => row.querySelector("[data-status]")?.getAttribute("data-status")),
-    ).toEqual(["added", "attention", "attention", "unavailable"]);
-    expect(rows[0]!.textContent).toContain("Use for examples");
-    expect(rows[1]!.textContent).toContain("Pending changes");
-    expect(rows[2]!.textContent).toContain("Pending changes · not active");
-    expect(rows[3]!.textContent).toContain("Not active · disabled");
-    expect(rows[3]!.querySelector(".og-capability-catalog-copy > span")).toBeNull();
-    expect(rows.some((row) => /workspace|Plugin|Authored|Installed/.test(row.textContent!))).toBe(
-      false,
-    );
+    expect(rows.map((row) => row.getAttribute("title"))).toEqual([
+      "Installed",
+      "Pending changes",
+      "Pending changes",
+      "Not active · disabled",
+    ]);
+    expect(rows[1]!.querySelector('[aria-label="Needs attention"]')).not.toBeNull();
+    expect(rows[2]!.querySelector('[aria-label="Needs attention"]')).not.toBeNull();
+    expect(rows.every((row) => row.querySelectorAll("button").length === 0)).toBe(true);
     expect(calls.filter((call) => call.method === "read")).toHaveLength(0);
   } finally {
     await view.dispose();
@@ -243,10 +241,12 @@ test("editor has a labelled shared dialog and restores focus to its catalog open
   const { context } = fixture();
   const view = await mount(context);
   try {
-    const opener = view.container.querySelector<HTMLButtonElement>(".og-capability-catalog-row")!;
+    const opener = view.container.querySelector<HTMLButtonElement>(
+      ".og-connection-installed button",
+    )!;
     await view.click("example");
     const dialog = view.container.querySelector('[role="dialog"]')!;
-    expect(dialog.id).toBe(opener.getAttribute("aria-controls")!);
+    expect(opener.getAttribute("aria-label")).toContain("example");
     expect(document.getElementById(dialog.getAttribute("aria-labelledby")!)?.textContent).toBe(
       "example",
     );
@@ -395,7 +395,7 @@ test("a delayed open cannot reveal old-workspace files after switching workspace
     await view.render("two");
     await act(async () => resolve(record));
     expect(view.container.querySelector('[role="dialog"]')).toBeNull();
-    expect(view.container.textContent).toContain("No Skills yet.");
+    expect(view.container.textContent).toContain("No skills yet.");
   } finally {
     await view.dispose();
   }

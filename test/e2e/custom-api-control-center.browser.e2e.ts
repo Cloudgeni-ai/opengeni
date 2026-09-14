@@ -526,6 +526,7 @@ async function openCapabilities(page: Page): Promise<void> {
   await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
     waitUntil: "networkidle",
   });
+  await page.getByRole("tab", { name: "Connections", exact: true }).click();
   await expectVisible(page.getByRole("heading", { name: "Custom APIs" }));
 }
 
@@ -634,6 +635,8 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
       return json({ packs: [], installations: [] });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`)
+      return json({ items: [], nextCursor: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) return json({ skills: [] });
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`)
       return json({ skills: [], nextCursor: null });

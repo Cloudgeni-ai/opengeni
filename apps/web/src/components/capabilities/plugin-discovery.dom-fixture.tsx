@@ -187,10 +187,12 @@ test("installed rows use the same one-button presentation and discovery does not
     />,
   );
   try {
-    const row = rendered.container.querySelector<HTMLButtonElement>("[data-installed-plugin]")!;
-    expect(row.classList.contains("og-capability-catalog-row")).toBe(true);
+    const row = rendered.container.querySelector<HTMLButtonElement>(
+      ".og-connection-installed button",
+    )!;
+    expect(row.getAttribute("aria-label")).toContain(installedPlugin.name);
     expect(row.querySelectorAll("button")).toHaveLength(0);
-    expect(row.querySelector('[data-status="added"]')).not.toBeNull();
+    expect(row.getAttribute("aria-label")).toContain("Installed");
     expect(row.textContent).not.toContain("Research category");
     expect(row.textContent).not.toContain("2");
     await act(async () => {
@@ -229,8 +231,11 @@ test("installed attention state remains textual and management uses the exact in
     />,
   );
   try {
-    const row = rendered.container.querySelector<HTMLButtonElement>("[data-installed-plugin]")!;
-    expect(row.querySelector('[data-status="attention"]')?.textContent).toBe("Needs attention");
+    const row = rendered.container.querySelector<HTMLButtonElement>(
+      ".og-connection-installed button",
+    )!;
+    expect(row.getAttribute("aria-label")).toContain("Needs attention");
+    expect(row.querySelector('[aria-label="Needs attention"]')).not.toBeNull();
     await act(async () => {
       row.focus();
       row.click();
