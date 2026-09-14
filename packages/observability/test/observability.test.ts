@@ -223,6 +223,46 @@ describe("observability", () => {
     }
   });
 
+  test("exports bounded materialization reasons without command or path labels", async () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    expect(await obs.prometheusMetrics()).toMatch(
+      /opengeni_sandbox_materialization_verification_failures_total\{[^}]*backend="modal"[^}]*reason="path_not_visible"[^}]*\} 0\b/,
+    );
+    const observe = sandboxOperationMetricObserver(obs);
+    for (const reason of [
+      "path_not_visible",
+      "command_failed",
+      "command_pending",
+      "invalid_response",
+      "command_error",
+      "/private/provider-response",
+    ]) {
+      observe({
+        backend: "modal",
+        op: "materializeEntry",
+        outcome: "failed",
+        durationMs: 10,
+        materializationFailureReason: reason,
+      });
+    }
+    const metrics = await obs.prometheusMetrics();
+    for (const reason of [
+      "path_not_visible",
+      "command_failed",
+      "command_pending",
+      "invalid_response",
+      "command_error",
+      "unknown",
+    ]) {
+      expect(metrics).toMatch(
+        new RegExp(
+          `opengeni_sandbox_materialization_verification_failures_total\\{[^}]*backend="modal"[^}]*reason="${reason}"[^}]*\\} 1\\b`,
+        ),
+      );
+    }
+    expect(metrics).not.toContain("/private/provider-response");
+  });
+
   test("counts observer failures without leaking them into sandbox execution", async () => {
     const obs = createObservability(settings, { component: "worker", now: () => 1 });
     obs.incrementCounter({

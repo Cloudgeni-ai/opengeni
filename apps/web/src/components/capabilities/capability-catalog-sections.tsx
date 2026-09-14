@@ -64,10 +64,13 @@ export function CapabilityDiscoveryControls({
 export function PluginSearch({
   query,
   onQueryChange,
+  scope = "all",
 }: {
   query: string;
+  scope?: string;
   onQueryChange: (query: string) => void;
 }) {
+  const label = scope === "all" ? "Search connections, skills, and plugins" : `Search ${scope}`;
   return (
     <div className="relative mt-6">
       <SearchIcon className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-fg-subtle" />
@@ -76,9 +79,9 @@ export function PluginSearch({
         suppressAutofill
         value={query}
         onChange={(event) => onQueryChange(event.target.value)}
-        placeholder="Search connections, skills, and plugins"
+        placeholder={label}
         className="h-11 rounded-lg pl-11 text-sm shadow-none transition-none placeholder:text-fg-subtle"
-        aria-label="Search capabilities"
+        aria-label={label}
       />
     </div>
   );
@@ -225,7 +228,8 @@ export function CapabilityBrowseSection({
                   onLoadMore();
                   queueMicrotask(() => {
                     if (button.isConnected || !grid?.isConnected) return;
-                    grid.children[focusIndex]?.querySelector<HTMLButtonElement>("button")?.focus();
+                    const row = grid.children[focusIndex];
+                    if (row instanceof HTMLButtonElement) row.focus();
                   });
                 }}
               >

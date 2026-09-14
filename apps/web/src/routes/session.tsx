@@ -80,10 +80,8 @@ import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "@/components/session/artifact-link-boundary";
-import {
-  SessionVariableSetPicker,
-  type SessionVariableSetPickerSharedState,
-} from "@/components/session/session-variable-set-picker";
+import { SessionVariableSetPicker } from "@/components/session/session-variable-set-picker";
+import { useSessionVariableSetPickerState } from "@/lib/use-session-variable-set-picker-state";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
@@ -333,6 +331,30 @@ export function SessionRoute({
         : null,
     [queue.effectiveControl, sessionSeed, sessionStatus, sessionStatusSequence],
   );
+  // Dispatch retries update their durable ledger without timeline events. Read
+  // that evidence only while this visible session is queued, with no overlapping
+  // requests, so a moving retry schedule cannot masquerade as active execution.
+  const waitingForDispatch =
+    session?.status === "queued" &&
+    session.activeTurnId === null &&
+    session.effectiveControl.state === "active";
+  useEffect(() => {
+    if (!waitingForDispatch) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      try {
+        if (document.visibilityState === "visible") await refreshSession();
+      } finally {
+        if (!stopped) timer = setTimeout(() => void refresh(), 15_000);
+      }
+    };
+    timer = setTimeout(() => void refresh(), 15_000);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [waitingForDispatch, sessionId, refreshSession]);
   // /clear-view: a LOCAL, this-device-only collapse of the transcript. It hides
   // every event at or before the sequence seen when the operator ran it; the
   // server log is untouched and newer events (higher sequence) keep streaming
@@ -1555,11 +1577,9 @@ function SessionChatPane(props: {
   const onVoiceActiveChange = useCallback((active: boolean) => {
     setVoiceActive(active);
   }, []);
-  const [variableSetPickerState, setVariableSetPickerState] =
-    useState<SessionVariableSetPickerSharedState>({
-      saving: false,
-      committedSelection: null,
-    });
+  const [variableSetPickerState, setVariableSetPickerState] = useSessionVariableSetPickerState(
+    props.session,
+  );
   const variableSetComposerBlocked =
     variableSetPickerState.saving ||
     variableSetPickerState.committedSelection?.sessionId === props.session.id;
@@ -2505,8 +2525,8 @@ function SessionChatPane(props: {
         </div>
       ) : null}
 
-      {props.session.inputWait &&
-      props.session.status === "idle" &&
+      {((props.session.inputWait && props.session.status === "idle") ||
+        (props.session.status === "queued" && !props.session.activeTurnId)) &&
       props.session.effectiveControl.state === "active" ? (
         <Suspense fallback={null}>
           <LazySessionWaitStatus session={props.session} />

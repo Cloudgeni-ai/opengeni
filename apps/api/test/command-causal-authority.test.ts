@@ -149,23 +149,22 @@ test("managed HTTP session retains personal authority across command and timeout
           ...provider,
           command: "printf done",
         });
-      } else {
-        await waitForSessionInputWithEvent(client.db, workspace.id, session.id, {
-          reason: "waiting for command evidence",
-          timeoutSeconds: 30,
-          command: {
-            accountId: context.defaultAccountId,
-            operationKey: crypto.randomUUID(),
-            actor: {
-              type: "agent_attempt",
-              sessionId: session.id,
-              turnId: initial.turn.id,
-              attemptId: initial.attemptId,
-              executionGeneration: initial.turn.executionGeneration,
-            },
-          },
-        });
       }
+      await waitForSessionInputWithEvent(client.db, workspace.id, session.id, {
+        reason: "waiting for command evidence",
+        timeoutSeconds: 30,
+        command: {
+          accountId: context.defaultAccountId,
+          operationKey: crypto.randomUUID(),
+          actor: {
+            type: "agent_attempt",
+            sessionId: session.id,
+            turnId: initial.turn.id,
+            attemptId: initial.attemptId,
+            executionGeneration: initial.turn.executionGeneration,
+          },
+        },
+      });
       await applySessionTurnSettlement(client.db, workspace.id, {
         sessionId: session.id,
         turnId: initial.turn.id,

@@ -37,9 +37,9 @@ describe("CapabilityBrowseSection", () => {
       expect(rendered.container.querySelectorAll("[data-capability-catalog-tile]")).toHaveLength(
         96,
       );
-      const firstAppendedAction = rendered.container
-        .querySelectorAll<HTMLElement>("[data-capability-catalog-tile]")[48]
-        ?.querySelector("button");
+      const firstAppendedAction = rendered.container.querySelectorAll<HTMLElement>(
+        "button[data-capability-catalog-tile]",
+      )[48];
       expect(firstAppendedAction === document.activeElement).toBe(true);
     } finally {
       await rendered.unmount();

@@ -427,7 +427,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     });
 
     await expect(proxy.materializeEntry({ path: ".agents/example", entry: {} })).rejects.toThrow(
-      "provider cannot read the destination path",
+      "visibility check returned no valid success confirmation",
     );
   });
 

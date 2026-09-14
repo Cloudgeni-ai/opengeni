@@ -1,6 +1,7 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
 
 export type BundledSkillId =
+  | "builtin:opengeni-help"
   | "builtin:opengeni-visualize"
   | "builtin:document-parsing"
   | "builtin:opengeni-skills"
@@ -1371,6 +1372,16 @@ export type CancelSessionBackgroundCommandResult = {
 };
 
 export type Session = {
+  /** Detail-only dispatch evidence; delivery does not prove turn execution. */
+  dispatchWait?:
+    | {
+        state: "pending" | "acknowledged" | "unavailable";
+        attempts: number;
+        nextAttemptAt: string | null;
+        lastError: string | null;
+      }
+    | null
+    | undefined;
   /** Detail-only failure evidence through lastSequence; independent of timeline paging. */
   failureDiagnostics?:
     | {
@@ -3054,6 +3065,7 @@ export type Permission = KnownPermission | (string & {});
 
 export type FirstPartyMcpToolName =
   | "knowledge_search"
+  | "knowledge_prepare_save"
   | "knowledge_get"
   | "knowledge_browse"
   | "knowledge_save"

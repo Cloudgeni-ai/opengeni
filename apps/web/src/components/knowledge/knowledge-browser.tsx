@@ -148,6 +148,7 @@ export function KnowledgeBrowser({
   const [creating, setCreating] = useState<"note" | "group" | null>(null);
   const [createParent, setCreateParent] = useState<KnowledgeCollection | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [includeEvidence, setIncludeEvidence] = useState(false);
   const [copying, setCopying] = useState<KnowledgeEntryRecord | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -157,6 +158,7 @@ export function KnowledgeBrowser({
   const request: KnowledgeEntryListRequest = {
     view,
     limit: 50,
+    ...(includeEvidence || sourceOnly || fileFilter ? { includeEvidence: true } : {}),
     ...(scope !== "all" ? { scope } : {}),
     ...(sourceOnly ? { kind: "source" as const } : kind !== "all" ? { kind } : {}),
     ...(group ? { groupId: group.id } : treeView ? { rootOnly: true } : {}),
@@ -541,6 +543,16 @@ export function KnowledgeBrowser({
               </option>
             ))}
           </Select>
+          {view === "published" ? (
+            <label className="flex items-center gap-2 py-2 text-sm">
+              <input
+                type="checkbox"
+                checked={includeEvidence}
+                onChange={(event) => setIncludeEvidence(event.target.checked)}
+              />
+              Include supporting evidence
+            </label>
+          ) : null}
           {kind !== "all" ? (
             <p className="text-xs text-fg-muted">{KNOWLEDGE_KIND_HELP[kind]}</p>
           ) : null}
@@ -703,6 +715,7 @@ export function KnowledgeBrowser({
                 <KnowledgeTree
                   key={`${workspaceId}:${requestKey}`}
                   workspaceId={workspaceId}
+                  includeEvidence={includeEvidence}
                   entries={entries}
                   scope={scope === "all" ? undefined : scope}
                   refresh={refresh}
@@ -1121,6 +1134,14 @@ function KnowledgeInspector(props: {
               />
             ) : pending ? (
               <KnowledgeReviewSummary workspaceId={props.workspaceId} record={record} />
+            ) : entry.kind === "source" && entry.source?.fileId ? (
+              <KnowledgeOriginalFile
+                workspaceId={props.workspaceId}
+                entryId={record.id}
+                revisionId={record.revision.id}
+                autoOpen
+                extractedText={entry.content}
+              />
             ) : (
               <div className="whitespace-pre-wrap break-words text-sm leading-6">
                 {entry.content || "This collection brings together related knowledge."}
@@ -1170,7 +1191,8 @@ function KnowledgeInspector(props: {
                               Open conversation
                             </a>
                           ) : null}
-                          {entry.source.fileId ? (
+                          {entry.source.fileId &&
+                          (entry.kind !== "source" || pending || editing) ? (
                             <KnowledgeOriginalFile
                               key={`${record.id}:${record.revision.id}`}
                               workspaceId={props.workspaceId}

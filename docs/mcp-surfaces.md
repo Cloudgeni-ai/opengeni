@@ -84,6 +84,10 @@ First-party OpenGeni MCP Knowledge tools:
 - `knowledge_search`, `knowledge_browse`, `knowledge_get`: published retrieval by
   default; explicit `view: "needs_review"` reads unapproved proposals for reuse
   and correction. Pending content never activates Knowledge or behavior.
+- `knowledge_prepare_save`: read-only collection catalog and related published/
+  pending matches before deciding whether and where to save. Source evidence is
+  excluded from normal published discovery; explicit `includeEvidence` searches
+  and exact evidence reads preserve its availability.
 - `knowledge_save`, `knowledge_archive`, `knowledge_retain_file`: exact-attempt
   writes through the shared Knowledge lifecycle. Accepted Agent learning controls
   publication: Automatic, Review first, or Off. Off leaves retrieval available.

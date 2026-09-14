@@ -222,6 +222,7 @@ export function CapabilityDetailSheet({
 export function DetailBody({
   item,
   inline = false,
+  setupOnly = inline,
   showIdentity = true,
   onCancel,
   health,
@@ -235,7 +236,9 @@ export function DetailBody({
 }: {
   item: CapabilityCatalogItem;
   inline?: boolean;
-  /** A conversation card keeps its identity visible while setup expands. */
+  /** Chat setup must not expose disconnect/removal actions, regardless of layout. */
+  setupOnly?: boolean;
+  /** The containing dialog may already render the provider identity. */
   showIdentity?: boolean;
   onCancel?: (() => void) | undefined;
   health: ConnectionHealth;
@@ -261,7 +264,7 @@ export function DetailBody({
   );
 
   const canDisconnect =
-    !inline && item.enabled && item.kind === "mcp" && item.actions.includes("disconnect");
+    !setupOnly && item.enabled && item.kind === "mcp" && item.actions.includes("disconnect");
   const keyPageUrl = item.installUrl ?? item.homepageUrl;
   // Repair is driven by the installation's OWN connectionRef.kind, not the catalog
   // plan — on catalog/registry drift an enabled item can carry a live connectionRef
@@ -272,12 +275,13 @@ export function DetailBody({
   // "API key" field so an api-key reconnect still has something to submit.
   const reconnectFields =
     plan.mode === "api_key" && plan.fields.length > 0 ? plan.fields : [GENERIC_API_KEY_FIELD];
+  const SkillHeading = inline ? "h4" : "h3";
 
   return (
     <div
       className={cn("flex min-h-0 flex-col", inline ? "session-capability-card__form" : "flex-1")}
     >
-      {inline && !showIdentity ? null : inline ? (
+      {!showIdentity ? null : inline ? (
         <div className="flex items-start gap-3">
           <CapabilityLogo
             src={logoSrc}
@@ -320,6 +324,7 @@ export function DetailBody({
           "min-h-0 flex-1",
           inline ? "space-y-3 text-xs" : "space-y-6 overflow-y-auto p-6 sm:p-8",
           inline && showIdentity && "mt-3",
+          !showIdentity && !inline && "p-0 sm:p-0",
         )}
       >
         {item.stale ? (
@@ -328,7 +333,7 @@ export function DetailBody({
           </Notice>
         ) : null}
 
-        {item.description && (!inline || showIdentity) ? (
+        {item.description && (!inline || showIdentity) && !(setupOnly && item.kind === "skill") ? (
           <p className="text-sm leading-6 text-fg-muted">{item.description}</p>
         ) : null}
 
@@ -361,9 +366,11 @@ export function DetailBody({
           </dl>
         ) : null}
 
-        {inline && item.kind === "skill" ? (
+        {setupOnly && item.kind === "skill" ? (
           <div className="space-y-3 border-t border-border pt-3">
-            <h4 className="text-xs font-medium text-fg">What this skill adds</h4>
+            <SkillHeading className="text-xs font-medium text-fg">
+              What this skill adds
+            </SkillHeading>
             <p className="session-capability-card__lede text-fg-muted">
               {item.description || "Review this skill's source and version before installing."}
             </p>
@@ -413,7 +420,7 @@ export function DetailBody({
               item={item}
               busy={busy}
               canManage={canManageSkills}
-              setupOnly={inline}
+              setupOnly={setupOnly}
               onCancel={onCancel}
               onAction={onAction}
             />
@@ -426,7 +433,7 @@ export function DetailBody({
               onOwnershipChange={setConnectionOwnership}
               busy={busy}
               canManage={canManageSocial}
-              setupOnly={inline}
+              setupOnly={setupOnly}
               onAction={onAction}
             />
           ) : plan.mode === "fiken_api_token" ? (
@@ -435,7 +442,7 @@ export function DetailBody({
               health={health}
               keyPageUrl={keyPageUrl}
               busy={busy}
-              setupOnly={inline}
+              setupOnly={setupOnly}
               onAction={onAction}
             />
           ) : item.enabled ? (
@@ -504,7 +511,7 @@ export function DetailBody({
                   {busy && !reconnect ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
                   Disconnect
                 </Button>
-              ) : !inline ? (
+              ) : !setupOnly ? (
                 <p className="text-center text-xs text-fg-subtle">
                   Manage this capability from its dedicated controls.
                 </p>
@@ -516,11 +523,15 @@ export function DetailBody({
                 presentation={capabilityPresentation(item.metadata)}
                 requestedScopes={[]}
               />
+              <p className="text-sm text-fg-muted">
+                You’ll use credentials for your own provider account or service account.
+              </p>
               {personalOnly ? (
                 <PersonalOnlyConnectionNotice itemName={item.name} />
               ) : (
                 <OwnershipSelector
                   compact={inline}
+                  credentialBased
                   value={connectionOwnership}
                   onChange={setConnectionOwnership}
                 />
@@ -556,6 +567,7 @@ export function DetailBody({
                 presentation={capabilityPresentation(item.metadata)}
                 requestedScopes={plan.requestedScopes}
               />
+              <p className="text-sm text-fg-muted">You’ll sign in with your own account.</p>
               {personalOnly ? (
                 <PersonalOnlyConnectionNotice itemName={item.name} />
               ) : (
@@ -565,17 +577,6 @@ export function DetailBody({
                   onChange={setConnectionOwnership}
                 />
               )}
-              <p
-                className={cn(
-                  inline
-                    ? "session-capability-card__lede text-fg-subtle"
-                    : "text-xs text-center text-fg-subtle",
-                )}
-              >
-                {connectionOwnership === "workspace"
-                  ? `You'll authorize ${item.name} once for this workspace. Provider actions may appear as the account you connect.`
-                  : `You'll authorize ${item.name} for your personal use, then return here.`}
-              </p>
               <ConnectionActions onCancel={onCancel} busy={busy}>
                 <Button
                   type="button"
@@ -821,6 +822,7 @@ export function SocialConnectorControls({
   const canConnect = ownership === "personal" || canManage;
   return (
     <div className="space-y-3">
+      <p className="text-sm text-fg-muted">You’ll sign in with your own account.</p>
       <OwnershipSelector compact={setupOnly} value={ownership} onChange={onOwnershipChange} />
       {visibleConnections.length > 0 ? (
         <div className="divide-y divide-border rounded-lg border border-border" role="list">
@@ -888,11 +890,6 @@ export function SocialConnectorControls({
               ? `Connect ${item.name} for workspace`
               : `Connect ${item.name} only for me`}
       </Button>
-      <p className="text-center text-xs text-fg-subtle">
-        {ownership === "workspace"
-          ? "Workspace shared. Agents and scheduled automations can use the connected account; connect a brand account rather than a personal one."
-          : "Personal. Used only by work carrying your explicit connection authority, including tasks you create from that authority."}
-      </p>
       {ownership === "workspace" && !canManage ? (
         <p className="text-center text-xs text-fg-subtle">
           Workspace admin permission is required to manage this connection.
@@ -1043,8 +1040,7 @@ export function FikenConnectorControls({
     <div className="space-y-3">
       {oauthButton("Connect with Fiken", <PlugIcon />)}
       <p className="text-center text-xs text-fg-subtle">
-        You'll sign in at Fiken and approve access once for this workspace. Everyone in the
-        workspace can then use the Fiken tools through this connection.
+        Connect your own Fiken account. Workspace agents and automations can act through it.
       </p>
       {usingToken ? (
         <div className="space-y-3">
@@ -1071,12 +1067,20 @@ export function OwnershipSelector({
   value,
   onChange,
   compact = false,
+  credentialBased = false,
 }: {
   value: ConnectionOwnership;
   onChange: (value: ConnectionOwnership) => void;
   compact?: boolean;
+  credentialBased?: boolean;
 }) {
   const groupName = useId();
+  const workspaceDescription = credentialBased
+    ? "Workspace agents and automations can act through the account these credentials authorize."
+    : "Workspace agents and automations can act through your account.";
+  const personalDescription = credentialBased
+    ? "Only your authorized work can use these credentials."
+    : "Only your authorized work can use your account.";
   if (compact) {
     const descriptionId = `${groupName}-description`;
     return (
@@ -1094,15 +1098,13 @@ export function OwnershipSelector({
                 onChange={() => onChange(ownership)}
               />
               <span className="session-capability-card__choice-label border border-border text-fg-muted peer-checked:bg-surface-2 peer-checked:text-fg peer-focus-visible:ring-2 peer-focus-visible:ring-ring">
-                {ownership === "workspace" ? "Workspace" : "Only me"}
+                {ownership === "workspace" ? "This workspace" : "Only me"}
               </span>
             </label>
           ))}
         </div>
         <p id={descriptionId} className="session-capability-card__fine text-fg-subtle">
-          {value === "workspace"
-            ? "Shared with agents and automations in this workspace."
-            : "Used only when work is authorized to act as you."}
+          {value === "workspace" ? workspaceDescription : personalDescription}
         </p>
       </fieldset>
     );
@@ -1114,16 +1116,16 @@ export function OwnershipSelector({
         groupName={groupName}
         checked={value === "workspace"}
         value="workspace"
-        title="Connect for workspace"
-        description="Shared with agents and automations in this workspace."
+        title="This workspace"
+        description={workspaceDescription}
         onChange={() => onChange("workspace")}
       />
       <OwnershipOption
         groupName={groupName}
         checked={value === "personal"}
         value="personal"
-        title="Connect only for me"
-        description="Used only when work is authorized to act as you."
+        title="Only me"
+        description={personalDescription}
         onChange={() => onChange("personal")}
       />
     </fieldset>

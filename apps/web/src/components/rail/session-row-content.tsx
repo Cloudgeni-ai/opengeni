@@ -55,6 +55,9 @@ function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
       />
     );
   }
+  if (summary.kind === "queued") {
+    return <Clock3Icon aria-hidden="true" className="size-3 shrink-0 text-fg-subtle" />;
+  }
   if (summary.kind === "active_work") {
     return <ActiveWorkMark />;
   }

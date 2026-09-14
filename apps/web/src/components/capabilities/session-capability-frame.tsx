@@ -2,8 +2,15 @@ import { CheckIcon, ShieldCheckIcon } from "lucide-react";
 import type { ReactNode, RefObject } from "react";
 
 import { Button } from "@/components/ui/button";
+import {
+  Dialog as Sheet,
+  DialogDescription as SheetDescription,
+  DialogHeader as SheetHeader,
+  DialogTitle as SheetTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { CapabilityLogo } from "./capability-logo";
+import { CapabilityDialogContent } from "./detail-dialog";
 import "./session-capability-card.css";
 
 /** The conversation's compact card shell. Setup owns its real provider flow;
@@ -20,6 +27,8 @@ export function SessionCapabilityFrame({
   actionLabel,
   note,
   onOpen,
+  onClose,
+  busy = false,
   opener,
   cardRef,
   children,
@@ -35,6 +44,8 @@ export function SessionCapabilityFrame({
   actionLabel: string;
   note: string;
   onOpen(): void;
+  onClose(): void;
+  busy?: boolean;
   opener?: RefObject<HTMLButtonElement | null>;
   cardRef?: RefObject<HTMLElement | null>;
   children?: ReactNode;
@@ -87,27 +98,67 @@ export function SessionCapabilityFrame({
         ) : (
           <>
             <p className="session-capability-card__copy text-fg-muted">{description}</p>
-            <div
-              className="session-capability-card__actions"
-              data-expanded={expanded ? "true" : "false"}
-            >
+            <div className="session-capability-card__actions" data-expanded="false">
               <p className="session-capability-card__reassure text-fg-subtle">
                 <ShieldCheckIcon aria-hidden />
                 {skill ? "Guidance only · no account access" : "You choose what to authorize"}
               </p>
-              {!expanded ? (
-                <div className="session-capability-card__open">
-                  <Button ref={opener} size="sm" onClick={onOpen} aria-expanded={false}>
-                    {actionLabel}
-                  </Button>
-                </div>
-              ) : null}
+              <div className="session-capability-card__open">
+                <Button
+                  ref={opener}
+                  size="sm"
+                  onClick={onOpen}
+                  aria-haspopup="dialog"
+                  aria-expanded={expanded}
+                >
+                  {actionLabel}
+                </Button>
+              </div>
             </div>
-            {expanded ? <div className="session-capability-card__setup">{children}</div> : null}
           </>
         )}
       </section>
       {!complete ? <p className="session-capability-card__note text-fg-subtle">{note}</p> : null}
+      <Sheet
+        open={expanded && !complete}
+        onOpenChange={(open) => {
+          if (!open && !busy) onClose();
+        }}
+      >
+        <CapabilityDialogContent
+          showCloseButton={!busy}
+          onEscapeKeyDown={(event) => {
+            if (busy) event.preventDefault();
+          }}
+          onInteractOutside={(event) => {
+            if (busy) event.preventDefault();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            const target = opener?.current?.isConnected ? opener.current : cardRef?.current;
+            if (target?.isConnected) target.focus();
+          }}
+        >
+          <SheetHeader className="gap-3 border-b border-border p-6 pr-12 text-left sm:p-8 sm:pr-14">
+            <div className="flex items-start gap-3">
+              <CapabilityLogo
+                src={logo}
+                name={name}
+                size="lg"
+                fallback={skill ? name.trim().slice(0, 1).toUpperCase() || "?" : undefined}
+              />
+              <div className="min-w-0 flex-1">
+                <SheetTitle className="text-xl font-semibold tracking-tight">{name}</SheetTitle>
+                <SheetDescription className="mt-0.5 text-xs text-fg-subtle">
+                  {typeLabel}
+                  {subtitle ? ` · ${subtitle}` : ""}
+                </SheetDescription>
+              </div>
+            </div>
+          </SheetHeader>
+          <div className="min-h-0 overflow-y-auto">{children}</div>
+        </CapabilityDialogContent>
+      </Sheet>
     </div>
   );
 }

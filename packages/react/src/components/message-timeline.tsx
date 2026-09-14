@@ -229,8 +229,8 @@ export type MessageTimelineProps = {
   hasNewer?: boolean | undefined;
   /** A newer history page is being fetched. */
   loadingNewer?: boolean | undefined;
-  /** Page forward through history without loading the whole gap to the tip. */
-  onLoadNewer?: (() => void) | undefined;
+  /** Page forward through history. Return the request promise to enable inline error/retry. */
+  onLoadNewer?: (() => unknown) | undefined;
   /**
    * Reload the live tip window. When omitted, Jump to latest only re-pins and
    * scrolls the in-memory window.
@@ -461,6 +461,67 @@ export function MessageTimeline({
   // can acquire a different first-delta id when older text arrives).
   const sourceItems = events ?? items;
   const olderBoundaryKey = sourceItems?.[0]?.id;
+  const newerBoundaryKey = `${events?.[0]?.sessionId ?? ""}:${olderBoundaryKey ?? ""}`;
+  const newerScopeRef = useRef(newerBoundaryKey);
+  newerScopeRef.current = newerBoundaryKey;
+  const newerAttemptRef = useRef<{ pending: boolean } | null>(null);
+  const newerRetryButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [newerRetryPending, setNewerRetryPending] = useState(false);
+  const [newerFailure, setNewerFailure] = useState<{ key: string; message: string } | null>(null);
+  useEffect(() => {
+    newerScopeRef.current = newerBoundaryKey;
+    newerAttemptRef.current = null;
+    setNewerFailure(null);
+    setNewerRetryPending(false);
+    return () => {
+      newerScopeRef.current = "";
+      newerAttemptRef.current = null;
+    };
+  }, [newerBoundaryKey]);
+  const requestNewer = useCallback(
+    (explicitRetry = false) => {
+      if (
+        newerScopeRef.current !== newerBoundaryKey ||
+        !onLoadNewer ||
+        loadingNewer ||
+        (newerAttemptRef.current && (!explicitRetry || newerAttemptRef.current.pending))
+      ) {
+        return;
+      }
+      const attempt = { pending: true };
+      newerAttemptRef.current = attempt;
+      if (explicitRetry) setNewerRetryPending(true);
+      const isCurrent = () =>
+        newerAttemptRef.current === attempt && newerScopeRef.current === newerBoundaryKey;
+      // Both synchronous host errors and rejected promises belong to this
+      // boundary. Retain the failed attempt so observers cannot hot-retry it.
+      void Promise.resolve()
+        .then(() => (isCurrent() ? onLoadNewer() : undefined))
+        .then(
+          () => {
+            if (!isCurrent()) return;
+            newerAttemptRef.current = null;
+            // The successful page removes the recovery control. Return focus
+            // to the reading surface without moving the reader's viewport.
+            if (document.activeElement === newerRetryButtonRef.current) {
+              scrollRef.current?.focus({ preventScroll: true });
+            }
+            setNewerFailure(null);
+            setNewerRetryPending(false);
+          },
+          (reason: unknown) => {
+            if (!isCurrent()) return;
+            attempt.pending = false;
+            setNewerRetryPending(false);
+            setNewerFailure({
+              key: newerBoundaryKey,
+              message: reason instanceof Error ? reason.message : String(reason),
+            });
+          },
+        );
+    },
+    [onLoadNewer, loadingNewer, newerBoundaryKey],
+  );
   const previousSourceIdsRef = useRef(new Set<string>());
   const previousSourceBoundaryRef = useRef<string | undefined>(undefined);
   const readingAnchorRef = useRef<TimelineAnchor | null>(null);
@@ -1586,14 +1647,14 @@ export function MessageTimeline({
         // An underfilled history window has both sentinels visible. Advancing
         // it automatically would undo an explicit older-page navigation.
         if (maxScrollOf(root) > 1 && entries.some((entry) => entry.isIntersecting)) {
-          onLoadNewer();
+          requestNewer();
         }
       },
       { root, rootMargin: "0px 0px 1200px 0px" },
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [hasNewer, loadingNewer, onLoadNewer, firstGroupKey]);
+  }, [hasNewer, loadingNewer, onLoadNewer, requestNewer, firstGroupKey]);
 
   // Late layout that React commits cannot see (images decoding, fonts, code
   // blocks) grows content without a commit. While pinned, soft-follow the tip;
@@ -2060,6 +2121,29 @@ export function MessageTimeline({
                           })}
                           {groups.length > 0 && trailingState ? (
                             <div data-og-timeline-trailing-state="">{trailingState}</div>
+                          ) : null}
+                          {hasNewer && newerFailure?.key === newerBoundaryKey ? (
+                            <div
+                              data-og-newer-error=""
+                              className="flex flex-col items-center gap-2 px-4 py-3 text-center text-og-menu text-og-fg-muted"
+                            >
+                              <p role="status" className="max-w-prose [overflow-wrap:anywhere]">
+                                Couldn’t load later activity. {newerFailure.message}
+                              </p>
+                              <button
+                                ref={newerRetryButtonRef}
+                                type="button"
+                                data-og-retry-newer=""
+                                className="min-h-11 rounded-og-md border border-og-border px-3 py-2 text-og-fg hover:bg-og-surface-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-og-accent"
+                                aria-disabled={loadingNewer || newerRetryPending}
+                                aria-busy={newerRetryPending}
+                                onClick={() => requestNewer(true)}
+                              >
+                                {newerRetryPending
+                                  ? "Retrying later activity…"
+                                  : "Retry later activity"}
+                              </button>
+                            </div>
                           ) : null}
                           {hasNewer ? (
                             <div

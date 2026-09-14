@@ -168,6 +168,113 @@ async function armOlderPrefetch(container: HTMLElement): Promise<void> {
 }
 
 const originalIntersectionObserver = globalThis.IntersectionObserver;
+
+function observeNewerForTest() {
+  const observers = new Map<
+    Element,
+    { callback: IntersectionObserverCallback; observer: IntersectionObserver }
+  >();
+  globalThis.IntersectionObserver = class implements IntersectionObserver {
+    readonly root = null;
+    readonly rootMargin = "";
+    readonly scrollMargin = "";
+    readonly thresholds = [0];
+    constructor(private callback: IntersectionObserverCallback) {}
+    observe(target: Element) {
+      observers.set(target, { callback: this.callback, observer: this });
+    }
+    unobserve() {}
+    disconnect() {}
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+  };
+  return async (container: HTMLElement) => {
+    const scroller = container.querySelector("[data-og-timeline-scroller]")!;
+    const target = container.querySelector("[data-og-bottom-sentinel]")!;
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 2400 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+    const observed = observers.get(target)!;
+    await actRun(() =>
+      observed.callback(
+        [{ target, isIntersecting: true } as IntersectionObserverEntry],
+        observed.observer,
+      ),
+    );
+    await flush();
+  };
+}
+
+test.each(["promise", "synchronous"])(
+  "newer %s failure stops observer retries and offers explicit recovery",
+  async (mode) => {
+    const intersect = observeNewerForTest();
+    const recovery = deferred<boolean>();
+    let calls = 0;
+    const onLoadNewer = () => {
+      calls += 1;
+      if (calls === 1) {
+        const failure = new Error("Sign in again to read this session");
+        if (mode === "synchronous") throw failure;
+        return Promise.reject(failure);
+      }
+      return recovery.promise;
+    };
+    const r = await renderComponent(
+      <MessageTimeline events={manyEvents(4)} hasNewer onLoadNewer={onLoadNewer} />,
+    );
+    await intersect(r.container);
+    expect(calls).toBe(1);
+    expect(r.container.querySelector("[data-og-newer-error]")?.textContent).toContain(
+      "Sign in again",
+    );
+    await intersect(r.container);
+    await intersect(r.container);
+    expect(calls).toBe(1);
+    const retry = r.container.querySelector<HTMLButtonElement>("[data-og-retry-newer]")!;
+    retry.focus();
+    await actRun(() => {
+      retry.click();
+      retry.click();
+    });
+    expect(calls).toBe(2);
+    expect(document.activeElement).toBe(retry);
+    expect(retry.getAttribute("aria-busy")).toBe("true");
+    await intersect(r.container);
+    expect(calls).toBe(2);
+    await actRun(() => recovery.resolve(true));
+    expect(r.container.querySelector("[data-og-newer-error]")).toBeNull();
+    expect(document.activeElement).toBe(r.container.querySelector("[data-og-timeline-scroller]"));
+    await intersect(r.container);
+    expect(calls).toBe(3);
+    await r.unmount();
+  },
+);
+
+test("newer rejection from a previous session does not expose a retry in the next session", async () => {
+  const intersect = observeNewerForTest();
+  const old = deferred<boolean>();
+  const r = await renderComponent(
+    <MessageTimeline events={manyEvents(4)} hasNewer onLoadNewer={() => old.promise} />,
+  );
+  await intersect(r.container);
+  const replacement = manyEvents(4).map((row) => ({ ...row, sessionId: "session-2" }));
+  let calls = 0;
+  await r.rerender(
+    <MessageTimeline
+      events={replacement}
+      hasNewer
+      onLoadNewer={() => {
+        calls += 1;
+      }}
+    />,
+  );
+  await actRun(() => old.reject(new Error("old session unavailable")));
+  expect(r.container.querySelector("[data-og-newer-error]")).toBeNull();
+  await intersect(r.container);
+  expect(calls).toBe(1);
+  await r.unmount();
+});
 const originalResizeObserver = globalThis.ResizeObserver;
 const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
 const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;

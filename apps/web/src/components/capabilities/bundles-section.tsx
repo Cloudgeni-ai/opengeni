@@ -1,6 +1,6 @@
+import { CatalogHeader } from "./catalog-header";
 import { PluginDiscovery } from "./plugin-discovery";
 import { SkillDiscovery } from "./skill-discovery";
-import { InstalledStrip } from "./installed-strip";
 /**
  * Bundles: one section, one uniform row, for every Skill, Plugin, and Pack.
  *
@@ -18,7 +18,7 @@ import { InstalledStrip } from "./installed-strip";
  * quick-connect fast path: the trailing state indicator stays decorative.
  */
 import type { usePacks } from "@opengeni/react";
-import { PackagePlusIcon, PlusIcon, PuzzleIcon } from "lucide-react";
+import { BookOpenIcon, PackagePlusIcon, PlusIcon, PuzzleIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -63,6 +63,9 @@ export function BundlesSection({
   query,
   importSkillRef,
   onSearchSkills,
+  onShowCategory,
+  overviewSkills,
+  discoveryEnabled = true,
   section = "plugins",
   client,
   workspaceId,
@@ -86,7 +89,17 @@ export function BundlesSection({
   onChanged,
 }: {
   query: string;
+  discoveryEnabled?: boolean;
   importSkillRef?: RefObject<(() => void) | null>;
+  overviewSkills?: readonly {
+    id: string;
+    name: string;
+    description?: string;
+    status?: "added" | "attention" | "unavailable";
+    statusLabel?: string;
+    onOpen: () => void;
+  }[];
+  onShowCategory?: (category: "skills" | "plugins") => void;
   onSearchSkills?: (() => void) | undefined;
   section?: "skills" | "plugins" | "all";
   client: OpenGeniBrowserClient;
@@ -257,13 +270,72 @@ export function BundlesSection({
     onOpenCatalogItem(row.detail.item);
   }
 
+  const workflowTemplates = (
+    <details className="my-5">
+      <summary className="cursor-pointer text-sm font-medium text-fg-muted">
+        Workflow templates
+      </summary>
+      <p className="mt-2 text-xs leading-5 text-fg-muted">
+        Ready-made setups that combine skills, connections, and automations for a specific job.
+      </p>
+
+      <div className="mt-4 grid gap-x-6 sm:grid-cols-2">
+        {visible
+          .filter((row) => row.kind === "pack")
+          .map((row) => (
+            <button
+              type="button"
+              key={row.id}
+              data-workflow-template={row.id}
+              className="min-w-0 rounded-lg px-2 py-3 text-left hover:bg-surface-2"
+              onClick={(event) => open(row, event.currentTarget)}
+            >
+              <span className="flex items-center justify-between gap-2 text-sm font-medium">
+                {row.name}
+                <span className="text-xs font-normal text-fg-muted">{row.chip.label}</span>
+              </span>
+              <span className="mt-1 block line-clamp-2 text-xs leading-5 text-fg-muted">
+                {row.description}
+              </span>
+            </button>
+          ))}
+      </div>
+      <Button
+        className="mt-3"
+        variant="ghost"
+        size="sm"
+        disabled={!canManage}
+        onClick={() => setManifestOpen(true)}
+      >
+        <PlusIcon />
+        Add workflow template
+      </Button>
+    </details>
+  );
+
   return (
     <section
-      className="mt-6 space-y-3"
+      className="space-y-3"
       aria-label={section === "plugins" ? "Plugins" : "Skills and plugins"}
     >
-      {section !== "plugins" ? (
+      {discoveryEnabled && section !== "plugins" ? (
         <SkillDiscovery
+          {...(onShowCategory
+            ? {
+                resultLimit: 6,
+                onShowMore: () => onShowCategory("skills"),
+                localSkills:
+                  overviewSkills ??
+                  visible
+                    .filter((row) => row.kind === "skill")
+                    .map((row) => ({
+                      id: row.id,
+                      name: row.name,
+                      ...(row.description ? { description: row.description } : {}),
+                      onOpen: () => open(row, document.activeElement),
+                    })),
+              }
+            : {})}
           client={client}
           workspaceId={workspaceId}
           query={query}
@@ -273,10 +345,17 @@ export function BundlesSection({
           onImport={(url) => source.importSkill(url)}
         />
       ) : null}
-      <div
-        hidden={section === "plugins" || (!visible.length && !loading && !failed)}
+      <details
+        hidden={
+          Boolean(onShowCategory) ||
+          section === "plugins" ||
+          (!visible.length && !loading && !failed)
+        }
         className="space-y-3"
       >
+        <summary className="cursor-pointer py-2 text-sm text-fg-muted">
+          Manage installed packages
+        </summary>
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div className="min-w-0">
             <h2 id="bundles-heading" className="mt-1 text-base font-semibold text-fg">
@@ -325,22 +404,6 @@ export function BundlesSection({
           </div>
         </div>
 
-        <InstalledStrip
-          items={visible
-            .filter(
-              (row) =>
-                (section === "all" ||
-                  (section === "skills" ? row.kind === "skill" : row.kind !== "skill")) &&
-                ["Installed", "Update available"].includes(row.chip.label),
-            )
-            .map((row) => ({
-              id: row.id,
-              name: row.name,
-              status: row.chip.label,
-              logoSrc: "logoSrc" in row.mark ? row.mark.logoSrc : null,
-              onOpen: () => open(row, document.activeElement),
-            }))}
-        />
         <div className="flex flex-wrap items-center gap-3">
           {/*
           A live region tied to the search box: narrowing the list is otherwise
@@ -373,7 +436,7 @@ export function BundlesSection({
         ) : null}
 
         {visible.length > 0 ? (
-          <div className="grid gap-2" data-bundle-list>
+          <div className="og-capability-catalog-grid" data-bundle-list>
             {visible.map((row) => (
               <IntegrationRow
                 key={row.id}
@@ -390,6 +453,7 @@ export function BundlesSection({
                     : row
                 }
                 busy={row.busy}
+                icon={row.kind === "skill" ? <BookOpenIcon aria-hidden="true" /> : undefined}
                 onOpen={() => open(row, document.activeElement)}
               />
             ))}
@@ -416,24 +480,18 @@ export function BundlesSection({
             }
           />
         )}
-      </div>
+      </details>
       {section === "plugins" ? (
-        <div className="space-y-8">
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <h2 className="text-lg font-semibold text-fg">Plugins</h2>
-              <p className="mt-1 text-sm text-fg-muted">Tools and skills, together.</p>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!canManage}
-              onClick={source.installPlugin}
-            >
-              <PlusIcon />
-              Import plugin
-            </Button>
-          </div>
+        <div>
+          <CatalogHeader
+            title="Plugins"
+            action={
+              <Button disabled={!canManage} onClick={source.installPlugin}>
+                <PlusIcon />
+                Import plugin
+              </Button>
+            }
+          />
           {source.loadError ? (
             <LoadErrorState
               title="Couldn’t load installed plugins"
@@ -441,62 +499,31 @@ export function BundlesSection({
               onRetry={source.reload}
             />
           ) : null}
-          <PluginDiscovery
-            installedPlugins={source.plugins}
-            onManageInstalled={(plugin, element) => {
-              const row = rows.find((candidate) => candidate.id === `plugin:${plugin.pluginKey}`);
-              if (row) open(row, element);
-            }}
-            onOpenConnection={onOpenCatalogItem}
-            client={client}
-            workspaceId={workspaceId}
-            query={query}
-            canManage={canManage}
-            onChanged={() => {
-              source.reload();
-              onChanged();
-            }}
-          />
-          <details className="border-t border-border pt-5">
-            <summary className="cursor-pointer text-sm font-medium text-fg-muted">
-              Workflow templates
-            </summary>
-
-            <div className="mt-4 grid gap-x-6 sm:grid-cols-2">
-              {visible
-                .filter((row) => row.kind === "pack")
-                .map((row) => (
-                  <button
-                    type="button"
-                    key={row.id}
-                    data-workflow-template={row.id}
-                    className="min-w-0 rounded-lg px-2 py-3 text-left hover:bg-surface-2"
-                    onClick={(event) => open(row, event.currentTarget)}
-                  >
-                    <span className="flex items-center justify-between gap-2 text-sm font-medium">
-                      {row.name}
-                      <span className="text-xs font-normal text-fg-muted">{row.chip.label}</span>
-                    </span>
-                    <span className="mt-1 block line-clamp-2 text-xs leading-5 text-fg-muted">
-                      {row.description}
-                    </span>
-                  </button>
-                ))}
-            </div>
-            <Button
-              className="mt-3"
-              variant="ghost"
-              size="sm"
-              disabled={!canManage}
-              onClick={() => setManifestOpen(true)}
-            >
-              <PlusIcon />
-              Add workflow template
-            </Button>
-          </details>
+          {discoveryEnabled ? (
+            <PluginDiscovery
+              beforeCatalog={workflowTemplates}
+              installedPlugins={source.plugins}
+              onManageInstalled={(plugin, element) => {
+                const row = rows.find((candidate) => candidate.id === `plugin:${plugin.pluginKey}`);
+                if (row) open(row, element);
+              }}
+              onOpenConnection={onOpenCatalogItem}
+              client={client}
+              workspaceId={workspaceId}
+              query={query}
+              canManage={canManage}
+              onChanged={() => {
+                source.reload();
+                onChanged();
+              }}
+            />
+          ) : null}
         </div>
-      ) : section === "all" ? (
+      ) : discoveryEnabled && section === "all" ? (
         <PluginDiscovery
+          {...(onShowCategory
+            ? { resultLimit: 6, onShowMore: () => onShowCategory("plugins") }
+            : {})}
           installedPlugins={source.plugins}
           onOpenConnection={onOpenCatalogItem}
           client={client}

@@ -22,7 +22,7 @@ export const OPENGENI_PRODUCT_INTEGRATION_PACK = {
     "Help an implementation agent add OpenGeni to an external product with adaptive discovery, tenant-safe boundaries, framework-native UI, authorized data tools, and the customer's chosen delivery autonomy. Installation stays inactive until one implementation session selects the Skill.",
   role: "software-engineering",
   category: "product-integration",
-  version: "0.2.0",
+  version: "0.2.1",
   skills: [OPENGENI_PRODUCT_INTEGRATION_SKILL],
   components: [],
   tools: [],

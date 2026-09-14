@@ -1,5 +1,36 @@
 # @opengeni/api-router
 
+## 3.0.1
+
+### Patch Changes
+
+- 084e56b: Apply the curated source size limit consistently when parsing Microsoft's Graph definition while preserving the smaller limit for custom sources. Keep OneDrive file and sharing operations within the tool limit by excluding the nested Excel workbook API.
+- de5569f: Allow native full organization API keys to administer host MCP resolver registrations. Align request authorization, live-key revalidation, and the database write trigger with the public key contract without granting human organization-admin permissions. Read-only, workspace-scoped, delegated, external-user, expired, and revoked credentials remain denied.
+- 7746251: Prevent agent-authored workspace instruction changes from replacing the complete active policy, fence unsafe older pending revisions at approval, and show reviewers the current and proposed instruction text before approval.
+- 37f16c2: Keep curated Microsoft Graph integrations within storage and MCP schema limits by explicitly exposing provider-validated JSON bodies instead of expanding the recursive entity graph. Preserve request parameters, body requirements, media types, authorization and write approvals. Reject oversized compiled revisions during preview before installation begins.
+
+  Request People.Read for the signed-in user's people suggestions. Keep OneDrive to file scopes and omit the organization-only followed-sites surface, allowing personal Microsoft accounts to complete consent.
+
+- Updated dependencies [084e56b]
+- Updated dependencies [de5569f]
+- Updated dependencies [7746251]
+- Updated dependencies [37f16c2]
+- Updated dependencies [85cafd0]
+  - @opengeni/capabilities@0.3.4
+  - @opengeni/core@3.0.1
+  - @opengeni/db@5.0.1
+  - @opengeni/contracts@4.1.0
+  - @opengeni/runtime@3.0.1
+  - @opengeni/documents@0.8.30
+  - @opengeni/events@0.4.28
+  - @opengeni/artifact-tool@0.3.29
+  - @opengeni/codemode@0.5.9
+  - @opengeni/config@1.2.2
+  - @opengeni/github@0.7.13
+  - @opengeni/observability@0.8.29
+  - @opengeni/storage@0.2.130
+  - @opengeni/tool-gateway@0.1.10
+
 ## 3.0.0
 
 ### Major Changes
