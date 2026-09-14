@@ -269,6 +269,17 @@ test("remote revocation cannot redisplay previously loaded rows on immediate reo
     expect(list).toHaveBeenCalledTimes(2);
     expect(tree.container.textContent).not.toContain("Revoked member");
     expect(tree.container.textContent).toContain("403 Forbidden after remote revocation");
+    const retry = [...tree.container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "Retry",
+    )!;
+    expect(retry.disabled).toBe(false);
+    expect(retry.closest('[aria-disabled="true"]') !== null).toBe(false);
+    list.mockResolvedValue({ entries: [entry("restored", "Restored member")], nextCursor: null });
+    await act(async () => retry.click());
+    expect(list).toHaveBeenCalledTimes(3);
+    expect(tree.container.textContent).toContain("Restored member");
+    expect(tree.container.textContent).not.toContain("Revoked member");
+    expect(tree.container.querySelector('[role="alert"]')).toBeNull();
   } finally {
     await tree.close();
   }
@@ -317,12 +328,14 @@ test("a failed request can be retried and reopened pagination starts from a fres
   list.mockReset();
   list.mockRejectedValueOnce(new Error("Try again"));
   const tree = await mountedTree();
-  const clickText = async (text: string) =>
-    act(async () =>
-      [...tree.container.querySelectorAll("button")]
-        .find((button) => button.textContent === text)!
-        .click(),
-    );
+  const clickText = async (text: string) => {
+    const button = [...tree.container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (candidate) => candidate.textContent === text,
+    )!;
+    expect(button.disabled).toBe(false);
+    expect(button.closest('[aria-disabled="true"]') !== null).toBe(false);
+    await act(async () => button.click());
+  };
   try {
     await tree.click("Acme");
     expect(tree.container.textContent).toContain("Try again");
@@ -341,6 +354,42 @@ test("a failed request can be retried and reopened pagination starts from a fres
     expect(list).toHaveBeenCalledTimes(5);
     expect(tree.container.querySelectorAll('button[aria-label="First member"]')).toHaveLength(1);
     expect(tree.container.querySelectorAll('button[aria-label="Later member"]')).toHaveLength(1);
+  } finally {
+    await tree.close();
+  }
+});
+
+test("Load more disables only its button while pending and is actionable after settlement", async () => {
+  list.mockReset();
+  list.mockResolvedValue({ entries: [entry("first", "First member")], nextCursor: "next" });
+  const tree = await mountedTree();
+  try {
+    await tree.click("Acme");
+    const more = () =>
+      [...tree.container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Load more in Acme",
+      )!;
+    expect(more().disabled).toBe(false);
+    expect(more().closest('[aria-disabled="true"]') !== null).toBe(false);
+    const held = deferred();
+    list.mockReturnValue(held.promise);
+    await act(async () => more().click());
+    expect(more().disabled).toBe(true);
+    expect(more().closest('[aria-disabled="true"]') !== null).toBe(false);
+    expect(tree.container.querySelector('[role="status"]')?.textContent).toContain(
+      "Loading collection",
+    );
+    await act(async () => more().click());
+    expect(list).toHaveBeenCalledTimes(2);
+    await act(async () =>
+      held.resolve({ entries: [entry("second", "Second member")], nextCursor: "last" }),
+    );
+    expect(more().disabled).toBe(false);
+    expect(more().closest('[aria-disabled="true"]') !== null).toBe(false);
+    list.mockResolvedValue({ entries: [entry("last", "Last member")], nextCursor: null });
+    await act(async () => more().click());
+    expect(list).toHaveBeenCalledTimes(3);
+    expect(tree.container.textContent).toContain("Last member");
   } finally {
     await tree.close();
   }

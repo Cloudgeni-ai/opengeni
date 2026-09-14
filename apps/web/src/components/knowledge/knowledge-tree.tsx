@@ -390,10 +390,11 @@ function CollectionChildren({
     }
   }
   const visible = treeOrder(entries.filter((child) => !ancestors.includes(child.id)));
+  // Actions own their disabled state: disabling this row also disables its
+  // Retry and Load more descendants for assistive technology and automation.
   const status = (content: ReactNode) => (
     <div
       role="treeitem"
-      aria-disabled="true"
       className="flex flex-wrap items-center gap-2 px-9 py-2 text-xs text-fg-muted"
     >
       {content}
