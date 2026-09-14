@@ -36,6 +36,22 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+After execution ends, every physical finalization stage has a five-minute
+containment deadline, including normally completed turns. This is not a
+run-length limit. Heartbeats report `finalizing` and the current bounded
+`finalizationStage`; Grafana exposes stage occupancy and thirty-second slow-stage observations;
+the bounded containment log and worker restarts identify actual exits.
+A stuck writer drain is never detached to release a successor: the worker exits,
+and normal heartbeat recovery and durable retained-process proofs govern
+admission. The deadline resets only when cleanup advances to another stage and
+is disarmed when the finalizer exits, including exceptional exits. Publishing a
+quiescence receipt does not disable containment for later housekeeping.
+Closed attempts with unsettled workspace mutations or active, unadopted retained
+processes also block admission, even when their logical outcome is `completed`.
+The work peeker exposes the existing previous-attempt wait, and the final writer's
+settlement re-arms the workflow wake. Independently adopted background commands
+retain their own lifetime and do not hold this turn-cleanup gate.
+
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its
 own batch's durable history-item receipt; a turn-wide update query can therefore

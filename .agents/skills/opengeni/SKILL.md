@@ -75,7 +75,7 @@ Then open the smallest source files that answer the question:
 - Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
-- Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`.
+- Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
 - Runtime/sandbox/tools: `packages/runtime/src/index.ts` is the public agent-loop facade;
   `skill-catalog.ts` renders Skill descriptors into the turn-attempt instruction
   layer; the worker's `skill-read.ts` exposes eager text reads and `skill-checkout.ts`
