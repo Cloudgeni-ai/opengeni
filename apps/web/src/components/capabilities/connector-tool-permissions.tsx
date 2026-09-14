@@ -5,7 +5,7 @@ import type {
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
 } from "@opengeni/contracts";
-import { request } from "@/api";
+import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
 
@@ -61,6 +61,7 @@ export function ConnectorToolPermissions({
   workspaceId: string;
   capabilityId: string;
 }) {
+  const { client } = useAppContext();
   const [data, setData] = useState<ConnectorToolPermissionsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -80,12 +81,13 @@ export function ConnectorToolPermissions({
       mutationController.current?.abort();
       mutationController.current = null;
     };
-  }, [path]);
+  }, [path, client]);
   useEffect(() => {
     const controller = new AbortController();
     setData(null);
     setError(null);
-    void request<ConnectorToolPermissionsResponse>(path, { signal: controller.signal })
+    void client
+      .getConnectorToolPermissions(workspaceId, capabilityId, { signal: controller.signal })
       .then((result) => {
         if (!controller.signal.aborted) setData(result);
       })
@@ -94,7 +96,7 @@ export function ConnectorToolPermissions({
           setError(failure instanceof Error ? failure.message : "Could not load tool permissions.");
       });
     return () => controller.abort();
-  }, [path, generation]);
+  }, [path, generation, client, workspaceId, capabilityId]);
   async function update(
     selection: { target: "default" } | { target: "tools"; toolNames: string[] },
     permission: ConnectorToolPermission,
@@ -110,16 +112,16 @@ export function ConnectorToolPermissions({
     setError(null);
     setSaved(false);
     try {
-      await request(path, {
-        method: "PATCH",
-        signal: controller.signal,
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
+      await client.updateConnectorToolPermissions(
+        workspaceId,
+        capabilityId,
+        {
           connectionId: data.connectionId,
           ...selection,
           permission,
-        } satisfies UpdateConnectorToolPermissionsRequest),
-      });
+        } satisfies UpdateConnectorToolPermissionsRequest,
+        { signal: controller.signal },
+      );
       if (!isCurrent()) return;
       setData((current) =>
         current

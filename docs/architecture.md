@@ -1128,14 +1128,7 @@ Capabilities define integration/tool shapes. Connections bind credentials and
 ownership. Session policy selects authorized tools.
 MCP/Codemode execute tools; neither grants authority.
 
-The composer exposes connected apps and session exclusions. Built-in runtime tools
-follow deployment defaults without a granular workspace settings UI. Workspace-default sessions track new MCP connections
-when inheritance is enabled; explicit selections stay exact.
-`packages/core/src/domain/session-tool-policy.ts` resolves that selection.
-`packages/core/src/domain/connector-tool-permissions.ts` discovers MCP tool catalogs
-and manages the existing durable approval ledger. Per-tool Allow/Ask/Block policies
-are frozen for accepted attempts and enforced by the canonical tool gateway for
-direct MCP and Codemode calls. Annotations group tools without granting authority.
+Connector permission management: `packages/core/src/domain/connector-tool-permissions.ts`.
 See [`session-mcp-servers.md`](session-mcp-servers.md).
 
 [MCP recovery](mcp-operation-recovery.md) observes outcomes without mutation replay.

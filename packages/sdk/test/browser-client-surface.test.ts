@@ -40,6 +40,8 @@ const legacyBrowserUnusedMethods = [
   "gitShow",
   "githubConnectUrl",
   "importLegacyWorkspaceInstructionPolicyDraft",
+  // Existing public API retained after duplicate learning settings were removed.
+  "listAgentLearningOverrides",
   "listDocuments",
   "listGoalRevisionPage",
   "listGoalRevisions",

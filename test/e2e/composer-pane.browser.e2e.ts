@@ -88,10 +88,10 @@ describe("console composer in a split desktop pane", () => {
     await page.screenshot({ path: `${root}/composer-pane-fixed.png` });
   });
 
-  test("shared actions keep repositories, tools, and variable sets reachable", async () => {
+  test("shared actions keep repositories, connectors, and variable sets reachable", async () => {
     await page.getByRole("button", { name: "More composer actions" }).click();
     expect(await page.getByRole("menuitem", { name: /Repositories/ }).isVisible()).toBe(true);
-    expect(await page.getByRole("menuitem", { name: /Tools/ }).isVisible()).toBe(true);
+    expect(await page.getByRole("menuitem", { name: /Connectors/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: /Variable sets/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: "Chat settings", exact: true }).count()).toBe(
       1,
@@ -109,7 +109,7 @@ describe("console composer in a split desktop pane", () => {
       await page.locator("main").evaluate((node) => {
         node.style.width = "min(448px, calc(100vw - 32px))";
       });
-      for (const name of ["Repositories", "Tools", "Variable sets"]) {
+      for (const name of ["Repositories", "Connectors", "Variable sets"]) {
         const plus = page.getByRole("button", { name: "More composer actions" });
         expect(await page.getByRole("button", { name: "More composer actions" }).count()).toBe(1);
         await plus.click();
@@ -117,15 +117,18 @@ describe("console composer in a split desktop pane", () => {
           await page.getByRole("menuitem", { name: "Chat settings", exact: true }).count(),
         ).toBe(1);
         await page.getByRole("menuitem", { name: new RegExp(name) }).click();
-        const dialog = page.getByRole("dialog", { name, exact: true });
+        const dialog =
+          name === "Connectors"
+            ? page.getByRole("menu")
+            : page.getByRole("dialog", { name, exact: true });
         await dialog.waitFor({ state: "visible" });
         const box = (await dialog.boundingBox())!;
-        expect(box.height).toBeGreaterThan(300);
+        expect(box.height).toBeGreaterThan(name === "Connectors" ? 60 : 300);
         expect(box.x).toBeGreaterThanOrEqual(0);
         expect(box.y).toBeGreaterThanOrEqual(0);
         expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
         expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
-        if (name !== "Tools") {
+        if (name !== "Connectors") {
           const scroll = dialog.getByTestId("picker-scroll");
           expect(await scroll.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
           await dialog.getByRole("button", { name: /option 30/ }).scrollIntoViewIfNeeded();
