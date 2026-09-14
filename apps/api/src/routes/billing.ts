@@ -3,6 +3,7 @@ import {
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
+  OrganizationUsageQuery,
   type AccessContext,
   type Permission,
 } from "@opengeni/contracts";
@@ -14,6 +15,7 @@ import {
   hasCreditLedgerEntry,
   isStripeWebhookProcessed,
   listUsageEvents,
+  getOrganizationUsageSummary,
   getManagedAccount,
   markStripeWebhookProcessed,
   recordStripeWebhookEvent,
@@ -55,6 +57,18 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
         limit: 100,
       }),
     });
+  });
+
+  app.get("/v1/billing/usage-summary", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    const parsed = OrganizationUsageQuery.safeParse(c.req.query());
+    if (!parsed.success) {
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid usage query",
+      });
+    }
+    return c.json(await getOrganizationUsageSummary(deps.db, { accountId, ...parsed.data }));
   });
 
   app.get("/v1/billing/entitlements", async (c) => {

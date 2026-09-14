@@ -32,6 +32,17 @@ const getBillingEntitlements = mock(async () => ({
   mode: "managed" as const,
   entitlements: { seats: 10 },
 }));
+const getOrganizationUsageSummary = mock(async (_options: unknown, _requestOptions?: unknown) => ({
+  accountId,
+  period: "month",
+  since: "2026-08-01T00:00:00.000Z",
+  until: timestamp,
+  granularity: "day",
+  totals: [],
+  buckets: [],
+  workspaces: [],
+  nextWorkspaceCursor: null,
+}));
 const createBillingCheckout = mock(async () => {
   throw new Error("bounded checkout failure");
 });
@@ -89,6 +100,7 @@ const context = {
   client: {
     getBilling,
     getBillingEntitlements,
+    getOrganizationUsageSummary,
     createBillingCheckout,
     createBillingPortalSession,
     listOrganizationApiKeys,
@@ -230,14 +242,40 @@ describe("organization billing StrictMode ownership", () => {
     expect(getBillingEntitlements.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(container.textContent).toContain("$25.00 available");
     expect(container.textContent).toContain("seats");
-    expect(useBillingUsage.mock.calls.at(-1)?.[0]).toEqual({
+    expect(getOrganizationUsageSummary.mock.calls.at(-1)?.[0]).toEqual({
       accountId,
-      enabled: true,
+      period: "month",
+      afterWorkspaceId: undefined,
     });
+    expect(container.textContent).toContain("No visible usage recorded in this period.");
+    expect(useBillingUsage).not.toHaveBeenCalled();
     expect(container.textContent).toContain(
       "View invoices and manage payment information in Stripe.",
     );
     expect(container.textContent).not.toContain("OG-0042");
+
+    const usageSection = container.querySelector('[aria-label="Organization usage dashboard"]')!;
+    const periodSelect = usageSection.querySelector<HTMLSelectElement>(
+      '[aria-label="Usage period"]',
+    )!;
+    const readsBeforeChange = getOrganizationUsageSummary.mock.calls.length;
+    await act(async () => {
+      periodSelect.value = "today";
+      periodSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    await flush();
+    expect(getOrganizationUsageSummary.mock.calls.length).toBe(readsBeforeChange + 1);
+    expect(getOrganizationUsageSummary.mock.calls.at(-1)?.[0]).toEqual({
+      accountId,
+      period: "today",
+    });
+    getOrganizationUsageSummary.mockImplementationOnce(async () => {
+      throw new Error("usage unavailable");
+    });
+    await act(async () => (usageSection.querySelector("button") as HTMLButtonElement).click());
+    await flush();
+    expect(usageSection.textContent).toContain("Couldn't load period usage");
+    expect(usageSection.textContent).not.toContain("No visible usage recorded");
 
     await act(async () => button(container, "Add credits").click());
     await flush();
