@@ -21,6 +21,7 @@ import {
   readSkillPublications,
 } from "./skill-publication";
 import type { SkillPublicationReceipt } from "@opengeni/contracts";
+import { withOrganizationIntegrationAcquisition } from "./organization-integration-policy";
 
 export type PluginBomComponent = {
   key: string;
@@ -626,6 +627,16 @@ export async function installPluginMcpReference(
     authKind: CapabilityCatalogAuthKind;
     digest: string;
   },
+): Promise<{ capabilityId: string; facetInstallationId: string }> {
+  const snapshot = structuredClone(input);
+  return withOrganizationIntegrationAcquisition(db, snapshot, ["custom:mcp"], (tx) =>
+    installPluginMcpReferenceInScope(tx, snapshot),
+  );
+}
+
+async function installPluginMcpReferenceInScope(
+  db: Database,
+  input: Parameters<typeof installPluginMcpReference>[1],
 ): Promise<{ capabilityId: string; facetInstallationId: string }> {
   const capabilityId = `mcp:configured:${input.serverId}`;
   const pluginKey = `plugin-mcp/${input.serverId}`;

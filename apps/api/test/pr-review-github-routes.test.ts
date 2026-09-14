@@ -1,5 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import postgres from "postgres";
 import { stableJson, type PrReviewManagedGitHubSetup } from "@opengeni/contracts";
 import { getCapabilityPack, type ApiRouteDeps } from "@opengeni/core";
 import {
@@ -31,8 +32,27 @@ let accountId: string | null = null;
 let subjectId: string | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("pr-review-github-routes");
-  if (!shared) return;
+  const adminUrl = process.env.OPENGENI_INTEGRATION_POLICY_TEST_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_INTEGRATION_POLICY_TEST_APP_URL;
+  if (Boolean(adminUrl) !== Boolean(appUrl)) throw new Error("Set both policy fixture URLs");
+  if (adminUrl && appUrl) {
+    const admin = postgres(adminUrl);
+    shared = {
+      admin,
+      adminUrl,
+      appUrl,
+      release: async () => {
+        await admin.end();
+      },
+    };
+  } else {
+    shared = await acquireSharedTestDatabase("pr-review-github-routes");
+  }
+  if (!shared) {
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1")
+      throw new Error("PR Review GitHub routes require real PostgreSQL");
+    return;
+  }
   client = createDb(shared.appUrl);
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "opengeni:configured",

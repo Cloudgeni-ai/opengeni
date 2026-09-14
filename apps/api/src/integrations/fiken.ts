@@ -1,3 +1,5 @@
+import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
+import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
 import { safeReturnPath } from "./oauth-return-path";
 import type { ApiRouteDeps } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
@@ -30,7 +32,6 @@ import {
   encryptEnvironmentValue,
   decryptEnvironmentValue,
   getConnectAttempt,
-  claimConnectOperation,
   finishConnectOperation,
   getConnectionMetadata,
   listConnectionsMetadata,
@@ -63,7 +64,9 @@ const MAX_DRAFT_LINES = 100;
 const COMPANY_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,127}$/;
 
 /** Shared native/embedded token adapter. Provider verification happens before
- * persistence; the caller reauthorizes inside its durable commit transaction. */
+ * persistence; the caller reauthorizes inside its durable commit transaction.
+ * That caller must acquire the organization policy fence for `fiken` BEFORE
+ * owner/tenancy locks and invoke the returned writer with that exact tx. */
 export async function prepareFikenTokenInstall(
   deps: ApiRouteDeps,
   grant: Pick<AccessGrant, "accountId" | "workspaceId" | "subjectId">,
@@ -71,6 +74,7 @@ export async function prepareFikenTokenInstall(
   expectedVersion?: number,
 ): Promise<(tx: Database) => Promise<ConnectionMetadata>> {
   const payload = FikenInstallRequest.parse(raw);
+  await withOrganizationIntegrationAcquisition(deps.db, grant, ["fiken"], async () => {});
   const key = requireEnvironmentEncryption(deps.settings);
   const existing = payload.connectionId
     ? await getConnectionMetadata(deps.db, grant.workspaceId, payload.connectionId, null)
@@ -1102,6 +1106,7 @@ export async function startFikenOAuth(
     connectAttemptId?: string;
   },
 ): Promise<FikenOAuthStartResponse> {
+  await withOrganizationIntegrationAcquisition(deps.db, input, ["fiken"], async () => {});
   const fiken = requireFikenOAuthSettings(deps.settings);
   const existing = input.payload.connectionId
     ? await getConnectionMetadata(deps.db, input.workspaceId, input.payload.connectionId, null)
@@ -1168,12 +1173,18 @@ export async function completeFikenOAuthCallback(
         operationId: `oauth:${state.nonce}`,
         inputDigest: createHash("sha256").update(input.state!).digest("hex"),
       };
-      const claim = await claimConnectOperation(deps.db, state, {
-        ...operation,
-        expectedRevision: stored.attempt.revision,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
-      });
+      const claim = await claimOAuthAcquisition(
+        deps.db,
+        state,
+        {
+          ...operation,
+          expectedRevision: stored.attempt.revision,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        },
+        "fiken",
+        Boolean(input.code && !input.error),
+      );
       if (claim.status === "replayed") return { redirectTo: exactReturnUrl, exactReturn: true };
     }
     await requireFikenCallbackGrant(deps.db, state);
@@ -1217,6 +1228,7 @@ export async function completeFikenOAuthCallback(
     if (!input.code) {
       throw new FikenOAuthCallbackError("missing_code");
     }
+    await withOrganizationIntegrationAcquisition(deps.db, state, ["fiken"], async () => {});
     const fiken = requireFikenOAuthSettings(deps.settings);
     const key = requireEnvironmentEncryption(deps.settings);
     const fetchImpl = deps.fikenFetch ?? fetch;
@@ -1303,36 +1315,46 @@ export async function completeFikenOAuthCallback(
             createdBySubjectId: state!.subjectId,
           });
     if (operation) {
-      await finishConnectOperation(deps.db, state, {
-        ...operation,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
-        commit: async (tx, current) => {
-          const connection = await persist(tx);
-          if (!connection) throw new FikenOAuthCallbackError("connection_conflict");
-          return {
-            ...current,
-            revision: current.revision + 1,
-            state: "complete",
-            credentialsCommitted: true,
-            nextAction: { type: "none" },
-            account: {
-              id: connection.id,
-              version: connection.version,
-              providerId: "fiken-oauth",
-              label: "Fiken",
-              ownership: "workspace",
-              status: "connected",
-            },
-          };
+      await finishOAuthAcquisition(
+        deps.db,
+        state,
+        {
+          ...operation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+          commit: async (tx, current) => {
+            const connection = await persist(tx);
+            if (!connection) throw new FikenOAuthCallbackError("connection_conflict");
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete",
+              credentialsCommitted: true,
+              nextAction: { type: "none" },
+              account: {
+                id: connection.id,
+                version: connection.version,
+                providerId: "fiken-oauth",
+                label: "Fiken",
+                ownership: "workspace",
+                status: "connected",
+              },
+            };
+          },
         },
-      });
+        "fiken",
+      );
       return { redirectTo: exactReturnUrl!, exactReturn: true };
     }
-    const connection = await deps.db.transaction(async (tx) => {
-      await requireFikenCallbackGrant(tx, state!);
-      return persist(tx);
-    });
+    const connection = await withOrganizationIntegrationAcquisition(
+      deps.db,
+      state,
+      ["fiken"],
+      async (tx) => {
+        await requireFikenCallbackGrant(tx, state!);
+        return persist(tx);
+      },
+    );
     if (!connection) {
       throw new FikenOAuthCallbackError("connection_conflict");
     }

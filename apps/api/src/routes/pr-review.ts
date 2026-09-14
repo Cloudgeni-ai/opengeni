@@ -1,4 +1,5 @@
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
+import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import {
   CreatePrReviewAppRegistrationRequest,
   CreatePrReviewRepositoryBindingRequest,
@@ -20,6 +21,7 @@ import {
   prReviewPackConnectorId,
   PR_REVIEW_AUTOMATION_TEMPLATE_ID,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requirePermission,
   resolveWorkspaceCatalogSettings,
   type ApiRouteDeps,
@@ -48,6 +50,7 @@ import {
   verifyPrReviewProviderRepository,
 } from "../integrations/pr-review-provider";
 import { registerPrReviewGitHubRoutes } from "./pr-review-github";
+import { integrationCommitGrant } from "../integrations/integration-commit-authority";
 
 export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings } = deps;
@@ -94,28 +97,34 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     const registration = await mapPrReviewUniqueConflict(
-      createPrReviewAppRegistration(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        name: payload.name,
-        provider: payload.provider,
-        providerBaseUrl,
-        appId: payload.appId ?? null,
-        credentialKind: payload.credentialKind,
-        credentialEncrypted: encryptVariableSetValue(
-          encryptionKey,
-          payload.privateKey ?? payload.accessToken!,
-        ),
-        accessTokenExpiresAt: payload.accessTokenExpiresAt
-          ? new Date(payload.accessTokenExpiresAt)
-          : null,
-        webhookAuthKind: prReviewWebhookAuthKind(payload.provider),
-        webhookSecretEncrypted: encryptVariableSetValue(encryptionKey, payload.webhookSecret),
-        webhookUsername: payload.webhookUsername ?? null,
-        createdBySubjectId: grant.subjectId,
-        packInstallationId: packInstallation.id,
-        packConnectorId: prReviewPackConnectorId(payload.provider),
-      }),
+      withOrganizationIntegrationAcquisition(
+        db,
+        grant,
+        [prReviewIntegrationKey(payload.provider)],
+        (tx) =>
+          createPrReviewAppRegistration(tx, {
+            accountId: grant.accountId,
+            workspaceId,
+            name: payload.name,
+            provider: payload.provider,
+            providerBaseUrl,
+            appId: payload.appId ?? null,
+            credentialKind: payload.credentialKind,
+            credentialEncrypted: encryptVariableSetValue(
+              encryptionKey,
+              payload.privateKey ?? payload.accessToken!,
+            ),
+            accessTokenExpiresAt: payload.accessTokenExpiresAt
+              ? new Date(payload.accessTokenExpiresAt)
+              : null,
+            webhookAuthKind: prReviewWebhookAuthKind(payload.provider),
+            webhookSecretEncrypted: encryptVariableSetValue(encryptionKey, payload.webhookSecret),
+            webhookUsername: payload.webhookUsername ?? null,
+            createdBySubjectId: grant.subjectId,
+            packInstallationId: packInstallation.id,
+            packConnectorId: prReviewPackConnectorId(payload.provider),
+          }),
+      ),
       "A PR Review registration with this provider and name already exists",
     );
     await recordAuditEvent(db, {
@@ -272,7 +281,11 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/pr-review/repositories", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await integrationCommitGrant(
+      await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:admin"),
+      ["workspace:admin"],
+      { settings: deps.settings, authorizationHeader: c.req.header("authorization") },
+    );
     const packInstallation = await requirePrReviewPackActive(db, workspaceId);
     const payload = CreatePrReviewRepositoryBindingRequest.parse(await c.req.json());
     const registration = await getPrReviewAppRegistrationSecret(db, {
@@ -284,6 +297,8 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, {
         message: "PR Review app registration not found",
       });
+    const integrationKey = prReviewIntegrationKey(registration.provider);
+    await withOrganizationIntegrationAcquisition(db, grant, [integrationKey], async () => {});
     const repositoryUrl = new URL(payload.repositoryUri);
     let canonicalRepositoryUri = repositoryUrl.href;
     let canonicalRepositoryFullName = payload.repositoryFullName;
@@ -413,28 +428,31 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(503, { message: "PR Review automation template is unavailable" });
     }
     const binding = await mapPrReviewUniqueConflict(
-      createPrReviewRepositoryBinding(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        registrationId: registration.id,
-        provider: registration.provider,
-        repositoryUri: canonicalRepositoryUri,
-        repositoryFullName: canonicalRepositoryFullName,
-        providerRepositoryId: canonicalProviderRepositoryId,
-        installationId:
-          payload.installationId === undefined ? null : String(payload.installationId),
-        projectId: canonicalProjectId,
-        model,
-        additionalInstructions: payload.additionalInstructions ?? null,
-        status: payload.status,
-        createdBySubjectId: grant.subjectId,
-        packInstallationId: packInstallation.id,
-        packTemplateId: template.id,
-        adapterId: template.adapterId,
-        eventTypes: template.eventTypes,
-        configuration: template.configuration,
-        sessionTemplate: template.sessionTemplate,
-        ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
+      withOrganizationIntegrationAcquisition(db, grant, [integrationKey], async (tx) => {
+        await grant.authorizeCommit(tx);
+        return createPrReviewRepositoryBinding(tx, {
+          accountId: grant.accountId,
+          workspaceId,
+          registrationId: registration.id,
+          provider: registration.provider,
+          repositoryUri: canonicalRepositoryUri,
+          repositoryFullName: canonicalRepositoryFullName,
+          providerRepositoryId: canonicalProviderRepositoryId,
+          installationId:
+            payload.installationId === undefined ? null : String(payload.installationId),
+          projectId: canonicalProjectId,
+          model,
+          additionalInstructions: payload.additionalInstructions ?? null,
+          status: payload.status,
+          createdBySubjectId: grant.subjectId,
+          packInstallationId: packInstallation.id,
+          packTemplateId: template.id,
+          adapterId: template.adapterId,
+          eventTypes: template.eventTypes,
+          configuration: template.configuration,
+          sessionTemplate: template.sessionTemplate,
+          ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
+        });
       }),
       "This repository is already bound to the selected PR Review registration",
     );
@@ -545,6 +563,12 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     return c.body(null, 204);
   });
+}
+
+/** PR Review's server-owned provider, not a repository URL or user label,
+ * establishes Lens identity. Other providers have no curated acquisition key. */
+function prReviewIntegrationKey(provider: string): "github-lens" | null {
+  return provider === "github" ? "github-lens" : null;
 }
 
 function prReviewCustomModelCommitGuard(input: {

@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "182363157bd87ca47b0e67ab2365976849f7f88efa62bd82bf2ebd922976834b"
+      "sha256": "58a6d7f959a6ff9317944b3c50be4dbadf67a2bb48c22601319b142629b51ff2"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",

@@ -4304,7 +4304,7 @@ describe("workflow contracts", () => {
 
     const expectedEvidence = {
       "Upload browser account acceptance evidence": {
-        if: "${{ matrix.lane == 'accounts' && steps.browser_accounts.outcome == 'success' }}",
+        if: "${{ always() && matrix.lane == 'accounts' && (steps.browser_accounts.outcome == 'success' || steps.browser_accounts.outcome == 'failure') }}",
         name: "browser-account-acceptance-${{ matrix.engine }}",
         path: ["/tmp/opengeni-account-acceptance"],
       },

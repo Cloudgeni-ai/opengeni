@@ -1,10 +1,13 @@
 import {
+  assertOrganizationIntegrationAllowed,
   IntegrationFacetMutationResult,
   IntegrationFacetRemovalResult,
   IntegrationInstanceFacetsResponse,
   MutateIntegrationFacetRequest,
   UpsertIntegrationFacetRequest,
 } from "@opengeni/contracts";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
+import { CORE_INTEGRATION_DEFINITIONS } from "@opengeni/capabilities";
 import {
   hasPermission,
   requireAccessGrant,
@@ -25,6 +28,7 @@ import {
   removeIntegrationFacet,
   replayCompletedIntegrationFacetOperation,
   setIntegrationFacetLifecycle,
+  type IntegrationFacetAcquisitionAuthorizer,
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -179,20 +183,30 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
         }
         return c.json(
           IntegrationFacetMutationResult.parse(
-            await configureIntegrationFacet(deps.db, {
-              accountId: grant.accountId,
-              workspaceId,
-              subjectId: grant.subjectId,
-              capabilityId,
-              instanceKey,
-              facetKey,
-              displayName: payload.displayName,
-              config: payload.config,
-              ...(payload.expectedVersion !== undefined
-                ? { expectedVersion: payload.expectedVersion }
-                : {}),
-              idempotencyKey: payload.idempotencyKey,
-            }),
+            await withOrganizationIntegrationPolicyFence(
+              deps.db,
+              { accountId: grant.accountId, workspaceId },
+              (tx, policy) =>
+                configureIntegrationFacet(tx, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  subjectId: grant.subjectId,
+                  capabilityId,
+                  instanceKey,
+                  facetKey,
+                  displayName: payload.displayName,
+                  config: payload.config,
+                  ...(payload.expectedVersion !== undefined
+                    ? { expectedVersion: payload.expectedVersion }
+                    : {}),
+                  idempotencyKey: payload.idempotencyKey,
+                  beforeAcquire: async (_db, context) =>
+                    assertOrganizationIntegrationAllowed(
+                      policy,
+                      installedFacetIntegrationKey(context),
+                    ),
+                }),
+            ),
           ),
           payload.expectedVersion === undefined ? 201 : 200,
         );
@@ -212,17 +226,27 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
         try {
           return c.json(
             IntegrationFacetMutationResult.parse(
-              await setIntegrationFacetLifecycle(deps.db, {
-                accountId: grant.accountId,
-                workspaceId,
-                subjectId: grant.subjectId,
-                capabilityId: decoded(c.req.param("capabilityId")),
-                instanceKey: decoded(c.req.param("instanceKey")),
-                facetKey: decoded(c.req.param("facetKey")),
-                action,
-                expectedVersion: payload.expectedVersion,
-                idempotencyKey: payload.idempotencyKey,
-              }),
+              await withOrganizationIntegrationPolicyFence(
+                deps.db,
+                { accountId: grant.accountId, workspaceId },
+                (tx, policy) =>
+                  setIntegrationFacetLifecycle(tx, {
+                    accountId: grant.accountId,
+                    workspaceId,
+                    subjectId: grant.subjectId,
+                    capabilityId: decoded(c.req.param("capabilityId")),
+                    instanceKey: decoded(c.req.param("instanceKey")),
+                    facetKey: decoded(c.req.param("facetKey")),
+                    action,
+                    expectedVersion: payload.expectedVersion,
+                    idempotencyKey: payload.idempotencyKey,
+                    beforeAcquire: async (_db, context) =>
+                      assertOrganizationIntegrationAllowed(
+                        policy,
+                        installedFacetIntegrationKey(context),
+                      ),
+                  }),
+              ),
             ),
           );
         } catch (error) {
@@ -262,6 +286,23 @@ export function registerIntegrationFacetRoutes(app: Hono, deps: ApiRouteDeps): v
 
 function decoded(value: string): string {
   return decodeURIComponent(value);
+}
+
+/** The DB context comes from the matching installed API facet and immutable
+ * server-authored version manifest, never request metadata or a provider domain.
+ */
+function installedFacetIntegrationKey(
+  context: Parameters<IntegrationFacetAcquisitionAuthorizer>[1],
+): string | null {
+  if (context.apiProtocol !== "openapi" && context.apiProtocol !== "graphql") return null;
+  if (context.definitionProvenance === "workspace") return `custom:${context.apiProtocol}`;
+  if (
+    context.definitionProvenance === "curated" &&
+    CORE_INTEGRATION_DEFINITIONS.some((definition) => definition.id === context.definitionId)
+  ) {
+    return context.definitionId;
+  }
+  return null;
 }
 
 function facetHttpError(error: unknown): HTTPException {

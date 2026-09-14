@@ -98,6 +98,45 @@ function validateOperation(id: string, digest: string): void {
 
 /** Caller must establish live workspace/actor authority before this storage
  * seam. RLS scope is a consistency boundary, not proof of authentication. */
+type ConnectBeginIdentity = {
+  idempotencyKey: string;
+  requestDigest: string;
+  returnUrl: string;
+  externalContinuation?: ExternalActorContinuation;
+};
+
+/** Recover only an exact saved begin request, under the caller's live actor
+ * admission. This performs no provider work or acquisition. */
+export async function getConnectBeginReplay(
+  db: Database,
+  scope: ConnectActorScope,
+  input: ConnectBeginIdentity,
+): Promise<Attempt | null> {
+  validateOperation(input.idempotencyKey, input.requestDigest);
+  const origin = input.externalContinuation
+    ? ExternalActorContinuation.parse(input.externalContinuation)
+    : null;
+  const key = createHash("sha256").update(input.idempotencyKey).digest("hex");
+  return scoped(db, scope, async (tx) => {
+    const [existing] = await rawRows<Row>(
+      tx,
+      sql`select * from connect_attempts
+      where workspace_id = ${scope.workspaceId}::uuid and subject_id = ${scope.subjectId}
+        and idempotency_key_hash = ${key} and account_id = ${scope.accountId}::uuid`,
+    );
+    if (!existing) return null;
+    if (
+      existing.request_digest !== input.requestDigest ||
+      existing.return_url !== input.returnUrl ||
+      stableJson(existing.external_continuation ?? null) !== stableJson(origin)
+    )
+      throw new ConnectAttemptConflictError(
+        "Connect idempotency key was reused with different input",
+      );
+    return projection(existing, scope);
+  });
+}
+
 export async function beginConnectAttempt(
   db: Database,
   scope: ConnectActorScope,
@@ -107,6 +146,7 @@ export async function beginConnectAttempt(
     returnUrl: string;
     attempt: Attempt;
     externalContinuation?: ExternalActorContinuation;
+    authorizeAcquisition?: (tx: Database) => Promise<void>;
   },
 ): Promise<Attempt> {
   const value = ConnectAttempt.parse(input.attempt);
@@ -128,24 +168,9 @@ export async function beginConnectAttempt(
         and expires_at < now() - interval '30 days'
       order by expires_at, id limit 100 for update skip locked
     ) delete from connect_attempts where id in (select id from expired)`);
-    const [existing] = await rawRows<Row>(
-      tx,
-      sql`select * from connect_attempts
-      where workspace_id = ${scope.workspaceId}::uuid and subject_id = ${scope.subjectId}
-        and idempotency_key_hash = ${key} and account_id = ${scope.accountId}::uuid`,
-    );
-    if (existing) {
-      if (
-        existing.request_digest !== input.requestDigest ||
-        existing.return_url !== input.returnUrl ||
-        stableJson(existing.external_continuation ?? null) !== stableJson(origin)
-      ) {
-        throw new ConnectAttemptConflictError(
-          "Connect idempotency key was reused with different input",
-        );
-      }
-      return projection(existing, scope);
-    }
+    const existing = await getConnectBeginReplay(tx, scope, input);
+    if (existing) return existing;
+    await input.authorizeAcquisition?.(tx);
     const [count] = await rawRows<{ count: number }>(
       tx,
       sql`select count(*)::int as count from connect_attempts
@@ -227,6 +252,8 @@ export async function claimConnectOperation(
     operationId: string;
     inputDigest: string;
     authorize?: ConnectOperationAuthorization;
+    /** Additional acquisition admission, only after exact no-effect receipt replay. */
+    authorizeAcquisition?: (tx: Database, attempt: Attempt) => Promise<void>;
   },
 ): Promise<{ status: "claimed"; attempt: Attempt } | { status: "replayed"; attempt: Attempt }> {
   validateOperation(input.operationId, input.inputDigest);
@@ -242,6 +269,7 @@ export async function claimConnectOperation(
     if (receipt) {
       return { status: "replayed", attempt: receipt };
     }
+    await input.authorizeAcquisition?.(tx, structuredClone(current));
     if (row.operation_id)
       throw new ConnectAttemptConflictError(
         "Connect operation is in flight or uncertain; reconcile before retrying",
@@ -272,6 +300,8 @@ export async function finishConnectOperation(
     inputDigest: string;
     commit: (tx: Database, current: Attempt) => Promise<Attempt>;
     authorize?: ConnectOperationAuthorization;
+    /** Additional acquisition admission, only after exact no-effect receipt replay. */
+    authorizeAcquisition?: (tx: Database, attempt: Attempt) => Promise<void>;
   },
 ): Promise<Attempt> {
   validateOperation(input.operationId, input.inputDigest);
@@ -287,6 +317,7 @@ export async function finishConnectOperation(
     if (receipt) {
       return receipt;
     }
+    await input.authorizeAcquisition?.(tx, structuredClone(current));
     if (row.operation_id !== input.operationId || row.operation_digest !== input.inputDigest)
       throw new ConnectAttemptConflictError();
     const next = ConnectAttempt.parse(await input.commit(tx, structuredClone(current)));

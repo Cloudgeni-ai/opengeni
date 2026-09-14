@@ -79,6 +79,27 @@ For the full OpenGeni React experience, use `SessionConversation` or compose
 authenticated backend proxy. These components do not consume the simplified
 chat-handler protocol. See the [SDK reference](/reference/sdk).
 
+## Choose allowed integration setup
+
+Organization owners and administrators can select allowed integrations in
+**Organization settings → Integrations**. Your backend can administer the same
+policy with a full-access organization key through
+`@opengeni/sdk/organization-integration-policy`. Use
+`getOrganizationIntegrationCatalog` to discover supported keys, rather than
+guessing provider IDs. The policy is organization-wide, not per customer workspace.
+
+Unrestricted mode permits supported setup flows. Restricted mode permits only
+the selected keys; an empty selection denies new setup. Custom MCP, OpenAPI and
+GraphQL are separate broad permissions. Existing connections remain usable under
+their normal authorization, and cleanup and exact completed-request retries remain
+available. This setting does not grant access or replace tool-execution policy.
+Embedding-host session-local MCP configuration retains its existing admission rules.
+
+Use the matching API/runtime, SDK and database migration before enabling this
+policy. Older runtimes do not enforce it. On an uncertain policy save, retry the
+same operation ID and request; on a revision conflict, read current state before
+making a new change. See the [integration policy contract](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/organization-integration-policy.md).
+
 ## Choose agent access and memory
 
 Use one workspace per customer when their documents, instructions, Connections, and integrations are shared. Choose which other conversations an agent can reach and which memories it can save within that workspace:

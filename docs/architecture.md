@@ -1,24 +1,24 @@
 # OpenGeni architecture reference
 
-> Whole-system orientation; code and focused docs own exact behavior.
+> Orientation; code and focused docs define behavior.
 > Setup: [`../AGENTS.md`](../AGENTS.md). Documentation index: [`README.md`](README.md).
 
 ## Navigation
 
-1. **New here?** Read §2–4; skim §6.
+1. Read §2–4; skim §6.
 2. **Subsystem changes:** §13 links canonical sources.
-3. **Exact behavior:** follow source links.
+3. **Behavior:** follow source links.
 4. **Stale boundaries:** update per §14.
 
 ---
 
 ## 1. Scope
 
-Product shape, invariants, execution, and ownership.
+Product, invariants, execution, ownership.
 
 ---
 
-## 2. What OpenGeni is
+## 2. OpenGeni
 
 OpenGeni is a self-hostable, session-based agent runtime. Postgres owns durable
 truth; Temporal coordinates execution; NATS transports reconstructible events.
@@ -44,7 +44,7 @@ See [product integration](product-integration.md),
 
 ## 3. Core invariants
 
-Cross-package invariants.
+Invariants.
 
 ### 3.1 Postgres is durable truth; NATS is transport
 
@@ -1588,6 +1588,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Organization recovery custody or workspace ownership | `packages/contracts/src/organization-recovery.ts`, `packages/db/src/organization-recovery.ts`, `apps/api/src/routes/organization-recovery.ts` | [`organization-recovery.md`](organization-recovery.md), [`organization-tenancy.md`](organization-tenancy.md) |
 | Variable Sets, ordered session attachment, or secret reads | `packages/core/src/`, `packages/db/src/`, `apps/api/src/routes/` | [`variable-sets.md`](variable-sets.md) |
 | Connections and credential ownership | `apps/api/src/routes/connections.ts`, `packages/db/src/connection-token-resolver.ts` | [`credentials.md`](credentials.md) |
+| Integration policy | `packages/db/src/organization-integration-policy.ts`, `apps/api/src/routes/organization-integration-policy.ts` | [`organization-integration-policy.md`](organization-integration-policy.md) |
 
 ### Models, tools, and compute
 

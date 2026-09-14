@@ -1,7 +1,12 @@
 import pluginSnapshot from "../../../../data/catalog/plugins-snapshot.json";
 import { marketplacePlugin } from "../integrations/marketplace-plugin";
 import { mcpEndpointIdentity } from "@opengeni/contracts";
-import { buildCapabilityCatalog, createCatalogItem } from "@opengeni/core";
+import {
+  buildCapabilityCatalog,
+  createCatalogItem,
+  integrationSourceForOrganizationPolicy,
+} from "@opengeni/core";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import { createHash } from "node:crypto";
 
 import {
@@ -499,6 +504,11 @@ async function resolvePluginPackage(input: {
       continue;
     }
     if (component.kind === "integration") {
+      const source = await withOrganizationIntegrationPolicyFence(
+        input.deps.db,
+        input,
+        async (_tx, policy) => integrationSourceForOrganizationPolicy(policy, component.source),
+      );
       const requestedBinding = input.bindings[component.key];
       const connection = await optionalConnection(
         input.deps,
@@ -507,7 +517,7 @@ async function resolvePluginPackage(input: {
         requestedBinding?.connectionId,
       );
       const resolved = await resolveApiIntegrationPreview({
-        source: component.source,
+        source,
         connection: connectionDescriptor(connection),
         transport: input.transport,
         authority: {

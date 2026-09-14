@@ -2658,6 +2658,89 @@ async function delayedWorkspaceResponse(page: Page, oldActorEpoch: string) {
   };
 }
 
+async function captureAccountConvergenceFailure(input: {
+  page: Page;
+  problems: BrowserProblems;
+  engine: EngineName;
+  reloadOutcome: string;
+  failure: unknown;
+}): Promise<void> {
+  const { page, problems, engine } = input;
+  const prefix = `${EVIDENCE_DIR}/${engine}-late-old-epoch-convergence-failure`;
+  // Snapshot the existing ledger before any browser evaluation. Do not reread
+  // session-set authority here: that probe can itself change the observation.
+  const evidence = {
+    runId: RUN_ID,
+    engine,
+    capturedAt: performance.now(),
+    url: page.url(),
+    closed: page.isClosed(),
+    reloadOutcome: input.reloadOutcome,
+    failure: String(input.failure),
+    phase: problems.phase,
+    pendingFiniteReads: [...problems.pendingFiniteReads.values()].map((read) => ({
+      description: read.description,
+      actorEpoch: read.actorEpoch,
+      dispatchPhase: read.dispatchPhase,
+      method: read.method,
+      pathname: read.pathname,
+      responseSeen: read.responseSeen,
+      startedAt: read.startedAt,
+    })),
+    activeStreams: [...problems.activeStreams.values()],
+    actorDispatches: problems.actorDispatches.slice(-20),
+    actorFenceResponses: problems.actorFenceResponses.slice(-20),
+    actorTransitionResponses: problems.actorTransitionResponses
+      .slice(-20)
+      .map(({ request: _request, ...response }) => response),
+    acceptedRequestTerminals: problems.acceptedRequestTerminals.slice(-20),
+    acceptedActorTransitions: actorMutationAcceptances.slice(-20),
+    consoleErrors: problems.consoleErrors.slice(-20),
+    pageErrors: problems.pageErrorEvidence.slice(-20),
+    failedRequests: problems.failedRequests.slice(-20),
+    retirementChecks: problems.retirementChecks.slice(-20),
+    retiredFiniteReads: problems.retiredFiniteReads.slice(-20),
+  };
+  // Persist useful evidence even if the page has closed or evaluation fails.
+  await writeFile(`${prefix}.json`, `${JSON.stringify(evidence, null, 2)}\n`);
+  const surface = await page
+    .evaluate(() => {
+      const visible = (element: Element) => {
+        const bounds = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return (
+          bounds.width > 0 &&
+          bounds.height > 0 &&
+          style.visibility !== "hidden" &&
+          style.display !== "none"
+        );
+      };
+      return {
+        url: location.href,
+        readyState: document.readyState,
+        accountTriggers: [...document.querySelectorAll('button[aria-label*="Account menu"]')].map(
+          (element) => ({
+            label: element.getAttribute("aria-label"),
+            expanded: element.getAttribute("aria-expanded"),
+            visible: visible(element),
+          }),
+        ),
+        visibleStatus: [...document.querySelectorAll('[role="alert"], [role="status"], h1, h2')]
+          .filter(visible)
+          .map((element) => element.textContent?.slice(0, 1_000))
+          .slice(0, 20),
+        visibleText: document.body.innerText.slice(0, 4_000),
+      };
+    })
+    .catch((error: unknown) => ({ captureError: String(error) }));
+  await writeFile(`${prefix}.json`, `${JSON.stringify({ ...evidence, surface }, null, 2)}\n`);
+  await page
+    .screenshot({ path: `${prefix}.png`, fullPage: true, timeout: 5_000 })
+    .catch((error: unknown) =>
+      console.error("Account convergence screenshot unavailable:", String(error)),
+    );
+}
+
 beforeAll(async () => {
   if (!(requestedEngine in ENGINES)) {
     throw new Error(`unsupported OPENGENI_ACCOUNT_BROWSER_ENGINE: ${requestedEngine}`);
@@ -4379,7 +4462,17 @@ describe("provider-neutral browser account acceptance", () => {
       await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems]);
       const oldProjection = await sessionSet(secondTab);
       const delay = await delayedWorkspaceResponse(secondTab, oldProjection.actorEpoch);
-      const reload = secondTab.reload({ waitUntil: "domcontentloaded" }).catch(() => null);
+      let reloadOutcome = "pending";
+      const reload = secondTab.reload({ waitUntil: "domcontentloaded" }).then(
+        (response) => {
+          reloadOutcome = `domcontentloaded (HTTP ${response?.status() ?? "no response"})`;
+          return response;
+        },
+        (error: unknown) => {
+          reloadOutcome = `rejected: ${String(error)}`;
+          return null;
+        },
+      );
       const intentionallyHeldRequest = await delay.intercepted;
       await waitForCompanionFiniteReadQuiescence(secondTabProblems, intentionallyHeldRequest);
       setBrowserPhase(pageProblems, "late-old-epoch-alpha-to-beta");
@@ -4390,9 +4483,22 @@ describe("provider-neutral browser account acceptance", () => {
       delay.release();
       await reload;
       await delay.dispose();
-      await accountMenuTrigger(secondTab, beta.displayName).waitFor({
-        timeout: 30_000,
-      });
+      try {
+        await accountMenuTrigger(secondTab, beta.displayName).waitFor({
+          timeout: 30_000,
+        });
+      } catch (failure) {
+        await captureAccountConvergenceFailure({
+          page: secondTab,
+          problems: secondTabProblems,
+          engine,
+          reloadOutcome,
+          failure,
+        }).catch((error: unknown) =>
+          console.error("Account convergence evidence unavailable:", String(error)),
+        );
+        throw failure;
+      }
       const confirmedTabBetaAfterDelayAt = performance.now();
       const betaSelectionAcceptance = actorMutationAcceptances
         .filter(({ path }) => path === "/v1/auth/session-set/select")

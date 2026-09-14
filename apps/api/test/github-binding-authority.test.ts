@@ -1,13 +1,24 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import postgres from "postgres";
 import type { ApiRouteDeps } from "@opengeni/core";
-import type { GitHubInstallationAccess } from "@opengeni/db";
+import {
+  createDb,
+  createWorkspace,
+  listGitHubInstallationAccessForWorkspace,
+  type DbClient,
+  type GitHubInstallationAccess,
+} from "@opengeni/db";
 import {
   createSignedState,
   GitHubInstallationAuthorityError,
   readSignedState,
   stateMaxAgeSeconds,
 } from "@opengeni/github";
-import { testSettings } from "@opengeni/testing";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { Hono } from "hono";
 import {
   githubBindingStatus,
@@ -22,10 +33,62 @@ import {
 } from "../src/routes/github";
 
 const stateSecret = "github-binding-authority-test-secret";
-const accountId = "00000000-0000-4000-8000-000000000101";
-const workspaceId = "00000000-0000-4000-8000-000000000102";
+const accountId = crypto.randomUUID();
+let workspaceId = "";
 const otherWorkspaceId = "00000000-0000-4000-8000-000000000103";
 const subjectId = "configured-owner";
+let shared: SharedTestDatabase;
+let client: DbClient;
+
+beforeAll(async () => {
+  const adminUrl = process.env.OPENGENI_INTEGRATION_POLICY_TEST_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_INTEGRATION_POLICY_TEST_APP_URL;
+  if (Boolean(adminUrl) !== Boolean(appUrl)) throw new Error("Set both policy fixture URLs");
+  const acquired =
+    adminUrl && appUrl
+      ? (() => {
+          const admin = postgres(adminUrl);
+          return {
+            admin,
+            adminUrl,
+            appUrl,
+            release: async () => {
+              await admin.end();
+            },
+          };
+        })()
+      : await acquireSharedTestDatabase("github-binding-authority");
+  if (!acquired) throw new Error("GitHub binding authority tests require real PostgreSQL");
+  shared = acquired;
+  client = createDb(shared.appUrl);
+  await shared.admin`insert into managed_accounts (id, name) values (${accountId}, 'GitHub authority fixture')`;
+  workspaceId = (await createWorkspace(client.db, { accountId, name: "GitHub authority fixture" }))
+    .id;
+}, 180_000);
+
+afterEach(async () => {
+  // Discovery now reads organization policy. These navigation/denial cases
+  // still must never acquire a GitHub binding, regardless of provider outcome.
+  if (client && workspaceId)
+    expect(await listGitHubInstallationAccessForWorkspace(client.db, workspaceId)).toEqual([]);
+});
+
+afterAll(async () => {
+  if (shared) await shared.admin`delete from managed_accounts where id = ${accountId}`;
+  await client?.close();
+  await shared?.release();
+});
+
+function databaseMustNotBeConsulted(): ApiRouteDeps["db"] {
+  return new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("database must not be consulted");
+      },
+    },
+  ) as ApiRouteDeps["db"];
+}
 
 test("public GitHub verification accepts create or follow-up session authority", () => {
   expect(() =>
@@ -42,6 +105,7 @@ test("public GitHub verification accepts create or follow-up session authority",
 function appWithProvider(
   provider: NonNullable<ApiRouteDeps["githubAppApi"]> = {},
   calls = { provider: 0 },
+  database = client.db,
 ): Hono {
   const app = new Hono();
   registerGitHubRoutes(app, {
@@ -69,14 +133,7 @@ function appWithProvider(
       ],
       ...provider,
     },
-    db: new Proxy(
-      {},
-      {
-        get() {
-          throw new Error("database must not be consulted");
-        },
-      },
-    ),
+    db: database,
   } as unknown as ApiRouteDeps);
   void calls;
   return app;
@@ -485,18 +542,19 @@ describe("GitHub owner-authority binding routes", () => {
 
   test("owner approval requests are truthful and never reach provider or database", async () => {
     const calls = { provider: 0 };
-    const app = appWithProvider(
-      {
-        discoverInstallationBindingCandidates: async () => [],
-        authorizeInstallationBinding: async () => {
-          calls.provider += 1;
-          throw new Error("provider must not be called");
-        },
+    const provider = {
+      discoverInstallationBindingCandidates: async () => [],
+      authorizeInstallationBinding: async () => {
+        calls.provider += 1;
+        throw new Error("provider must not be called");
       },
-      calls,
-    );
+    };
+    const app = appWithProvider(provider, calls);
     const install = await startInstall(app);
-    const response = await app.request(
+    // Only discovery needs the policy DB; a pending owner approval remains a
+    // no-effect response and must not consult it at all.
+    const pendingApp = appWithProvider(provider, calls, databaseMustNotBeConsulted());
+    const response = await pendingApp.request(
       `http://test/v1/github/setup?installation_id=42&setup_action=request&state=${encodeURIComponent(install.state)}`,
       { headers: { cookie: install.browserHeader } },
     );
@@ -526,7 +584,7 @@ describe("GitHub owner-authority binding routes", () => {
   });
 
   test("missing provider authority proof fails closed", async () => {
-    const app = appWithProvider({ authorizeInstallationBinding: undefined });
+    const app = appWithProvider();
     const oauth = await startOAuth(app);
     const response = await app.request(
       `http://test/v1/github/oauth/callback?code=fresh&state=${encodeURIComponent(oauth.state)}`,
@@ -576,7 +634,7 @@ describe("GitHub owner-authority binding routes", () => {
   });
 
   test("missing, tampered, expired, cross-workspace, and stale OAuth state fail before effects", async () => {
-    const app = appWithProvider();
+    const app = appWithProvider({}, undefined, databaseMustNotBeConsulted());
     const valid = managerState();
     const expired = managerState({}, Math.floor(Date.now() / 1_000) - stateMaxAgeSeconds - 1);
     const staleConsent = managerState({}, Math.floor(Date.now() / 1_000) - 10 * 60);
@@ -595,7 +653,7 @@ describe("GitHub owner-authority binding routes", () => {
   });
 
   test("legacy PR #518 chooser remains disabled with authenticated state validation", async () => {
-    const app = appWithProvider();
+    const app = appWithProvider({}, undefined, databaseMustNotBeConsulted());
     const state = managerState();
     const valid = await app.request(
       `http://test/v1/workspaces/${workspaceId}/github/installations`,

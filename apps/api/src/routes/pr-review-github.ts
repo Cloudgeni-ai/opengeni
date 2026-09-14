@@ -1,4 +1,5 @@
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
+import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import {
   AUTOMATION_WEBHOOK_MAX_BYTES,
   OPENGENI_PR_REVIEW_PACK_ID,
@@ -49,6 +50,10 @@ import {
 } from "@opengeni/github";
 import type { Context, Hono } from "hono";
 import { requireLegacyOAuthActor } from "../connection-ownership";
+import {
+  integrationCommitGrant,
+  type IntegrationCommitGrant,
+} from "../integrations/integration-commit-authority";
 import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { githubBrowserBaseUrl } from "../github-browser-flow";
@@ -340,6 +345,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     assertManagedCompute(deps);
     requireConfiguredApp(deps);
 
+    await withOrganizationIntegrationAcquisition(deps.db, grant, ["github-lens"], async () => {});
     if (payload.intent === "pr_review_github_discovery") {
       let candidates: GitHubInstallationBindingCandidate[] | null;
       try {
@@ -424,32 +430,40 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     }
     let synchronized;
     try {
-      synchronized = await syncManagedGitHubPrReviewInstallation(deps.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        installationId,
-        providerAccountLogin: proof.installation.accountLogin,
-        providerAccountType: proof.installation.accountType as "User" | "Organization",
-        githubActorId: proof.actorId,
-        authorityKind: proof.authorityKind,
-        authorityCheckedAt: new Date(),
-        authorityExpiresAt: new Date((payload.iat + bindingStateMaxAgeSeconds) * 1_000),
-        authorityNonce: payload.nonce,
-        appId: deps.settings.prReviewGithubAppId!,
-        webhookSecretEncrypted: encryptVariableSetValue(
-          encryptionKey,
-          deps.settings.prReviewGithubWebhookSecret!,
-        ),
-        repositories: proof.repositories,
-        createdBySubjectId: grant.subjectId,
-        packInstallationId: packInstallation.id,
-        packConnectorId: prReviewPackConnectorId("github"),
-        packTemplateId: template.id,
-        adapterId: template.adapterId,
-        eventTypes: template.eventTypes,
-        configuration: template.configuration,
-        sessionTemplate: template.sessionTemplate,
-      });
+      synchronized = await withOrganizationIntegrationAcquisition(
+        deps.db,
+        grant,
+        ["github-lens"],
+        async (tx) => {
+          await grant.authorizeCommit(tx);
+          return syncManagedGitHubPrReviewInstallation(tx, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            installationId,
+            providerAccountLogin: proof.installation.accountLogin,
+            providerAccountType: proof.installation.accountType as "User" | "Organization",
+            githubActorId: proof.actorId,
+            authorityKind: proof.authorityKind,
+            authorityCheckedAt: new Date(),
+            authorityExpiresAt: new Date((payload.iat + bindingStateMaxAgeSeconds) * 1_000),
+            authorityNonce: payload.nonce,
+            appId: deps.settings.prReviewGithubAppId!,
+            webhookSecretEncrypted: encryptVariableSetValue(
+              encryptionKey,
+              deps.settings.prReviewGithubWebhookSecret!,
+            ),
+            repositories: proof.repositories,
+            createdBySubjectId: grant.subjectId,
+            packInstallationId: packInstallation.id,
+            packConnectorId: prReviewPackConnectorId("github"),
+            packTemplateId: template.id,
+            adapterId: template.adapterId,
+            eventTypes: template.eventTypes,
+            configuration: template.configuration,
+            sessionTemplate: template.sessionTemplate,
+          });
+        },
+      );
     } catch (error) {
       if (error instanceof PrReviewDispatchAuthorityError) {
         throw new HTTPException(409, { message: error.message });
@@ -539,17 +553,33 @@ async function requirePrReviewManageGrant(
   deps: ApiRouteDeps,
   workspaceId: string,
   state: GitHubSignedStatePayload,
-): Promise<AccessGrant> {
-  let grant: AccessGrant;
+): Promise<IntegrationCommitGrant> {
+  let grant: IntegrationCommitGrant;
   try {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:admin");
     requireLegacyOAuthActor(access);
-    grant = access.grant;
+    grant = await integrationCommitGrant(access, ["workspace:admin", "secrets:write"], {
+      settings: deps.settings,
+      authorizationHeader: c.req.header("authorization"),
+    });
   } catch (error) {
     if (!(error instanceof HTTPException) || error.status !== 401) throw error;
     const handedOff = prReviewBrowserGrantFromState(deps, state, workspaceId);
     if (!handedOff) throw error;
-    grant = handedOff;
+    grant = {
+      ...handedOff,
+      authorizeCommit: async () => {
+        const current = prReviewBrowserGrantFromState(deps, state, workspaceId);
+        if (
+          !current ||
+          current.accountId !== handedOff.accountId ||
+          current.subjectId !== handedOff.subjectId
+        )
+          throw new HTTPException(403, {
+            message: "OpenGeni Lens browser handoff expired or changed",
+          });
+      },
+    };
   }
   requirePermission(grant, "secrets:write");
   if (grant.accountId !== state.accountId) {

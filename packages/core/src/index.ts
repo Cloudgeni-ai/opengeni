@@ -1,4 +1,5 @@
 export * from "./domain/skills";
+export * from "./domain/organization-integration-catalog";
 export * from "./domain/knowledge";
 export * from "./domain/knowledge-search";
 // @opengeni/core — the framework-agnostic OpenGeni core.

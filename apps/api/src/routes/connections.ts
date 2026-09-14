@@ -1,4 +1,10 @@
 import { createHash, createHmac } from "node:crypto";
+import { sql } from "drizzle-orm";
+import { assertOrganizationIntegrationAllowed } from "@opengeni/contracts";
+import {
+  withOrganizationIntegrationAcquisition,
+  withOrganizationIntegrationPolicyFence,
+} from "@opengeni/db/organization-integration-policy";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import {
   startSlackBotInstall,
@@ -286,12 +292,29 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           });
       return c.json(ConnectionResponse.parse({ connection }), 201);
     };
-    return beforeCommit
-      ? withWorkspaceSubjectRls(db, workspaceId, grant.subjectId, async (tx) => {
-          await beforeCommit(tx);
-          return persist(tx);
-        })
-      : persist(db);
+    const commit = (database: Database) =>
+      beforeCommit
+        ? withWorkspaceSubjectRls(database, workspaceId, grant.subjectId, async (tx) => {
+            await beforeCommit(tx);
+            return persist(tx);
+          })
+        : persist(database);
+    // Only the canonical workspace model-key lane is outside integration policy.
+    // Generic credentials have no validated protocol/curated target in this contract.
+    const modelKey = workspaceProviderApiKeyConnectionKind({
+      subjectId: createConnectionSubjectId(payload, grant.subjectId),
+      providerDomain: canonicalProviderDomain(payload.providerDomain),
+      kind: payload.kind,
+      metadata: payload.metadata,
+    });
+    return modelKey
+      ? commit(db)
+      : withOrganizationIntegrationAcquisition(
+          db,
+          { accountId: grant.accountId, workspaceId },
+          [null],
+          commit,
+        );
   });
 
   app.post("/v1/workspaces/:workspaceId/connections/slack-bot/install", async (c) => {
@@ -301,13 +324,22 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = access.grant;
     const payload = OpenGeniSlackBotInstallRequest.parse(await c.req.json());
     return c.json(
-      await startSlackBotInstall(deps, {
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-        requestUrl: c.req.url,
-        ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
-      }),
+      await withOrganizationIntegrationAcquisition(
+        db,
+        { accountId: grant.accountId, workspaceId },
+        ["slack-bot"],
+        (tx) =>
+          startSlackBotInstall(
+            { ...deps, db: tx },
+            {
+              accountId: grant.accountId,
+              workspaceId,
+              subjectId: grant.subjectId,
+              requestUrl: c.req.url,
+              ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
+            },
+          ),
+      ),
     );
   });
 
@@ -329,12 +361,25 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           operationId: `oauth:${state.nonce}`,
           inputDigest: createHash("sha256").update(c.req.query("state")!).digest("hex"),
         };
-        const claim = await claimConnectOperation(db, state, {
-          ...operation,
-          expectedRevision: stored.attempt.revision,
-          authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
-        });
+        const callbackState = state;
+        const callbackOperation = operation;
+        const claim = await withOrganizationIntegrationPolicyFence(
+          db,
+          callbackState,
+          (policyTx, policy) =>
+            claimConnectOperation(policyTx, callbackState, {
+              ...callbackOperation,
+              expectedRevision: stored.attempt.revision,
+              authorize: (tx, _attempt, origin) =>
+                requireConnectOwnerAuthority(tx, callbackState, "connections:write", origin),
+              authorizeAcquisition: async () => {
+                // Provider denial/cancellation acquires nothing; completed exact
+                // receipts replay before this callback is invoked.
+                if (!c.req.query("error") && c.req.query("code"))
+                  assertOrganizationIntegrationAllowed(policy, "slack-bot");
+              },
+            }),
+        );
         if (claim.status === "replayed")
           return new Response(null, { status: 302, headers: { Location: exactReturnUrl } });
       }
@@ -391,6 +436,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           "Slack installation callback is missing code",
         );
       }
+      await withOrganizationIntegrationAcquisition(db, state, ["slack-bot"], async () => {});
       const slack = requireOpenGeniSlackOAuthSettings(settings);
       const redirectUri = `${baseUrl}/v1/integrations/slack/callback`;
       const authorization = await exchangeOpenGeniSlackAuthorizationCode(
@@ -424,35 +470,44 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           verified,
         });
       if (operation) {
-        await finishConnectOperation(db, acceptedState, {
-          ...operation,
-          authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
-          commit: async (tx, current) => {
-            const connection = await persist(tx);
-            return {
-              ...current,
-              revision: current.revision + 1,
-              state: "complete",
-              credentialsCommitted: true,
-              nextAction: { type: "none" },
-              account: {
-                id: connection.id,
-                version: connection.version,
-                providerId: "slack-bot",
-                label: "Slack workspace bot",
-                ownership: "workspace",
-                status: "connected",
-              },
-            };
-          },
-        });
+        const acceptedOperation = operation;
+        await withOrganizationIntegrationPolicyFence(db, acceptedState, (policyTx, policy) =>
+          finishConnectOperation(policyTx, acceptedState, {
+            ...acceptedOperation,
+            authorize: (tx, _attempt, origin) =>
+              requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+            commit: async (tx, current) => {
+              assertOrganizationIntegrationAllowed(policy, "slack-bot");
+              const connection = await persist(tx);
+              return {
+                ...current,
+                revision: current.revision + 1,
+                state: "complete",
+                credentialsCommitted: true,
+                nextAction: { type: "none" },
+                account: {
+                  id: connection.id,
+                  version: connection.version,
+                  providerId: "slack-bot",
+                  label: "Slack workspace bot",
+                  ownership: "workspace",
+                  status: "connected",
+                },
+              };
+            },
+          }),
+        );
         return new Response(null, { status: 302, headers: { Location: exactReturnUrl! } });
       }
-      const connection = await db.transaction(async (tx) => {
-        await requireSlackInstallCallbackGrant(tx, acceptedState);
-        return persist(tx);
-      });
+      const connection = await withOrganizationIntegrationAcquisition(
+        db,
+        acceptedState,
+        ["slack-bot"],
+        async (tx) => {
+          await requireSlackInstallCallbackGrant(tx, acceptedState);
+          return persist(tx);
+        },
+      );
       return c.redirect(
         slackInstallReturnUrl(baseUrl, state.returnPath, "connected", connection.id),
         302,
@@ -502,16 +557,21 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = FikenInstallRequest.parse(await c.req.json());
     const persist = await prepareFikenTokenInstall(deps, grant, payload);
     const continuation = externalActorContinuationForAuthorization(authorization);
-    const connection = await db.transaction(async (tx) => {
-      await requireConnectOwnerAuthority(tx, {
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-        personalOwnerVerified: isPersonalConnectionOwnerPrincipal(authorization),
-        ...(continuation ? { externalContinuation: continuation } : {}),
-      });
-      return persist(tx);
-    });
+    const connection = await withOrganizationIntegrationAcquisition(
+      db,
+      { accountId: grant.accountId, workspaceId },
+      ["fiken"],
+      async (tx) => {
+        await requireConnectOwnerAuthority(tx, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          personalOwnerVerified: isPersonalConnectionOwnerPrincipal(authorization),
+          ...(continuation ? { externalContinuation: continuation } : {}),
+        });
+        return persist(tx);
+      },
+    );
     return c.json(ConnectionResponse.parse({ connection }), payload.connectionId ? 200 : 201);
   });
 
@@ -789,258 +849,323 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     const { grant } = authorization;
     const payload = UpdateConnectionRequest.parse(await c.req.json());
-    assertNotReservedSlackBotMetadata(payload.metadata);
-    assertNotReservedFikenMetadata(payload.metadata);
-    assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
-    assertNotReservedPersonalGitHubMetadata(payload.metadata);
-    const existing = await getConnectionMetadata(
+    // Policy first, then the existing tenancy prefix and exact credential row.
+    // The locked live identity makes unchanged/reducing updates safe against a
+    // concurrent replacement; all final writes below use this same transaction.
+    return withOrganizationIntegrationPolicyFence(
       db,
-      workspaceId,
-      c.req.param("connectionId"),
-      grant.subjectId,
-    );
-    if (existing && isOpenGeniSlackBotConnection(existing)) {
-      const destination = ConnectorDocumentDestinationSelection.safeParse(
-        payload.metadata?.documentDestination,
-      );
-      const destinationOnlyUpdate =
-        payload.metadata !== undefined &&
-        Object.keys(payload.metadata).length === 1 &&
-        payload.providerDomain === undefined &&
-        payload.subjectId === undefined &&
-        payload.kind === undefined &&
-        payload.status === undefined &&
-        payload.credential === undefined &&
-        payload.grantedScopes === undefined &&
-        payload.expiresAt === undefined;
-      if (!destination.success || !destinationOnlyUpdate) {
-        throw new HTTPException(422, {
-          message: "use the dedicated OpenGeni Slack bot reinstall flow to update this connection",
-        });
-      }
-      const destinationSelection = destination.data;
-      if (
-        destinationSelection.authorityKind === "organization" &&
-        authorization.accountGrant?.permissions.includes("account:admin") !== true
-      ) {
-        throw new HTTPException(403, { message: "missing permission: account:admin" });
-      }
-      if (
-        destinationSelection.authorityKind === "workspace" &&
-        !hasPermission(grant.permissions, "workspace:admin")
-      ) {
-        throw new HTTPException(403, { message: "missing permission: workspace:admin" });
-      }
-      if (
-        destinationSelection.authorityKind === "personal" &&
-        (!authorization.contextIntegrity ||
-          authorization.authenticatedSubjectId !== grant.subjectId)
-      ) {
-        throw new HTTPException(403, {
-          message: "personal destination requires the exact actor",
-        });
-      }
-      const metadata = {
-        ...existing.metadata,
-        documentDestination: bindConnectorDocumentDestination(destinationSelection, {
-          accountId: grant.accountId,
-          workspaceId,
-          initiatingSubjectId: grant.subjectId,
-        }),
-      };
-      const connection = await updateSlackBotDocumentDestination(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        connectionId: existing.id,
-        visibleToSubjectId: grant.subjectId,
-        expectedVersion: existing.version,
-        metadata,
-        updatedBySubjectId: grant.subjectId,
-      });
-      if (!connection) {
-        throw new HTTPException(409, {
-          message: "Slack bot connection changed; reload before saving its destination",
-        });
-      }
-      return c.json(ConnectionResponse.parse({ connection }));
-    }
-    if (existing && GoogleDriveConnectionMetadata.safeParse(existing.metadata).success) {
-      throw new HTTPException(422, {
-        message: "use the dedicated Google Drive reconnect or source-selection flow",
-      });
-    }
-    if (existing?.metadata.credentialRole === API_INTEGRATION_OAUTH_CREDENTIAL_ROLE) {
-      throw new HTTPException(422, {
-        message: "use the dedicated Integration provider OAuth flow to update this connection",
-      });
-    }
-    if (existing && AtlassianConnectionMetadata.safeParse(existing.metadata).success) {
-      throw new HTTPException(422, {
-        message: "use the dedicated Atlassian reconnect or source-selection flow",
-      });
-    }
-    if (existing && isPersonalGitHubConnection(existing)) {
-      throw new HTTPException(422, {
-        message: "use the dedicated personal GitHub reconnect flow to update this connection",
-      });
-    }
-    if (existing) {
-      const providerDomain = canonicalProviderDomain(
-        payload.providerDomain ?? existing.providerDomain,
-      );
-      const kind = payload.kind ?? existing.kind;
-      const subjectId =
-        payload.subjectId === undefined
-          ? existing.subjectId
-          : writableSubjectId(payload.subjectId, grant.subjectId);
-      const targetWorkspaceProviderKind = workspaceProviderApiKeyConnectionKind({
-        subjectId,
-        providerDomain,
-        kind,
-        metadata: payload.metadata ?? existing.metadata,
-      });
-      if (!workspaceProviderApiKeyConnectionKind(existing) && targetWorkspaceProviderKind) {
-        throw new HTTPException(422, {
-          message:
-            targetWorkspaceProviderKind === "vercel_gateway"
-              ? "use the Vercel AI Gateway connect flow to create this connection"
-              : "use the OpenRouter connect flow to create this connection",
-        });
-      }
-      assertNotDirectPersonalSlackOAuth(providerDomain, kind);
-      assertNotDirectGoogleDriveOAuth(providerDomain, kind, payload.metadata ?? existing.metadata);
-      assertNotDirectAtlassianOAuth(providerDomain, kind, payload.metadata ?? existing.metadata);
-      assertNotDirectPersonalGitHubOAuth(
-        providerDomain,
-        kind,
-        payload.metadata ?? existing.metadata,
-      );
-    }
-    // Status is not a free-form field: revocation goes through DELETE, and the
-    // broker owns needs_reauth/error. Reactivating a connection is only
-    // meaningful together with a fresh credential bundle — otherwise a PATCH
-    // could clear the broker's re-auth signal while stale tokens stay in place.
-    if (payload.status !== undefined) {
-      if (payload.status !== "active") {
-        throw new HTTPException(400, {
-          message: 'status can only be set to "active"; use DELETE to revoke',
-        });
-      }
-      if (payload.credential === undefined) {
-        throw new HTTPException(400, {
-          message: "reactivating a connection requires a new credential",
-        });
-      }
-    }
-    const existingWorkspaceProviderKind = existing
-      ? workspaceProviderApiKeyConnectionKind(existing)
-      : null;
-    if (existing && existingWorkspaceProviderKind) {
-      const provider = workspaceProviderApiKeyConnectionSpec(existingWorkspaceProviderKind);
-      const providerDomain = canonicalProviderDomain(
-        payload.providerDomain ?? existing.providerDomain,
-      );
-      const subjectId =
-        payload.subjectId === undefined
-          ? existing.subjectId
-          : writableSubjectId(payload.subjectId, grant.subjectId);
-      const kind = payload.kind ?? existing.kind;
-      if (
-        subjectId !== null ||
-        providerDomain !== provider.providerDomain ||
-        kind !== "api_key" ||
-        (payload.metadata?.credentialRole !== undefined &&
-          payload.metadata.credentialRole !== provider.credentialRole)
-      ) {
-        throw new HTTPException(422, {
-          message: `${provider.label} connection identity cannot be changed`,
-        });
-      }
-      if (payload.credential === undefined) {
-        throw new HTTPException(400, {
-          message: `updating a ${provider.label} connection requires a new credential`,
-        });
-      }
-      if (payload.expectedVersion === undefined || payload.operationId === undefined) {
-        throw new HTTPException(400, {
-          message: `updating a ${provider.label} connection requires expectedVersion and operationId`,
-        });
-      }
-      const key = requireEnvironmentEncryption(settings);
-      const grantedScopes = payload.grantedScopes ?? existing.grantedScopes;
-      const expiresAt =
-        payload.expiresAt !== undefined
-          ? payload.expiresAt
-            ? new Date(payload.expiresAt)
-            : null
-          : existing.expiresAt
-            ? new Date(existing.expiresAt)
+      { accountId: grant.accountId, workspaceId },
+      (policyTx, policy) =>
+        // eslint-disable-next-line no-shadow -- every existing final writer must use this exact scoped transaction
+        withWorkspaceSubjectRls(policyTx, workspaceId, grant.subjectId, async (db) => {
+          const initial = await getConnectionMetadata(
+            db,
+            workspaceId,
+            c.req.param("connectionId"),
+            grant.subjectId,
+          );
+          // Model-key rotation owns an advisory -> credential-row prefix. Do
+          // not take its row first or change that excluded lane's lock order.
+          if (!initial || !workspaceProviderApiKeyConnectionKind(initial)) {
+            await db.execute(
+              sql`select id from connections where workspace_id = ${workspaceId}::uuid and id = ${c.req.param("connectionId")}::uuid and (subject_id is null or subject_id = ${grant.subjectId}) for update`,
+            );
+          }
+          assertNotReservedSlackBotMetadata(payload.metadata);
+          assertNotReservedFikenMetadata(payload.metadata);
+          assertNotReservedApiIntegrationOAuthMetadata(payload.metadata);
+          assertNotReservedPersonalGitHubMetadata(payload.metadata);
+          const existing = await getConnectionMetadata(
+            db,
+            workspaceId,
+            c.req.param("connectionId"),
+            grant.subjectId,
+          );
+          if (existing && isOpenGeniSlackBotConnection(existing)) {
+            const destination = ConnectorDocumentDestinationSelection.safeParse(
+              payload.metadata?.documentDestination,
+            );
+            const destinationOnlyUpdate =
+              payload.metadata !== undefined &&
+              Object.keys(payload.metadata).length === 1 &&
+              payload.providerDomain === undefined &&
+              payload.subjectId === undefined &&
+              payload.kind === undefined &&
+              payload.status === undefined &&
+              payload.credential === undefined &&
+              payload.grantedScopes === undefined &&
+              payload.expiresAt === undefined;
+            if (!destination.success || !destinationOnlyUpdate) {
+              throw new HTTPException(422, {
+                message:
+                  "use the dedicated OpenGeni Slack bot reinstall flow to update this connection",
+              });
+            }
+            const destinationSelection = destination.data;
+            if (
+              destinationSelection.authorityKind === "organization" &&
+              authorization.accountGrant?.permissions.includes("account:admin") !== true
+            ) {
+              throw new HTTPException(403, { message: "missing permission: account:admin" });
+            }
+            if (
+              destinationSelection.authorityKind === "workspace" &&
+              !hasPermission(grant.permissions, "workspace:admin")
+            ) {
+              throw new HTTPException(403, { message: "missing permission: workspace:admin" });
+            }
+            if (
+              destinationSelection.authorityKind === "personal" &&
+              (!authorization.contextIntegrity ||
+                authorization.authenticatedSubjectId !== grant.subjectId)
+            ) {
+              throw new HTTPException(403, {
+                message: "personal destination requires the exact actor",
+              });
+            }
+            const metadata = {
+              ...existing.metadata,
+              documentDestination: bindConnectorDocumentDestination(destinationSelection, {
+                accountId: grant.accountId,
+                workspaceId,
+                initiatingSubjectId: grant.subjectId,
+              }),
+            };
+            if (
+              stableJson(metadata.documentDestination) !==
+              stableJson(existing.metadata.documentDestination)
+            ) {
+              assertOrganizationIntegrationAllowed(policy, "slack-bot");
+            }
+            const connection = await updateSlackBotDocumentDestination(db, {
+              accountId: grant.accountId,
+              workspaceId,
+              connectionId: existing.id,
+              visibleToSubjectId: grant.subjectId,
+              expectedVersion: existing.version,
+              metadata,
+              updatedBySubjectId: grant.subjectId,
+            });
+            if (!connection) {
+              throw new HTTPException(409, {
+                message: "Slack bot connection changed; reload before saving its destination",
+              });
+            }
+            return c.json(ConnectionResponse.parse({ connection }));
+          }
+          if (existing && GoogleDriveConnectionMetadata.safeParse(existing.metadata).success) {
+            throw new HTTPException(422, {
+              message: "use the dedicated Google Drive reconnect or source-selection flow",
+            });
+          }
+          if (existing?.metadata.credentialRole === API_INTEGRATION_OAUTH_CREDENTIAL_ROLE) {
+            throw new HTTPException(422, {
+              message:
+                "use the dedicated Integration provider OAuth flow to update this connection",
+            });
+          }
+          if (existing && AtlassianConnectionMetadata.safeParse(existing.metadata).success) {
+            throw new HTTPException(422, {
+              message: "use the dedicated Atlassian reconnect or source-selection flow",
+            });
+          }
+          if (existing && isPersonalGitHubConnection(existing)) {
+            throw new HTTPException(422, {
+              message: "use the dedicated personal GitHub reconnect flow to update this connection",
+            });
+          }
+          if (existing) {
+            const providerDomain = canonicalProviderDomain(
+              payload.providerDomain ?? existing.providerDomain,
+            );
+            const kind = payload.kind ?? existing.kind;
+            const subjectId =
+              payload.subjectId === undefined
+                ? existing.subjectId
+                : writableSubjectId(payload.subjectId, grant.subjectId);
+            const targetWorkspaceProviderKind = workspaceProviderApiKeyConnectionKind({
+              subjectId,
+              providerDomain,
+              kind,
+              metadata: payload.metadata ?? existing.metadata,
+            });
+            if (!workspaceProviderApiKeyConnectionKind(existing) && targetWorkspaceProviderKind) {
+              throw new HTTPException(422, {
+                message:
+                  targetWorkspaceProviderKind === "vercel_gateway"
+                    ? "use the Vercel AI Gateway connect flow to create this connection"
+                    : "use the OpenRouter connect flow to create this connection",
+              });
+            }
+            assertNotDirectPersonalSlackOAuth(providerDomain, kind);
+            assertNotDirectGoogleDriveOAuth(
+              providerDomain,
+              kind,
+              payload.metadata ?? existing.metadata,
+            );
+            assertNotDirectAtlassianOAuth(
+              providerDomain,
+              kind,
+              payload.metadata ?? existing.metadata,
+            );
+            assertNotDirectPersonalGitHubOAuth(
+              providerDomain,
+              kind,
+              payload.metadata ?? existing.metadata,
+            );
+          }
+          // Status is not a free-form field: revocation goes through DELETE, and the
+          // broker owns needs_reauth/error. Reactivating a connection is only
+          // meaningful together with a fresh credential bundle — otherwise a PATCH
+          // could clear the broker's re-auth signal while stale tokens stay in place.
+          if (payload.status !== undefined) {
+            if (payload.status !== "active") {
+              throw new HTTPException(400, {
+                message: 'status can only be set to "active"; use DELETE to revoke',
+              });
+            }
+            if (payload.credential === undefined) {
+              throw new HTTPException(400, {
+                message: "reactivating a connection requires a new credential",
+              });
+            }
+          }
+          const existingWorkspaceProviderKind = existing
+            ? workspaceProviderApiKeyConnectionKind(existing)
             : null;
-      const metadata = workspaceProviderCredentialMetadata(existingWorkspaceProviderKind, {
-        ...existing.metadata,
-        ...(payload.metadata ?? {}),
-      });
-      const input = {
-        accountId: grant.accountId,
-        workspaceId,
-        connectionId: existing.id,
-        expectedVersion: payload.expectedVersion,
-        operationId: payload.operationId,
-        requestDigest: workspaceProviderCredentialRequestDigest(key, {
-          action: "rotate",
-          connectionId: existing.id,
-          expectedVersion: payload.expectedVersion,
-          credential: payload.credential,
-          grantedScopes,
-          expiresAt: expiresAt?.toISOString() ?? null,
-          metadata,
+          if (existing && existingWorkspaceProviderKind) {
+            const provider = workspaceProviderApiKeyConnectionSpec(existingWorkspaceProviderKind);
+            const providerDomain = canonicalProviderDomain(
+              payload.providerDomain ?? existing.providerDomain,
+            );
+            const subjectId =
+              payload.subjectId === undefined
+                ? existing.subjectId
+                : writableSubjectId(payload.subjectId, grant.subjectId);
+            const kind = payload.kind ?? existing.kind;
+            if (
+              subjectId !== null ||
+              providerDomain !== provider.providerDomain ||
+              kind !== "api_key" ||
+              (payload.metadata?.credentialRole !== undefined &&
+                payload.metadata.credentialRole !== provider.credentialRole)
+            ) {
+              throw new HTTPException(422, {
+                message: `${provider.label} connection identity cannot be changed`,
+              });
+            }
+            if (payload.credential === undefined) {
+              throw new HTTPException(400, {
+                message: `updating a ${provider.label} connection requires a new credential`,
+              });
+            }
+            if (payload.expectedVersion === undefined || payload.operationId === undefined) {
+              throw new HTTPException(400, {
+                message: `updating a ${provider.label} connection requires expectedVersion and operationId`,
+              });
+            }
+            const key = requireEnvironmentEncryption(settings);
+            const grantedScopes = payload.grantedScopes ?? existing.grantedScopes;
+            const expiresAt =
+              payload.expiresAt !== undefined
+                ? payload.expiresAt
+                  ? new Date(payload.expiresAt)
+                  : null
+                : existing.expiresAt
+                  ? new Date(existing.expiresAt)
+                  : null;
+            const metadata = workspaceProviderCredentialMetadata(existingWorkspaceProviderKind, {
+              ...existing.metadata,
+              ...(payload.metadata ?? {}),
+            });
+            const input = {
+              accountId: grant.accountId,
+              workspaceId,
+              connectionId: existing.id,
+              expectedVersion: payload.expectedVersion,
+              operationId: payload.operationId,
+              requestDigest: workspaceProviderCredentialRequestDigest(key, {
+                action: "rotate",
+                connectionId: existing.id,
+                expectedVersion: payload.expectedVersion,
+                credential: payload.credential,
+                grantedScopes,
+                expiresAt: expiresAt?.toISOString() ?? null,
+                metadata,
+              }),
+              credentialEncrypted: encryptCredentialBundle(key, payload.credential),
+              grantedScopes,
+              expiresAt,
+              metadata,
+              updatedBySubjectId: grant.subjectId,
+            };
+            const connection =
+              existingWorkspaceProviderKind === "vercel_gateway"
+                ? await rotateWorkspaceVercelAiGatewayConnection(db, input)
+                : await rotateWorkspaceOpenRouterConnection(db, input);
+            if (!connection) {
+              throw new HTTPException(409, {
+                message: `${provider.label} connection changed; reload before replacing its key`,
+              });
+            }
+            return c.json(ConnectionResponse.parse({ connection }));
+          }
+          const key =
+            payload.credential === undefined ? null : requireEnvironmentEncryption(settings);
+          const subjectId =
+            payload.subjectId === undefined
+              ? undefined
+              : writableSubjectId(payload.subjectId, grant.subjectId);
+          if (
+            existing &&
+            (payload.credential !== undefined ||
+              (payload.providerDomain !== undefined &&
+                canonicalProviderDomain(payload.providerDomain) !== existing.providerDomain) ||
+              (payload.kind !== undefined && payload.kind !== existing.kind) ||
+              (subjectId !== undefined && subjectId !== existing.subjectId) ||
+              payload.grantedScopes?.some((scope) => !existing.grantedScopes.includes(scope)) ||
+              (payload.metadata !== undefined &&
+                ["mcpUrl", "resource", "credentialRole"].some(
+                  (field) =>
+                    stableJson(payload.metadata?.[field] ?? null) !==
+                    stableJson(existing.metadata[field] ?? null),
+                )) ||
+              (payload.expiresAt !== undefined &&
+                existing.expiresAt !== null &&
+                (payload.expiresAt === null ||
+                  Date.parse(payload.expiresAt) > Date.parse(existing.expiresAt))) ||
+              (payload.status === "active" && existing.status !== "active"))
+          ) {
+            assertOrganizationIntegrationAllowed(policy, null);
+          }
+          const connection = await updateConnection(db, {
+            workspaceId,
+            connectionId: c.req.param("connectionId"),
+            visibleToSubjectId: grant.subjectId,
+            updatedBySubjectId: grant.subjectId,
+            ...(payload.providerDomain !== undefined
+              ? { providerDomain: canonicalProviderDomain(payload.providerDomain) }
+              : {}),
+            ...(subjectId !== undefined ? { subjectId } : {}),
+            ...(payload.kind !== undefined ? { kind: payload.kind } : {}),
+            ...(payload.status !== undefined ? { status: payload.status } : {}),
+            ...(payload.credential !== undefined && key
+              ? { credentialEncrypted: encryptCredentialBundle(key, payload.credential) }
+              : {}),
+            ...(payload.grantedScopes !== undefined
+              ? { grantedScopes: payload.grantedScopes }
+              : {}),
+            ...(payload.expiresAt !== undefined
+              ? { expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null }
+              : {}),
+            ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
+          });
+          if (!connection) {
+            throw new HTTPException(404, { message: "connection not found" });
+          }
+          return c.json(ConnectionResponse.parse({ connection }));
         }),
-        credentialEncrypted: encryptCredentialBundle(key, payload.credential),
-        grantedScopes,
-        expiresAt,
-        metadata,
-        updatedBySubjectId: grant.subjectId,
-      };
-      const connection =
-        existingWorkspaceProviderKind === "vercel_gateway"
-          ? await rotateWorkspaceVercelAiGatewayConnection(db, input)
-          : await rotateWorkspaceOpenRouterConnection(db, input);
-      if (!connection) {
-        throw new HTTPException(409, {
-          message: `${provider.label} connection changed; reload before replacing its key`,
-        });
-      }
-      return c.json(ConnectionResponse.parse({ connection }));
-    }
-    const key = payload.credential === undefined ? null : requireEnvironmentEncryption(settings);
-    const subjectId =
-      payload.subjectId === undefined
-        ? undefined
-        : writableSubjectId(payload.subjectId, grant.subjectId);
-    const connection = await updateConnection(db, {
-      workspaceId,
-      connectionId: c.req.param("connectionId"),
-      visibleToSubjectId: grant.subjectId,
-      updatedBySubjectId: grant.subjectId,
-      ...(payload.providerDomain !== undefined
-        ? { providerDomain: canonicalProviderDomain(payload.providerDomain) }
-        : {}),
-      ...(subjectId !== undefined ? { subjectId } : {}),
-      ...(payload.kind !== undefined ? { kind: payload.kind } : {}),
-      ...(payload.status !== undefined ? { status: payload.status } : {}),
-      ...(payload.credential !== undefined && key
-        ? { credentialEncrypted: encryptCredentialBundle(key, payload.credential) }
-        : {}),
-      ...(payload.grantedScopes !== undefined ? { grantedScopes: payload.grantedScopes } : {}),
-      ...(payload.expiresAt !== undefined
-        ? { expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null }
-        : {}),
-      ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
-    });
-    if (!connection) {
-      throw new HTTPException(404, { message: "connection not found" });
-    }
-    return c.json(ConnectionResponse.parse({ connection }));
+    );
   });
 
   app.delete("/v1/workspaces/:workspaceId/connections/:connectionId", async (c) => {
