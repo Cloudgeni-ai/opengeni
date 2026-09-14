@@ -867,7 +867,13 @@ export function useSessionEvents(
 
   const identityMatches = stateStreamKey === streamKey;
   const visibleEvents = identityMatches ? eventWindow.events : EMPTY_EVENTS;
-  const timeline = useMemo(() => buildTimeline(visibleEvents), [visibleEvents]);
+  const timeline = useMemo(
+    () =>
+      buildTimeline(visibleEvents, {
+        partialStart: hasOlder || eventWindow.truncated || after > 0,
+      }),
+    [visibleEvents, hasOlder, eventWindow.truncated, after],
+  );
 
   return {
     events: visibleEvents,

@@ -19,6 +19,7 @@ import ReactMarkdown, {
   type UrlTransform,
 } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { LoaderCircleIcon } from "lucide-react";
 import { cn } from "../lib/cn";
 import { tableElementToTsv } from "../lib/clipboard";
 import { prefersReducedMotion } from "../lib/motion";
@@ -46,6 +47,7 @@ import { TooltipProvider } from "./tooltip";
 export type MarkdownInteractiveBlock = { kind: "html" | "site"; content: string };
 const InteractiveContext = createContext<{
   source: string;
+  streaming?: boolean | undefined;
   render?: (block: MarkdownInteractiveBlock) => ReactNode;
   renderImage?: (image: { src: string; alt: string }) => ReactNode;
 }>({ source: "" });
@@ -406,7 +408,7 @@ function fenceLanguage(children: ReactNode): string | null {
 }
 
 function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"> & ExtraProps) {
-  const { source, render } = useContext(InteractiveContext);
+  const { source, render, streaming } = useContext(InteractiveContext);
   const language = fenceLanguage(children);
   if (render && (language === "opengeni-html" || language === "opengeni-site")) {
     const start = node?.position?.start.offset;
@@ -428,7 +430,33 @@ function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"
       closing &&
       closing.length >= opening[1]!.length &&
       [...closing].every((c) => c === opening[1]![0]);
-    if (!complete) return <p role="status">Preparing preview…</p>;
+    if (!complete) {
+      return (
+        <div
+          role="status"
+          aria-live="polite"
+          aria-busy={streaming === true}
+          className="my-3 flex min-h-32 items-center gap-3 rounded-og-md bg-og-surface-1/70 px-4 py-5"
+        >
+          {streaming ? (
+            <LoaderCircleIcon
+              aria-hidden
+              className="size-5 shrink-0 text-og-fg-muted motion-safe:animate-spin"
+            />
+          ) : null}
+          <div>
+            <div className="text-og-sm font-medium text-og-fg">
+              {streaming ? "Preparing preview…" : "Preview incomplete"}
+            </div>
+            <div className="mt-1 text-og-sm text-og-fg-muted">
+              {streaming
+                ? "Generating the interactive content. It will appear here when ready."
+                : "Generation stopped before the preview was ready."}
+            </div>
+          </div>
+        </div>
+      );
+    }
     return (
       <>
         {render({
@@ -622,10 +650,11 @@ function MarkdownImpl({
   const interactiveContext = useMemo(
     () => ({
       source: children,
+      streaming,
       ...(renderInteractiveBlock ? { render: renderInteractiveBlock } : {}),
       ...(renderImage ? { renderImage } : {}),
     }),
-    [children, renderInteractiveBlock, renderImage],
+    [children, streaming, renderInteractiveBlock, renderImage],
   );
 
   // `min-w-0` lets the prose shrink inside flex parents (message bubbles) so

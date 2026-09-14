@@ -44,8 +44,26 @@ const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
 const TIMELINE_TIP_FOLLOW_BROWSER_E2E = "test/e2e/timeline-tip-follow.browser.e2e.ts";
 const RESTORED_ATTACHMENT_PREVIEW_E2E = "test/e2e/restored-attachment-preview.browser.e2e.ts";
 const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
+const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
+  test("preview loading coverage follows React and testing dependencies without widening leaf plans", () => {
+    for (const path of [
+      "packages/react/src/components/MessageTimeline.tsx",
+      "packages/react/demo/preview-loading-test.html",
+      "packages/testing/src/process.ts",
+      PREVIEW_LOADING_E2E,
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode).toBe("focused");
+      expect(plan.e2eTests).toContain(PREVIEW_LOADING_E2E);
+      expect(plan.unitTests).not.toContain(PREVIEW_LOADING_E2E);
+    }
+    const unrelated = createImpactPlan(["packages/ogtool/src/index.ts"]);
+    expect(unrelated.mode).toBe("focused");
+    expect(unrelated.e2eTests).not.toContain(PREVIEW_LOADING_E2E);
+  });
+
   test("documentation-only changes retain every non-runtime public guard", () => {
     const plan = createImpactPlan(["docs/artifact-engine.md", "README.md"]);
     expect(plan.mode).toBe("docs");
@@ -115,6 +133,7 @@ describe("fail-closed change impact", () => {
       PERSONAL_RESOURCE_ATTACHMENTS_E2E,
       PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/plugin-discovery.browser.e2e.ts",
+      PREVIEW_LOADING_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
       "test/e2e/session-artifact-navigation.browser.e2e.ts",
@@ -454,6 +473,7 @@ describe("fail-closed change impact", () => {
       PERSONAL_RESOURCE_ATTACHMENTS_E2E,
       PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/plugin-discovery.browser.e2e.ts",
+      PREVIEW_LOADING_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
       "test/e2e/session-artifact-navigation.browser.e2e.ts",
