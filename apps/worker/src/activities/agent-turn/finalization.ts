@@ -104,6 +104,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
     turnId: deps.attempt.turnId,
     opAcks: {},
   };
+  deps.eventing.heartbeatDetails = details;
   // Keep one heartbeat owner through all physical cleanup, with the same op
   // acknowledgements used during execution. It must no longer say "running".
   if (deps.eventing.heartbeatTimer) clearInterval(deps.eventing.heartbeatTimer);
@@ -331,6 +332,7 @@ async function finalizeTurnAttemptSteps(
         signalProof: signalSessionAttemptQuiesced,
         heartbeat: (deliveryAttempt, retryMs) => {
           activityContext?.heartbeat({
+            ...eventing.heartbeatDetails,
             phase: "quiescence-proof-delivery",
             sessionId: input.sessionId,
             attemptId: input.attemptId,

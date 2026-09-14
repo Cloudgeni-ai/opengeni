@@ -87,13 +87,15 @@ describe("turn finalization diagnostics", () => {
     const output = spyOn(console, "error").mockImplementation((...args) =>
       logs.push(args.join(" ")),
     );
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
     const obs = observability();
     let exits = 0;
     const monitor = startTurnFinalizationMonitor({
       observability: obs,
       details: { opAcks: {} },
       heartbeat() {},
-      timeoutMs: 1,
+      timeoutMs: 10,
+      slowAfterMs: 1,
       terminateWorker() {
         exits++;
       },
@@ -107,13 +109,14 @@ describe("turn finalization diagnostics", () => {
       expect(
         sample(
           await obs.prometheusMetrics(),
-          "opengeni_turn_finalization_containment_total",
+          "opengeni_turn_finalization_slow_total",
           "credential_cleanup",
         ),
       ).toBe(1);
     } finally {
       monitor.stop();
       output.mockRestore();
+      warning.mockRestore();
     }
   });
 });

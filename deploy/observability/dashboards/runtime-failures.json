@@ -943,8 +943,8 @@
     {
       "id": 28,
       "type": "timeseries",
-      "title": "Stalled turn cleanup containment",
-      "description": "Worker containment exits when one cleanup stage exceeds five minutes. This deadline begins only after execution ends and does not limit agent run length. The exit stops in-process writers; normal recovery retains the durable remote-process proof requirements. A restart before the next scrape can hide an increment; correlate worker restart and timeout logs.",
+      "title": "Slow turn cleanup stages",
+      "description": "Cleanup stages that took more than thirty seconds, recorded while the worker remains scrapeable. A slow stage may still finish successfully. A stage stalled for five minutes triggers worker containment; correlate the bounded containment log with worker restarts. These deadlines begin only after execution ends and do not limit agent run length.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -970,7 +970,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (stage) (increase(opengeni_turn_finalization_containment_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
+          "expr": "sum by (stage) (increase(opengeni_turn_finalization_slow_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
           "legendFormat": "{{stage}}",
           "editorMode": "code",
           "range": true

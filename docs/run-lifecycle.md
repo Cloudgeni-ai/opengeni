@@ -39,7 +39,8 @@ needs.
 After execution ends, every physical finalization stage has a five-minute
 containment deadline, including normally completed turns. This is not a
 run-length limit. Heartbeats report `finalizing` and the current bounded
-`finalizationStage`; Grafana exposes stage occupancy and containment exits.
+`finalizationStage`; Grafana exposes stage occupancy and thirty-second slow-stage observations;
+the bounded containment log and worker restarts identify actual exits.
 A stuck writer drain is never detached to release a successor: the worker exits,
 and normal heartbeat recovery and durable retained-process proofs govern
 admission. The deadline resets only when cleanup advances to another stage and

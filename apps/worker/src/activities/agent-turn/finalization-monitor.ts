@@ -22,9 +22,9 @@ const INFLIGHT = {
   name: "opengeni_turn_finalization_inflight",
   help: "Physical turn finalizers currently waiting in each cleanup stage.",
 };
-const TIMEOUTS = {
-  name: "opengeni_turn_finalization_containment_total",
-  help: "Worker containment exits caused by a stalled turn cleanup stage.",
+const SLOW_STAGES = {
+  name: "opengeni_turn_finalization_slow_total",
+  help: "Turn cleanup stages observed to exceed thirty seconds.",
 };
 const initialized = new WeakSet<Observability>();
 function diagnose(operation: () => void): void {
@@ -43,20 +43,25 @@ export function startTurnFinalizationMonitor(input: {
   heartbeat: (details: TurnHeartbeatDetails) => void;
   terminateWorker: () => void;
   timeoutMs?: number;
+  slowAfterMs?: number;
 }) {
   const { observability, details } = input;
   if (!initialized.has(observability)) {
     for (const stage of TURN_FINALIZATION_STAGES) {
       diagnose(() => observability.incrementGauge({ ...INFLIGHT, labels: { stage }, amount: 0 }));
-      diagnose(() => observability.incrementCounter({ ...TIMEOUTS, labels: { stage }, amount: 0 }));
+      diagnose(() =>
+        observability.incrementCounter({ ...SLOW_STAGES, labels: { stage }, amount: 0 }),
+      );
     }
     initialized.add(observability);
   }
   let stage: TurnFinalizationStage | null = null;
   let disarm = () => {};
   let stopped = false;
+  let slowTimer: ReturnType<typeof setTimeout> | undefined;
   const leave = () => {
     disarm();
+    clearTimeout(slowTimer);
     if (stage) {
       const previous = stage;
       diagnose(() =>
@@ -79,7 +84,6 @@ export function startTurnFinalizationMonitor(input: {
         ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
         onTimeout: () => {
           try {
-            observability.incrementCounter({ ...TIMEOUTS, labels: { stage: next } });
             observability.error("turn finalization stalled; containing worker", {
               surface: "turn_finalization",
               outcome: "containment",
@@ -91,6 +95,21 @@ export function startTurnFinalizationMonitor(input: {
         },
         terminateWorker: input.terminateWorker,
       });
+      // Record the precursor while the process remains scrapeable. A counter
+      // increment immediately before process.exit can never reach Prometheus.
+      slowTimer = setTimeout(
+        () =>
+          diagnose(() => {
+            observability.incrementCounter({ ...SLOW_STAGES, labels: { stage: next } });
+            observability.warn("turn finalization is taking longer than expected", {
+              surface: "turn_finalization",
+              outcome: "slow",
+              reason: next,
+            });
+          }),
+        input.slowAfterMs ?? 30_000,
+      );
+      slowTimer.unref?.();
       diagnose(() => input.heartbeat(details));
     },
     stop() {
