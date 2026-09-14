@@ -102,6 +102,7 @@ describe("fail-closed change impact", () => {
       ARTIFACT_LIBRARY_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
       "test/e2e/capability-details.browser.e2e.ts",
+      "test/e2e/chat-media-entry.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-pane.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
@@ -299,6 +300,27 @@ describe("fail-closed change impact", () => {
     }
   });
 
+  test("chat media browser coverage follows its production and fixture dependencies", () => {
+    const browserTest = "test/e2e/chat-media-entry.browser.e2e.ts";
+    for (const path of [
+      "apps/web/src/components/artifacts/deferred-chat-media.tsx",
+      "apps/web/test/chat-media.vite.config.ts",
+      "packages/react/src/components/message-timeline.tsx",
+      "packages/sdk/src/client.ts",
+      browserTest,
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode).toBe("focused");
+      expect(plan.e2eTests).toContain(browserTest);
+      expect(plan.unitTests).not.toContain(browserTest);
+      expect(plan.integrationTests).not.toContain(browserTest);
+    }
+    expect(usesBrowserRunner(browserTest)).toBe(true);
+    for (const path of ["packages/ogtool/src/index.ts", "packages/browserd/src/index.ts"]) {
+      expect(createImpactPlan([path]).e2eTests).not.toContain(browserTest);
+    }
+  });
+
   test("timeline pagination changes select protected interaction browser coverage", () => {
     for (const path of [
       "packages/react/src/components/message-timeline.tsx",
@@ -419,6 +441,7 @@ describe("fail-closed change impact", () => {
       ARTIFACT_LIBRARY_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
       "test/e2e/capability-details.browser.e2e.ts",
+      "test/e2e/chat-media-entry.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-pane.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
