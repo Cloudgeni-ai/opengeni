@@ -16,7 +16,6 @@ import {
   BoxesIcon,
   Building2Icon,
   ChevronRightIcon,
-  DatabaseIcon,
   KeyRoundIcon,
   LaptopIcon,
   PlugIcon,
@@ -64,7 +63,7 @@ const SECTION_COPY: Record<WorkspaceSettingsSection, { title: string; descriptio
   },
   learning: {
     title: "Agent learning",
-    description: "Defaults and exceptions for Knowledge, workspace instructions, and Skills.",
+    description: "Defaults for Knowledge, workspace instructions, and Skills.",
   },
   members: {
     title: "Members",
@@ -105,16 +104,6 @@ const WORKSPACE_PAGE_GROUPS = [
         to: "/workspaces/$workspaceId/insights" as const,
         label: "Insights",
         icon: BarChart3Icon,
-      },
-    ],
-  },
-  {
-    label: "Knowledge",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/memory" as const,
-        label: "Agent Knowledge",
-        icon: DatabaseIcon,
       },
     ],
   },
