@@ -1,4 +1,8 @@
-import type { OrganizationUsagePeriod, OrganizationUsageSummary } from "@opengeni/contracts";
+import type {
+  OrganizationUsagePeriod,
+  OrganizationUsageSummary,
+  OrganizationUsageWorkspacePage,
+} from "@opengeni/contracts";
 import { useEffect, useState } from "react";
 import { useAppContext } from "@/context";
 import { LoadErrorState } from "@/components/common";
@@ -51,7 +55,12 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
     data?: OrganizationUsageSummary;
     error?: Error;
   }>({ key: "" });
-  const key = JSON.stringify([props.accountId, props.enabled, period, cursor, revision]);
+  const [pageState, setPageState] = useState<{
+    key: string;
+    data?: OrganizationUsageWorkspacePage;
+    error?: Error;
+  }>({ key: "" });
+  const key = JSON.stringify([props.accountId, props.enabled, period, revision]);
   useEffect(() => {
     if (!props.enabled) return;
     let active = true;
@@ -61,7 +70,7 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
     void (async () => {
       try {
         const data = await client.getOrganizationUsageSummary(
-          { accountId: props.accountId, period, ...(cursor ? { afterWorkspaceId: cursor } : {}) },
+          { accountId: props.accountId, period },
           { signal: controller.signal },
         );
         if (active) setState({ key, data });
@@ -74,9 +83,42 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
       active = false;
       controller.abort();
     };
-  }, [client, key, props.accountId, props.enabled, period, cursor]);
+  }, [client, key, props.accountId, props.enabled, period]);
   const data = state.key === key ? state.data : undefined;
   const error = state.key === key ? state.error : undefined;
+  const pageKey = JSON.stringify([key, data?.until, cursor]);
+  useEffect(() => {
+    if (!props.enabled || !data || !cursor) return;
+    let active = true;
+    const controller = new AbortController();
+    setPageState({ key: pageKey });
+    void (async () => {
+      try {
+        const page = await client.getOrganizationUsageWorkspacePage(
+          {
+            accountId: props.accountId,
+            period,
+            until: data.until,
+            afterWorkspaceId: cursor,
+          },
+          { signal: controller.signal },
+        );
+        if (active) setPageState({ key: pageKey, data: page });
+      } catch (error) {
+        if (active)
+          setPageState({
+            key: pageKey,
+            error: error instanceof Error ? error : new Error(String(error)),
+          });
+      }
+    })();
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [client, props.enabled, props.accountId, data, period, cursor, pageKey]);
+  const page = cursor ? (pageState.key === pageKey ? pageState.data : undefined) : data;
+  const pageError = cursor && pageState.key === pageKey ? pageState.error : undefined;
   const selected =
     data?.totals.find((total) => metricKey(total) === metric) ??
     data?.totals.find((total) => total.eventType === "model.cost") ??
@@ -190,6 +232,18 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
             {data.since} to {data.until}. Chart values are rounded; totals retain exact metered
             units.
           </p>
+          {cursor && !page && !pageError && (
+            <p role="status" className="text-xs text-fg-muted">
+              Loading workspace totals
+            </p>
+          )}
+          {pageError && (
+            <LoadErrorState
+              title="Couldn't load workspace totals"
+              error={pageError}
+              onRetry={() => setCursor(undefined)}
+            />
+          )}
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <caption className="pb-3 text-left text-sm font-semibold text-fg">
@@ -202,7 +256,7 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
                 </tr>
               </thead>
               <tbody>
-                {data.workspaces.map((workspace) => {
+                {(page?.workspaces ?? []).map((workspace) => {
                   const total = workspace.totals.find(
                     (item) => selected && metricKey(item) === metricKey(selected),
                   );
@@ -221,18 +275,18 @@ export function OrganizationUsageDashboard(props: { accountId: string; enabled: 
               </tbody>
             </table>
           </div>
-          {(cursor || data.nextWorkspaceCursor) && (
+          {(cursor || page?.nextWorkspaceCursor) && (
             <div className="flex gap-2">
               {cursor && (
                 <Button variant="outline" size="sm" onClick={() => setCursor(undefined)}>
                   First workspaces
                 </Button>
               )}
-              {data.nextWorkspaceCursor && (
+              {page?.nextWorkspaceCursor && (
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => setCursor(data.nextWorkspaceCursor!)}
+                  onClick={() => setCursor(page.nextWorkspaceCursor!)}
                 >
                   Next workspaces
                 </Button>

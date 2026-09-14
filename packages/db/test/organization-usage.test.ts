@@ -1,11 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { OrganizationUsageQuery, OrganizationUsageSummary } from "@opengeni/contracts";
+import {
+  OrganizationUsageQuery,
+  OrganizationUsageSummary,
+  OrganizationUsageWorkspacePageQuery,
+} from "@opengeni/contracts";
 import {
   createDb,
   createSession,
   ensureManagedAccessForUser,
   getOrganizationUsageSummary,
+  getOrganizationUsageWorkspacePage,
   organizationUsageWindow,
   getOrganizationPrivateSessionSettings,
   updateOrganizationPrivateSessionSettings,
@@ -30,7 +35,12 @@ describe("organization usage windows and wire quantities", () => {
   });
   test("rejects unbounded periods and malformed workspace cursors", () => {
     expect(OrganizationUsageQuery.safeParse({ period: "all" }).success).toBe(false);
-    expect(OrganizationUsageQuery.safeParse({ afterWorkspaceId: "bad" }).success).toBe(false);
+    expect(
+      OrganizationUsageWorkspacePageQuery.safeParse({
+        until: now.toISOString(),
+        afterWorkspaceId: "bad",
+      }).success,
+    ).toBe(false);
   });
   test("preserves quantities beyond safe JS integers", () => {
     const result = OrganizationUsageSummary.parse({
@@ -124,7 +134,7 @@ test("private-session totals stay actor-visible under the application RLS role",
   );
   expect(outsider.totals).toEqual([]);
   expect(outsider.buckets).toEqual([]);
-  expect(outsider.workspaces).toEqual([]);
+  expect(outsider.workspaces.every((workspace) => workspace.totals.length === 0)).toBe(true);
 }, 180_000);
 afterAll(async () => {
   await client?.close();
@@ -198,14 +208,16 @@ test("real RLS query totals all events, separates units, excludes other accounts
   );
   expect(pageOne.workspaces).toHaveLength(50);
   expect(pageOne.nextWorkspaceCursor).not.toBeNull();
-  const pageTwo = await getOrganizationUsageSummary(
-    client.db,
-    { accountId: grant.accountId, period: "month", afterWorkspaceId: pageOne.nextWorkspaceCursor! },
-    new Date("2026-09-14T12:00:00Z"),
-  );
+  const pageTwo = await getOrganizationUsageWorkspacePage(client.db, {
+    accountId: grant.accountId,
+    period: "month",
+    until: pageOne.until,
+    afterWorkspaceId: pageOne.nextWorkspaceCursor!,
+  });
   expect(pageTwo.workspaces).toHaveLength(2);
   expect(pageTwo.nextWorkspaceCursor).toBeNull();
-  expect(pageTwo.totals).toEqual(pageOne.totals);
+  expect("totals" in pageTwo).toBe(false);
+  expect("buckets" in pageTwo).toBe(false);
   expect(
     new Set(
       [...pageOne.workspaces, ...pageTwo.workspaces].map((workspace) => workspace.workspaceId),

@@ -4,6 +4,9 @@ export const OrganizationUsagePeriod = z.enum(["today", "week", "month", "ytd"])
 export type OrganizationUsagePeriod = z.infer<typeof OrganizationUsagePeriod>;
 export const OrganizationUsageQuery = z.object({
   period: OrganizationUsagePeriod.default("month"),
+});
+export const OrganizationUsageWorkspacePageQuery = OrganizationUsageQuery.extend({
+  until: z.string().datetime(),
   afterWorkspaceId: z.string().uuid().optional(),
 });
 // PostgreSQL SUM(bigint) must never pass through a JavaScript number.
@@ -33,3 +36,10 @@ export const OrganizationUsageSummary = z.object({
   nextWorkspaceCursor: z.string().uuid().nullable(),
 });
 export type OrganizationUsageSummary = z.infer<typeof OrganizationUsageSummary>;
+
+/** A page deliberately excludes totals and charts: those are not recomputed. */
+export const OrganizationUsageWorkspacePage = OrganizationUsageSummary.omit({
+  totals: true,
+  buckets: true,
+});
+export type OrganizationUsageWorkspacePage = z.infer<typeof OrganizationUsageWorkspacePage>;

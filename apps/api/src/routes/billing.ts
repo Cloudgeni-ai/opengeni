@@ -4,6 +4,7 @@ import {
   CreateCheckoutRequest,
   CreateCheckoutResponse,
   OrganizationUsageQuery,
+  OrganizationUsageWorkspacePageQuery,
   type AccessContext,
   type Permission,
 } from "@opengeni/contracts";
@@ -16,6 +17,7 @@ import {
   isStripeWebhookProcessed,
   listUsageEvents,
   getOrganizationUsageSummary,
+  getOrganizationUsageWorkspacePage,
   getManagedAccount,
   markStripeWebhookProcessed,
   recordStripeWebhookEvent,
@@ -69,6 +71,17 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     return c.json(await getOrganizationUsageSummary(deps.db, { accountId, ...parsed.data }));
+  });
+
+  app.get("/v1/billing/usage-workspaces", async (c) => {
+    const context = await requireAccessContext(c, deps);
+    const accountId = requireSelectedAccount(context, c.req.query("accountId"), "billing:read");
+    const parsed = OrganizationUsageWorkspacePageQuery.safeParse(c.req.query());
+    if (!parsed.success)
+      throw new HTTPException(400, {
+        message: parsed.error.issues[0]?.message ?? "invalid usage page query",
+      });
+    return c.json(await getOrganizationUsageWorkspacePage(deps.db, { accountId, ...parsed.data }));
   });
 
   app.get("/v1/billing/entitlements", async (c) => {

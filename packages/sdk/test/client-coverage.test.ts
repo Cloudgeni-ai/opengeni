@@ -2283,7 +2283,7 @@ describe("OpenGeniClient external workspace provisioning", () => {
 });
 
 describe("OpenGeniClient billing", () => {
-  test("organization usage summary makes one account-scoped request with bounded period and cursor", async () => {
+  test("organization usage pages have a separate bounded request without rereading the summary", async () => {
     const response = {
       accountId: "acc-1",
       period: "ytd" as const,
@@ -2307,14 +2307,22 @@ describe("OpenGeniClient billing", () => {
       await client.getOrganizationUsageSummary({
         accountId: "acc-1",
         period: "ytd",
-        afterWorkspaceId: WORKSPACE_ID,
       }),
     ).toEqual(response);
     expect(requests).toHaveLength(1);
     expect(new URL(requests[0]!.url).pathname).toBe("/v1/billing/usage-summary");
     expect(new URL(requests[0]!.url).searchParams.get("period")).toBe("ytd");
     expect(new URL(requests[0]!.url).searchParams.get("accountId")).toBe("acc-1");
-    expect(new URL(requests[0]!.url).searchParams.get("afterWorkspaceId")).toBe(WORKSPACE_ID);
+    await client.getOrganizationUsageWorkspacePage({
+      accountId: "acc-1",
+      period: "ytd",
+      until: response.until,
+      afterWorkspaceId: WORKSPACE_ID,
+    });
+    expect(requests).toHaveLength(2);
+    expect(new URL(requests[1]!.url).pathname).toBe("/v1/billing/usage-workspaces");
+    expect(new URL(requests[1]!.url).searchParams.get("afterWorkspaceId")).toBe(WORKSPACE_ID);
+    expect(new URL(requests[1]!.url).searchParams.get("until")).toBe(response.until);
   });
 
   test("billing reads pass account/workspace selectors as query params", async () => {

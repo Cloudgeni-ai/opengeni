@@ -230,6 +230,9 @@ describe("release schema contract", () => {
     const knowledgeRelationshipProjection = completeSourceContract.migrations.some(
       (migration) => migration.path === "0468_knowledge_relationship_projection.sql",
     );
+    const organizationUsageAnalyticalCapability = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0471_organization_usage_analytical_capability.sql",
+    );
     const mcpOperations = completeSourceContract.migrations.some(
       (migration) => migration.path === "0459_mcp_operations.sql",
     );
@@ -259,6 +262,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (organizationUsageAnalyticalCapability ? 1 : 0) +
         (knowledgeRelationshipProjection ? 1 : 0) +
         (hostResolverFullOrganizationKeys ? 1 : 0) +
         (agentInstructionActivationPreservation ? 1 : 0) +
@@ -386,9 +390,14 @@ describe("release schema contract", () => {
       ...(knowledgeRelationshipProjection
         ? { latestMigration: "0468_knowledge_relationship_projection.sql" }
         : {}),
+      ...(organizationUsageAnalyticalCapability
+        ? { latestMigration: "0471_organization_usage_analytical_capability.sql" }
+        : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: "0468_knowledge_relationship_projection.sql",
+      path: organizationUsageAnalyticalCapability
+        ? "0471_organization_usage_analytical_capability.sql"
+        : "0468_knowledge_relationship_projection.sql",
       deploymentMode: "rolling",
     });
     expect(
@@ -1497,6 +1506,9 @@ describe("release schema contract", () => {
     const knowledgeRelationshipProjection = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0468_knowledge_relationship_projection.sql",
     );
+    const organizationUsageAnalyticalCapability = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0471_organization_usage_analytical_capability.sql",
+    );
     let completeSourceContract = await contractWithoutMigrations([
       "0463_host_mcp_resolver_registration.sql",
       "0461_unified_knowledge.sql",
@@ -1950,6 +1962,7 @@ describe("release schema contract", () => {
       "0466_agent_instruction_activation_preservation.sql",
       "0467_host_resolver_full_organization_keys.sql",
       "0468_knowledge_relationship_projection.sql",
+      "0471_organization_usage_analytical_capability.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2313,8 +2326,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0468_knowledge_relationship_projection.sql",
       };
+    if (organizationUsageAnalyticalCapability)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0471_organization_usage_analytical_capability.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (organizationUsageAnalyticalCapability ? 1 : 0) +
         (knowledgeRelationshipProjection ? 1 : 0) +
         (hostResolverFullOrganizationKeys ? 1 : 0) +
         (agentInstructionActivationPreservation ? 1 : 0) +
@@ -2642,6 +2661,9 @@ describe("release schema contract", () => {
         : {}),
       ...(knowledgeRelationshipProjection
         ? { latestMigration: "0468_knowledge_relationship_projection.sql" }
+        : {}),
+      ...(organizationUsageAnalyticalCapability
+        ? { latestMigration: "0471_organization_usage_analytical_capability.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(

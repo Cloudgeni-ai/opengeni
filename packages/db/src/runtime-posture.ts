@@ -1959,6 +1959,7 @@ export async function inspectRuntimeDatabasePosture(
               ${SCOPED_COMPUTE_CAPABILITY_TABLE},
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
+              'organization_usage_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE}
             )
         `),
@@ -3559,6 +3560,39 @@ export function evaluateRuntimeDatabasePosture(
       ) {
         violations.push(`sandbox file publication capability ${name} is missing or unsafe`);
       }
+    }
+  }
+
+  const organizationUsageCapability = posture.privateTables.find(
+    (table) => table.name === "organization_usage_read_capabilities",
+  );
+  if (organizationUsageCapability) {
+    const capability = organizationUsageCapability;
+    if (
+      capability.owner === expectedRole ||
+      capability.owner !== tableByName.get("usage_events")?.owner ||
+      capability.select ||
+      capability.insert ||
+      capability.update ||
+      capability.delete
+    ) {
+      violations.push(
+        "organization usage capability has unsafe owner or direct runtime privileges",
+      );
+    }
+    const routine = posture.privateRoutines.find(
+      (routine) =>
+        routine.name ===
+        "organization_usage_summary(uuid, timestamp with time zone, timestamp with time zone, text, uuid, boolean)",
+    );
+    if (
+      !routine ||
+      !routine.securityDefiner ||
+      !routine.execute ||
+      routine.publicExecute ||
+      routine.owner !== capability.owner
+    ) {
+      violations.push("organization usage aggregate capability is missing or unsafe");
     }
   }
 
