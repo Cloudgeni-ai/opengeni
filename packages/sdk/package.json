@@ -74,6 +74,10 @@
       "types": "./src/pr-review.ts",
       "default": "./src/pr-review.ts"
     },
+    "./organization-integration-policy": {
+      "types": "./src/organization-integration-policy.ts",
+      "default": "./src/organization-integration-policy.ts"
+    },
     "./organization-private-session-settings": {
       "types": "./src/organization-private-session-settings.ts",
       "default": "./src/organization-private-session-settings.ts"
