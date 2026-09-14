@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { verifyModalMaterializedPath } from "../src/sandbox/providers/modal-materialization-verification";
-import type {
+import {
   ModalCommandControl,
-  ModalProviderCommand,
-  ModalProviderOutputPage,
+  type ModalProviderCommand,
+  type ModalProviderOutputPage,
 } from "../src/sandbox/providers/modal-command-control";
 import { materializationVerificationDiagnostic } from "../src/sandbox/materialization-verification-error";
 import { RoutingSandboxSession } from "../src/sandbox/routing/routing-session";
@@ -34,14 +34,14 @@ function fixture(pages: ModalProviderOutputPage[]) {
   let starts = 0;
   let reads = 0;
   const pending = new Set<AbortController>();
-  const control: Pick<ModalCommandControl, "start" | "read"> = {
+  const control: Pick<ModalCommandControl, "start" | "readProbe"> = {
     async start(args) {
       starts++;
       expect(args.cmd).toBe(`test -e 'repos/example' && printf %s '${marker}'`);
       expect(args.workdir).toBe("/workspace");
       return structuredClone(command);
     },
-    async read() {
+    async readProbe() {
       reads++;
       return pages.shift() ?? page("", null);
     },
@@ -106,7 +106,7 @@ for (const stage of ["start", "read"] as const) {
         );
       });
     if (stage === "start") f.control.start = async (_, signal) => stalled(signal);
-    else f.control.read = async (_, __, signal) => stalled(signal);
+    else f.control.readProbe = async (_, __, cancellation) => stalled(cancellation.signal);
     await expect(
       verifyModalMaterializedPath(f.control, "repos/example", "/workspace", f.pending, 5),
     ).rejects.toMatchObject({ diagnostic: { reason: "command_pending" } });
@@ -118,7 +118,7 @@ for (const stage of ["start", "read"] as const) {
 test("provider errors keep identity and retained diagnostic evidence", async () => {
   const f = fixture([]);
   const error = Object.assign(new Error("provider unavailable"), { status: 503 });
-  f.control.read = async () => {
+  f.control.readProbe = async () => {
     throw error;
   };
   await expect(
@@ -144,7 +144,7 @@ test("rejects a changed provider identity without replay", async () => {
 test("attempt cancellation preserves its cause and rejects late success", async () => {
   const f = fixture([]);
   const cancellation = new Error("attempt cancelled");
-  f.control.read = async () => {
+  f.control.readProbe = async () => {
     for (const controller of f.pending) controller.abort(cancellation);
     return page(marker, 0);
   };
@@ -220,4 +220,52 @@ test("capture waits for the probe under the original gate without nested admissi
   finish();
   await Promise.all([materialization, capture]);
   expect(order).toEqual(["write", "probe", "verified", "capture"]);
+});
+
+test("a stream failure aborts and drains its sibling before releasing probe ownership", async () => {
+  const failure = new Error("stdout transport failed");
+  let siblingEntered!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    siblingEntered = resolve;
+  });
+  let siblingSettled = false;
+  let siblingSignal: AbortSignal | undefined;
+  const pending = new Set<AbortController>();
+  const port = {
+    sandboxGetTaskId: async () => ({ taskId: "ta-test" }),
+    containerExec: async () => ({ execId: "tp-test" }),
+    async *containerExecGetOutput(
+      request: { fileDescriptor: number },
+      options?: { signal?: AbortSignal },
+    ): AsyncGenerator<never> {
+      if (request.fileDescriptor === 1) {
+        await entered;
+        throw failure;
+      }
+      siblingSignal = options?.signal;
+      try {
+        siblingEntered();
+        yield await new Promise<never>((_, reject) => {
+          siblingSignal!.addEventListener("abort", () => reject(siblingSignal!.reason), {
+            once: true,
+          });
+        });
+      } finally {
+        // Model asynchronous transport cleanup, not merely receipt of abort.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        siblingSettled = true;
+      }
+    },
+  };
+  const control = ModalCommandControl.forSandbox(
+    { cpClient: port, version: () => "0.9.0" } as never,
+    "sb-test",
+    "/workspace",
+  );
+  await expect(
+    verifyModalMaterializedPath(control, "repos/example", "/workspace", pending),
+  ).rejects.toBe(failure);
+  expect(siblingSignal?.aborted).toBe(true);
+  expect(siblingSettled).toBe(true);
+  expect(pending.size).toBe(0);
 });

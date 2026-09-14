@@ -924,7 +924,9 @@ page is not completion. It never borrows the parent workspace mutation's retaine
 command handle, weakens command persistence, or retries the clone/check/turn.
 Success requires exit zero and the exact visibility marker. A 30-second
 observation deadline and turn cancellation abort outstanding provider RPCs;
-aborting observation does not prove process termination. Deadline failures stay
+if either probe output stream fails, its sibling is aborted and both reads drain
+before the provider-operation gate is released. The original error is preserved.
+Aborting observation does not prove process termination. Deadline failures stay
 unconfirmed and preserve the known provider execution identity in authenticated
 materialization diagnostics. Other providers retain their existing verification
 contract, and Connected Machine materialization remains a no-op.

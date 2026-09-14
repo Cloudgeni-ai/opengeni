@@ -14,7 +14,7 @@ const OUTPUT_LIMIT = 16 * 1024;
  * the original backend and provider-operation gate for the entire observation.
  */
 export async function verifyModalMaterializedPath(
-  control: Pick<ModalCommandControl, "start" | "read">,
+  control: Pick<ModalCommandControl, "start" | "readProbe">,
   path: string,
   workdir: string,
   pending: Set<AbortController>,
@@ -23,7 +23,7 @@ export async function verifyModalMaterializedPath(
   const quote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
   const command = `test -e ${quote(path)} && printf %s ${quote(MARKER)}`;
   const cancellation = new AbortController();
-  let deadlineExpired = false;
+  const deadlineReason = new Error("Materialization visibility observation deadline exceeded");
   let providerCommand: ModalProviderCommand | undefined;
   let stdout = "";
   let stderr = "";
@@ -49,8 +49,7 @@ export async function verifyModalMaterializedPath(
       : {}),
   });
   const timer = setTimeout(() => {
-    deadlineExpired = true;
-    cancellation.abort(new Error("Materialization visibility observation deadline exceeded"));
+    cancellation.abort(deadlineReason);
   }, observationTimeoutMs);
   timer.unref();
   pending.add(cancellation);
@@ -61,7 +60,7 @@ export async function verifyModalMaterializedPath(
     );
     for (;;) {
       cancellation.signal.throwIfAborted();
-      const page = await control.read(providerCommand, 1_000, cancellation.signal);
+      const page = await control.readProbe(providerCommand, 1_000, cancellation);
       // Cancellation ends observation, not the process. Never accept a late
       // success after the attempt requested cancellation.
       cancellation.signal.throwIfAborted();
@@ -99,7 +98,7 @@ export async function verifyModalMaterializedPath(
       );
     }
   } catch (error) {
-    if (deadlineExpired) {
+    if (cancellation.signal.reason === deadlineReason) {
       throw new SandboxMaterializationVerificationError(
         {
           ...diagnostic("command_pending"),
@@ -116,6 +115,7 @@ export async function verifyModalMaterializedPath(
     }
     throw error;
   } finally {
+    cancellation.abort(new Error("Materialization visibility observation finished"));
     clearTimeout(timer);
     pending.delete(cancellation);
   }
