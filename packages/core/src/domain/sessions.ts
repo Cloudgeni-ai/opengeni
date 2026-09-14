@@ -209,6 +209,26 @@ const maxSessionMcpCredentialHeaderValueLength = 4096;
 // the generic lossy projection cannot silently rewrite this audit fact.
 const maxToolPolicyAuditRefs = 40;
 
+function withoutExcludedMcpServers(
+  tools: ToolRef[],
+  excludedIds: readonly string[] = [],
+): ToolRef[] {
+  const excluded = new Set(excludedIds);
+  return tools.filter((tool) => tool.id === "opengeni" || !excluded.has(tool.id));
+}
+
+function defaultPolicyExclusions(
+  ids: readonly string[] = [],
+): Pick<SessionToolPolicy, "excludedMcpServerIds"> {
+  const sorted = [...new Set(ids)].filter((id) => id !== "opengeni").sort();
+  if (sorted.length > 64 || sorted.some((id) => id.length > 200 || !/^[A-Za-z0-9_-]+$/.test(id))) {
+    throw new HTTPException(422, {
+      message: "connector exclusions must contain at most 64 valid MCP server IDs",
+    });
+  }
+  return sorted.length ? { excludedMcpServerIds: sorted } : {};
+}
+
 function isCatalogOverlayModel(modelId: string | null | undefined): boolean {
   return (
     modelId?.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) === true ||
@@ -2395,6 +2415,11 @@ async function createSessionForRequestInFileScope(
     });
   }
   const toolsProvided = hasOwnProperty(rawPayload, "tools");
+  if (toolsProvided && payload.excludedMcpServerIds !== undefined) {
+    throw new HTTPException(422, {
+      message: "connector exclusions require workspace-default tools",
+    });
+  }
   // Visibility became durable draft state after older clients had already
   // written rows without it. Compare it only when the create request supplied
   // the field explicitly; the parsed schema default must not manufacture a
@@ -2417,6 +2442,9 @@ async function createSessionForRequestInFileScope(
           )
         : parentSession.tools,
       runtimeSettings,
+    ).filter(
+      (tool) =>
+        tool.id === "opengeni" || !parentSession.toolPolicy.excludedMcpServerIds?.includes(tool.id),
     );
     if (toolsProvided) {
       assertToolRefsSubset(
@@ -2434,6 +2462,7 @@ async function createSessionForRequestInFileScope(
       toolPolicy = {
         mode: parentTracksWorkspaceDefaults ? "workspace_default" : "inherited",
         inheritedFromSessionId: parentSession.id,
+        ...defaultPolicyExclusions(parentSession.toolPolicy.excludedMcpServerIds),
       };
     }
   } else if (toolsProvided) {
@@ -2448,6 +2477,21 @@ async function createSessionForRequestInFileScope(
     );
     toolPolicy = { mode: "workspace_default", inheritedFromSessionId: null };
   }
+  if (payload.excludedMcpServerIds !== undefined) {
+    if (toolPolicy.mode !== "workspace_default") {
+      throw new HTTPException(403, {
+        message: "connector exclusions require workspace-default tools",
+      });
+    }
+    toolPolicy = {
+      ...toolPolicy,
+      ...defaultPolicyExclusions([
+        ...(toolPolicy.excludedMcpServerIds ?? []),
+        ...payload.excludedMcpServerIds,
+      ]),
+    };
+  }
+  selectedTools = withoutExcludedMcpServers(selectedTools, toolPolicy.excludedMcpServerIds);
   // The first-party MCP server is attached to EVERY session. Registration is
   // independently intersected with the exact model-visible selection and the
   // tool's permission/target authorization predicate, so attachment alone
@@ -2584,6 +2628,9 @@ async function createSessionForRequestInFileScope(
           reasoningEffort,
           latencyMode,
           options: {
+            ...(payload.excludedMcpServerIds !== undefined
+              ? { excludedMcpServerIds: payload.excludedMcpServerIds }
+              : {}),
             ...(visibilityProvided ? { visibility: payload.visibility } : {}),
             ...(payload.sandboxBackend ? { sandboxBackend: payload.sandboxBackend } : {}),
             ...(payload.targetSandboxId ? { targetSandboxId: payload.targetSandboxId } : {}),
@@ -3976,6 +4023,12 @@ function toolPolicyAuditSnapshot(
   return {
     mode: policy.mode,
     inheritedFromSessionId: policy.inheritedFromSessionId,
+    ...(policy.excludedMcpServerIds?.length
+      ? {
+          excludedMcpServerIds: policy.excludedMcpServerIds.slice(0, maxToolPolicyAuditRefs),
+          excludedMcpServerCount: policy.excludedMcpServerIds.length,
+        }
+      : {}),
     // IDs only: no MCP URLs, names, headers, credentials, schemas, or args.
     toolIds: [...toolRefs]
       .sort((left, right) => `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`))
@@ -3984,7 +4037,9 @@ function toolPolicyAuditSnapshot(
     toolCount: allToolRefs.length,
     firstPartyMcpTools: [...firstPartyMcpTools].sort(),
     firstPartyMcpToolCount: firstPartyMcpTools.length,
-    truncated: allToolRefs.length > toolRefs.length,
+    truncated:
+      allToolRefs.length > toolRefs.length ||
+      (policy.excludedMcpServerIds?.length ?? 0) > maxToolPolicyAuditRefs,
   };
 }
 
@@ -4028,9 +4083,31 @@ export async function updateSessionToolPolicy(
   );
   const explicitRequest = request.mode === "workspace_default" ? null : request;
   const requestedMode = explicitRequest ? "explicit" : "workspace_default";
+  const connectorOnlyEdit =
+    request.mode === "workspace_default" && request.excludedMcpServerIds !== undefined;
+  const requestedExclusions =
+    request.mode === "workspace_default" ? (request.excludedMcpServerIds ?? []) : [];
   const explicitRequestedTools = explicitRequest
     ? (() => {
-        const validatedTools = validateToolRefs(explicitRequest.tools, runtimeSettings);
+        // A disconnected stored selection remains policy truth, not executable
+        // authority. Preserve exact existing refs while validating every new or
+        // changed ref against the current runtime registry.
+        const availableIds = new Set(runtimeSettings.mcpServers.map((server) => server.id));
+        const retainedUnavailableRefs = explicitRequest.tools.filter(
+          (tool) =>
+            !availableIds.has(tool.id) &&
+            existingSession.tools.some((existing) => stableJson(existing) === stableJson(tool)),
+        );
+        const retainedIds = new Set(retainedUnavailableRefs.map((tool) => tool.id));
+        const validatedCurrentRefs = validateToolRefs(
+          explicitRequest.tools.filter((tool) => !retainedIds.has(tool.id)),
+          runtimeSettings,
+        );
+        const validatedTools = explicitRequest.tools.filter(
+          (tool) =>
+            retainedUnavailableRefs.includes(tool) ||
+            validatedCurrentRefs.some((validated) => validated.id === tool.id),
+        );
         const validatedIds = new Set(validatedTools.map((tool) => `${tool.kind}:${tool.id}`));
         const unknown = explicitRequest.tools.find(
           (tool) => !validatedIds.has(`${tool.kind}:${tool.id}`),
@@ -4100,6 +4177,9 @@ export async function updateSessionToolPolicy(
               )
             : parent.tools,
           runtimeSettings,
+        ).filter(
+          (tool) =>
+            tool.id === "opengeni" || !parent.toolPolicy.excludedMcpServerIds?.includes(tool.id),
         );
         const deploymentAllowedFirstPartyMcpTools = new Set(
           deploymentFirstPartyMcpToolPolicy.allowed,
@@ -4119,6 +4199,10 @@ export async function updateSessionToolPolicy(
           nextPolicy = {
             mode: "workspace_default",
             inheritedFromSessionId: parent.id,
+            ...defaultPolicyExclusions([
+              ...(parent.toolPolicy.excludedMcpServerIds ?? []),
+              ...requestedExclusions,
+            ]),
           };
         } else {
           nextTools = explicitRequestedTools!;
@@ -4149,41 +4233,88 @@ export async function updateSessionToolPolicy(
           requestedMode === "workspace_default"
             ? workspaceDefaultFirstPartyTools
             : explicitRequestedFirstPartyTools!;
-        nextPolicy = { mode: requestedMode, inheritedFromSessionId: null };
-        if (agentAttemptCaller) {
-          // A human or API key may widen a top-level session; a live agent
-          // attempt may only narrow relative to the session's CURRENT
-          // effective policy, in either mode. Adopting workspace defaults is a
-          // widen whenever it adds a server or tool the session does not hold.
-          const sessionTracksWorkspaceDefaults = session.toolPolicy?.mode === "workspace_default";
-          const currentEffectiveTools = withFirstPartyTools(
-            sessionTracksWorkspaceDefaults
-              ? withWorkspaceDefaultMcpTools(
-                  availableToolRefs(session.tools, runtimeSettings),
+        nextPolicy = {
+          mode: requestedMode,
+          inheritedFromSessionId: null,
+          ...(requestedMode === "workspace_default"
+            ? defaultPolicyExclusions(requestedExclusions)
+            : {}),
+        };
+      }
+      if (connectorOnlyEdit) {
+        if (session.toolPolicy.mode !== "workspace_default") {
+          throw new HTTPException(409, {
+            message: "adopt workspace defaults before editing connector exclusions",
+          });
+        }
+        // A connector switch never rewrites built-in tool choices or selected refs.
+        nextTools = session.tools;
+        nextFirstPartyMcpTools = [
+          ...(session.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default),
+        ];
+      }
+      if (!connectorOnlyEdit) {
+        nextTools = withoutExcludedMcpServers(nextTools, nextPolicy.excludedMcpServerIds);
+      }
+      if (agentAttemptCaller && !session.parentSessionId) {
+        // A human or API key may widen a top-level session; a live agent
+        // attempt may only narrow relative to the session's CURRENT
+        // effective policy, in either mode. Adopting workspace defaults is a
+        // widen whenever it adds a server or tool the session does not hold.
+        const sessionTracksWorkspaceDefaults = session.toolPolicy?.mode === "workspace_default";
+        const currentEffectiveTools = withFirstPartyTools(
+          sessionTracksWorkspaceDefaults
+            ? withWorkspaceDefaultMcpTools(
+                availableToolRefs(session.tools, runtimeSettings),
+                deps.settings,
+                runtimeSettings,
+                workspaceSessionToolDefaults,
+              )
+            : session.tools,
+          runtimeSettings,
+        );
+        const currentAllowedTools = withoutExcludedMcpServers(
+          currentEffectiveTools,
+          session.toolPolicy.excludedMcpServerIds,
+        );
+        const nextEffectiveTools =
+          nextPolicy.mode === "workspace_default"
+            ? withFirstPartyTools(
+                withWorkspaceDefaultMcpTools(
+                  availableToolRefs(nextTools, runtimeSettings),
                   deps.settings,
                   runtimeSettings,
                   workspaceSessionToolDefaults,
-                )
-              : session.tools,
-            runtimeSettings,
-          );
-          assertToolRefsSubset(
-            nextTools,
-            currentEffectiveTools,
-            "an agent may only narrow its session tool policy",
-          );
-          const currentFirstPartyCeiling = effectiveFirstPartyMcpToolCeiling(
-            session.firstPartyMcpTools,
-            deploymentFirstPartyMcpToolPolicy,
-          );
-          const widenedFirstPartyTool = nextFirstPartyMcpTools.find(
-            (tool) => !currentFirstPartyCeiling.has(tool),
-          );
-          if (widenedFirstPartyTool) {
-            throw new HTTPException(403, {
-              message: `an agent may only narrow its session OpenGeni tools: ${widenedFirstPartyTool}`,
-            });
-          }
+                ),
+                runtimeSettings,
+              )
+            : nextTools;
+        if (
+          nextPolicy.mode === "workspace_default" &&
+          (session.toolPolicy.excludedMcpServerIds ?? []).some(
+            (id) => !nextPolicy.excludedMcpServerIds?.includes(id),
+          )
+        ) {
+          throw new HTTPException(403, {
+            message: "an agent may not remove session connector exclusions",
+          });
+        }
+        assertToolRefsSubset(
+          withoutExcludedMcpServers(nextEffectiveTools, nextPolicy.excludedMcpServerIds),
+          currentAllowedTools,
+          "an agent may only narrow its session tool policy",
+        );
+        const currentFirstPartyCeiling = effectiveFirstPartyMcpToolCeiling(
+          session.firstPartyMcpTools,
+          deploymentFirstPartyMcpToolPolicy,
+        );
+        const widenedFirstPartyTool = nextFirstPartyMcpTools.find(
+          (tool) => !currentFirstPartyCeiling.has(tool),
+        );
+        if (widenedFirstPartyTool) {
+          throw new HTTPException(403, {
+            message: `an agent may only narrow its session OpenGeni tools: ${widenedFirstPartyTool}`,
+          });
         }
       }
 

@@ -2283,6 +2283,48 @@ describe("OpenGeniClient external workspace provisioning", () => {
 });
 
 describe("OpenGeniClient billing", () => {
+  test("organization usage pages have a separate bounded request without rereading the summary", async () => {
+    const response = {
+      accountId: "acc-1",
+      period: "ytd" as const,
+      since: "2026-01-01T00:00:00.000Z",
+      until: "2026-09-14T12:00:00.000Z",
+      granularity: "day" as const,
+      totals: [
+        {
+          eventType: "model.cost",
+          unit: "usd_micros",
+          quantity: "9007199254740993",
+          eventCount: "1",
+        },
+      ],
+      buckets: [],
+      workspaces: [],
+      nextWorkspaceCursor: null,
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    expect(
+      await client.getOrganizationUsageSummary({
+        accountId: "acc-1",
+        period: "ytd",
+      }),
+    ).toEqual(response);
+    expect(requests).toHaveLength(1);
+    expect(new URL(requests[0]!.url).pathname).toBe("/v1/billing/usage-summary");
+    expect(new URL(requests[0]!.url).searchParams.get("period")).toBe("ytd");
+    expect(new URL(requests[0]!.url).searchParams.get("accountId")).toBe("acc-1");
+    await client.getOrganizationUsageWorkspacePage({
+      accountId: "acc-1",
+      period: "ytd",
+      until: response.until,
+      afterWorkspaceId: WORKSPACE_ID,
+    });
+    expect(requests).toHaveLength(2);
+    expect(new URL(requests[1]!.url).pathname).toBe("/v1/billing/usage-workspaces");
+    expect(new URL(requests[1]!.url).searchParams.get("afterWorkspaceId")).toBe(WORKSPACE_ID);
+    expect(new URL(requests[1]!.url).searchParams.get("until")).toBe(response.until);
+  });
+
   test("billing reads pass account/workspace selectors as query params", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({

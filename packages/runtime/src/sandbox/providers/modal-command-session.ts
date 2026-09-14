@@ -11,6 +11,7 @@ import {
   admittedProviderCommandHandle,
 } from "../provider-command-session";
 import type { ModalCommandControl, ModalProviderCommand } from "./modal-command-control";
+import { verifyModalMaterializedPath } from "./modal-materialization-verification";
 
 type Entry = {
   command: ModalProviderCommand;
@@ -33,6 +34,7 @@ export function installModalCommandSession(
   session: ProviderCommandSession & {
     execCommand?: ChannelASession["execCommand"];
     writeStdin?: ChannelASession["writeStdin"];
+    verifyMaterializedPath?: (path: string, workdir: string) => Promise<void>;
   },
   control: ModalCommandControl,
 ): void {
@@ -41,6 +43,8 @@ export function installModalCommandSession(
   const originalWrite = session.writeStdin?.bind(session);
   const cancelLegacyStart = session.cancelPendingExecCommand?.bind(session);
   const pendingStarts = new Set<AbortController>();
+  session.verifyMaterializedPath = (path, workdir) =>
+    verifyModalMaterializedPath(control, path, workdir, pendingStarts);
   const entries = new Map<number, Entry>();
   // Current SDK setup commands are not retained/admitted commands. Give their
   // live observer handles a disjoint, adapter-local range; never use a missing

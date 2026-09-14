@@ -382,7 +382,11 @@ export type AppContextValue = {
       installedSkillIds?: string[];
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[];
-      newSessionDraftToolPolicy?: { tools: ToolRef[]; toolsProvided: boolean };
+      newSessionDraftToolPolicy?: {
+        tools: ToolRef[];
+        toolsProvided: boolean;
+        excludedMcpServerIds?: string[];
+      };
       targetSandboxId?: string | null;
       workingDir?: string | null;
       /** Workspace folder to file the new session under. */
@@ -1132,7 +1136,16 @@ export function RootRouteComponent() {
     const available = new Set(toolMcpServers.map((server) => server.id));
     const configured = configuredWorkspaceToolDefaults?.mcpServerIds;
     return configured
-      ? configured.filter((id) => available.has(id))
+      ? [
+          ...new Set([
+            ...configured.filter((id) => available.has(id)),
+            ...(configuredWorkspaceToolDefaults?.inheritConnectedMcpServers
+              ? toolMcpServers
+                  .filter((server) => !["opengeni", "files", "docs"].includes(server.id))
+                  .map((server) => server.id)
+              : []),
+          ]),
+        ]
       : toolMcpServers.map((server) => server.id);
   }, [configuredWorkspaceToolDefaults, toolMcpServers]);
   const lastValidResources = useRef<ResourceRef[]>([]);
@@ -1175,7 +1188,7 @@ export function RootRouteComponent() {
 
   useCapabilityToolDefaults({
     principalKey: JSON.stringify(principalTransitionIdentity.current),
-    ready: clientConfig !== null,
+    ready: clientConfig !== null && !/^\/workspaces\/[^/]+\/sessions\/?$/.test(pathname),
     workspaceId: routedWorkspaceId,
     configuredIds: configuredWorkspaceToolDefaults?.mcpServerIds,
     availableIds: toolMcpServers.map((server) => server.id),
@@ -1867,7 +1880,11 @@ export function RootRouteComponent() {
       installedSkillIds?: string[];
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[];
-      newSessionDraftToolPolicy?: { tools: ToolRef[]; toolsProvided: boolean };
+      newSessionDraftToolPolicy?: {
+        tools: ToolRef[];
+        toolsProvided: boolean;
+        excludedMcpServerIds?: string[];
+      };
       targetSandboxId?: string | null;
       workingDir?: string | null;
       channelId?: string | null;
@@ -1943,8 +1960,7 @@ export function RootRouteComponent() {
           defaultLatencyMode: latencyMode,
           clientEventId: crypto.randomUUID(),
           idempotencyKey: freshIdempotencyKey,
-          workspaceDefaultMcpServerIds:
-            configuredWorkspaceToolDefaults?.mcpServerIds ?? workspaceDefaultToolIds,
+          workspaceDefaultMcpServerIds: workspaceDefaultToolIds,
           workspaceMcpCatalogReady,
           targetSandboxId: options?.targetSandboxId,
           workingDir: options?.workingDir,

@@ -51,7 +51,7 @@ import { buildCodexTokenResolver } from "../codex-auth";
 import { CODEX_CLIENT_VERSION } from "@opengeni/codex";
 import { mergeResourceRefs } from "../common";
 import {
-  defaultSessionMcpServerIds,
+  workspaceSessionToolPolicyDefaultServerIds,
   loadRigDefaultVariableSetEnvironment,
   mergeRigDefaultVariableSetEnvironment,
   buildApiIntegrationMcpServers,
@@ -212,7 +212,15 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
       ? scheduledEffectiveMcpServerIds.filter((id) => currentMcpServerIds.has(id))
       : [...currentMcpServerIds],
     defaultMcpServerIds:
-      scheduledEffectiveMcpServerIds ?? defaultSessionMcpServerIds(capabilitySettings.mcpServers),
+      scheduledEffectiveMcpServerIds ??
+      (session.toolPolicy.mode === "workspace_default"
+        ? await workspaceSessionToolPolicyDefaultServerIds(
+            db,
+            input.workspaceId,
+            capabilitySettings,
+            fileAuthoritySubjectId ?? undefined,
+          )
+        : []),
   });
   const mcpAvailabilityNote = unavailableMcpOperationalContext({
     droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,

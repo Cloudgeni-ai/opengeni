@@ -102,10 +102,11 @@ operations have external effects. Recovery is explicit and attempt-fenced.
 Provider work stays outside database retries; only idempotent settlement
 transactions may retry.
 
-Active-run writes must prove the exact current attempt/execution generation.
-Stale workers may retain compute/network activity, but cannot append authoritative
-events or settle replacements. Temporal cancellation delivers intent, not proof
-of stopped tools/sandbox work; durable quiescence evidence gates replacement admission.
+Active-run writes prove the exact current attempt/generation. Stale workers may
+remain alive but cannot authoritatively write or settle replacements. Temporal
+cancellation is intent; durable quiescence gates replacements, including closed
+attempts' unresolved writers. After execution, finalization has per-stage
+containment and heartbeat/metric evidence (`agent-turn/finalization-monitor.ts`).
 
 A recoverable activity shutdown creates a transactional workflow-wake
 obligation in Postgres. Delivery remains unacknowledged until the exact closed
@@ -1127,6 +1128,9 @@ Projects uses the shared catalog/reader; hosts can exclude `builtin:opengeni-pro
 Capabilities define integration/tool shapes. Connections bind credentials and
 ownership. Session policy selects authorized tools.
 MCP/Codemode execute tools; neither grants authority.
+
+Connector permission management: `packages/core/src/domain/connector-tool-permissions.ts`.
+See [`session-mcp-servers.md`](session-mcp-servers.md).
 
 [MCP recovery](mcp-operation-recovery.md) observes outcomes without mutation replay.
 

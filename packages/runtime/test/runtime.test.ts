@@ -2385,13 +2385,14 @@ describe("runtime event normalization", () => {
     async function connectorPolicyFixture(input: {
       connectorDecision: "allow" | "ask" | "block";
       legacyApproval?: boolean;
+      withoutConnection?: boolean;
       begin?: ConnectorActionPolicyHooks["begin"];
       complete?: ConnectorActionPolicyHooks["complete"];
       sandboxBackend?: "none" | "modal";
     }) {
       const mcp = startTestMcpServer();
       const baseConfig = {
-        id: "docs",
+        id: input.withoutConnection ? "remote" : "docs",
         name: "Document Search",
         url: mcp.url,
         cacheToolsList: false,
@@ -2431,28 +2432,36 @@ describe("runtime event normalization", () => {
         mcpServers: [
           {
             ...baseConfig,
-            connectionRef: {
-              connectionId: "connection-1",
-              providerDomain: "example.test",
-            },
+            ...(input.withoutConnection
+              ? {}
+              : {
+                  connectionRef: {
+                    connectionId: "connection-1",
+                    providerDomain: "example.test",
+                  },
+                }),
           },
         ],
       });
-      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
-        accountId: "11111111-1111-4111-8111-111111111111",
-        workspaceId: "22222222-2222-4222-8222-222222222222",
-        sessionId: "33333333-3333-4333-8333-333333333333",
-        turnId: "44444444-4444-4444-8444-444444444444",
-        attemptId: "55555555-5555-4555-8555-555555555555",
-        executionGeneration: 1,
-        credentialSubjectId: "subject-a",
-        resolveCredential: async () => ({
-          status: "ok",
-          connectionId: "connection-1",
-          headers: { authorization: "Bearer connector-token" },
-        }),
-        connectorActionPolicy: hooks,
-      });
+      const prepared = await prepareAgentTools(
+        settings,
+        [{ kind: "mcp", id: input.withoutConnection ? "remote" : "docs" }],
+        {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: "55555555-5555-4555-8555-555555555555",
+          executionGeneration: 1,
+          credentialSubjectId: "subject-a",
+          resolveCredential: async () => ({
+            status: "ok",
+            connectionId: "connection-1",
+            headers: { authorization: "Bearer connector-token" },
+          }),
+          connectorActionPolicy: hooks,
+        },
+      );
       const agent = buildOpenGeniAgent(settings, [], {
         mcpServers: prepared.mcpServers,
         resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
@@ -2526,6 +2535,97 @@ describe("runtime event normalization", () => {
         } finally {
           await fixture.prepared.close();
           fixture.mcp.close();
+        }
+      }
+    });
+
+    test("header-backed connectors enforce Ask and Block before provider execution", async () => {
+      for (const connectorDecision of ["ask", "block"] as const) {
+        const fixture = await connectorPolicyFixture({
+          connectorDecision,
+          withoutConnection: true,
+          begin: async () => ({
+            allowed: false,
+            managed: true,
+            requestId: `request-${connectorDecision}`,
+            reason: connectorDecision === "ask" ? "approval_required" : "blocked",
+          }),
+        });
+        try {
+          const [tool] = (await fixture.agent.getMcpTools(new RunContext())).filter(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "remote__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+          expect(
+            await tool.needsApproval(
+              new RunContext(),
+              { query: "top-secret-query" },
+              `call-${connectorDecision}`,
+            ),
+          ).toBe(connectorDecision === "ask");
+          expect(
+            await tool.invoke(new RunContext(), JSON.stringify({ query: "top-secret-query" }), {
+              toolCall: { callId: `call-${connectorDecision}` },
+            } as any),
+          ).toMatchObject({ isError: true });
+          expect(fixture.mcp.calls).toHaveLength(0);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      }
+    });
+
+    test("Codemode observes connector Ask and Block for credential-free MCP servers", async () => {
+      for (const decision of ["ask", "block"] as const) {
+        const mcp = startTestMcpServer();
+        const seen: string[] = [];
+        const prepared = await prepareAgentTools(
+          testSettings({
+            mcpServers: [{ id: "remote", url: mcp.url, cacheToolsList: false }],
+          }),
+          [{ kind: "mcp", id: "remote" }],
+          {
+            accountId: "11111111-1111-4111-8111-111111111111",
+            workspaceId: "22222222-2222-4222-8222-222222222222",
+            sessionId: "33333333-3333-4333-8333-333333333333",
+            turnId: "44444444-4444-4444-8444-444444444444",
+            attemptId: "55555555-5555-4555-8555-555555555555",
+            executionGeneration: 1,
+            connectorActionPolicy: {
+              prepare: async (call) => {
+                seen.push(call.connectionId!);
+                return { managed: true, decision };
+              },
+              begin: async () => ({
+                allowed: false,
+                managed: true,
+                requestId: "request-test",
+                reason: "blocked",
+              }),
+              complete: async () => {
+                throw new Error("must not complete a blocked call");
+              },
+            },
+          },
+        );
+        try {
+          const environment = prepared.attemptToolEnvironment!;
+          await expect(
+            environment.call({
+              catalogDigest: environment.catalog.digest,
+              operationId: crypto.randomUUID(),
+              identity: { serverId: "remote", toolName: "search_documents" },
+              arguments: { query: "needle" },
+              caller: { kind: "codemode", subjectId: "worker:test" },
+            }),
+          ).rejects.toThrow(decision === "ask" ? "approval" : "blocked");
+          expect(seen[0]).toMatch(/^session-mcp:remote:[a-f0-9]{64}$/);
+          expect(mcp.calls).toHaveLength(0);
+        } finally {
+          await prepared.close();
+          mcp.close();
         }
       }
     });

@@ -2986,7 +2986,7 @@ function installMcpApprovalPolicy(
       const originalInvoke = tool.invoke.bind(tool);
       const legacyApproval =
         !policy.connectorBacked && mcpToolRequiresApproval(policy.requireApproval, unprefixed);
-      if (!policy.connectorBacked && !legacyApproval) {
+      if (!policy.connectorBacked && !legacyApproval && !connectorActionPolicy) {
         return tool;
       }
       const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => {
@@ -3324,6 +3324,7 @@ function applyMcpApprovalPolicy(
     .filter(
       (server) =>
         Boolean(server.connectionRef) ||
+        Boolean(connectorActionPolicy && attemptToolSource(server.id) === "mcp") ||
         server.requireApproval === true ||
         (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
     )
@@ -4655,7 +4656,11 @@ function installAttemptConnectorActionGatewayLifecycle(
     const config = registry.get(definition.identity.serverId);
     const legacyMcpApproval =
       Boolean(config) && !config!.connectionRef && definition.approval === "human";
-    if (!binding && !config?.connectionRef && !legacyMcpApproval) return definition;
+    const workspaceConnectorPolicy = Boolean(
+      connectorActionPolicy && config && attemptToolSource(config.id) === "mcp",
+    );
+    if (!binding && !config?.connectionRef && !legacyMcpApproval && !workspaceConnectorPolicy)
+      return definition;
     if (definition.lifecycle) {
       throw new Error(`Connector action tool already owns a lifecycle: ${definition.modelName}`);
     }
@@ -4684,7 +4689,7 @@ function installAttemptConnectorActionGatewayLifecycle(
             serverId: definition.identity.serverId,
             toolName: definition.identity.toolName,
             arguments: arguments_,
-            approvalMode: "session_mcp",
+            ...(legacyMcpApproval ? { approvalMode: "session_mcp" as const } : {}),
           });
     return {
       ...definition,

@@ -36,6 +36,22 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+After execution ends, every physical finalization stage has a five-minute
+containment deadline, including normally completed turns. This is not a
+run-length limit. Heartbeats report `finalizing` and the current bounded
+`finalizationStage`; Grafana exposes stage occupancy and thirty-second slow-stage observations;
+the bounded containment log and worker restarts identify actual exits.
+A stuck writer drain is never detached to release a successor: the worker exits,
+and normal heartbeat recovery and durable retained-process proofs govern
+admission. The deadline resets only when cleanup advances to another stage and
+is disarmed when the finalizer exits, including exceptional exits. Publishing a
+quiescence receipt does not disable containment for later housekeeping.
+Closed attempts with unsettled workspace mutations or active, unadopted retained
+processes also block admission, even when their logical outcome is `completed`.
+The work peeker exposes the existing previous-attempt wait, and the final writer's
+settlement re-arms the workflow wake. Independently adopted background commands
+retain their own lifetime and do not hold this turn-cleanup gate.
+
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its
 own batch's durable history-item receipt; a turn-wide update query can therefore
@@ -916,6 +932,20 @@ turn that attached them; historical attachment ids do not cause sandbox work.
 Active model-history images are independently read from object storage. This-turn generated-video files may still copy onto the
 box before dispatch; a copy miss is deferred like generated images (the
 durable File remains) and does not fail the turn.
+
+Modal materialization verification uses a fixed read-only provider probe inside
+the original routed operation and capture gate. It starts once and advances its
+own ephemeral output cursor until both streams are terminal; an initial output
+page is not completion. It never borrows the parent workspace mutation's retained
+command handle, weakens command persistence, or retries the clone/check/turn.
+Success requires exit zero and the exact visibility marker. A 30-second
+observation deadline and turn cancellation abort outstanding provider RPCs;
+if either probe output stream fails, its sibling is aborted and both reads drain
+before the provider-operation gate is released. The original error is preserved.
+Aborting observation does not prove process termination. Deadline failures stay
+unconfirmed and preserve the known provider execution identity in authenticated
+materialization diagnostics. Other providers retain their existing verification
+contract, and Connected Machine materialization remains a no-op.
 Source-bearing `generate_video` calls join that same single-flight provisioner
 immediately before inspecting their `/workspace` references and use the active
 routed session. Text-to-video requests do not acquire a sandbox.

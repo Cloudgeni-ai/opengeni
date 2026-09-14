@@ -18,7 +18,7 @@ import { useMemo, useState } from "react";
 
 import { activityEvents } from "@/dev/session-activity-events";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
-import { ModelPicker, SessionToolPicker } from "@/components/pickers";
+import { ModelPicker } from "@/components/pickers";
 import { SubagentTree } from "@/components/session/subagents";
 import {
   emptyAttachments,
@@ -267,7 +267,7 @@ export function ScenarioStack({
       queuedAheadCount={queue.queue.length}
       placeholder="Send a follow-up…"
       attachments={attachments}
-      attachButtonClassName="console-composer-wide-control max-sm:hidden"
+      attachButtonClassName="hidden"
       transcription={{
         client: fixtureClient as never,
         workspaceId: GALLERY_WORKSPACE_ID,
@@ -294,14 +294,6 @@ export function ScenarioStack({
             onModelChange={setModel}
             onEffortChange={setEffort}
             onLatencyModeChange={() => {}}
-          />
-          <SessionToolPicker
-            servers={galleryToolServers}
-            firstPartyTools={galleryFirstPartyTools}
-            selection={toolSelection}
-            menuSide="top"
-            triggerClassName="console-composer-wide-control max-sm:hidden"
-            onChange={setToolSelection}
           />
         </div>
       }

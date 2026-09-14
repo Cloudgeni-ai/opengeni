@@ -11769,6 +11769,17 @@ export const usageEvents = pgTable(
       table.eventType,
       table.occurredAt,
     ),
+    accountRecent: index("usage_events_account_recent_idx").on(
+      table.accountId,
+      table.occurredAt.desc(),
+      table.recordedAt.desc(),
+    ),
+    workspaceRecent: index("usage_events_workspace_recent_idx").on(
+      table.accountId,
+      table.workspaceId,
+      table.occurredAt.desc(),
+      table.recordedAt.desc(),
+    ),
     workspaceSession: index("usage_events_workspace_session_idx").on(
       table.workspaceId,
       table.sessionId,

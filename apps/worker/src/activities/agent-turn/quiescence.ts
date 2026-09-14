@@ -198,13 +198,16 @@ export async function drainAttemptOwnedSandboxWriters(input: {
   gitCredentialRenewals: readonly Pick<GitCredentialRenewalController, "stop">[];
   codemodeTokenRenewal: Pick<CodemodeTokenRenewalController, "stop"> | null;
   runCredentialRenewal: Pick<RunCredentialRenewalController, "stop"> | null;
+  onStage?: (stage: "tool_writers" | "credential_renewals") => void;
 }): Promise<void> {
+  input.onStage?.("tool_writers");
   if (input.toolCancellationFence) {
     input.toolCancellationFence.cancel(
       input.cancellationReason ?? new Error("TURN_ATTEMPT_FENCED"),
     );
     await input.toolCancellationFence.waitForQuiescence();
   }
+  input.onStage?.("credential_renewals");
   await Promise.all(input.gitCredentialRenewals.map(async (renewal) => await renewal.stop()));
   await input.codemodeTokenRenewal?.stop();
   await input.runCredentialRenewal?.stop();

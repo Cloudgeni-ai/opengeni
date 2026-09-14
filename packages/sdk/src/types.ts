@@ -586,11 +586,13 @@ export type ToolRef = {
 export type SessionToolPolicy = {
   mode: "workspace_default" | "explicit" | "inherited";
   inheritedFromSessionId: string | null;
+  excludedMcpServerIds?: string[] | undefined;
 };
 
 export type UpdateSessionToolPolicyRequest =
   | {
       mode: "workspace_default";
+      excludedMcpServerIds?: string[] | undefined;
       expectedVersion: number;
     }
   | {
@@ -2917,6 +2919,7 @@ export type CreateSessionRequest = {
     | undefined;
   /** Omitted: defaults/inheritance; []: no bundled guidance. Children cannot widen. */
   bundledSkillIds?: BundledSkillId[] | undefined;
+  excludedMcpServerIds?: string[] | undefined;
   // Optional UUID preallocated by an embedding host so it can durably link its
   // projection before OpenGeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
@@ -4511,6 +4514,7 @@ export type WorkspaceSessionDefaults = {
 };
 
 export type WorkspaceSessionToolDefaults = {
+  inheritConnectedMcpServers?: boolean | undefined;
   mcpServerIds?: string[];
   firstPartyMcpTools?: FirstPartyMcpToolName[];
 };
@@ -4578,7 +4582,11 @@ export type UpdateWorkspaceSettingsRequest = {
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
   sessionToolDefaults?:
-    | { mcpServerIds?: string[] | null; firstPartyMcpTools?: FirstPartyMcpToolName[] | null }
+    | {
+        mcpServerIds?: string[] | null;
+        firstPartyMcpTools?: FirstPartyMcpToolName[] | null;
+        inheritConnectedMcpServers?: boolean | null;
+      }
     | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
@@ -5009,6 +5017,7 @@ export type ComposerDraft = {
 
 export type NewSessionDraftOptions = {
   agentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
+  excludedMcpServerIds?: string[] | undefined;
   visibility?: SessionVisibility | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   targetSandboxId?: string | undefined;
@@ -8378,3 +8387,26 @@ export type ModelConnectionAccessResponse = {
   workspaces: Array<{ id: string; name: string }>;
   personalWorkspacesSupported: boolean;
 };
+
+export type ConnectorToolPermission = "allow" | "ask" | "block";
+export type ConnectorToolPermissionEntry = {
+  name: string;
+  title?: string | undefined;
+  description?: string | undefined;
+  group: "read" | "write" | "other";
+  permission: ConnectorToolPermission;
+  inherited: boolean;
+  approvalRequired: boolean;
+};
+export type ConnectorToolPermissionsResponse = {
+  connectionId: string;
+  serverId: string;
+  defaultPermission: ConnectorToolPermission | null;
+  tools: ConnectorToolPermissionEntry[];
+  discoveryError: string | null;
+  canManage: boolean;
+};
+export type UpdateConnectorToolPermissionsRequest = {
+  connectionId: string;
+  permission: ConnectorToolPermission;
+} & ({ target: "default" } | { target: "tools"; toolNames: string[] });

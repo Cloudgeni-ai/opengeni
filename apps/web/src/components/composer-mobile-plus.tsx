@@ -4,6 +4,7 @@ import {
   AudioLinesIcon,
   BoxIcon,
   ChevronLeftIcon,
+  ChevronRightIcon,
   GitBranchIcon,
   PaperclipIcon,
   PlugIcon,
@@ -24,7 +25,6 @@ import {
 
 import {
   SessionToolsMenuBody,
-  sessionToolSelectionSummary,
   SESSION_TOOLS_PANEL_CLASS,
   type SessionToolSelection,
 } from "@/components/pickers";
@@ -55,12 +55,22 @@ import {
 import { repoCountLabel } from "@/lib/format";
 import type { McpServerOption } from "@/lib/session-tools";
 
+import {
+  isComposerConnector,
+  type SessionConnectorsMenuProps,
+} from "@/components/session-connectors-menu-body";
+
 type Panel = "root" | "tools" | "repos" | "voice" | "variables";
 
 /**
  * Shared composer actions at every width; model and voice stay in the bar.
  */
-export function ComposerMobilePlus(props: {
+export type ComposerPlusProps = {
+  connectorActions?: Pick<
+    SessionConnectorsMenuProps,
+    "onReconnect" | "loading" | "error" | "busyId"
+  >;
+  onOpenConnectors?: () => void;
   /** Centered composers need viewport-sized panels rather than trigger-side space. */
   expandedPanelPresentation?: "menu" | "dialog";
   draftChatSettings?: {
@@ -101,16 +111,21 @@ export function ComposerMobilePlus(props: {
     /** Panel element; receives `leading` (back control) via clone. */
     panel: ReactElement<{ leading?: ReactNode }>;
   };
-}) {
+};
+
+export function ComposerMobilePlus(props: ComposerPlusProps) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [panel, setPanel] = useState<Panel>("root");
-  const toolSummary = sessionToolSelectionSummary(props);
-  const toolsAvailable = toolSummary.total > 0;
+  const connectors = props.servers.filter(isComposerConnector);
+  const toolsSelected = connectors.filter((server) =>
+    props.selection.mcpServerIds.has(server.id),
+  ).length;
   const repositories = props.repositories;
   const voiceModel = props.voiceModel;
-  const dialogOpen = open && panel !== "root" && props.expandedPanelPresentation === "dialog";
+  const dialogOpen =
+    open && panel !== "root" && panel !== "tools" && props.expandedPanelPresentation === "dialog";
 
   const backButton = (
     <button
@@ -162,6 +177,7 @@ export function ComposerMobilePlus(props: {
             dialog={dialogOpen}
             panel={panel}
             triggerRef={triggerRef}
+            side={props.expandedPanelPresentation === "dialog" ? "bottom" : "top"}
             className={
               panel === "tools"
                 ? SESSION_TOOLS_PANEL_CLASS
@@ -192,22 +208,24 @@ export function ComposerMobilePlus(props: {
                     Add photos & files
                   </DropdownMenuItem>
                 ) : null}
-                {toolsAvailable ? (
+                {
                   <DropdownMenuItem
                     className="pointer-coarse:min-h-11"
                     disabled={props.disabled || props.toolsDisabled}
                     onSelect={(event) => {
                       event.preventDefault();
                       setPanel("tools");
+                      props.onOpenConnectors?.();
                     }}
                   >
                     <PlugIcon className="size-4" />
-                    Tools
+                    Connectors
                     <span className="ml-auto text-2xs text-fg-subtle">
-                      {props.toolsSaving ? "Saving…" : toolSummary.label}
+                      {props.toolsSaving ? "Saving…" : toolsSelected || ""}
+                      <ChevronRightIcon className="ml-1 inline size-3.5" />
                     </span>
                   </DropdownMenuItem>
-                ) : null}
+                }
                 {repositories ? (
                   <DropdownMenuItem
                     className="pointer-coarse:min-h-11"
@@ -274,6 +292,7 @@ export function ComposerMobilePlus(props: {
               </>
             ) : panel === "tools" ? (
               <SessionToolsMenuBody
+                {...props.connectorActions}
                 presentation={dialogOpen ? "dialog" : "menu"}
                 servers={props.servers}
                 firstPartyTools={props.firstPartyTools}
@@ -334,6 +353,7 @@ export function ComposerMobilePlus(props: {
 
 function ComposerPanelContent(props: {
   dialog: boolean;
+  side: "top" | "bottom";
   panel: Panel;
   triggerRef: { current: HTMLButtonElement | null };
   className: string;
@@ -367,7 +387,7 @@ function ComposerPanelContent(props: {
           {props.panel === "repos"
             ? "Repositories"
             : props.panel === "tools"
-              ? "Tools"
+              ? "Connectors"
               : props.panel === "variables"
                 ? "Variable sets"
                 : "Voice model"}
@@ -380,7 +400,7 @@ function ComposerPanelContent(props: {
   return (
     <DropdownMenuContent
       align="start"
-      side="top"
+      side={props.side}
       sideOffset={8}
       collisionPadding={12}
       className={props.className}

@@ -6,6 +6,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import { publishDurableWorkspaceControlEvent } from "@opengeni/events";
+import { recordWorkflowWakeReconciliation } from "@opengeni/observability";
 import type { ControlActivityServices } from "./types";
 import {
   reconcileAutomaticSessionTitleFanout,
@@ -115,23 +116,7 @@ export function createWorkflowWakeActivities(services: () => Promise<ControlActi
         pendingAdmissionBlockers,
         exhaustedBatchLimit,
       };
-      if (claimed > 0) {
-        service.observability.info("session workflow wake delivery reconciled", {
-          claimed,
-          signaled,
-          delivered,
-          pendingAdmission,
-          unconfirmed,
-          failed,
-          exhaustedBatchLimit,
-          ...Object.fromEntries(
-            Object.entries(pendingAdmissionBlockers).map(([blocker, count]) => [
-              `pendingAdmissionBlockers.${blocker}`,
-              count,
-            ]),
-          ),
-        });
-      }
+      recordWorkflowWakeReconciliation(service.observability, result);
       return result;
     },
   };

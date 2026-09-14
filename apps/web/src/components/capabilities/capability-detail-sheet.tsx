@@ -17,6 +17,7 @@ import {
   type RefObject,
 } from "react";
 
+import { ConnectorToolPermissions } from "./connector-tool-permissions";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityDialogContent } from "@/components/capabilities/detail-dialog";
 import {
@@ -120,6 +121,7 @@ export type ConnectAction =
 export { DEFAULT_CONNECTION_OWNERSHIP };
 
 export function CapabilityDetailSheet({
+  workspaceId,
   item,
   health,
   logoSrc,
@@ -134,6 +136,7 @@ export function CapabilityDetailSheet({
   canManageSkills = false,
   onAction,
 }: {
+  workspaceId?: string;
   item: CapabilityCatalogItem | null;
   health: ConnectionHealth;
   logoSrc: string | null;
@@ -203,6 +206,7 @@ export function CapabilityDetailSheet({
       >
         {item ? (
           <DetailBody
+            workspaceId={workspaceId}
             item={item}
             health={health}
             logoSrc={logoSrc}
@@ -220,6 +224,7 @@ export function CapabilityDetailSheet({
 }
 
 export function DetailBody({
+  workspaceId,
   item,
   inline = false,
   setupOnly = inline,
@@ -234,6 +239,7 @@ export function DetailBody({
   canManageSkills = false,
   onAction,
 }: {
+  workspaceId?: string;
   item: CapabilityCatalogItem;
   inline?: boolean;
   /** Chat setup must not expose disconnect/removal actions, regardless of layout. */
@@ -388,6 +394,17 @@ export function DetailBody({
         ) : (
           <CuratedSkillProvenanceSection item={item} />
         )}
+        {workspaceId &&
+        item.enabled &&
+        item.kind === "mcp" &&
+        item.source !== "built_in" &&
+        item.surfaceType !== "codex_apps" ? (
+          <ConnectorToolPermissions
+            key={`${workspaceId}:${item.id}`}
+            workspaceId={workspaceId}
+            capabilityId={item.id}
+          />
+        ) : null}
 
         {/* Action — flows directly after the content so a sparse item stays a
             compact top-flowing column, with no dead void before a bottom-pinned

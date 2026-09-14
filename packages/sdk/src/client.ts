@@ -181,6 +181,8 @@ import type {
   BeginSessionRealtimeRequest,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
+  ConnectorToolPermissionsResponse,
+  UpdateConnectorToolPermissionsRequest,
   CapabilityInstallation,
   ApiIntegrationPreview,
   ApiIntegrationOAuthStartRequest,
@@ -6808,6 +6810,35 @@ export class OpenGeniClient {
     );
   }
 
+  async getConnectorToolPermissions(
+    workspaceId: string,
+    capabilityId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ConnectorToolPermissionsResponse> {
+    return await this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async updateConnectorToolPermissions(
+    workspaceId: string,
+    capabilityId: string,
+    request: UpdateConnectorToolPermissionsRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ saved: boolean }> {
+    return await this.requestJson(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions`,
+      request,
+      {},
+      options,
+    );
+  }
+
   async enableCapability(
     workspaceId: string,
     capabilityId: string,
@@ -7866,6 +7897,48 @@ export class OpenGeniClient {
     });
   }
 
+  async getOrganizationUsageSummary(
+    options: {
+      accountId: string;
+      period?: import("@opengeni/contracts").OrganizationUsagePeriod;
+    },
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<import("@opengeni/contracts").OrganizationUsageSummary> {
+    return await this.requestJson(
+      "GET",
+      "/v1/billing/usage-summary",
+      undefined,
+      {
+        accountId: options.accountId,
+        period: options.period ?? "month",
+      },
+      requestOptions,
+    );
+  }
+
+  async getOrganizationUsageWorkspacePage(
+    options: {
+      accountId: string;
+      period?: import("@opengeni/contracts").OrganizationUsagePeriod;
+      until: string;
+      afterWorkspaceId?: string;
+    },
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<import("@opengeni/contracts").OrganizationUsageWorkspacePage> {
+    return await this.requestJson(
+      "GET",
+      "/v1/billing/usage-workspaces",
+      undefined,
+      {
+        accountId: options.accountId,
+        period: options.period ?? "month",
+        until: options.until,
+        ...(options.afterWorkspaceId ? { afterWorkspaceId: options.afterWorkspaceId } : {}),
+      },
+      requestOptions,
+    );
+  }
+
   async getBillingUsage(
     options: { accountId?: string; workspaceId?: string } = {},
   ): Promise<BillingUsageResponse> {
@@ -7881,6 +7954,7 @@ export class OpenGeniClient {
       range?: InsightsRange;
       provider?: string;
       model?: string;
+      signal?: AbortSignal;
     } = {},
   ): Promise<WorkspaceInsightsResponse> {
     return await this.requestJson<WorkspaceInsightsResponse>(
@@ -7892,6 +7966,7 @@ export class OpenGeniClient {
         ...(options.provider !== undefined ? { provider: options.provider } : {}),
         ...(options.model !== undefined ? { model: options.model } : {}),
       },
+      { signal: options.signal },
     );
   }
 
