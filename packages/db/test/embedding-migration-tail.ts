@@ -32,4 +32,6 @@ export const embeddingMigrationTail = [
   // must replay it after that writer rather than before its original creation.
   "0462_agent_instruction_non_destructive_edits.sql",
   "0466_agent_instruction_activation_preservation.sql",
+  // Compiles against the Knowledge tables and visibility helper from 0461.
+  "0468_knowledge_relationship_projection.sql",
 ];

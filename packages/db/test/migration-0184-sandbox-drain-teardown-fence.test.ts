@@ -62,6 +62,8 @@ const withheldMigrationNames = [
   // behind the same historical replay boundary.
   "0462_agent_instruction_non_destructive_edits.sql",
   "0466_agent_instruction_activation_preservation.sql",
+  // Compiles against the Knowledge tables and visibility helper from 0461.
+  "0468_knowledge_relationship_projection.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

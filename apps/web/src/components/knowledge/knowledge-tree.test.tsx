@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import type {
   KnowledgeEntryListRequest,
@@ -14,7 +14,11 @@ const list = mock(
     _request: KnowledgeEntryListRequest,
   ): Promise<KnowledgeEntryListResponse> => ({ entries: [], nextCursor: null }),
 );
-const context = { client: { listKnowledgeEntries: list } };
+const context = {
+  client: { listKnowledgeEntries: list },
+  accessContext: {},
+  workspaceStateOwnerId: "workspace",
+};
 mock.module("@/context", () => ({ useAppContext: () => context }));
 const { KnowledgeTree } = await import("./knowledge-tree");
 beforeAll(() => {
@@ -170,5 +174,316 @@ test("a stale folder page cannot repopulate the tree after the scope changes", a
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+async function mountedTree(strict = false) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const folders = [entry("acme", "Acme", true), entry("other", "Other", true)];
+  const render = async (options: { refresh?: number; workspaceId?: string } = {}) =>
+    act(async () => root.render(strict ? <StrictMode>{tree(options)}</StrictMode> : tree(options)));
+  const tree = (options: { refresh?: number; workspaceId?: string }) => (
+    <KnowledgeTree
+      workspaceId={options.workspaceId ?? "workspace"}
+      entries={folders}
+      refresh={options.refresh ?? 0}
+      canEdit={false}
+      onOpen={() => {}}
+      onCreate={() => {}}
+    />
+  );
+  const click = async (title: string) =>
+    act(async () =>
+      container.querySelector<HTMLButtonElement>(`button[aria-label="${title}"]`)!.click(),
+    );
+  await render();
+  return {
+    container,
+    render,
+    click,
+    close: async () => {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+test("reopening a loaded collection hides prior rows until a fresh first page arrives", async () => {
+  list.mockReset();
+  list.mockResolvedValue({ entries: [entry("member", "Cached member")], nextCursor: "next" });
+  const tree = await mountedTree();
+  try {
+    await tree.click("Acme");
+    expect(tree.container.textContent).toContain("Cached member");
+    await tree.click("Acme");
+    expect(tree.container.textContent).not.toContain("Cached member");
+    const held = deferred();
+    list.mockReturnValue(held.promise);
+    await tree.click("Acme");
+    expect(tree.container.textContent).not.toContain("Cached member");
+    expect(tree.container.textContent).toContain("Loading collection");
+    expect(list).toHaveBeenCalledTimes(2);
+    await act(async () =>
+      held.resolve({ entries: [entry("fresh", "Fresh member")], nextCursor: "next" }),
+    );
+    expect(tree.container.textContent).toContain("Fresh member");
+    expect(tree.container.textContent).toContain("Load more in Acme");
+  } finally {
+    await tree.close();
+  }
+});
+
+test("collapse and reopen during a held request does not issue duplicate work", async () => {
+  list.mockReset();
+  const held = deferred();
+  list.mockReturnValue(held.promise);
+  const tree = await mountedTree();
+  try {
+    await tree.click("Acme");
+    await tree.click("Acme");
+    await tree.click("Acme");
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(tree.container.textContent).toContain("Loading collection");
+    await act(async () =>
+      held.resolve({ entries: [entry("member", "Current member")], nextCursor: null }),
+    );
+    expect(tree.container.textContent).toContain("Current member");
+    expect(tree.container.textContent).not.toContain("Loading collection");
+  } finally {
+    await tree.close();
+  }
+});
+
+test("remote revocation cannot redisplay previously loaded rows on immediate reopen", async () => {
+  list.mockReset();
+  list.mockResolvedValue({ entries: [entry("old", "Revoked member")], nextCursor: null });
+  const tree = await mountedTree();
+  try {
+    await tree.click("Acme");
+    expect(tree.container.textContent).toContain("Revoked member");
+    await tree.click("Acme");
+    list.mockRejectedValue(new Error("403 Forbidden after remote revocation"));
+    await tree.click("Acme");
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(tree.container.textContent).not.toContain("Revoked member");
+    expect(tree.container.textContent).toContain("403 Forbidden after remote revocation");
+    const retry = [...tree.container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "Retry",
+    )!;
+    expect(retry.disabled).toBe(false);
+    expect(retry.closest('[aria-disabled="true"]') !== null).toBe(false);
+    list.mockResolvedValue({ entries: [entry("restored", "Restored member")], nextCursor: null });
+    await act(async () => retry.click());
+    expect(list).toHaveBeenCalledTimes(3);
+    expect(tree.container.textContent).toContain("Restored member");
+    expect(tree.container.textContent).not.toContain("Revoked member");
+    expect(tree.container.querySelector('[role="alert"]')).toBeNull();
+  } finally {
+    await tree.close();
+  }
+});
+
+test("edits, workspace, access-context and client changes invalidate collection rows", async () => {
+  const originalClient = context.client;
+  const originalAccess = context.accessContext;
+  list.mockReset();
+  list.mockResolvedValue({ entries: [entry("old", "Old member")], nextCursor: null });
+  const tree = await mountedTree();
+  try {
+    await tree.click("Acme");
+    const changes = [
+      () => tree.render({ refresh: 1 }),
+      () => tree.render({ workspaceId: "another-workspace", refresh: 1 }),
+      () => {
+        context.accessContext = {};
+        return tree.render({ workspaceId: "another-workspace", refresh: 1 });
+      },
+      () => {
+        context.client = { listKnowledgeEntries: list };
+        return tree.render({ workspaceId: "another-workspace", refresh: 1 });
+      },
+    ];
+    for (const change of changes) {
+      const held = deferred();
+      list.mockReturnValue(held.promise);
+      await change();
+      expect(tree.container.textContent).not.toContain("Old member");
+      expect(tree.container.textContent).toContain("Loading collection");
+      await act(async () =>
+        held.resolve({ entries: [entry("old", "Old member")], nextCursor: null }),
+      );
+      expect(tree.container.textContent).toContain("Old member");
+    }
+    expect(list).toHaveBeenCalledTimes(5);
+  } finally {
+    context.client = originalClient;
+    context.accessContext = originalAccess;
+    await tree.close();
+  }
+});
+
+test("a failed request can be retried and reopened pagination starts from a fresh first page", async () => {
+  list.mockReset();
+  list.mockRejectedValueOnce(new Error("Try again"));
+  const tree = await mountedTree();
+  const clickText = async (text: string) => {
+    const button = [...tree.container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (candidate) => candidate.textContent === text,
+    )!;
+    expect(button.disabled).toBe(false);
+    expect(button.closest('[aria-disabled="true"]') !== null).toBe(false);
+    await act(async () => button.click());
+  };
+  try {
+    await tree.click("Acme");
+    expect(tree.container.textContent).toContain("Try again");
+    list.mockResolvedValue({ entries: [entry("first", "First member")], nextCursor: "next" });
+    await clickText("Retry");
+    list.mockResolvedValue({ entries: [entry("later", "Later member")], nextCursor: null });
+    await clickText("Load more in Acme");
+    expect(tree.container.textContent).toContain("Later member");
+    await tree.click("Acme");
+    list.mockResolvedValue({ entries: [entry("first", "First member")], nextCursor: "next" });
+    await tree.click("Acme");
+    expect(tree.container.textContent).toContain("First member");
+    expect(tree.container.textContent).not.toContain("Later member");
+    list.mockResolvedValue({ entries: [entry("later", "Later member")], nextCursor: null });
+    await clickText("Load more in Acme");
+    expect(list).toHaveBeenCalledTimes(5);
+    expect(tree.container.querySelectorAll('button[aria-label="First member"]')).toHaveLength(1);
+    expect(tree.container.querySelectorAll('button[aria-label="Later member"]')).toHaveLength(1);
+  } finally {
+    await tree.close();
+  }
+});
+
+test("Load more disables only its button while pending and is actionable after settlement", async () => {
+  list.mockReset();
+  list.mockResolvedValue({ entries: [entry("first", "First member")], nextCursor: "next" });
+  const tree = await mountedTree();
+  try {
+    await tree.click("Acme");
+    const more = () =>
+      [...tree.container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Load more in Acme",
+      )!;
+    expect(more().disabled).toBe(false);
+    expect(more().closest('[aria-disabled="true"]') !== null).toBe(false);
+    const held = deferred();
+    list.mockReturnValue(held.promise);
+    await act(async () => more().click());
+    expect(more().disabled).toBe(true);
+    expect(more().closest('[aria-disabled="true"]') !== null).toBe(false);
+    expect(tree.container.querySelector('[role="status"]')?.textContent).toContain(
+      "Loading collection",
+    );
+    await act(async () => more().click());
+    expect(list).toHaveBeenCalledTimes(2);
+    await act(async () =>
+      held.resolve({ entries: [entry("second", "Second member")], nextCursor: "last" }),
+    );
+    expect(more().disabled).toBe(false);
+    expect(more().closest('[aria-disabled="true"]') !== null).toBe(false);
+    list.mockResolvedValue({ entries: [entry("last", "Last member")], nextCursor: null });
+    await act(async () => more().click());
+    expect(list).toHaveBeenCalledTimes(3);
+    expect(tree.container.textContent).toContain("Last member");
+  } finally {
+    await tree.close();
+  }
+});
+
+test("a previous authorization request cannot populate the replacement request context", async () => {
+  const originalAccess = context.accessContext;
+  const old = deferred();
+  const current = deferred();
+  list.mockReset();
+  list.mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+  const tree = await mountedTree();
+  try {
+    await tree.click("Acme");
+    context.accessContext = {};
+    await tree.render();
+    await act(async () =>
+      current.resolve({
+        entries: [entry("current", "Current authorized member")],
+        nextCursor: null,
+      }),
+    );
+    await act(async () =>
+      old.resolve({ entries: [entry("old", "Previous principal member")], nextCursor: null }),
+    );
+    await tree.click("Acme");
+    list.mockResolvedValue({
+      entries: [entry("current", "Current authorized member")],
+      nextCursor: null,
+    });
+    await tree.click("Acme");
+    expect(tree.container.textContent).toContain("Current authorized member");
+    expect(tree.container.textContent).not.toContain("Previous principal member");
+    expect(list).toHaveBeenCalledTimes(3);
+  } finally {
+    context.accessContext = originalAccess;
+    await tree.close();
+  }
+});
+
+test("the same collection at two tree paths shares only an in-flight first page", async () => {
+  list.mockReset();
+  const held = deferred();
+  list.mockImplementation(async (_workspace, request) =>
+    request.groupId === "other"
+      ? { entries: [entry("acme", "Acme", true)], nextCursor: null }
+      : held.promise,
+  );
+  const tree = await mountedTree();
+  try {
+    await tree.click("Acme");
+    await tree.click("Other");
+    await act(async () =>
+      tree.container
+        .querySelector<HTMLButtonElement>('[data-path="other/acme"] button[aria-label="Acme"]')!
+        .click(),
+    );
+    expect(list).toHaveBeenCalledTimes(2);
+    await act(async () =>
+      held.resolve({ entries: [entry("member", "Shared member")], nextCursor: null }),
+    );
+    expect(tree.container.querySelectorAll('button[aria-label="Shared member"]')).toHaveLength(2);
+  } finally {
+    await tree.close();
+  }
+});
+
+test("workspace owner reset invalidates rows without changing access, client or props", async () => {
+  const originalOwner = context.workspaceStateOwnerId;
+  list.mockReset();
+  list.mockResolvedValue({ entries: [entry("old", "Old owner member")], nextCursor: null });
+  const tree = await mountedTree();
+  try {
+    await tree.click("Acme");
+    context.workspaceStateOwnerId = "replacement-owner";
+    list.mockResolvedValue({ entries: [], nextCursor: null });
+    await tree.render();
+    expect(tree.container.textContent).not.toContain("Old owner member");
+    expect(list).toHaveBeenCalledTimes(2);
+  } finally {
+    context.workspaceStateOwnerId = originalOwner;
+    await tree.close();
+  }
+});
+
+test("StrictMode effect replay shares the pending first-page request", async () => {
+  list.mockReset();
+  list.mockResolvedValue({ entries: [entry("member", "Strict member")], nextCursor: null });
+  const tree = await mountedTree(true);
+  try {
+    await tree.click("Acme");
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(tree.container.textContent).toContain("Strict member");
+  } finally {
+    await tree.close();
   }
 });
