@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { KnowledgeOriginalFileDownload } from "@opengeni/sdk";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
@@ -8,29 +8,62 @@ export function KnowledgeOriginalFile(props: {
   workspaceId: string;
   entryId: string;
   revisionId: string;
+  autoOpen?: boolean;
+  extractedText?: string;
 }) {
-  const { client } = useAppContext();
+  const { client, accessContext, workspaceStateOwnerId } = useAppContext();
+  // Reset both the URL and pending response synchronously when its authority changes.
+  const lifetime = useMemo(
+    () => crypto.randomUUID(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- each identity fences original-file authority
+    [
+      client,
+      accessContext,
+      workspaceStateOwnerId,
+      props.workspaceId,
+      props.entryId,
+      props.revisionId,
+    ],
+  );
+  return <OriginalFilePreview key={lifetime} {...props} client={client} />;
+}
+
+function OriginalFilePreview(props: {
+  workspaceId: string;
+  entryId: string;
+  revisionId: string;
+  autoOpen?: boolean;
+  extractedText?: string;
+  client: ReturnType<typeof useAppContext>["client"];
+}) {
+  const [requested, setRequested] = useState(props.autoOpen ?? false);
+  const [retry, setRetry] = useState(0);
   const [file, setFile] = useState<KnowledgeOriginalFileDownload | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  async function load() {
+  useEffect(() => {
+    if (!requested) return;
+    let current = true;
     setBusy(true);
     setError(null);
-    try {
-      const result = await client.createKnowledgeFileDownloadUrl(
-        props.workspaceId,
-        props.entryId,
-        props.revisionId,
-      );
-      if (!["http:", "https:"].includes(new URL(result.url).protocol))
-        throw new Error("The original file URL is unavailable");
-      setFile(result);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not open the original file");
-    } finally {
-      setBusy(false);
-    }
-  }
+    void props.client
+      .createKnowledgeFileDownloadUrl(props.workspaceId, props.entryId, props.revisionId)
+      .then((result) => {
+        if (!["http:", "https:"].includes(new URL(result.url).protocol))
+          throw new Error("The original file URL is unavailable");
+        if (current) setFile(result);
+      })
+      .catch((reason: unknown) => {
+        if (current)
+          setError(reason instanceof Error ? reason.message : "Could not open the original file");
+      })
+      .finally(() => {
+        if (current) setBusy(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [props.client, props.workspaceId, props.entryId, props.revisionId, requested, retry]);
   return (
     <div className="grid gap-3">
       {!file ? (
@@ -39,7 +72,10 @@ export function KnowledgeOriginalFile(props: {
           size="sm"
           className="w-fit"
           disabled={busy}
-          onClick={() => void load()}
+          onClick={() => {
+            setRequested(true);
+            setRetry((value) => value + 1);
+          }}
         >
           {busy ? "Opening file…" : error ? "Retry opening file" : "View retained file"}
         </Button>
@@ -55,7 +91,14 @@ export function KnowledgeOriginalFile(props: {
             >
               Open original
             </a>
-            <Button variant="ghost" size="sm" onClick={() => setFile(null)}>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setRequested(false);
+                setFile(null);
+              }}
+            >
               Close preview
             </Button>
           </div>
@@ -84,6 +127,15 @@ export function KnowledgeOriginalFile(props: {
           )}
         </>
       )}
+      {props.extractedText !== undefined ? (
+        <details className="border-y border-border py-3">
+          <summary className="cursor-pointer text-sm font-medium">Extracted text</summary>
+          <div className="mt-3 whitespace-pre-wrap break-words text-sm leading-6">
+            {props.extractedText ||
+              "No extracted text is available. You can still open the original file."}
+          </div>
+        </details>
+      ) : null}
       {error ? (
         <p role="alert" className="text-sm text-status-error">
           {error}

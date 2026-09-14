@@ -130,6 +130,26 @@ describe("Knowledge relationship projection", () => {
     await parity({ operation: "get", entryId: rows[0]!.id, revisionId: rows[0]!.revision.id });
   }, 180_000);
 
+  test("0469 excludes typed incidental sources that the historical read exposed", async () => {
+    const f = await seedListingFixture(shared.admin, 4);
+    await shared.admin`UPDATE knowledge_entries SET prepared_file_id=${f.sourceFileId} WHERE id=${f.sourceId}`;
+    const before = await readListing(app, f, { limit: 20 }, true);
+    const after = await readListing(app, f, { limit: 20 });
+    expect(before.map((entry) => entry.id)).toContain(f.sourceId);
+    expect(after.map((entry) => entry.id)).not.toContain(f.sourceId);
+    expect(after).toEqual(before.filter((entry) => entry.id !== f.sourceId));
+    expect(await readListing(app, f, { limit: 20, includeEvidence: true })).toEqual(before);
+    expect(await readListing(app, f, { operation: "get", entryId: f.sourceId })).toEqual(
+      await readListing(app, f, { operation: "get", entryId: f.sourceId }, true),
+    );
+    expect(
+      (await readListing(app, f, { query: "Source", mode: "keyword" }, true)).map(
+        (entry) => entry.id,
+      ),
+    ).toContain(f.sourceId);
+    expect(await readListing(app, f, { query: "Source", mode: "keyword" })).toEqual([]);
+  }, 180_000);
+
   test("all pages retain exact ordering without gaps or duplicates", async () => {
     for (const limit of [7, 50]) {
       let afterId: string | undefined;

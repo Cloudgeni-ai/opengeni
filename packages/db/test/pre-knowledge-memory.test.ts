@@ -37,9 +37,9 @@ describe("pre-knowledge Memory storage compatibility", () => {
     const owner = postgres(owned.ownerUrl, { max: 1 });
     try {
       await owner`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
-      // 0468 compiles against the Knowledge tables withheld with 0461.
+      // 0468/0469 depend on Knowledge withheld with 0461.
       await owner`INSERT INTO schema_migrations(name) VALUES
-        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql')`;
+        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql')`;
       await migrate(owned.ownerUrl);
     } finally {
       await owner.end();

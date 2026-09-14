@@ -810,6 +810,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "goal_pause",
   "goal_resume",
   "knowledge_search",
+  "knowledge_prepare_save",
   "knowledge_get",
   "knowledge_browse",
   "knowledge_save",
@@ -17292,6 +17293,7 @@ export * from "./model-context-inspector";
 export * from "./workspace-learning-policy";
 export * from "./agent-learning";
 export * from "./knowledge-entries";
+export * from "./knowledge-preparation";
 export * from "./workspace-learning-administration";
 export * from "./workspace-state";
 export * from "./preference-registry";
