@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { isDeepStrictEqual } from "node:util";
-import { getLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
+import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   CapabilityCatalogItem,
@@ -389,7 +389,12 @@ async function unchangedMcpInstallation(
   const connectionRef = input.payload.connectionRef
     ? await validateMcpCapabilityConnectionRef(input, item, input.payload.connectionRef)
     : null;
-  const existing = await getLockedCapabilityInstallation(input.db, input.workspaceId, item.id);
+  const existing = await withLockedCapabilityInstallation(
+    input.db,
+    input.workspaceId,
+    item.id,
+    (tx) => getCapabilityInstallation(tx, input.workspaceId, item.id),
+  );
   if (!existing || existing.kind !== "mcp" || existing.status !== "active") return null;
   const {
     headerNames: _names,
