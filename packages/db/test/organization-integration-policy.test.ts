@@ -6,10 +6,12 @@ import postgres from "postgres";
 import { rawRows, setSubjectRlsContext } from "../src/database";
 import { ensureManagedAccessForUser, persistProviderOAuthConnection } from "../src";
 import { nestedPostgresSqlState } from "../src/persistence-errors";
+import { assertOrganizationIntegrationAllowed } from "@opengeni/contracts";
 import {
   getOrganizationIntegrationPolicy,
   updateOrganizationIntegrationPolicy,
   withOrganizationIntegrationAcquisition,
+  withOrganizationIntegrationPolicyFence,
 } from "../src/organization-integration-policy";
 
 let shared: SharedTestDatabase | null;
@@ -648,4 +650,63 @@ test("acquisition classifications are snapshotted before asynchronous workspace 
   keys[0] = "sample";
   await expect(acquisition).rejects.toThrow();
   expect(effect).toBe(false);
+});
+
+test("policy fence allows completed exact receipt reads but new progress still requires assertion", async () => {
+  const current = await getOrganizationIntegrationPolicy(client.db, scope, authorize);
+  const completedOperation = request(current.revision, "restricted");
+  const recorded = await updateOrganizationIntegrationPolicy(
+    client.db,
+    scope,
+    completedOperation,
+    authorize,
+  );
+  const replay = await withOrganizationIntegrationPolicyFence(
+    client.db,
+    scope,
+    async (tx, policy) => {
+      expect(policy.mode).toBe("restricted");
+      const [receipt] = await rawRows<{ result: unknown }>(
+        tx,
+        sql`select result from organization_integration_policy_operations where account_id = ${scope.accountId}::uuid and operation_id = ${completedOperation.operationId}::uuid`,
+      );
+      return receipt!.result;
+    },
+  );
+  expect(replay).toEqual(recorded);
+  let newEffect = false;
+  await expect(
+    withOrganizationIntegrationPolicyFence(client.db, scope, async (tx, policy) => {
+      const [receipt] = await rawRows(
+        tx,
+        sql`select result from organization_integration_policy_operations where account_id = ${scope.accountId}::uuid and operation_id = ${crypto.randomUUID()}::uuid`,
+      );
+      if (receipt) return receipt;
+      assertOrganizationIntegrationAllowed(policy, "unknown");
+      newEffect = true;
+      return null;
+    }),
+  ).rejects.toThrow();
+  expect(newEffect).toBe(false);
+});
+
+test("policy fence provides a deeply frozen policy snapshot", async () => {
+  const current = await getOrganizationIntegrationPolicy(client.db, scope, authorize);
+  await updateOrganizationIntegrationPolicy(
+    client.db,
+    scope,
+    request(current.revision, "restricted"),
+    authorize,
+  );
+  await withOrganizationIntegrationPolicyFence(client.db, scope, async (_tx, policy) => {
+    expect(Object.isFrozen(policy)).toBe(true);
+    expect(Object.isFrozen(policy.allowedIntegrationKeys)).toBe(true);
+    expect(() => {
+      policy.mode = "unrestricted";
+    }).toThrow();
+    expect(() => {
+      policy.allowedIntegrationKeys.push("unknown");
+    }).toThrow();
+    expect(() => assertOrganizationIntegrationAllowed(policy, "unknown")).toThrow();
+  });
 });

@@ -144,7 +144,13 @@ export async function updateOrganizationIntegrationPolicy(
   );
 }
 
-/** Requires read committed isolation. The shared policy fence precedes EVERY
+/** Internal serialization primitive, NOT acquisition authorization. Authenticate
+ * the caller normally. A callback may first return an exact completed receipt;
+ * before any new claim, uncommitted progress, or commit it MUST assert the trusted
+ * integration classification against the supplied runtime-frozen policy snapshot.
+ * Do not put network operations or retries inside this transaction.
+ *
+ * Requires read committed isolation. The shared policy fence precedes EVERY
  * organization-membership, workspace/tenancy, and credential lock. In particular,
  * persistProviderOAuthConnection may take the membership fence inside acquire.
  * Policy writers take exclusive policy -> membership -> live administrator rows,
@@ -157,17 +163,12 @@ export async function updateOrganizationIntegrationPolicy(
  * preflight separately and use this guard for final persistence. Existing execution,
  * refresh, credential lifecycle, and cleanup do not belong behind this guard.
  */
-export async function withOrganizationIntegrationAcquisition<T>(
+export async function withOrganizationIntegrationPolicyFence<T>(
   db: Database,
   inputScope: OrganizationIntegrationAcquisitionScope,
-  integrationKeys: readonly (string | null)[],
-  acquire: (tx: Database) => Promise<T>,
+  run: (tx: Database, policy: OrganizationIntegrationPolicy) => Promise<T>,
 ): Promise<T> {
   const requested = acquisitionScope.parse(inputScope);
-  // Snapshot classifications before the first await, including workspace lookup.
-  const keys = [...integrationKeys];
-  if (!keys.length)
-    throw new Error("Acquisition requires at least one trusted integration classification");
   // Non-locking authoritative resolution before any new lock; repeat under the
   // policy fence below so a moved/deleted workspace cannot retain stale scope.
   const resolved = await rlsContextForWorkspace(db, requested.workspaceId);
@@ -189,22 +190,46 @@ export async function withOrganizationIntegrationAcquisition<T>(
         sql`select id from workspaces where id = ${scope.workspaceId}::uuid and account_id = ${scope.accountId}::uuid`,
       );
       if (!workspace) throw new Error("Organization integration policy workspace scope invalid");
-      const assert = async () => {
-        const policy = await read(tx, scope);
-        for (const key of keys) assertOrganizationIntegrationAllowed(policy, key);
-      };
-      await assert();
-      const result = await acquire(tx);
+      const policy = await read(tx, scope);
+      Object.freeze(policy.allowedIntegrationKeys);
+      Object.freeze(policy);
+      const result = await run(tx, policy);
       const [finalWorkspace] = await rawRows(
         tx,
         sql`select id from workspaces where id = ${scope.workspaceId}::uuid and account_id = ${scope.accountId}::uuid for key share`,
       );
       if (!finalWorkspace)
         throw new Error("Organization integration policy workspace scope changed before commit");
-      await assert();
       return result;
     },
     undefined,
     "none",
   );
+}
+
+/** New acquisitions always assert before effects and before returning to commit.
+ * The immutable snapshot stays authoritative through commit: the shared fence
+ * excludes policy writers and the SQL writer rejects same-transaction upgrades.
+ * Receipt-aware callers instead use withOrganizationIntegrationPolicyFence and
+ * assert only after distinguishing completed replay from new workflow progress.
+ */
+export async function withOrganizationIntegrationAcquisition<T>(
+  db: Database,
+  inputScope: OrganizationIntegrationAcquisitionScope,
+  integrationKeys: readonly (string | null)[],
+  acquire: (tx: Database) => Promise<T>,
+): Promise<T> {
+  // Snapshot classifications before the first await, including workspace lookup.
+  const keys = [...integrationKeys];
+  if (!keys.length)
+    throw new Error("Acquisition requires at least one trusted integration classification");
+  return withOrganizationIntegrationPolicyFence(db, inputScope, async (tx, policy) => {
+    const assert = () => {
+      for (const key of keys) assertOrganizationIntegrationAllowed(policy, key);
+    };
+    assert();
+    const result = await acquire(tx);
+    assert();
+    return result;
+  });
 }
