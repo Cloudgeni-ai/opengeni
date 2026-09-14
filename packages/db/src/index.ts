@@ -77396,6 +77396,34 @@ async function mapSessionWithControl(
     tenancyViewer,
   );
   mapped.codexCurrentSelection = null;
+  mapped.dispatchWait = null;
+  if (row.status === "queued" && row.activeTurnId === null && control.state === "active") {
+    // Read only the existing delivery ledger. Neither a claimed wake nor a
+    // Temporal acknowledgement proves that a worker has admitted a turn.
+    const [wake] = await db
+      .select({
+        wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
+        deliveredRevision: schema.sessionWorkflowWakeOutbox.deliveredRevision,
+        attempts: schema.sessionWorkflowWakeOutbox.attempts,
+        nextAttemptAt: schema.sessionWorkflowWakeOutbox.nextAttemptAt,
+        lastError: schema.sessionWorkflowWakeOutbox.lastError,
+      })
+      .from(schema.sessionWorkflowWakeOutbox)
+      .where(
+        and(
+          eq(schema.sessionWorkflowWakeOutbox.workspaceId, row.workspaceId),
+          eq(schema.sessionWorkflowWakeOutbox.sessionId, row.id),
+        ),
+      )
+      .limit(1);
+    const pending = wake && wake.wakeRevision > wake.deliveredRevision;
+    mapped.dispatchWait = {
+      state: pending ? "pending" : wake ? "acknowledged" : "unavailable",
+      attempts: pending ? wake.attempts : 0,
+      nextAttemptAt: pending ? wake.nextAttemptAt.toISOString() : null,
+      lastError: pending ? wake.lastError : null,
+    };
+  }
   if (row.activeTurnId) {
     const [turn] = await db
       .select({

@@ -9,6 +9,8 @@ import {
   waitForSessionInputWithEvent,
   applySessionTurnSettlement,
   settleSessionInputWait,
+  claimPendingSessionWorkflowWakes,
+  markSessionWorkflowWakeFailed,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -269,13 +271,89 @@ describe("responsive production session header", () => {
         disposition: "timeout",
       });
       await publishDurableSessionEvents(bus, fixture.workspaceId, session.id, settled.events);
-      await header.getByText("Starting", { exact: true }).waitFor();
+      await header.getByText("Queued", { exact: true }).waitFor();
       expect(await header.innerText()).not.toContain("Waiting ·");
       expect(await header.innerText()).not.toContain("Idle");
     } finally {
       await context.close();
     }
   }, 60_000);
+
+  test("queued dispatch is visible as waiting and clears after real worker admission", async () => {
+    const session = await createSession(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: "Explain queued work",
+      title: "Queued dispatch check",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: session.id,
+      clientEventId: `initial:${session.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const wake = (await claimPendingSessionWorkflowWakes(dbClient.db, 1000)).find(
+      (entry) => entry.sessionId === session.id,
+    );
+    if (!wake) throw new Error("queued dispatch wake missing");
+    await markSessionWorkflowWakeFailed(dbClient.db, wake, "Control worker unavailable");
+    for (const width of [1280, 390]) {
+      const context = await configuredContext(browser, {
+        viewport: { width, height: 850 },
+        extraHTTPHeaders: ownerHeaders,
+      });
+      try {
+        const page = await context.newPage();
+        await page.goto(sessionUrl({ ...fixture, sessionId: session.id }));
+        const status = page.locator("[data-session-dispatch-wait]");
+        await status.waitFor();
+        expect(await status.innerText()).toContain("No agent turn is running");
+        await status.getByText("Start details", { exact: true }).click();
+        expect(await status.innerText()).toContain("Control worker unavailable");
+        expect(await status.locator(".animate-spin").count()).toBe(0);
+        expect(await status.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+          true,
+        );
+        if (width >= 640) {
+          const row = page
+            .locator(`a[href="/workspaces/${fixture.workspaceId}/sessions/${session.id}"]`)
+            .first();
+          await row.waitFor();
+          expect(await row.getAttribute("aria-label")).toContain("waiting to run");
+          expect(await row.locator(".animate-spin").count()).toBe(0);
+          expect((await row.boundingBox())?.height).toBeLessThanOrEqual(32);
+        }
+        await page.screenshot({
+          path: `/tmp/opengeni-queued-dispatch-${width}.png`,
+          fullPage: true,
+        });
+        if (width === 390) {
+          const claimed = await claimSessionWorkForAttempt(dbClient.db, fixture.workspaceId, {
+            sessionId: session.id,
+            workflowId: `session-${session.id}`,
+            workflowRunId: crypto.randomUUID(),
+            attemptId: crypto.randomUUID(),
+            dispatchId: crypto.randomUUID(),
+            trigger: { kind: "next" },
+          });
+          if (claimed.action !== "claimed") throw new Error("queued turn not admitted");
+          // No fake status patch: the route's queued-only read must observe the
+          // real admission even if its live notification is unavailable.
+          await status.waitFor({ state: "detached", timeout: 25_000 });
+        }
+      } finally {
+        await context.close();
+      }
+    }
+  }, 90_000);
 
   test("keeps deep ancestry, primary title, Back, and every action inside the shell", async () => {
     const matrix = [
