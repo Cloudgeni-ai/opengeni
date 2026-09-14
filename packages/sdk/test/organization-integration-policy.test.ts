@@ -1,8 +1,27 @@
 import { expect, test } from "bun:test";
 import {
+  getOrganizationIntegrationCatalog,
   getOrganizationIntegrationPolicy,
   updateOrganizationIntegrationPolicy,
 } from "../src/organization-integration-policy";
+
+test("organization integration identities are discoverable through the authenticated catalog", async () => {
+  const calls: unknown[][] = [];
+  const catalog = {
+    integrations: [{ key: "custom:mcp", label: "Custom MCP servers", kind: "custom" as const }],
+  };
+  const client = {
+    async requestJson<T>(...args: unknown[]): Promise<T> {
+      calls.push(args);
+      return catalog as T;
+    },
+  };
+  const organizationId = "11111111-1111-4111-8111-111111111111";
+  expect(await getOrganizationIntegrationCatalog(client, organizationId)).toEqual(catalog);
+  expect(calls).toEqual([
+    ["GET", `/v1/organizations/${organizationId}/integration-policy/catalog`],
+  ]);
+});
 
 test("organization policy reads and writes preserve the explicit organization and operation", async () => {
   const calls: unknown[][] = [];

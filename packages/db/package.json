@@ -19,6 +19,14 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./connect-attempts": {
+      "types": "./src/connect-attempts.ts",
+      "default": "./src/connect-attempts.ts"
+    },
+    "./capability-reconciliation": {
+      "types": "./src/capability-reconciliation.ts",
+      "default": "./src/capability-reconciliation.ts"
+    },
     "./organization-integration-policy": {
       "types": "./src/organization-integration-policy.ts",
       "default": "./src/organization-integration-policy.ts"

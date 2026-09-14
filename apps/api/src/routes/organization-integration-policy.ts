@@ -1,6 +1,7 @@
 import { UpdateOrganizationIntegrationPolicyRequest } from "@opengeni/contracts";
 import {
   accountScopedApiKeyWorkspaceAuthority,
+  organizationIntegrationCatalog,
   requireAccessContext,
   requireCanonicalLocalAccountAdministrator,
   type ApiRouteDeps,
@@ -72,7 +73,19 @@ export function registerOrganizationIntegrationPolicyRoutes(app: Hono, deps: Api
     if (!parsed.success) throw new HTTPException(422, { message: "Invalid organization identity" });
     return parsed.data.toLowerCase();
   };
+  app.get(`${path}/catalog`, async (context) => {
+    const accountId = organizationId(context);
+    // The same live administration check as policy reads, including workspace-free service access.
+    await policyResponse(() =>
+      getOrganizationIntegrationPolicy(deps.db, { accountId }, () =>
+        authorizeAdministration(context, deps, accountId, false),
+      ),
+    );
+    context.header("cache-control", "private, no-store");
+    return context.json(organizationIntegrationCatalog());
+  });
   app.get(path, async (context) => {
+    context.header("cache-control", "private, no-store");
     const accountId = organizationId(context);
     return context.json(
       await policyResponse(() =>
@@ -83,6 +96,7 @@ export function registerOrganizationIntegrationPolicyRoutes(app: Hono, deps: Api
     );
   });
   app.put(path, async (context) => {
+    context.header("cache-control", "private, no-store");
     const accountId = organizationId(context);
     const parsed = UpdateOrganizationIntegrationPolicyRequest.safeParse(
       await context.req.json().catch(() => null),

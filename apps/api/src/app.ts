@@ -1,7 +1,7 @@
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
 import { codemodeSessionRequest } from "./codemode";
-import { SiteSessionPathError } from "@opengeni/contracts";
+import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
   canonicalizeConfiguredModelId,
@@ -149,6 +149,7 @@ import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
 import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
+import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organization-integration-policy";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerConnectRoutes } from "./routes/connect";
@@ -1278,6 +1279,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
+  registerOrganizationIntegrationPolicyRoutes(app, routeDeps);
   registerModelConnectionAccessRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
@@ -1311,7 +1313,10 @@ export function createAppComposition(deps: AppDependencies): {
   app.onError((rawError, c) => {
     // One central mapping for every Send/Steer/control route: a bounded
     // control-prefix wait that expired is a known, retryable, not-applied 503.
-    const error = workspaceControlBusyHttpError(rawError) ?? rawError;
+    const error =
+      rawError instanceof OrganizationIntegrationDeniedError
+        ? new HTTPException(403, { message: rawError.message })
+        : (workspaceControlBusyHttpError(rawError) ?? rawError);
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
     const status = compactionLock ? 422 : httpStatusForError(error);

@@ -1,6 +1,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { isDeepStrictEqual } from "node:util";
+import { getLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   CapabilityCatalogItem,
@@ -17,6 +19,7 @@ import {
   type McpServerConnectionRef,
   type McpPersonalConnectionDelegation,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
+  assertOrganizationIntegrationAllowed,
   type SocialConnection,
 } from "@opengeni/contracts";
 import {
@@ -53,6 +56,10 @@ import {
   type InstalledSkillSummary,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import {
+  withOrganizationIntegrationAcquisition,
+  withOrganizationIntegrationPolicyFence,
+} from "@opengeni/db/organization-integration-policy";
 import { hasPermission } from "../access";
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
@@ -252,6 +259,7 @@ export async function enableCapability(
 /** Probe outside a durable Connect commit; persist the exact prepared settings
  * inside the caller's authorized receipt transaction. Native enable uses this too. */
 export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
+  input = { ...input, payload: structuredClone(input.payload) };
   const item = await requireCatalogItem(
     input.db,
     input.workspaceId,
@@ -297,6 +305,40 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   delete installationConfig.headerNames;
   delete installationConfig.connectionRef;
   if (item.kind === "mcp") {
+    // This generic, potentially workspace-authored catalog is not proof of a
+    // curated provider identity. Dedicated Connect adapters classify separately.
+    const unchanged = await withOrganizationIntegrationPolicyFence(
+      input.db,
+      input,
+      async (tx, policy) => {
+        const existing = await unchangedMcpInstallation(
+          { ...input, db: tx },
+          item,
+          installationConfig,
+        );
+        if (existing) return existing;
+        assertOrganizationIntegrationAllowed(policy, "custom:mcp");
+        return null;
+      },
+    );
+    if (unchanged) {
+      return {
+        commit: (db: Database) =>
+          withOrganizationIntegrationPolicyFence(db, input, async (tx) => {
+            const current = await unchangedMcpInstallation(
+              { ...input, db: tx },
+              item,
+              installationConfig,
+            );
+            if (!current || !isDeepStrictEqual(current, unchanged)) {
+              throw new HTTPException(409, {
+                message: "Capability installation changed; reload before reconciling",
+              });
+            }
+            return current;
+          }),
+      };
+    }
     const headers = await resolveMcpCredentialHeaders(input, item);
     const connectionRef = input.payload.connectionRef
       ? await validateMcpCapabilityConnectionRef(input, item, input.payload.connectionRef)
@@ -326,7 +368,52 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
     config: installationConfig,
     metadata: installationMetadata,
   };
-  return { commit: (db: Database) => enableCapabilityInstallation(db, installation) };
+  return {
+    commit: (db: Database) =>
+      item.kind === "mcp"
+        ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], (tx) =>
+            enableCapabilityInstallation(tx, installation),
+          )
+        : enableCapabilityInstallation(db, installation),
+  };
+}
+
+/** A no-effect reconciliation is not a new acquisition. Validate ordinary
+ * connection visibility before locking the installation, and compare actual
+ * stored credentials rather than trusting caller-supplied identity hints. */
+async function unchangedMcpInstallation(
+  input: EnableCapabilityInput,
+  item: CapabilityCatalogItem,
+  requestedConfig: Record<string, unknown>,
+): Promise<CapabilityInstallation | null> {
+  const connectionRef = input.payload.connectionRef
+    ? await validateMcpCapabilityConnectionRef(input, item, input.payload.connectionRef)
+    : null;
+  const existing = await getLockedCapabilityInstallation(input.db, input.workspaceId, item.id);
+  if (!existing || existing.kind !== "mcp" || existing.status !== "active") return null;
+  const {
+    headerNames: _names,
+    headersEncrypted: _encrypted,
+    headers: _headers,
+    ...storedConfig
+  } = existing.config;
+  const config = { ...requestedConfig, ...(connectionRef ? { connectionRef } : {}) };
+  const { mcpConnectivity: _storedConnectivity, ...storedMetadata } = existing.metadata;
+  const { mcpConnectivity: _requestedConnectivity, ...requestedMetadata } = input.payload.metadata;
+  if (
+    !isDeepStrictEqual(config, storedConfig) ||
+    !isDeepStrictEqual(requestedMetadata, storedMetadata)
+  )
+    return null;
+  const provided = normalizedMcpCredentialHeaders(input.payload.headers);
+  if (provided) {
+    const stored = await resolveMcpCredentialHeaders(
+      { ...input, payload: { ...input.payload, headers: {} } },
+      item,
+    );
+    if (!isDeepStrictEqual(provided, stored)) return null;
+  }
+  return existing;
 }
 
 /**
