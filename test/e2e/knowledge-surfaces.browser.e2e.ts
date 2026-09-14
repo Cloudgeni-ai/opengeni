@@ -578,6 +578,8 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
         } else await route.continue();
       };
       const collectionSearch = `**/v1/workspaces/${workspaceId}/knowledge/entries/search`;
+      expect(unexpectedDiagnostics(context)).toEqual([]);
+      const diagnosticsBeforeDenial = unexpectedDiagnostics(context).length;
       await page.route(collectionSearch, denyCollection);
       await tree.getByRole("button", { name: "Contracts tree", exact: true }).click();
       await tree.getByRole("button", { name: "Contracts tree", exact: true }).click();
@@ -586,6 +588,17 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       expect(await tree.getByRole("button", { name: "Nested renewal", exact: true }).count()).toBe(
         0,
       );
+      // The injected denial emits one response diagnostic and its Chromium
+      // console duplicate. Assert that exact local delta without suppressing
+      // any diagnostics from setup, Retry, or subsequent collection browsing.
+      await waitFor(() => unexpectedDiagnostics(context).length >= diagnosticsBeforeDenial + 2);
+      expect(unexpectedDiagnostics(context).slice(diagnosticsBeforeDenial).toSorted()).toEqual(
+        [
+          `response 403: POST ${apiBaseUrl}/v1/workspaces/${workspaceId}/knowledge/entries/search`,
+          "console error: Failed to load resource: the server responded with a status of 403 (Forbidden)",
+        ].toSorted(),
+      );
+      const diagnosticsAfterDenial = unexpectedDiagnostics(context).length;
       await page.unroute(collectionSearch, denyCollection);
       await tree.getByRole("button", { name: "Retry", exact: true }).click();
       await tree.getByRole("button", { name: "Nested renewal", exact: true }).waitFor();
@@ -633,7 +646,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       expect(await page.getByRole("button", { name: "Nested renewal", exact: true }).count()).toBe(
         1,
       );
-      expect(unexpectedDiagnostics(context)).toEqual([]);
+      expect(unexpectedDiagnostics(context).slice(diagnosticsAfterDenial)).toEqual([]);
     } finally {
       await context.close();
     }
