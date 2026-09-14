@@ -5,14 +5,20 @@ async function source(path: string): Promise<string> {
 }
 
 describe("session control surface architecture", () => {
-  test("only the centered new-session composer uses viewport-sized picker dialogs", async () => {
+  test("new and existing composers use the same popover pattern", async () => {
     const newSession = await source("routes/sessions-index.tsx");
     const existingSession = await source("routes/session.tsx");
-    expect(newSession).toContain('expandedPanelPresentation="dialog"');
+    expect(newSession).not.toContain('expandedPanelPresentation="dialog"');
+    expect(newSession).toContain('menuSide="bottom"');
     expect(newSession).toContain("draftChatSettings={{");
     expect(newSession.match(/<ComposerMobilePlus\b/g)).toHaveLength(1);
     expect(newSession).toContain("agentLearning: draft.agentLearning");
     expect(existingSession).not.toContain('expandedPanelPresentation="dialog"');
+    expect(newSession).not.toContain("voiceModel={{");
+    expect(newSession).toContain('modelMenu="split"');
+    const plus = await source("components/composer-mobile-plus.tsx");
+    expect(plus).toContain('setPanel("settings")');
+    expect(plus).not.toContain("setSettingsOpen");
   });
 
   test("renders SessionChrome above the composer", async () => {
@@ -106,14 +112,16 @@ describe("session control surface architecture", () => {
 
   test("keeps the folder above the prompt and context actions inside plus on new sessions", async () => {
     const route = await source("routes/sessions-index.tsx");
-    const actions = route.indexOf("actions={");
-    const model = route.indexOf("<SessionModelControl", actions);
+    const controls = route.indexOf("controls={");
+    const model = route.indexOf("<SessionModelControl", controls);
+    const actions = route.indexOf("actions={", model);
     const voice = route.indexOf("<NewSessionRealtimeControl", model);
     const header = route.indexOf("header={", voice);
     const setup = route.indexOf("<SessionSetupStrip", header);
-    expect(actions).toBeGreaterThan(-1);
-    expect(model).toBeGreaterThan(actions);
-    expect(voice).toBeGreaterThan(model);
+    expect(controls).toBeGreaterThan(-1);
+    expect(model).toBeGreaterThan(controls);
+    expect(actions).toBeGreaterThan(model);
+    expect(voice).toBeGreaterThan(actions);
     expect(header).toBeGreaterThan(voice);
     expect(setup).toBeGreaterThan(header);
 
