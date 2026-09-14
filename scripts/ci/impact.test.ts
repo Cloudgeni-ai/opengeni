@@ -44,6 +44,7 @@ const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
 const TIMELINE_TIP_FOLLOW_BROWSER_E2E = "test/e2e/timeline-tip-follow.browser.e2e.ts";
 const RESTORED_ATTACHMENT_PREVIEW_E2E = "test/e2e/restored-attachment-preview.browser.e2e.ts";
 const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
+const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
   test("documentation-only changes retain every non-runtime public guard", () => {
@@ -103,6 +104,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/capability-catalog.browser.e2e.ts",
       "test/e2e/capability-details.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
+      COMPACT_SESSION_VIEW_E2E,
       "test/e2e/composer-pane.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
@@ -340,6 +342,22 @@ describe("fail-closed change impact", () => {
     expect(plan.artifactRuntimeRequired).toBe(false);
   });
 
+  test("compact session view follows its web fixture dependencies without widening leaf plans", () => {
+    for (const path of [
+      COMPACT_SESSION_VIEW_E2E,
+      "apps/web/src/components/rail/session-list.tsx",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/index.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode).toBe("focused");
+      expect(plan.e2eTests).toContain(COMPACT_SESSION_VIEW_E2E);
+    }
+    expect(createImpactPlan(["packages/ogtool/src/index.ts"]).e2eTests).not.toContain(
+      COMPACT_SESSION_VIEW_E2E,
+    );
+  });
+
   test("account request observation stays in the native accounts lane", () => {
     const regression = "test/e2e/browser-account-request-observation.browser.e2e.ts";
     const plan = createImpactPlan([regression]);
@@ -420,6 +438,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/capability-catalog.browser.e2e.ts",
       "test/e2e/capability-details.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
+      COMPACT_SESSION_VIEW_E2E,
       "test/e2e/composer-pane.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
