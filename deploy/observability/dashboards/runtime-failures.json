@@ -896,6 +896,92 @@
         "w": 12,
         "h": 8
       }
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Turn cleanup in progress",
+      "description": "Physical cleanup after agent execution has ended. A completed logical turn can still hold its activity here and delay queued follow-ups. Inspect Temporal heartbeat finalizationStage for the exact session and attempt.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage) (opengeni_turn_finalization_inflight{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "legendFormat": "{{stage}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 77,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Stalled turn cleanup containment",
+      "description": "Worker containment exits when one cleanup stage exceeds five minutes. This deadline begins only after execution ends and does not limit agent run length. The exit stops in-process writers; normal recovery retains the durable remote-process proof requirements. A restart before the next scrape can hide an increment; correlate worker restart and timeout logs.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage) (increase(opengeni_turn_finalization_containment_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
+          "legendFormat": "{{stage}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "gridPos": {
+        "x": 12,
+        "y": 77,
+        "w": 12,
+        "h": 8
+      }
     }
   ]
 }

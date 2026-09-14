@@ -152,3 +152,13 @@ alerts on that condition.
 > Prometheus series — a machine's link history lives in the session timeline (which
 > carries the workspace/session context Prometheus omits). The Connected Machines
 > board is the aggregate op-outcome view.
+
+Runtime Failures also shows **Turn cleanup in progress** by bounded stage and
+**Stalled turn cleanup containment**. These describe physical cleanup after agent
+execution ends, including already-completed logical turns. Inspect the exact
+Temporal activity heartbeat (`phase=finalizing`, `finalizationStage`, and
+`finalizationStageStartedAt`) to correlate a session. A single cleanup stage
+stalled for five minutes triggers worker containment without claiming remote
+writer quiescence or retrying the completed logical turn. Since an immediate
+worker exit can precede a Prometheus scrape, correlate the containment log and
+worker restarts when the counter has no sample.
