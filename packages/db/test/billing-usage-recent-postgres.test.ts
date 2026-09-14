@@ -12,6 +12,7 @@ import {
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
+const historySize = 200_000;
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("billing-usage-recent");
@@ -45,6 +46,10 @@ describe("recent billing usage under application-role RLS", () => {
     });
     // Interleave workspaces and event types, with timestamp ties resolved by
     // recorded_at. The metric indexes cannot supply this ordering.
+    // Exercise a high-history account: restrictive RLS selectivity estimates
+    // only 50 visible rows from 20,000 seeded rows, below LIMIT 100, so that
+    // smaller fixture legitimately prefers a full scan even with these indexes.
+    // Keep the real planner settings and policies; do not force an index plan.
     await shared.admin`
       insert into usage_events (
         account_id, workspace_id, event_type, quantity, unit,
@@ -56,7 +61,7 @@ describe("recent billing usage under application-role RLS", () => {
         n, 'count', ${suffix} || ':' || n::text,
         '2026-01-01'::timestamptz + (n / 4) * interval '1 second',
         '2026-01-01'::timestamptz + n * interval '1 second'
-      from generate_series(1, 20000) fixture(n)`;
+      from generate_series(1, ${historySize}::integer) fixture(n)`;
     await shared.admin`analyze usage_events`;
 
     for (const workspaceId of [undefined, grant.workspaceId!] as const) {
@@ -67,7 +72,7 @@ describe("recent billing usage under application-role RLS", () => {
       });
       expect(rows).toHaveLength(100);
       expect(rows.map((row) => row.quantity)).toEqual(
-        Array.from({ length: 100 }, (_, index) => 20000 - index * (workspaceId ? 2 : 1)),
+        Array.from({ length: 100 }, (_, index) => historySize - index * (workspaceId ? 2 : 1)),
       );
       expect(rows.every((row) => row.accountId === grant.accountId)).toBe(true);
       if (workspaceId) expect(rows.every((row) => row.workspaceId === workspaceId)).toBe(true);
