@@ -65,8 +65,11 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
     availableIds.has(id),
   );
   const mandatoryIdSet = new Set<string>(mandatoryIds);
-  const selectedRefs = mergeToolRefs([], input.sessionTools);
   const tracksWorkspaceDefaults = policy.mode === "workspace_default";
+  const excludedIds = new Set(tracksWorkspaceDefaults ? policy.excludedMcpServerIds : []);
+  const selectedRefs = mergeToolRefs([], input.sessionTools).filter(
+    (tool) => !excludedIds.has(tool.id) || mandatoryIdSet.has(tool.id),
+  );
 
   // Persisted refs may outlive a capability installation, deployment config,
   // or its credentials. Admission remains strict for newly requested refs, but
@@ -80,7 +83,7 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
     toolRefs = mergeToolRefs(
       toolRefs,
       sortedIds(defaultIds)
-        .filter((id) => availableIds.has(id))
+        .filter((id) => availableIds.has(id) && !excludedIds.has(id))
         .map((id) => ({ kind: "mcp" as const, id, optional: true as const })),
     );
   }
@@ -97,7 +100,7 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
     selectedRefs,
     tracksWorkspaceDefaults
       ? sortedIds(defaultIds)
-          .filter((id) => availableIds.has(id))
+          .filter((id) => availableIds.has(id) && !excludedIds.has(id))
           .map((id) => ({ kind: "mcp" as const, id, optional: true as const }))
       : [],
   );
@@ -190,7 +193,12 @@ export async function workspaceSessionToolPolicyDefaultServerIds(
   const configured = resolveWorkspaceSessionToolDefaults(workspace.settings);
   if (!configured?.mcpServerIds) return availableDefaults;
   const available = new Set(availableDefaults);
-  return sortedIds(configured.mcpServerIds.filter((id) => available.has(id)));
+  return sortedIds([
+    ...configured.mcpServerIds.filter((id) => available.has(id)),
+    ...(configured.inheritConnectedMcpServers
+      ? availableDefaults.filter((id) => !["opengeni", "files", "docs"].includes(id))
+      : []),
+  ]);
 }
 
 /** Add a bounded, secret-safe effective projection to a session response. */

@@ -181,6 +181,8 @@ import type {
   BeginSessionRealtimeRequest,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
+  ConnectorToolPermissionsResponse,
+  UpdateConnectorToolPermissionsRequest,
   CapabilityInstallation,
   ApiIntegrationPreview,
   ApiIntegrationOAuthStartRequest,
@@ -6805,6 +6807,35 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/capabilities`,
       request,
+    );
+  }
+
+  async getConnectorToolPermissions(
+    workspaceId: string,
+    capabilityId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ConnectorToolPermissionsResponse> {
+    return await this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async updateConnectorToolPermissions(
+    workspaceId: string,
+    capabilityId: string,
+    request: UpdateConnectorToolPermissionsRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ saved: boolean }> {
+    return await this.requestJson(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions`,
+      request,
+      {},
+      options,
     );
   }
 

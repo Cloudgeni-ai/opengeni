@@ -93,6 +93,26 @@ describe("session resource tool policy fences", () => {
     ).toEqual([mcp("cap-docs", true)]);
   });
 
+  test("builtin-only defaults include future connectors without reenabling disabled builtins", () => {
+    const runtime = {
+      mcpServers: [
+        ...settings.mcpServers,
+        { id: "files", url: "https://files.example/mcp", cacheToolsList: false },
+        { id: "new-connector", url: "https://new.example/mcp", cacheToolsList: false },
+      ],
+    };
+    const resolved = withWorkspaceDefaultMcpTools([], settings, runtime, {
+      mcpServerIds: [],
+      firstPartyMcpTools: [],
+      inheritConnectedMcpServers: true,
+    });
+    expect(resolved.map((tool) => tool.id).sort()).toEqual([
+      "cap-docs",
+      "new-connector",
+      "static-configured",
+    ]);
+  });
+
   test("an absent workspace override preserves legacy capability defaults", () => {
     expect(
       withWorkspaceDefaultMcpTools(

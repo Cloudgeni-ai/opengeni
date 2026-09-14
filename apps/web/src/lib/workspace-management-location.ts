@@ -2,7 +2,6 @@ export type WorkspaceSettingsSection =
   | "general"
   | "learning"
   | "members"
-  | "tools"
   | "plugins"
   | "models"
   | "api-keys"
@@ -27,7 +26,6 @@ const DEFAULT_SETTINGS_SECTION: WorkspaceSettingsSection = "general";
 export function workspaceSettingsSectionFromSearch(value: unknown): WorkspaceSettingsSection {
   return value === "learning" ||
     value === "members" ||
-    value === "tools" ||
     value === "plugins" ||
     value === "models" ||
     value === "api-keys" ||

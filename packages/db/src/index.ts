@@ -30808,9 +30808,16 @@ function resolvedSessionMcpApproval(
 
 function resolvedConnectorWritePolicy(
   resolved: ResolvedConnectorActionPolicy,
-  approvalMode: "connector" | "connector_write",
+  approvalMode: "connector" | "connector_write" | "session_mcp",
   actionName: string,
 ): ResolvedConnectorActionPolicy {
+  if (approvalMode === "session_mcp") {
+    // Explicit Block still wins for header-backed / credential-free servers.
+    // Allow cannot lower the separately frozen session approval floor.
+    return resolved.managed && connectorActionPolicyDecision(resolved) !== "allow"
+      ? resolved
+      : resolvedSessionMcpApproval(actionName);
+  }
   return approvalMode === "connector_write" && !resolved.managed
     ? {
         managed: true,
@@ -31398,19 +31405,16 @@ export async function prepareConnectorActionApproval(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const snapshot = await connectorActionAttemptSnapshot(tx as unknown as Database, identity);
-        const resolved =
-          normalized.approvalMode === "session_mcp"
-            ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-            : resolvedConnectorWritePolicy(
-                resolveConnectorActionPolicy(snapshot, {
-                  connectionId: normalized.connectionId!,
-                  serverId: normalized.serverId,
-                  toolName: normalized.toolName,
-                  actionName: normalized.policyActionSelector,
-                }),
-                normalized.approvalMode,
-                normalized.policyActionSelector,
-              );
+        const resolved = resolvedConnectorWritePolicy(
+          resolveConnectorActionPolicy(snapshot, {
+            connectionId: normalized.connectionId!,
+            serverId: normalized.serverId,
+            toolName: normalized.toolName,
+            actionName: normalized.policyActionSelector,
+          }),
+          normalized.approvalMode,
+          normalized.policyActionSelector,
+        );
         if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
         const durable = durableConnectorActionInvocation(
           identity,
@@ -31467,19 +31471,16 @@ export async function previewConnectorActionApproval(
     { accountId: identity.accountId, workspaceId: identity.workspaceId },
     async (scopedDb) => {
       const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
-      const resolved =
-        normalized.approvalMode === "session_mcp"
-          ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-          : resolvedConnectorWritePolicy(
-              resolveConnectorActionPolicy(snapshot, {
-                connectionId: normalized.connectionId!,
-                serverId: normalized.serverId,
-                toolName: normalized.toolName,
-                actionName: normalized.policyActionSelector,
-              }),
-              normalized.approvalMode,
-              normalized.policyActionSelector,
-            );
+      const resolved = resolvedConnectorWritePolicy(
+        resolveConnectorActionPolicy(snapshot, {
+          connectionId: normalized.connectionId!,
+          serverId: normalized.serverId,
+          toolName: normalized.toolName,
+          actionName: normalized.policyActionSelector,
+        }),
+        normalized.approvalMode,
+        normalized.policyActionSelector,
+      );
       if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
       const durable = durableConnectorActionInvocation(
         identity,
@@ -31529,19 +31530,16 @@ export async function beginConnectorActionExecution(
         let row = existing;
         let inserted = false;
         if (!row) {
-          const resolved =
-            normalized.approvalMode === "session_mcp"
-              ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-              : resolvedConnectorWritePolicy(
-                  resolveConnectorActionPolicy(snapshot, {
-                    connectionId: normalized.connectionId!,
-                    serverId: normalized.serverId,
-                    toolName: normalized.toolName,
-                    actionName: normalized.policyActionSelector,
-                  }),
-                  normalized.approvalMode,
-                  normalized.policyActionSelector,
-                );
+          const resolved = resolvedConnectorWritePolicy(
+            resolveConnectorActionPolicy(snapshot, {
+              connectionId: normalized.connectionId!,
+              serverId: normalized.serverId,
+              toolName: normalized.toolName,
+              actionName: normalized.policyActionSelector,
+            }),
+            normalized.approvalMode,
+            normalized.policyActionSelector,
+          );
           if (!resolved.managed) return { allowed: true, managed: false } as const;
           const durable = durableConnectorActionInvocation(
             identity,
@@ -78958,4 +78956,65 @@ export * from "./knowledge-entries";
 
 export * from "./knowledge-indexing";
 
+import type { ConnectorToolPermission } from "@opengeni/contracts";
 export * from "./knowledge-document-preparation";
+
+export async function listConnectorToolPermissionPolicies(
+  db: Database,
+  input: { accountId: string; workspaceId: string; connectionId: string },
+) {
+  return withRlsContext(db, input, async (tx) =>
+    tx
+      .select()
+      .from(schema.connectorActionPolicies)
+      .where(
+        and(
+          eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+          eq(schema.connectorActionPolicies.connectionId, input.connectionId),
+        ),
+      )
+      .orderBy(asc(schema.connectorActionPolicies.id)),
+  );
+}
+
+/** All tools in a group change together, and never exceed the attempt snapshot bound. */
+export async function updateConnectorToolPermissionPolicies(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    serverId: string;
+    toolNames: string[];
+    policy: ConnectorToolPermission;
+  },
+): Promise<void> {
+  await withRlsContext(db, input, async (scoped) =>
+    scoped.transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`connector-tool-permissions:${input.workspaceId}`}, 0))`,
+      );
+      const existing = await tx
+        .select()
+        .from(schema.connectorActionPolicies)
+        .where(eq(schema.connectorActionPolicies.workspaceId, input.workspaceId));
+      const names = [...new Set(input.toolNames)].sort((left, right) => left.localeCompare(right));
+      const added = names.filter(
+        (name) =>
+          !existing.some(
+            (row) =>
+              row.connectionId === input.connectionId &&
+              row.serverId === input.serverId &&
+              row.toolName === name &&
+              row.actionName === "*",
+          ),
+      );
+      if (existing.length + added.length > 2048)
+        throw new Error("The workspace tool permission limit has been reached");
+      for (const toolName of names) {
+        await upsertConnectorActionPolicy(tx, { ...input, toolName, actionName: "*" });
+      }
+    }),
+  );
+}

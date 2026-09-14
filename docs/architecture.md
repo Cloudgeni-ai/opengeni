@@ -1129,6 +1129,9 @@ Capabilities define integration/tool shapes. Connections bind credentials and
 ownership. Session policy selects authorized tools.
 MCP/Codemode execute tools; neither grants authority.
 
+Connector permission management: `packages/core/src/domain/connector-tool-permissions.ts`.
+See [`session-mcp-servers.md`](session-mcp-servers.md).
+
 [MCP recovery](mcp-operation-recovery.md) observes outcomes without mutation replay.
 
 `@opengeni/tool-gateway` is the protocol-neutral catalog, validation,
