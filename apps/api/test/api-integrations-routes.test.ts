@@ -13,6 +13,7 @@ import {
 } from "@opengeni/contracts/google-drive";
 import {
   IntegrationPresentation,
+  OrganizationIntegrationDeniedError,
   ListIntegrationDefinitionsResponse,
   signDelegatedAccessToken,
 } from "@opengeni/contracts";
@@ -24,6 +25,8 @@ import {
   deleteWorkspace,
   encryptEnvironmentValue,
   installApiIntegration,
+  getApiIntegrationUninstallPreview,
+  uninstallApiIntegration,
   type DbClient,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -33,6 +36,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import postgres from "postgres";
 
 import {
@@ -46,6 +50,7 @@ const environmentsEncryptionKey = new Uint8Array(32).fill(19);
 let sourceVersion = "1.0.0";
 let googleDriveFolderName = "Product";
 const googleDriveProviderRequests: string[] = [];
+let sourceFetches = 0;
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let app: Hono | null = null;
@@ -146,6 +151,12 @@ beforeAll(async () => {
   accountId = grant.accountId;
   workspaceId = grant.workspaceId;
   app = new Hono();
+  app.onError((error, c) => {
+    if (error instanceof OrganizationIntegrationDeniedError)
+      return c.json({ message: error.message }, 403);
+    if (error instanceof HTTPException) return error.getResponse();
+    throw error;
+  });
   registerApiIntegrationRoutes(
     app,
     {
@@ -157,13 +168,19 @@ beforeAll(async () => {
     } as ApiRouteDeps,
     {
       fetchImpl: async (sourceRequest) => {
+        sourceFetches++;
         if (String(sourceRequest) === "https://127.0.0.1/secured-openapi.json") {
           return new Response(JSON.stringify(apiKeyOpenApiDocument()), {
             status: 200,
             headers: { "content-type": "application/json" },
           });
         }
-        if (String(sourceRequest) !== "https://127.0.0.1/openapi.json") {
+        if (
+          ![
+            "https://127.0.0.1/openapi.json",
+            "https://127.0.0.1/reconciliation-openapi.json",
+          ].includes(String(sourceRequest))
+        ) {
           return new Response(null, { status: 404 });
         }
         return new Response(JSON.stringify(openApiDocument()), {
@@ -231,6 +248,106 @@ async function request(
 }
 
 describe("API Integration routes", () => {
+  test("restricted API reconciliation uses exact stored previews without new discovery", async () => {
+    if (!client || !shared || !app) throw new Error("API reconciliation requires real PostgreSQL");
+    const source = { kind: "openapi", url: "https://127.0.0.1/reconciliation-openapi.json" };
+    const previewResponse = await request("/integrations/preview", {
+      method: "POST",
+      body: JSON.stringify({ source }),
+    });
+    expect(previewResponse.status, await previewResponse.clone().text()).toBe(200);
+    const preview = await previewResponse.json();
+    const body = {
+      source,
+      instanceKey: "reconcile",
+      expectedRevisionId: preview.revisionId,
+      expectedContentSha256: preview.contentSha256,
+      allowedTools: preview.tools.map((tool: { id: string }) => tool.id),
+    };
+    const post = (payload: unknown) =>
+      request("/integrations/install", { method: "POST", body: JSON.stringify(payload) });
+    const created = await post(body);
+    expect(created.status, await created.clone().text()).toBe(201);
+    const installed = await created.json();
+    const replacement = await createConnection(client.db, {
+      accountId,
+      workspaceId,
+      providerDomain: "127.0.0.1",
+      kind: "api_key",
+      credentialEncrypted: "fixture-only",
+      createdBySubjectId: subjectId,
+    });
+    try {
+      await shared.admin`insert into organization_integration_policies (account_id, mode, allowed_integration_keys, revision)
+        values (${accountId}, 'restricted', '[]'::jsonb, 1)`;
+      const beforeFetches = sourceFetches;
+      const unchanged = await post(body);
+      expect(unchanged.status, await unchanged.text()).toBe(201);
+      const reduction = {
+        ...body,
+        allowedTools: [body.allowedTools[0]],
+        expectedInstanceVersion: installed.instanceVersion,
+      };
+      const reducedResponse = await post(reduction);
+      expect(reducedResponse.status, await reducedResponse.clone().text()).toBe(200);
+      const reduced = await reducedResponse.json();
+      const renamed = await post({
+        ...reduction,
+        expectedInstanceVersion: reduced.instanceVersion,
+        displayName: "Renamed API",
+      });
+      expect(renamed.status, await renamed.clone().text()).toBe(200);
+      const current = await renamed.json();
+      for (const forged of [
+        { ...body, expectedInstanceVersion: current.instanceVersion },
+        { ...reduction, connectionId: replacement.id },
+        { ...reduction, source: { ...source, url: "https://127.0.0.1/new-source.json" } },
+        { ...reduction, source: { ...source, baseUrl: "https://127.0.0.1/other/" } },
+        { ...reduction, expectedContentSha256: "a".repeat(64) },
+        { ...reduction, instanceKey: "new-instance" },
+      ]) {
+        const denied = await post(forged);
+        expect(denied.status, await denied.text()).toBe(403);
+      }
+      const stale = await post({ ...reduction, displayName: "Stale rename" });
+      expect(stale.status, await stale.text()).toBe(409);
+      expect(sourceFetches).toBe(beforeFetches);
+      const otherActor = await request("/integrations/install", {
+        method: "POST",
+        body: JSON.stringify(reduction),
+        headers: {
+          authorization: `Bearer ${await signDelegatedAccessToken(delegationSecret, {
+            accountId,
+            workspaceId,
+            subjectId,
+            permissions: ["workspace:read"],
+            principalKind: "human_session",
+            exp: Math.floor(Date.now() / 1000) + 3600,
+          })}`,
+        },
+      });
+      expect(otherActor.status).toBe(403);
+    } finally {
+      await shared.admin`delete from organization_integration_policies where account_id = ${accountId}`;
+      const cleanup = await getApiIntegrationUninstallPreview(
+        client.db,
+        workspaceId,
+        subjectId,
+        installed.capabilityId,
+        installed.instanceKey,
+      );
+      if (cleanup.installed)
+        await uninstallApiIntegration(client.db, {
+          accountId,
+          workspaceId,
+          subjectId,
+          capabilityId: installed.capabilityId,
+          instanceKey: installed.instanceKey,
+          expectedInstallationVersion: cleanup.installationVersion!,
+          expectedInstanceVersion: cleanup.instanceVersion!,
+        });
+    }
+  });
   test("projects missing legacy auth metadata as not requiring a Connection", () => {
     expect(apiIntegrationRequiresConnection({})).toBe(false);
     expect(apiIntegrationRequiresConnection({ kind: "none" })).toBe(false);
