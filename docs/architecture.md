@@ -850,8 +850,8 @@ Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
 managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
 
 Repository `.agents/skills` holds maintainer and integration guidance. Runtime skills
-ship directly from `packages/runtime/src/bundled_*_skills`. Worker defaults include
-`opengeni-visualize` and `document-parsing`, unless overridden by explicit host selection.
+ship from `packages/runtime/src/bundled_*_skills`. Worker defaults include
+`opengeni-help`, `opengeni-visualize`, and `document-parsing`, unless overridden by explicit host selection.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
