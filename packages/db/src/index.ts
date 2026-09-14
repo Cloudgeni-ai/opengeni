@@ -63985,9 +63985,13 @@ function agentSteerCausalActor(update: Pick<BoundedSystemUpdate, "kind" | "linea
 
 function systemUpdateCausalExecutionKey(
   update: Pick<BoundedSystemUpdate, "id" | "kind" | "lineage">,
+  causalExecutionKeys: ReadonlyMap<string, string | null>,
 ): string | null {
   const targetTurnId = systemUpdateCausalHumanTurnId(update);
-  if (targetTurnId) return `target-turn:${targetTurnId}`;
+  if (targetTurnId) {
+    const human = causalExecutionKeys.get(targetTurnId);
+    return human ? `target-human:${human}` : `target-turn:${targetTurnId}`;
+  }
   if (
     isChildLifecycleSystemUpdateKind(update.kind) ||
     update.kind === "goal_continuation" ||
@@ -64013,6 +64017,7 @@ function systemUpdateCausalExecutionKey(
 function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
   selected: readonly T[],
   candidate: T,
+  causalExecutionKeys: ReadonlyMap<string, string | null>,
 ): boolean {
   const first = selected[0];
   if (
@@ -64023,13 +64028,13 @@ function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
   }
   // Null is compatible context (for example an ordinary notice riding with a
   // goal continuation). Once a batch contains frozen causal execution, every
-  // further authority-bearing member must name that exact same origin. Agent
+  // further authority-bearing member must have equivalent inherited authority. Agent
   // Steer uses its caller identity and therefore never borrows a child/goal
   // continuation's target-turn human.
   const selectedCausalKey = selected
-    .map((update) => systemUpdateCausalExecutionKey(update))
+    .map((update) => systemUpdateCausalExecutionKey(update, causalExecutionKeys))
     .find((key): key is string => key !== null);
-  const candidateCausalKey = systemUpdateCausalExecutionKey(candidate);
+  const candidateCausalKey = systemUpdateCausalExecutionKey(candidate, causalExecutionKeys);
   return (
     selectedCausalKey === undefined ||
     candidateCausalKey === null ||
@@ -64097,11 +64102,15 @@ function internalUpdateEventMember(update: BoundedSystemUpdate) {
 function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(
   updates: readonly T[],
   canCoalesce: (selected: readonly T[], candidate: T) => boolean = () => true,
+  skipIncompatibleCommands = false,
 ): T[] {
   const selected: T[] = [];
   let selectedBytes = 0;
   for (const update of updates) {
-    if (selected[0] && !canCoalesce(selected, update)) break;
+    if (selected[0] && !canCoalesce(selected, update)) {
+      if (skipIncompatibleCommands && update.kind === "background_command_result") continue;
+      break;
+    }
     const updateBytes = Buffer.byteLength(
       JSON.stringify({
         id: update.id,
@@ -64533,6 +64542,7 @@ export async function claimSessionWorkForAttempt(
             supersedeGoalContinuations?: boolean;
             deliverUpdates?: boolean;
             pendingEventSequenceBeforeOrAt?: number;
+            commandOnlyMayRun?: boolean;
           } = {},
         ): Promise<{
           count: number;
@@ -64640,6 +64650,9 @@ export async function claimSessionWorkForAttempt(
                     ),
                   )
                   .orderBy(
+                    // Command notices are retained context, not a reason to
+                    // strand later actionable input behind the read limit.
+                    sql`case when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
                     asc(schema.sessionSystemUpdates.createdAt),
                     asc(schema.sessionSystemUpdates.id),
                   )
@@ -64771,17 +64784,121 @@ export async function claimSessionWorkForAttempt(
             }
             validUpdates.push(update);
           }
+          const candidates = validUpdates.filter(
+            (update) =>
+              !expectedXaiAuthority ||
+              frozenXaiExecutionAuthorityKey(frozenXaiExecutionAuthority(update)) ===
+                frozenXaiExecutionAuthorityKey(expectedXaiAuthority),
+          );
           if (
-            expectedXaiAuthority &&
-            validUpdates[0] &&
-            frozenXaiExecutionAuthorityKey(frozenXaiExecutionAuthority(validUpdates[0])) !==
-              frozenXaiExecutionAuthorityKey(expectedXaiAuthority)
+            options.commandOnlyMayRun === false &&
+            candidates.every((update) => update.kind === "background_command_result")
           ) {
-            validUpdates.length = 0;
+            candidates.length = 0;
           }
+          const causalTurnIds = [
+            ...new Set(
+              candidates
+                .map(systemUpdateCausalHumanTurnId)
+                .filter((id): id is string => id !== null),
+            ),
+          ];
+          const causalTurns =
+            causalTurnIds.length === 0
+              ? []
+              : await tx
+                  .select({
+                    id: schema.sessionTurns.id,
+                    human: schema.sessionTurns.initiatingHumanSubjectId,
+                    initiatorKind: schema.sessionTurns.initiatorKind,
+                    initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+                    // Inheritance copies these permissions from the first
+                    // causal turn. Equivalence must include all of them,
+                    // including revoked snapshots (never native fallback).
+                    externalLink: sql<unknown>`(select a.canonical_snapshot
+                      from external_link_turn_authorities a
+                      where a.account_id = ${accountId}::uuid
+                        and a.workspace_id = ${workspaceId}::uuid
+                        and a.session_id = ${sessionId}::uuid
+                        and a.turn_id = ${schema.sessionTurns.id})`,
+                  })
+                  .from(schema.sessionTurns)
+                  .where(
+                    and(
+                      eq(schema.sessionTurns.accountId, accountId),
+                      eq(schema.sessionTurns.workspaceId, workspaceId),
+                      eq(schema.sessionTurns.sessionId, sessionId),
+                      inArray(schema.sessionTurns.id, causalTurnIds),
+                    ),
+                  );
+          // Host authority is owner-scoped. Resolve one batch per causal
+          // human, never mistake RLS-hidden selections for an empty grant set.
+          const turnsByHuman = new Map<string, string[]>();
+          for (const turn of causalTurns) {
+            const human =
+              turn.human ?? (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
+            if (!human) continue;
+            turnsByHuman.set(human, [...(turnsByHuman.get(human) ?? []), turn.id]);
+          }
+          const hostAuthorityByTurn = new Map<string, unknown[]>();
+          const incomingSubjectId = await rlsSubjectIdOrEmpty(tx);
+          try {
+            for (const [human, turnIds] of turnsByHuman) {
+              const authorities = await withWorkspaceSubjectRls(
+                tx,
+                workspaceId,
+                human,
+                async (subjectTx) =>
+                  subjectTx
+                    .select({
+                      turnId: schema.hostMcpTurnAuthorities.turnId,
+                      authority: sql<unknown>`${schema.hostMcpTurnAuthorities.canonicalSnapshot} - 'acceptedWork' - 'source'`,
+                    })
+                    .from(schema.hostMcpTurnAuthorities)
+                    .where(
+                      and(
+                        eq(schema.hostMcpTurnAuthorities.accountId, accountId),
+                        eq(schema.hostMcpTurnAuthorities.workspaceId, workspaceId),
+                        eq(schema.hostMcpTurnAuthorities.sessionId, sessionId),
+                        eq(schema.hostMcpTurnAuthorities.ownerSubjectId, human),
+                        inArray(schema.hostMcpTurnAuthorities.turnId, turnIds),
+                      ),
+                    )
+                    .orderBy(asc(schema.hostMcpTurnAuthorities.serverId)),
+              );
+              for (const row of authorities) {
+                hostAuthorityByTurn.set(row.turnId, [
+                  ...(hostAuthorityByTurn.get(row.turnId) ?? []),
+                  row.authority,
+                ]);
+              }
+            }
+          } finally {
+            await tx.execute(sql`select set_config(
+              'opengeni.subject_id', ${incomingSubjectId}, true
+            )`);
+          }
+          const causalExecutionKeys = new Map(
+            causalTurns.map((turn) => {
+              const human =
+                turn.human ?? (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
+              return [
+                turn.id,
+                human
+                  ? stableJson({
+                      human,
+                      externalLink: turn.externalLink,
+                      hostMcp: hostAuthorityByTurn.get(turn.id) ?? [],
+                    })
+                  : null,
+              ] as const;
+            }),
+          );
           const deliverable = selectBoundedSystemUpdateBatch(
-            validUpdates,
-            systemUpdatesCanCoalesceForExecution,
+            candidates,
+            (selected, candidate) =>
+              systemUpdatesCanCoalesceForExecution(selected, candidate, causalExecutionKeys),
+            true,
           );
           if (deliverable.length === 0) {
             let sequence = nextSequence - 1;
@@ -65976,6 +66093,16 @@ export async function claimSessionWorkForAttempt(
             return { action: "unclaimed", reason: "no-work" };
           }
 
+          const commandWait = await sessionInputWaitStateTx(tx, workspaceId, sessionId, session);
+          const wakeClasses = await pendingSystemUpdateWakeClassesTx(tx, workspaceId, sessionId);
+          if (
+            !wakeClasses.immediate &&
+            !wakeClasses.deferred &&
+            !(wakeClasses.command && commandWait.disposition === "held")
+          ) {
+            return { action: "unclaimed", reason: "no-work" };
+          }
+
           const pendingUpdates = await tx
             .select({ id: schema.sessionSystemUpdates.id })
             .from(schema.sessionSystemUpdates)
@@ -66013,6 +66140,8 @@ export async function claimSessionWorkForAttempt(
             session.lastSequence + 1,
             now,
             triggerEventId,
+            undefined,
+            { commandOnlyMayRun: commandWait.disposition === "held" },
           );
           if (delivered.count === 0) {
             if (delivered.events.length > 0) {
@@ -68077,12 +68206,13 @@ async function queuedSteerHasUnquiescedPredecessor(
  * Which wake classes are represented among a session's pending machine inputs.
  * `immediate` kinds make the session runnable even against a current
  * `wait_for_input` declaration; deferred child notices only do so without one.
+ * Command results are separate: only a current explicit wait lets them wake.
  */
 async function pendingSystemUpdateWakeClassesTx(
   db: Database,
   workspaceId: string,
   sessionId: string,
-): Promise<{ immediate: boolean; deferred: boolean }> {
+): Promise<{ immediate: boolean; deferred: boolean; command: boolean }> {
   const rows = await db
     .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
     .from(schema.sessionSystemUpdates)
@@ -68095,13 +68225,18 @@ async function pendingSystemUpdateWakeClassesTx(
     );
   let immediate = false;
   let deferred = false;
+  let command = false;
   for (const row of rows) {
+    if (row.kind === "background_command_result") {
+      command = true;
+      continue;
+    }
     const wakeClass =
       SESSION_SYSTEM_UPDATE_WAKE_CLASS[row.kind as SessionSystemUpdateKind] ?? "immediate";
     if (wakeClass === "deferred") deferred = true;
     else immediate = true;
   }
-  return { immediate, deferred };
+  return { immediate, deferred, command };
 }
 
 /**
@@ -68469,8 +68604,10 @@ export async function peekSessionWork(
       // child status notices stay parked until the wait times out, is superseded
       // by newer input, or an immediate input arrives.
       const wakeClasses = await pendingSystemUpdateWakeClassesTx(scopedDb, workspaceId, sessionId);
-      if (wakeClasses.immediate) return { kind: "runnable" };
-      return inputWaitPeek ?? { kind: "runnable" };
+      if (wakeClasses.immediate || (wakeClasses.command && waitState.disposition === "held")) {
+        return { kind: "runnable" };
+      }
+      return inputWaitPeek ?? { kind: wakeClasses.deferred ? "runnable" : "idle" };
     }
     const [pendingAgentSteer] = await scopedDb
       .select({ id: schema.sessionSystemUpdates.id })
@@ -74449,6 +74586,7 @@ export async function markSessionWorkflowWakeDelivered(
                   ({ kind }) =>
                     SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] ===
                       "immediate" &&
+                    (kind !== "background_command_result" || wait.disposition === "held") &&
                     (!isChildLifecycleSystemUpdateKind(kind as SessionSystemUpdateKind) ||
                       goal?.status === "active" ||
                       wait.disposition === "held" ||
@@ -75019,6 +75157,10 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // durable pending row that the next claim delivers coalesced.
         const wakeClass = SESSION_SYSTEM_UPDATE_WAKE_CLASS[input.kind];
         const childLifecycleKind = isChildLifecycleSystemUpdateKind(input.kind);
+        const commandMayWake =
+          input.kind !== "background_command_result" ||
+          (await sessionInputWaitStateTx(tx, input.workspaceId, input.sessionId, session))
+            .disposition === "held";
         // Every immediate kind except the goal's own synthesized continuation
         // is external input for the goal. A child notice may not revive an
         // already-failed parent (settled authority); every other kind already
@@ -75026,6 +75168,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // resumed without a workflow wake would strand its obligation.
         const externalGoalInput =
           wakeClass === "immediate" &&
+          commandMayWake &&
           input.kind !== "goal_continuation" &&
           (!childLifecycleKind || session.status !== "failed");
         let goalStatus: string | null = null;
@@ -75100,6 +75243,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
           (session.status !== "failed" && (goalStatus === "active" || waitingForInput));
         const shouldWake =
           wakeClass === "immediate" &&
+          commandMayWake &&
           childNoticeMayWake &&
           !realtimeActive &&
           session.activeTurnId === null &&
@@ -75480,12 +75624,21 @@ function backgroundCommandTerminalMutation(input: {
         )
         .returning();
       if (!pendingEvent) throw new Error("Failed to append background command pending event");
-      const autoResumed = await autoResumeGoalPausedByCapInTransaction(tx, {
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        cause: { kind: "background_command_result", updateId: insertedUpdate.id },
-        now,
-      });
+      const commandWait = await sessionInputWaitStateTx(
+        tx,
+        input.workspaceId,
+        input.sessionId,
+        session,
+      );
+      const waitingForInput = commandWait.disposition === "held";
+      const autoResumed = waitingForInput
+        ? await autoResumeGoalPausedByCapInTransaction(tx, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            cause: { kind: "background_command_result", updateId: insertedUpdate.id },
+            now,
+          })
+        : null;
       const [resumedEvent] = autoResumed
         ? await tx
             .insert(schema.sessionEvents)
@@ -75515,6 +75668,7 @@ function backgroundCommandTerminalMutation(input: {
         input.sessionId,
       );
       const shouldWake =
+        waitingForInput &&
         session.status !== "failed" &&
         session.activeTurnId === null &&
         controlActive &&

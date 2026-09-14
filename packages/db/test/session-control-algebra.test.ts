@@ -122,7 +122,7 @@ async function control(
 }
 
 describe("recursive session control algebra", () => {
-  test("terminal command proof atomically creates one durable agent input and workflow wake", async () => {
+  test("terminal command proof atomically retains one input without waking an idle session", async () => {
     const value = await fixture();
     const attempt = await claimAttempt(value, value.root.id);
     const commandId = crypto.randomUUID();
@@ -196,7 +196,7 @@ describe("recursive session control algebra", () => {
       "system.update.pending",
     ]);
     expect(await peekSessionWork(client.db, value.grant.workspaceId!, value.root.id)).toEqual({
-      kind: "runnable",
+      kind: "idle",
     });
     const updates = await listOutstandingSessionSystemUpdates(
       client.db,

@@ -97,6 +97,12 @@ Canonical model history owns their ordered, exactly-once inclusion.
 Successful `wait_for_input` ends model execution after tool-batch settlement;
 trusted runtime state and immutable same-turn deadlines preserve wait/wake authority.
 
+Command completion retains its result but starts a model turn only against a
+current explicit input wait. Pending command notices may accompany compatible
+new input; they cannot block later non-command inbox items. Coalescing preserves
+execution permissions and original lineage while allowing different causal
+turns resolved to the same human to share one batch.
+
 `runAgentTurn` is non-retryable by default: model/tool/sandbox/Git/connector/cloud
 operations have external effects. Recovery is explicit and attempt-fenced.
 Provider work stays outside database retries; only idempotent settlement

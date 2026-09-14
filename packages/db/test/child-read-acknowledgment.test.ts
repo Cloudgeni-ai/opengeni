@@ -201,6 +201,24 @@ async function startSession(
 
 type Started = Awaited<ReturnType<typeof startSession>>;
 
+async function waitForCommands(grant: Grant, started: Started) {
+  await waitForSessionInputWithEvent(client.db, grant.workspaceId, started.session.id, {
+    reason: "waiting for commands",
+    timeoutSeconds: 600,
+    command: {
+      accountId: grant.accountId,
+      actor: {
+        type: "agent_attempt",
+        sessionId: started.session.id,
+        turnId: started.turn.id,
+        attemptId: started.attemptId,
+        executionGeneration: started.turn.executionGeneration,
+      },
+      operationKey: crypto.randomUUID(),
+    },
+  });
+}
+
 async function claim(grant: Grant, sessionId: string) {
   const attemptId = crypto.randomUUID();
   const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
@@ -1069,6 +1087,7 @@ test.each(["legacy", "current", "legacy-replay"] as const)(
     const [launch] =
       await shared.admin`select launch_turn_id from session_background_commands where id=${commandId}`;
     expect(launch?.launch_turn_id).toBe(version === "current" ? parent.turn.id : null);
+    await waitForCommands(grant, parent);
     await settleIdle(grant, parent);
     await settleRetainedProcess(client.db, {
       accountId,
@@ -1201,6 +1220,7 @@ test.each(["session", "always"] as const)(
     const [launch] =
       await shared.admin`select launch_turn_id,launch_attempt_id from session_background_commands where id=${command.identity.commandId}`;
     expect(launch).toEqual({ launch_turn_id: parent.turn.id, launch_attempt_id: parent.attemptId });
+    await waitForCommands(grant, parent);
     await settleIdle(grant, parent);
     await command.finish();
     await command.finish();
@@ -1225,9 +1245,58 @@ test("a command successor cannot extend a once personal grant", async () => {
     personalMode: "once",
   });
   const command = await connectedCommand(grant, parent);
+  await waitForCommands(grant, parent);
   await settleIdle(grant, parent);
   await command.finish();
   await expect(claim(grant, parent.session.id)).rejects.toThrow();
+});
+
+test("commands from separate turns of the same human coalesce during an explicit wait", async () => {
+  const owner = await workspace();
+  const first = await startSession(owner, { message: "first command" });
+  const firstCommand = await connectedCommand(owner, first);
+  await settleIdle(owner, first);
+  await enqueueHumanTurn(owner, first.session.id);
+  const secondClaim = await claim(owner, first.session.id);
+  if (secondClaim.action !== "claimed") throw new Error("second turn was not claimed");
+  const second = {
+    session: first.session,
+    turn: secondClaim.turn,
+    attemptId: secondClaim.attemptId,
+  };
+  const secondCommand = await connectedCommand(owner, second);
+  await waitForSessionInputWithEvent(client.db, owner.workspaceId, first.session.id, {
+    reason: "waiting for both commands",
+    timeoutSeconds: 600,
+    command: {
+      accountId: owner.accountId,
+      actor: {
+        type: "agent_attempt",
+        sessionId: first.session.id,
+        turnId: second.turn.id,
+        attemptId: second.attemptId,
+        executionGeneration: second.turn.executionGeneration,
+      },
+      operationKey: crypto.randomUUID(),
+    },
+  });
+  await settleIdle(owner, second);
+  await firstCommand.finish();
+  await secondCommand.finish();
+  const result = await claim(owner, first.session.id);
+  if (result.action !== "claimed") throw new Error("results were not claimed");
+  expect(result.turn.initiatingHumanSubjectId).toBe(owner.subjectId);
+  const rows = await shared.admin`
+    select state, delivered_turn_id, delivered_history_item_id, lineage->>'causalTurnId' as origin
+    from session_system_updates where session_id=${first.session.id}
+    and kind='background_command_result' order by created_at, id`;
+  expect(rows).toHaveLength(2);
+  expect(
+    rows.every((row) => row.state === "delivered" && row.delivered_turn_id === result.turn.id),
+  ).toBe(true);
+  expect(rows[0]?.delivered_history_item_id).toBeTruthy();
+  expect(rows[0]?.delivered_history_item_id).toBe(rows[1]?.delivered_history_item_id);
+  expect(rows.map((row) => row.origin)).toEqual([first.turn.id, second.turn.id]);
 });
 
 test("commands launched by different humans never coalesce or borrow the latest human", async () => {
@@ -1245,6 +1314,7 @@ test("commands launched by different humans never coalesce or borrow the latest 
     attemptId: secondClaim.attemptId,
   };
   const secondCommand = await connectedCommand(other, second);
+  await waitForCommands(other, second);
   await settleIdle(other, second);
   await firstCommand.finish();
   await secondCommand.finish();
@@ -1254,6 +1324,11 @@ test("commands launched by different humans never coalesce or borrow the latest 
   const [pending] =
     await shared.admin`select count(*)::int as count from session_system_updates where session_id=${first.session.id} and state='pending'`;
   expect(pending?.count).toBe(1);
+  await waitForCommands(owner, {
+    ...first,
+    turn: firstResult.turn,
+    attemptId: firstResult.attemptId,
+  });
   await settleIdle(owner, { ...first, turn: firstResult.turn, attemptId: firstResult.attemptId });
   const secondResult = await claim(other, first.session.id);
   if (secondResult.action !== "claimed") throw new Error("second result was not claimed");
@@ -1329,6 +1404,7 @@ test("a command successor cannot revive a revoked personal grant", async () => {
     personalVariableSetId: variableSetId,
   });
   const command = await connectedCommand(grant, parent);
+  await waitForCommands(grant, parent);
   await settleIdle(grant, parent);
   await shared.admin`update organization_user_resource_grants set status='revoked', revoked_at=clock_timestamp(), generation=generation+1 where id in (select grant_id from session_attempt_personal_resource_snapshots where attempt_id=${parent.attemptId})`;
   await command.finish();
@@ -1361,6 +1437,7 @@ test("legacy unattributed commands cannot borrow a coalesced command human", asy
   const [legacyReceipt] =
     await shared.admin`select launch_turn_id from session_background_commands where id=${legacy.commandId}`;
   expect(legacyReceipt?.launch_turn_id).toBeNull();
+  await waitForCommands(grant, parent);
   await settleIdle(grant, parent);
   await good.finish();
   await settleConnectedMachineSessionBackgroundCommand(client.db, {
@@ -1372,6 +1449,11 @@ test("legacy unattributed commands cannot borrow a coalesced command human", asy
   const goodResult = await claim(grant, parent.session.id);
   if (goodResult.action !== "claimed") throw new Error("good command not claimed");
   expect(goodResult.turn.initiatingHumanSubjectId).toBe(grant.subjectId);
+  await waitForCommands(grant, {
+    ...parent,
+    turn: goodResult.turn,
+    attemptId: goodResult.attemptId,
+  });
   await settleIdle(grant, { ...parent, turn: goodResult.turn, attemptId: goodResult.attemptId });
   const legacyResult = await claim(grant, parent.session.id);
   if (legacyResult.action !== "claimed") throw new Error("legacy command not claimed");
