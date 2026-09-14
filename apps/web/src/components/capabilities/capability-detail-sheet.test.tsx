@@ -117,6 +117,87 @@ function installedCuratedSkill(): CapabilityCatalogItem {
 }
 
 describe("connection ownership UI", () => {
+  for (const authKind of ["oauth2", "api_key"] as const) {
+    test(`${authKind} discloses the supplied account truthfully without changing default scope`, async () => {
+      const capability = CapabilityCatalogItemSchema.parse({
+        id: "mcp:example",
+        kind: "mcp",
+        source: "manual",
+        name: "Example",
+        authKind,
+        mcpUrl: "https://example.test/mcp",
+        runtime: { available: true },
+      });
+      const rendered = await render(
+        <DetailBody
+          item={capability}
+          setupOnly
+          showIdentity={false}
+          health={{ state: "none" }}
+          logoSrc={null}
+          busy={false}
+          errorMessage={null}
+          canManageSocial
+          onAction={() => {}}
+        />,
+      );
+      try {
+        expect(
+          rendered.container.querySelector<HTMLInputElement>('input[value="workspace"]')?.checked,
+        ).toBe(true);
+        expect(rendered.container.textContent).toContain("Only me");
+        expect(rendered.container.textContent).toContain("This workspace");
+        if (authKind === "oauth2") {
+          expect(rendered.container.textContent).toContain("You’ll sign in with your own account.");
+          expect(rendered.container.textContent).toContain(
+            "Workspace agents and automations can act through your account.",
+          );
+        } else {
+          expect(rendered.container.textContent).toContain(
+            "You’ll use credentials for your own provider account or service account.",
+          );
+          expect(rendered.container.textContent).toContain(
+            "Only your authorized work can use these credentials.",
+          );
+          expect(rendered.container.textContent).not.toContain("sign in");
+        }
+      } finally {
+        await rendered.unmount();
+      }
+    });
+  }
+
+  test("centered chat setup never exposes a workspace disconnect action", async () => {
+    const capability = CapabilityCatalogItemSchema.parse({
+      id: "mcp:example",
+      kind: "mcp",
+      source: "manual",
+      name: "Example",
+      enabled: true,
+      authKind: "none",
+      actions: ["disconnect"],
+      runtime: { available: true },
+    });
+    const rendered = await render(
+      <DetailBody
+        item={capability}
+        setupOnly
+        showIdentity={false}
+        health={{ state: "none" }}
+        logoSrc={null}
+        busy={false}
+        errorMessage={null}
+        canManageSocial
+        onAction={() => {}}
+      />,
+    );
+    try {
+      expect(rendered.container.textContent).not.toContain("Disconnect");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("defaults to workspace ownership and exposes two labeled radio choices", async () => {
     expect(DEFAULT_CONNECTION_OWNERSHIP).toBe("workspace");
     const onChange = mock((_value: "workspace" | "personal") => {});
@@ -133,8 +214,14 @@ describe("connection ownership UI", () => {
       expect(radios[1]?.value).toBe("personal");
       expect(radios[1]?.checked).toBe(false);
       expect(rendered.container.textContent).toContain("Who can use this connection?");
-      expect(rendered.container.textContent).toContain("Connect for workspace");
-      expect(rendered.container.textContent).toContain("Connect only for me");
+      expect(rendered.container.textContent).toContain("This workspace");
+      expect(rendered.container.textContent).toContain("Only me");
+      expect(rendered.container.textContent).toContain(
+        "Workspace agents and automations can act through your account.",
+      );
+      expect(rendered.container.textContent).toContain(
+        "Only your authorized work can use your account.",
+      );
 
       await act(async () => radios[1]!.click());
       expect(onChange).toHaveBeenCalledWith("personal");
@@ -500,8 +587,10 @@ describe("social provider integration UI", () => {
       expect(rendered.container.textContent).toContain("OpenGeni");
       expect(rendered.container.textContent).toContain("OpenGeni Support");
       expect(rendered.container.textContent).toContain("Needs reconnection");
-      expect(rendered.container.textContent).toContain("Workspace shared");
-      expect(rendered.container.textContent).toContain("scheduled automations");
+      expect(rendered.container.textContent).toContain(
+        "Workspace agents and automations can act through your account.",
+      );
+      expect(rendered.container.textContent).toContain("You’ll sign in with your own account.");
       const buttons = [...rendered.container.querySelectorAll("button")];
       expect(buttons.map((button) => button.textContent?.trim())).toEqual([
         "Disconnect",
@@ -550,7 +639,7 @@ describe("social provider integration UI", () => {
       expect(button?.textContent).toContain("Connect X for workspace");
       expect(button?.disabled).toBe(true);
       expect(rendered.container.textContent).toContain("Workspace admin permission is required");
-      expect(rendered.container.textContent).toContain("Connect only for me");
+      expect(rendered.container.textContent).toContain("Only me");
     } finally {
       await rendered.unmount();
     }
@@ -581,7 +670,7 @@ test("compact chat ownership choices retain native radio semantics and explicit 
     expect(radios[1]!.checked).toBe(false);
     expect(radios[0]!.name).toBe(radios[1]!.name);
     expect(r.container.textContent).toContain(
-      "Shared with agents and automations in this workspace.",
+      "Workspace agents and automations can act through your account.",
     );
     await act(async () => radios[1]!.click());
     expect(onChange).toHaveBeenCalledWith("personal");

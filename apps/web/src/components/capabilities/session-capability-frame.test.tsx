@@ -14,6 +14,7 @@ const props = {
   actionLabel: "Review skill",
   note: "Skill content is reviewed separately from permission to use any integration.",
   onOpen: () => {},
+  onClose: () => {},
 };
 
 describe("compact conversation card states", () => {
@@ -27,7 +28,7 @@ describe("compact conversation card states", () => {
     expect(html).not.toContain("sparkles");
   });
 
-  test("setup keeps one provider header and renders the form inside the same shell", () => {
+  test("setup keeps the compact shell and its dialog opener without an inline form", () => {
     const html = renderToStaticMarkup(
       <SessionCapabilityFrame {...props} expanded>
         <form aria-label="Skill review" />
@@ -35,8 +36,10 @@ describe("compact conversation card states", () => {
     );
     expect(html).toContain('data-state="setup"');
     expect(html.match(/<h3 /g)).toHaveLength(1);
-    expect(html).toContain('aria-label="Skill review"');
-    expect(html).not.toContain(">Review skill</button>");
+    expect(html).not.toContain('aria-label="Skill review"');
+    expect(html).toContain('aria-haspopup="dialog"');
+    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain(">Review skill</button>");
   });
 
   test("completed Skill state uses neutral theme colors and removes setup actions and disclaimer", () => {

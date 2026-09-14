@@ -1,16 +1,26 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { ChevronDownIcon, PlusIcon } from "lucide-react";
+import { useCallback, useEffect, useId, useRef, useState, type RefObject } from "react";
+import { BookOpenIcon, ChevronDownIcon, PlusIcon } from "lucide-react";
+import { ConnectionInstalled } from "@opengeni/react/connect";
+import "@opengeni/react/connect.css";
 import type {
   SkillRecord,
   SkillScope,
   SkillSummary,
   PreferenceRegistryRevisionSummary,
 } from "@opengeni/sdk";
+import { CatalogHeader } from "@/components/capabilities/catalog-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select } from "@/components/ui/select";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { CapabilityDialogContent } from "@/components/capabilities/detail-dialog";
+import {
+  Dialog as Sheet,
+  DialogDescription as SheetDescription,
+  DialogHeader as SheetHeader,
+  DialogTitle as SheetTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -27,12 +37,18 @@ export function SkillsPanel({
   query = "",
   onFindSkill,
   onImportSkill,
+  refreshRevision = 0,
+  onSkillsChange,
+  openSkillRef,
 }: {
   workspaceId: string;
   personalWorkspace?: boolean;
   query?: string;
   onFindSkill?: (() => void) | undefined;
   onImportSkill?: (() => void) | undefined;
+  refreshRevision?: number;
+  onSkillsChange?: (skills: SkillSummary[]) => void;
+  openSkillRef?: RefObject<((id: string) => void) | null>;
 }) {
   return (
     <SkillsPanelContent
@@ -42,6 +58,9 @@ export function SkillsPanel({
       query={query}
       onFindSkill={onFindSkill}
       onImportSkill={onImportSkill}
+      refreshRevision={refreshRevision}
+      {...(onSkillsChange ? { onSkillsChange } : {})}
+      {...(openSkillRef ? { openSkillRef } : {})}
     />
   );
 }
@@ -53,6 +72,9 @@ export function SkillsPanelContent({
   query = "",
   onFindSkill,
   onImportSkill,
+  refreshRevision = 0,
+  onSkillsChange,
+  openSkillRef,
 }: {
   context: AppContextValue;
   workspaceId: string;
@@ -60,9 +82,15 @@ export function SkillsPanelContent({
   query?: string;
   onFindSkill?: (() => void) | undefined;
   onImportSkill?: (() => void) | undefined;
+  refreshRevision?: number;
+  onSkillsChange?: (skills: SkillSummary[]) => void;
+  openSkillRef?: RefObject<((id: string) => void) | null>;
 }) {
   const { client } = context;
   const editorId = useId();
+  const openerRef = useRef<HTMLElement | null>(null);
+  const newSkillRef = useRef<HTMLButtonElement | null>(null);
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
   const grant = context.accessContext.workspaceGrants.find(
     (entry) => entry.workspaceId === workspaceId,
   );
@@ -91,6 +119,7 @@ export function SkillsPanelContent({
   const [reload, setReload] = useState(0);
   const [discardAction, setDiscardAction] = useState<(() => void) | null>(null);
   const generation = useRef(0);
+  const inventoryGeneration = useRef(0);
   const dirty = Boolean(
     record &&
     (files.length !== record.files.length ||
@@ -101,7 +130,8 @@ export function SkillsPanelContent({
   );
 
   useEffect(() => {
-    const current = ++generation.current;
+    generation.current++;
+    const current = ++inventoryGeneration.current;
     setLoading(true);
     setBusy(false);
     setRecord(null);
@@ -114,24 +144,62 @@ export function SkillsPanelContent({
     void client
       .listWorkspaceSkills(workspaceId)
       .then((result) => {
-        if (generation.current === current) {
+        if (inventoryGeneration.current === current) {
+          setLoading(false);
           setSkills(result.skills);
           setNextCursor(result.nextCursor ?? null);
         }
       })
       .catch((reason) => {
-        if (generation.current === current)
+        if (inventoryGeneration.current === current)
           setError(reason instanceof Error ? reason.message : "Could not load Skills");
       })
       .finally(() => {
-        if (generation.current === current) setLoading(false);
+        if (inventoryGeneration.current === current) setLoading(false);
       });
     return () => {
       // Invalidate every request started since this effect, not only its initial list.
       // eslint-disable-next-line react-hooks/exhaustive-deps
       generation.current++;
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      inventoryGeneration.current++;
     };
   }, [client, workspaceId, reload]);
+
+  useEffect(() => {
+    onSkillsChange?.(skills);
+  }, [skills, onSkillsChange]);
+  useEffect(() => {
+    if (!refreshRevision) return;
+    let live = true;
+    const current = ++inventoryGeneration.current;
+    void client
+      .listWorkspaceSkills(workspaceId)
+      .then((result) => {
+        if (live && current === inventoryGeneration.current) {
+          setLoading(false);
+          setSkills(result.skills);
+          setNextCursor(result.nextCursor ?? null);
+        }
+      })
+      .catch((reason) => {
+        if (live && current === inventoryGeneration.current)
+          setError(reason instanceof Error ? reason.message : "Could not refresh Skills");
+      })
+      .finally(() => {
+        if (live && current === inventoryGeneration.current) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, workspaceId, refreshRevision]);
+  useEffect(() => {
+    if (!openSkillRef) return;
+    openSkillRef.current = (id) => navigate(() => void open(id));
+    return () => {
+      openSkillRef.current = null;
+    };
+  });
 
   useEffect(() => {
     if (!dirty) return;
@@ -151,11 +219,12 @@ export function SkillsPanelContent({
   const loadMore = useCallback(async () => {
     if (!nextCursor || busy) return;
     const current = generation.current;
+    const inventoryRequest = ++inventoryGeneration.current;
     setBusy(true);
     setError(null);
     try {
       const page = await client.listWorkspaceSkills(workspaceId, { cursor: nextCursor });
-      if (generation.current !== current) return;
+      if (inventoryGeneration.current !== inventoryRequest) return;
       setSkills((previous) => [
         ...new Map([...previous, ...page.skills].map((skill) => [skill.id, skill])).values(),
       ]);
@@ -179,6 +248,7 @@ export function SkillsPanelContent({
     setNewPath("");
   }
   async function open(skillId: string, revisionId?: string) {
+    if (!record) openerRef.current = document.activeElement as HTMLElement | null;
     const current = ++generation.current;
     setBusy(true);
     setError(null);
@@ -199,6 +269,7 @@ export function SkillsPanelContent({
     }
   }
   function create(scope: SkillScope) {
+    openerRef.current = newSkillRef.current;
     generation.current++;
     setHistory([]);
     setError(null);
@@ -241,15 +312,20 @@ export function SkillsPanelContent({
         expectedScopeVersion: record.scopeVersion,
         reason: "Change skill scope",
       });
+      if (generation.current !== current) return;
+      const inventoryRequest = ++inventoryGeneration.current;
       const [updated, inventory] = await Promise.all([
         client.readWorkspaceSkill(workspaceId, record.id, record.revisionId),
         client.listWorkspaceSkills(workspaceId),
       ]);
+      if (inventoryGeneration.current === inventoryRequest) {
+        setSkills(inventory.skills);
+        setNextCursor(inventory.nextCursor ?? null);
+      }
       if (generation.current !== current) return;
       // Keep any unsaved file edits while refreshing scope/version metadata.
       setRecord(updated);
-      setSkills(inventory.skills);
-      setNextCursor(inventory.nextCursor ?? null);
+
       setNotice("Skill scope updated.");
     } catch (reason) {
       if (generation.current === current)
@@ -289,15 +365,19 @@ export function SkillsPanelContent({
                 : client.restoreWorkspaceSkill.bind(client)
             )(workspaceId, record.id, { ...version, revisionId: record.revisionId! });
       if (generation.current !== current) return;
+      const inventoryRequest = ++inventoryGeneration.current;
       const [updated, inventory, detail] = await Promise.all([
         client.readWorkspaceSkill(workspaceId, receipt.skillId),
         client.listWorkspaceSkills(workspaceId),
         client.getPreferenceRegistry(workspaceId, receipt.skillId),
       ]);
+      if (inventoryGeneration.current === inventoryRequest) {
+        setSkills(inventory.skills);
+        setNextCursor(inventory.nextCursor ?? null);
+      }
       if (generation.current !== current) return;
       show(updated);
-      setSkills(inventory.skills);
-      setNextCursor(inventory.nextCursor ?? null);
+
       setHistory(detail.revisions);
       setNotice(
         receipt.outcome === "pending"
@@ -324,47 +404,43 @@ export function SkillsPanelContent({
 
   return (
     <section aria-label="Skills" className="skills-panel space-y-4">
-      <div
+      <CatalogHeader
+        title="Skills"
+        headingRef={headingRef}
         hidden={Boolean(query.trim()) && !matchingSkills.length && !record}
-        className="flex flex-wrap items-center justify-between gap-3"
-      >
-        <div>
-          <h2 className="text-lg font-semibold">Your skills</h2>
-          <p hidden={Boolean(query.trim())} className="text-sm text-fg-subtle">
-            Create and manage your agent’s instructions.
-          </p>
-        </div>
-        <div hidden={Boolean(query.trim())} className="flex flex-wrap gap-2">
-          {([personalWorkspace ? "user" : "workspace", "organization"] as const)
-            .filter(canManage)
-            .slice(0, 1)
-            .map((scope) => (
-              <DropdownMenu key={scope}>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="default" disabled={busy}>
-                    <PlusIcon aria-hidden="true" />
-                    New skill
-                    <ChevronDownIcon aria-hidden="true" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onSelect={() => navigate(() => create(scope))}>
-                    Create manually
-                  </DropdownMenuItem>
-                  {onFindSkill ? (
-                    <DropdownMenuItem onSelect={onFindSkill}>
-                      Find a skill in the catalogue
+        action={
+          <div hidden={Boolean(query.trim())} className="flex flex-wrap gap-2">
+            {([personalWorkspace ? "user" : "workspace", "organization"] as const)
+              .filter(canManage)
+              .slice(0, 1)
+              .map((scope) => (
+                <DropdownMenu key={scope}>
+                  <DropdownMenuTrigger asChild>
+                    <Button ref={newSkillRef} variant="default" disabled={busy}>
+                      <PlusIcon aria-hidden="true" />
+                      New skill
+                      <ChevronDownIcon aria-hidden="true" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={() => navigate(() => create(scope))}>
+                      Create manually
                     </DropdownMenuItem>
-                  ) : null}
-                  {onImportSkill ? (
-                    <DropdownMenuItem onSelect={onImportSkill}>Import from URL</DropdownMenuItem>
-                  ) : null}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ))}
-        </div>
-      </div>
-      {error ? (
+                    {onFindSkill ? (
+                      <DropdownMenuItem onSelect={onFindSkill}>
+                        Find a skill in the catalogue
+                      </DropdownMenuItem>
+                    ) : null}
+                    {onImportSkill ? (
+                      <DropdownMenuItem onSelect={onImportSkill}>Import from URL</DropdownMenuItem>
+                    ) : null}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ))}
+          </div>
+        }
+      />
+      {error && !record ? (
         <p role="alert" className="text-sm text-status-error">
           {error}{" "}
           <Button
@@ -376,7 +452,7 @@ export function SkillsPanelContent({
           </Button>
         </p>
       ) : null}
-      {notice ? (
+      {notice && !record ? (
         <p role="status" className="text-sm">
           {notice}
         </p>
@@ -384,195 +460,212 @@ export function SkillsPanelContent({
       {loading ? <p role="status">Loading Skills…</p> : null}
       {!loading && !skills.length ? (
         <p className="text-sm text-fg-subtle">
-          No Skills yet. Create one here or install one from the catalog.
+          {onFindSkill
+            ? "No skills installed yet. Browse the catalog below or add your own."
+            : "No skills yet. Create one to give your agent reusable instructions."}
         </p>
       ) : null}
-      <div className="skill-list">
-        {matchingSkills.map((skill) => (
-          <button
-            type="button"
-            className="skill-list-row"
-            key={skill.id}
-            aria-expanded={record?.id === skill.id}
-            aria-controls={record?.id === skill.id ? editorId : undefined}
-            disabled={busy}
-            onClick={() =>
-              navigate(() => {
-                if (record?.id === skill.id) setRecord(null);
-                else void open(skill.id);
-              })
-            }
-          >
-            <span className="min-w-0">
-              <span className="block truncate font-medium">{skill.title || skill.stableKey}</span>
-              {skill.status !== "active" || skill.pendingRevisionIds.length ? (
-                <span className="mt-1 block text-xs text-fg-subtle">
-                  {skill.pendingRevisionIds.length ? "Pending changes" : skill.status}
-                </span>
-              ) : null}
-            </span>
-            <ChevronDownIcon
-              aria-hidden="true"
-              className={`size-4 shrink-0 text-fg-subtle transition-transform ${record?.id === skill.id ? "rotate-180" : ""}`}
-            />
-          </button>
-        ))}
-        {nextCursor ? (
-          <Button variant="outline" disabled={busy} onClick={() => void loadMore()}>
-            Load more Skills
-          </Button>
-        ) : null}
-      </div>
-      {record ? (
-        <div
-          id={editorId}
-          className="skill-editor space-y-4 rounded-xl border border-border p-4 sm:p-5"
-        >
-          <div className="flex items-center justify-between gap-3">
-            <h3 className="font-medium">{record.title || record.stableKey || "New skill"}</h3>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={busy}
-              onClick={() => navigate(() => setRecord(null))}
-            >
-              Collapse <ChevronDownIcon aria-hidden="true" className="rotate-180" />
-            </Button>
-          </div>
-          <div className="flex flex-wrap items-center gap-3 text-xs text-fg-subtle">
-            {record.source
-              ? "Installed Skill · workspace edits preserve the upstream source"
-              : "Authored Skill"}{" "}
-            <Select
-              aria-label="Skill scope"
-              value={record.scope}
-              disabled={busy || !canManage(record.scope)}
-              onChange={(event) => void changeScope(event.target.value as SkillScope)}
-            >
-              {(["user", "workspace", "organization"] as const)
-                .filter((scope) => scope === record.scope || canManage(scope))
-                .map((scope) => (
-                  <option key={scope} value={scope}>
-                    {scope === "user"
-                      ? "Personal"
-                      : scope === "workspace"
-                        ? "Workspace"
-                        : "Organization"}
-                  </option>
-                ))}
-            </Select>
-          </div>
-          <p className="text-sm text-muted-foreground">
-            Edit the name and description at the top of SKILL.md.
-          </p>
-          {history.length ? (
-            <label className="flex flex-wrap items-center gap-3 text-sm">
-              History
-              <Select
-                aria-label="History"
-                value={record.revisionId ?? ""}
-                disabled={busy}
-                onChange={(event) => {
-                  const revisionId = event.target.value;
-                  navigate(() => void open(record.id, revisionId));
-                }}
-              >
-                {history.map((revision) => (
-                  <option key={revision.id} value={revision.id}>
-                    Version {revision.revision}
-                    {revision.id === record.activeRevisionId ? " · active" : ""}
-                    {record.pendingRevisionIds.includes(revision.id) ? " · pending" : ""}
-                  </option>
-                ))}
-              </Select>
-            </label>
-          ) : null}
-          <label className="flex flex-wrap items-center gap-3 text-sm">
-            File
-            <Select
-              aria-label="File"
-              value={path}
-              onChange={(event) => setPath(event.target.value)}
-            >
-              {files.map((file) => (
-                <option key={file.path} value={file.path}>
-                  {file.path}
-                </option>
-              ))}
-            </Select>
-          </label>
-          <Textarea
-            aria-label={`Contents of ${path}`}
-            value={selected?.content ?? ""}
-            disabled={!editable || busy}
-            className="min-h-72 font-mono"
-            onChange={(event) =>
-              setFiles((current) =>
-                current.map((file) =>
-                  file.path === path ? { ...file, content: event.target.value } : file,
-                ),
-              )
-            }
-          />
-          {editable ? (
-            <div className="flex flex-wrap gap-2">
-              <Input
-                aria-label="New relative file path"
-                placeholder="references/example.md"
-                value={newPath}
-                onChange={(event) => setNewPath(event.target.value)}
-                disabled={busy}
-                className="max-w-sm"
-              />
-              <Button
-                variant="outline"
-                disabled={busy || !newPath || files.some((file) => file.path === newPath)}
-                onClick={() => {
-                  setFiles((current) => [...current, { path: newPath, content: "" }]);
-                  setPath(newPath);
-                  setNewPath("");
-                }}
-              >
-                Add text file
-              </Button>
-              <Button
-                variant="outline"
-                disabled={busy || path === "SKILL.md"}
-                onClick={() => {
-                  setFiles((current) => current.filter((file) => file.path !== path));
-                  setPath("SKILL.md");
-                }}
-              >
-                Remove selected file
-              </Button>
-              <Button
-                disabled={
-                  busy || !files.some((file) => file.path === "SKILL.md" && file.content.trim())
-                }
-                onClick={() => void mutate("save")}
-              >
-                Save Skill
-              </Button>
-            </div>
-          ) : null}
-          {canManage(record.scope) &&
-          record.revisionId &&
-          record.revisionId !== record.activeRevisionId ? (
-            <Button
-              disabled={busy}
-              onClick={() =>
-                void mutate(
-                  record.pendingRevisionIds.includes(record.revisionId!) ? "approve" : "restore",
-                )
-              }
-            >
-              {record.pendingRevisionIds.includes(record.revisionId)
-                ? "Approve this revision"
-                : "Restore as a new revision"}
-            </Button>
-          ) : null}
-        </div>
+      <ConnectionInstalled
+        title="Your skills"
+        items={matchingSkills.map((skill) => ({
+          id: skill.id,
+          name: skill.title || skill.stableKey,
+          icon: <BookOpenIcon aria-hidden="true" className="size-10 p-2 text-fg-muted" />,
+          status: skill.pendingRevisionIds.length
+            ? "Pending changes"
+            : skill.status === "active"
+              ? "Installed"
+              : `Not active · ${skill.status}`,
+          needsAttention: Boolean(skill.pendingRevisionIds.length),
+          disabled: busy,
+          onOpen: () => {
+            if (!busy) navigate(() => void open(skill.id));
+          },
+        }))}
+      />
+      {nextCursor ? (
+        <Button variant="outline" disabled={busy} onClick={() => void loadMore()}>
+          Load more Skills
+        </Button>
       ) : null}
+      <Sheet
+        open={record !== null}
+        onOpenChange={(isOpen) => {
+          if (!isOpen && !busy) navigate(() => setRecord(null));
+        }}
+      >
+        {record ? (
+          <CapabilityDialogContent
+            id={editorId}
+            showCloseButton={!busy}
+            onEscapeKeyDown={(event) => {
+              if (busy) event.preventDefault();
+            }}
+            onInteractOutside={(event) => {
+              if (busy) event.preventDefault();
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              const opener = openerRef.current;
+              openerRef.current = null;
+              if (opener?.isConnected && !opener.matches(":disabled")) opener.focus();
+              else headingRef.current?.focus();
+            }}
+          >
+            <SheetHeader className="shrink-0 border-b border-border px-6 py-5 pr-12 text-left">
+              <SheetTitle className="break-words text-xl font-semibold tracking-tight">
+                {record.title || record.stableKey || "New skill"}
+              </SheetTitle>
+              <SheetDescription>
+                Edit the name and description at the top of SKILL.md.
+              </SheetDescription>
+            </SheetHeader>
+            <div className="skill-editor min-h-0 space-y-4 overflow-y-auto px-6 py-5">
+              {error ? (
+                <p role="alert" className="text-sm text-status-error">
+                  {error}
+                </p>
+              ) : null}
+              {notice ? (
+                <p role="status" className="text-sm">
+                  {notice}
+                </p>
+              ) : null}
+              <div className="flex flex-wrap items-center gap-3 text-xs text-fg-subtle">
+                {record.source
+                  ? "Installed Skill · workspace edits preserve the upstream source"
+                  : "Authored Skill"}{" "}
+                <Select
+                  aria-label="Skill scope"
+                  value={record.scope}
+                  disabled={busy || !canManage(record.scope)}
+                  onChange={(event) => void changeScope(event.target.value as SkillScope)}
+                >
+                  {(["user", "workspace", "organization"] as const)
+                    .filter((scope) => scope === record.scope || canManage(scope))
+                    .map((scope) => (
+                      <option key={scope} value={scope}>
+                        {scope === "user"
+                          ? "Personal"
+                          : scope === "workspace"
+                            ? "Workspace"
+                            : "Organization"}
+                      </option>
+                    ))}
+                </Select>
+              </div>
+              {history.length ? (
+                <label className="flex flex-wrap items-center gap-3 text-sm">
+                  History
+                  <Select
+                    aria-label="History"
+                    value={record.revisionId ?? ""}
+                    disabled={busy}
+                    onChange={(event) => {
+                      const revisionId = event.target.value;
+                      navigate(() => void open(record.id, revisionId));
+                    }}
+                  >
+                    {history.map((revision) => (
+                      <option key={revision.id} value={revision.id}>
+                        Version {revision.revision}
+                        {revision.id === record.activeRevisionId ? " · active" : ""}
+                        {record.pendingRevisionIds.includes(revision.id) ? " · pending" : ""}
+                      </option>
+                    ))}
+                  </Select>
+                </label>
+              ) : null}
+              <label className="flex flex-wrap items-center gap-3 text-sm">
+                File
+                <Select
+                  aria-label="File"
+                  value={path}
+                  onChange={(event) => setPath(event.target.value)}
+                >
+                  {files.map((file) => (
+                    <option key={file.path} value={file.path}>
+                      {file.path}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+              <Textarea
+                aria-label={`Contents of ${path}`}
+                value={selected?.content ?? ""}
+                disabled={!editable || busy}
+                className="min-h-72 font-mono"
+                onChange={(event) =>
+                  setFiles((current) =>
+                    current.map((file) =>
+                      file.path === path ? { ...file, content: event.target.value } : file,
+                    ),
+                  )
+                }
+              />
+              {editable ? (
+                <div className="flex flex-wrap gap-2">
+                  <Input
+                    aria-label="New relative file path"
+                    placeholder="references/example.md"
+                    value={newPath}
+                    onChange={(event) => setNewPath(event.target.value)}
+                    disabled={busy}
+                    className="max-w-sm"
+                  />
+                  <Button
+                    variant="outline"
+                    disabled={busy || !newPath || files.some((file) => file.path === newPath)}
+                    onClick={() => {
+                      setFiles((current) => [...current, { path: newPath, content: "" }]);
+                      setPath(newPath);
+                      setNewPath("");
+                    }}
+                  >
+                    Add text file
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={busy || path === "SKILL.md"}
+                    onClick={() => {
+                      setFiles((current) => current.filter((file) => file.path !== path));
+                      setPath("SKILL.md");
+                    }}
+                  >
+                    Remove selected file
+                  </Button>
+                  <Button
+                    disabled={
+                      busy || !files.some((file) => file.path === "SKILL.md" && file.content.trim())
+                    }
+                    onClick={() => void mutate("save")}
+                  >
+                    Save Skill
+                  </Button>
+                </div>
+              ) : null}
+              {canManage(record.scope) &&
+              record.revisionId &&
+              record.revisionId !== record.activeRevisionId ? (
+                <Button
+                  disabled={busy}
+                  onClick={() =>
+                    void mutate(
+                      record.pendingRevisionIds.includes(record.revisionId!)
+                        ? "approve"
+                        : "restore",
+                    )
+                  }
+                >
+                  {record.pendingRevisionIds.includes(record.revisionId)
+                    ? "Approve this revision"
+                    : "Restore as a new revision"}
+                </Button>
+              ) : null}
+            </div>
+          </CapabilityDialogContent>
+        ) : null}
+      </Sheet>
       <ConfirmDialog
         open={discardAction !== null}
         onOpenChange={(isOpen) => {

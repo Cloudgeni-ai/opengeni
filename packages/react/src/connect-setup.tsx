@@ -38,9 +38,11 @@ export type ConnectSetupProps = {
   /** Host pagination must retain selections across pages and submit the final set. */
   onBrowseResources?: (attempt: ConnectAttempt) => void | Promise<unknown>;
   className?: string;
+  /** Provider-specific label supplied by the embedding host. */
+  authorizeLabel?: string | undefined;
 };
 
-/** Unstyled setup surface. No provider secrets enter React state. Host owns
+/** Controller-backed setup surface, styled by opt-in connect.css. No provider secrets enter React state. Host owns
  * chooser, controller lifetime, navigation and recovery after full redirect. */
 export function ConnectSetup(props: ConnectSetupProps) {
   // Attempt IDs/revisions are not a substitute for actor scope. A host can
@@ -55,7 +57,13 @@ export function ConnectSetup(props: ConnectSetupProps) {
   return <ScopedSetup key={generation} {...props} />;
 }
 
-function ScopedSetup({ controller, onAuthorize, onBrowseResources, className }: ConnectSetupProps) {
+function ScopedSetup({
+  controller,
+  onAuthorize,
+  onBrowseResources,
+  className,
+  authorizeLabel = "Authorize connection",
+}: ConnectSetupProps) {
   const view = useConnect(controller);
   const [localError, setLocalError] = useState(false);
   const invoke = (operation: () => unknown | Promise<unknown>) => {
@@ -69,7 +77,10 @@ function ScopedSetup({ controller, onAuthorize, onBrowseResources, className }: 
   const attempt = view.attempt;
   if (!attempt)
     return (
-      <section className={className} aria-label="Connection setup">
+      <section
+        className={["og-connect-setup", className].filter(Boolean).join(" ")}
+        aria-label="Connection setup"
+      >
         <p role="status">Choose a connection to begin.</p>
       </section>
     );
@@ -115,9 +126,24 @@ function ScopedSetup({ controller, onAuthorize, onBrowseResources, className }: 
     }
   };
   return (
-    <section className={className} aria-label="Connection setup" aria-busy={view.busy}>
-      <p>Ownership: {attempt.ownership === "personal" ? "Personal" : "Workspace"}</p>
-      <p role="status">{setupStatus[attempt.state]}</p>
+    <section
+      className={["og-connect-setup", className].filter(Boolean).join(" ")}
+      aria-label="Connection setup"
+      aria-busy={view.busy}
+    >
+      <div className="og-connect-setup-summary">
+        <p className="og-connect-setup-scope">
+          {attempt.ownership === "personal" ? "Personal connection" : "Workspace connection"}
+        </p>
+        <p role="status" className="og-connect-setup-status">
+          {setupStatus[attempt.state]}
+        </p>
+        <p className="og-connect-setup-description">
+          {attempt.ownership === "personal"
+            ? "Only your work can use this connection."
+            : "Work in this workspace can use this connection."}
+        </p>
+      </div>
       {attempt.account && <p>Account: {attempt.account.label}</p>}
       {(localError || view.error || attempt.error) && (
         <p role="alert">
@@ -129,10 +155,15 @@ function ScopedSetup({ controller, onAuthorize, onBrowseResources, className }: 
       {!terminal && (
         <form key={`${attempt.id}:${attempt.revision}`} onSubmit={submit} autoComplete="off">
           <fieldset disabled={view.busy}>
-            <legend>Connection details</legend>
+            {["credentials", "select_account", "select_resources", "preview"].includes(
+              action.type,
+            ) ? (
+              <legend>Connection details</legend>
+            ) : null}
             {attempt.state === "connected_but_incomplete" && action.type === "none" && (
               <button
                 type="button"
+                className="og-connect-setup-primary"
                 onClick={() => invoke(() => view.advance({ type: "retry" }, crypto.randomUUID()))}
               >
                 Review integration operations
@@ -218,6 +249,7 @@ function ScopedSetup({ controller, onAuthorize, onBrowseResources, className }: 
             ) && (
               <button
                 type="submit"
+                className="og-connect-setup-primary"
                 disabled={action.type === "select_resources" && Boolean(action.cursor)}
               >
                 {action.type === "preview" ? "Install selected operations" : "Continue"}
@@ -226,9 +258,10 @@ function ScopedSetup({ controller, onAuthorize, onBrowseResources, className }: 
             {action.type === "authorize" && (
               <button
                 type="button"
+                className="og-connect-setup-primary"
                 onClick={() => invoke(() => onAuthorize(structuredClone(attempt)))}
               >
-                Authorize connection
+                {authorizeLabel}
               </button>
             )}
             {action.type === "wait" && (
@@ -246,12 +279,14 @@ function ScopedSetup({ controller, onAuthorize, onBrowseResources, className }: 
                 )}
               </>
             )}
-            <button type="button" onClick={() => invoke(() => view.refresh())}>
-              Check status
-            </button>
-            <button type="button" onClick={() => invoke(() => view.cancel(crypto.randomUUID()))}>
-              Cancel setup
-            </button>
+            <div className="og-connect-setup-secondary">
+              <button type="button" onClick={() => invoke(() => view.refresh())}>
+                Check status
+              </button>
+              <button type="button" onClick={() => invoke(() => view.cancel(crypto.randomUUID()))}>
+                Cancel setup
+              </button>
+            </div>
           </fieldset>
         </form>
       )}

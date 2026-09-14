@@ -62,7 +62,7 @@ async function memorySlackClient(client: ReturnType<typeof useAppContext>["clien
   return module.createMemorySlackClient(client);
 }
 
-export const SLACK_APP_DESCRIPTION = "Chat with OpenGeni and start work from Slack.";
+export const SLACK_APP_DESCRIPTION = "Mention @OpenGeni or chat with the bot in Slack.";
 export const SLACK_LOGO_URL =
   "https://a.slack-edge.com/80588/marketing/img/meta/slack_hash_256.png";
 const OPENGENI_REACTION_EMOJI = "genie" as const;
@@ -199,7 +199,7 @@ export function useSlackIntegration({
   sheetOpen: boolean;
   refresh: () => Promise<void>;
   onRuntimeChanged: () => void;
-}): IntegrationAdapter {
+}): IntegrationAdapter & { catalogName: "OpenGeni bot" | "Your account" } {
   const context = useAppContext();
   const client = context.client;
   const connectTransport = useMemo(() => client.connectTransport(), [client]);
@@ -413,7 +413,10 @@ export function useSlackIntegration({
     setConnectRequest({
       scope: { workspaceId, transport: connectTransport },
       providerId: "slack-personal",
-      displayName: "your Slack account",
+      displayName: "Slack account",
+      description: "Let OpenGeni read and send Slack messages as you.",
+      logoUrl: SLACK_LOGO_URL,
+      authorizeLabel: "Continue to Slack",
       ownership: "personal",
       returnUrl: window.location.href,
       idempotencyKey: crypto.randomUUID(),
@@ -453,7 +456,10 @@ export function useSlackIntegration({
     setConnectRequest({
       scope: { workspaceId, transport: connectTransport },
       providerId: "slack-bot",
-      displayName: "Slack workspace bot",
+      displayName: "OpenGeni Slack bot",
+      description: SLACK_APP_DESCRIPTION,
+      logoUrl: SLACK_LOGO_URL,
+      authorizeLabel: "Continue to Slack",
       ownership: "workspace",
       returnUrl: window.location.href,
       idempotencyKey: crypto.randomUUID(),
@@ -942,7 +948,7 @@ export function useSlackIntegration({
                 title: botMetadata.slackTeamName,
                 description: binding
                   ? `${botHealthy ? "Connected for" : "Set up for"} ${binding.accountName}. ${routingEnabled === true ? "Start work in workspaces you have access to in this organization." : "Manage how OpenGeni connects to Slack here."}`
-                  : "Chat with OpenGeni and start work from Slack.",
+                  : SLACK_APP_DESCRIPTION,
               },
               ...(routingEnabled === true
                 ? {
@@ -1056,7 +1062,7 @@ export function useSlackIntegration({
     return {
       id: "slack",
       name: "Slack",
-      description: SLACK_APP_DESCRIPTION,
+      description: "Let OpenGeni read and send Slack messages as you.",
       mark: { logoSrc: SLACK_LOGO_URL, monogram: "S" },
       chip,
       connection: facts,
@@ -1165,7 +1171,14 @@ export function useSlackIntegration({
     </>
   );
 
-  return { model, dialogs };
+  return {
+    model,
+    dialogs,
+    catalogName:
+      discovery.bindings.length > 0 || discovery.loading || discovery.failed || canInstallBot
+        ? "OpenGeni bot"
+        : "Your account",
+  };
 }
 
 function formatDate(value: string | null): string {

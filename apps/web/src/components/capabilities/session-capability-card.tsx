@@ -21,23 +21,35 @@ const CodexSubscriptionsCard = lazy(async () => ({
 
 /** Recommendations carry identity and rationale, never connection configuration.
  * Expand against the current authenticated catalog before rendering any form. */
-export function SessionCapabilityCard({
-  item,
-  workspaceId,
-  sessionId,
-  visibility = "workspace",
-  onConfigured,
-}: {
+type SessionCapabilityCardProps = {
   visibility?: "private" | "workspace";
   onConfigured?: (() => Promise<void>) | undefined;
   item: AuthNeededItem;
   workspaceId: string;
   sessionId: string;
-}) {
+};
+
+export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
+  return (
+    <ScopedSessionCapabilityCard
+      key={`${props.workspaceId}:${props.sessionId}:${props.item.capability!.id}`}
+      {...props}
+    />
+  );
+}
+
+function ScopedSessionCapabilityCard({
+  item,
+  workspaceId,
+  sessionId,
+  visibility = "workspace",
+  onConfigured,
+}: SessionCapabilityCardProps) {
   const context = useAppContext();
   const recommendation = item.capability!;
   const [expanded, setExpanded] = useState(false);
   const [complete, setComplete] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [resolvedItem, setResolvedItem] = useState<CapabilityCatalogItem | null>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLElement>(null);
@@ -49,7 +61,6 @@ export function SessionCapabilityCard({
     : null;
   const close = () => {
     setExpanded(false);
-    requestAnimationFrame(() => (opener.current ?? cardRef.current)?.focus());
   };
   const skill = recommendation.kind === "skill";
   const apiKey = catalogItem ? capabilityConnectPlan(catalogItem).mode === "api_key" : false;
@@ -80,11 +91,15 @@ export function SessionCapabilityCard({
             : "Review access before signing in. You'll return to this conversation after authorization."
       }
       onOpen={() => setExpanded(true)}
+      onClose={close}
+      busy={busy}
       opener={opener}
       cardRef={cardRef}
     >
       {recommendation.id === "api:github-app" ? (
         <SessionGitHubSetup
+          busy={busy}
+          setBusy={setBusy}
           workspaceId={workspaceId}
           sessionId={sessionId}
           onClose={close}
@@ -95,6 +110,8 @@ export function SessionCapabilityCard({
         />
       ) : recommendation.id === "mcp:codex_apps" ? (
         <SessionCodexAppsSetup
+          busy={busy}
+          setBusy={setBusy}
           workspaceId={workspaceId}
           sessionId={sessionId}
           onClose={close}
@@ -105,6 +122,8 @@ export function SessionCapabilityCard({
         />
       ) : (
         <SessionCapabilitySetup
+          busy={busy}
+          setBusy={setBusy}
           key={`${workspaceId}:${sessionId}:${recommendation.id}`}
           capabilityId={recommendation.id}
           onResolvedItem={setResolvedItem}
@@ -124,6 +143,8 @@ export function SessionCapabilityCard({
 }
 
 function SessionCapabilitySetup({
+  busy,
+  setBusy,
   capabilityId,
   onResolvedItem,
   visibility,
@@ -133,6 +154,8 @@ function SessionCapabilitySetup({
   onClose,
   onComplete,
 }: {
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
   capabilityId: string;
   onResolvedItem: (item: CapabilityCatalogItem) => void;
   visibility: "private" | "workspace";
@@ -146,7 +169,6 @@ function SessionCapabilitySetup({
   const catalog = useCapabilitiesCatalog(workspaceId);
   const [sharedAcknowledged, setSharedAcknowledged] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
   const scope = useRef({ client: context.client, workspaceId, sessionId, alive: true });
@@ -276,7 +298,7 @@ function SessionCapabilitySetup({
     ? connectionHealth(item, catalog.connections ?? [], catalog.connections !== null)
     : null;
   return (
-    <div>
+    <div className="p-6 sm:p-8">
       {catalog.loading && !item ? (
         <p role="status" className="flex items-center gap-2 text-sm text-fg-muted">
           <Loader2Icon className="size-4 animate-spin" />
@@ -297,7 +319,7 @@ function SessionCapabilitySetup({
         </Notice>
       ) : (
         <DetailBody
-          inline
+          setupOnly
           showIdentity={false}
           onCancel={ownsActionRow ? onClose : undefined}
           item={item}
@@ -374,18 +396,21 @@ function SessionCapabilitySetup({
 }
 
 function SessionGitHubSetup({
+  busy,
+  setBusy,
   workspaceId,
   sessionId,
   onClose,
   onComplete,
 }: {
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
   workspaceId: string;
   sessionId: string;
   onClose: () => void;
   onComplete: () => void;
 }) {
   const { client } = useAppContext();
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const active = useRef(true);
   const inFlight = useRef(false);
@@ -427,7 +452,7 @@ function SessionGitHubSetup({
     }
   }
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 p-6 sm:p-8">
       <p className="text-xs leading-[1.7] text-fg-muted">
         Choose the account and repositories to share with this workspace on GitHub, then return to
         this conversation.
@@ -446,11 +471,15 @@ function SessionGitHubSetup({
 }
 
 function SessionCodexAppsSetup({
+  busy,
+  setBusy,
   workspaceId,
   sessionId,
   onClose,
   onComplete,
 }: {
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
   workspaceId: string;
   sessionId: string;
   onClose: () => void;
@@ -458,7 +487,6 @@ function SessionCodexAppsSetup({
 }) {
   const context = useAppContext();
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const inFlight = useRef(false);
   const active = useRef(true);
   useEffect(
@@ -498,7 +526,7 @@ function SessionCodexAppsSetup({
     }
   }
   return (
-    <div>
+    <div className="p-6 sm:p-8">
       <Suspense fallback={<p role="status">Loading connection controls…</p>}>
         <CodexSubscriptionsCard
           workspaceId={workspaceId}

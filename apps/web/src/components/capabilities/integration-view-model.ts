@@ -9,6 +9,7 @@
  */
 
 import type { ReactNode } from "react";
+import type { CapabilityCatalogStatus } from "@opengeni/react/connect";
 
 export type IntegrationChipTone = "ok" | "warn" | "idle" | "plain";
 
@@ -35,6 +36,15 @@ export type IntegrationChip = {
   label: IntegrationChipLabel;
   tone: IntegrationChipTone;
 };
+
+/** Keep catalog exceptions explicit without showing routine connected/not-connected text. */
+export function catalogStatusForChip(chip: IntegrationChip): CapabilityCatalogStatus {
+  if (chip.label === "Loading" || chip.label === "Installing") return "loading";
+  if (chip.tone === "warn") return "attention";
+  if (chip.tone === "ok") return "added";
+  if (chip.tone === "plain") return "unavailable";
+  return "available";
+}
 
 export type IntegrationMark = { logoSrc: string; monogram: string } | { monogram: string };
 

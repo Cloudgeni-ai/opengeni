@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { pluginMcpUnavailableReason, type PluginDiscoveryItem } from "@opengeni/sdk";
+import { BoxesIcon } from "lucide-react";
 import { Markdown } from "./components/markdown";
+import { ConnectionLogo } from "./connection-logo";
 
 const componentLabels: Record<string, string> = {
   skills: "Skills",
@@ -38,9 +40,8 @@ export function PluginDetails({
   const installableCount =
     (item.skills?.length ?? 0) + (item.mcpServers?.filter(supported).length ?? 0);
   const exceedsInstallLimit = installableCount > 64;
-  const installable = installableCount > 0 && !exceedsInstallLimit;
+  const installable = !contentsUnknown && installableCount > 0 && !exceedsInstallLimit;
   const [expanded, setExpanded] = useState(false);
-  const [logoFailed, setLogoFailed] = useState(false);
   const description = item.longDescription || item.description;
   const lengthy = description.length > 700;
   const registryLabel =
@@ -52,9 +53,11 @@ export function PluginDetails({
   return (
     <article className="og-plugin-details">
       <header className="og-plugin-details-header">
-        {item.logoUrl && !logoFailed ? (
-          <img src={item.logoUrl} alt="" onError={() => setLogoFailed(true)} />
-        ) : null}
+        <ConnectionLogo
+          src={item.logoUrl}
+          name={item.displayName}
+          fallback={<BoxesIcon aria-hidden="true" />}
+        />
         <div>
           <h2>{item.displayName.replace(/-/g, " ")}</h2>
           {item.author?.name ? <p>By {item.author.name}</p> : null}

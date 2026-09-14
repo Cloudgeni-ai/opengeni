@@ -433,7 +433,7 @@ describe("custom API control center browser acceptance", () => {
         .getByRole("button", { name: /^Outlook Mail\s/ })
         .filter({ hasText: "Connected" });
       await expectVisible(row);
-      expect(await row.locator(".og-connection-catalog-status").textContent()).toBe("Connected");
+      expect(await row.locator(".og-capability-catalog-sr-only").textContent()).toBe("Connected");
       // Keyboard journey: opening from the focused row must return focus to it.
       await row.focus();
       await row.press("Enter");
@@ -526,13 +526,14 @@ async function openCapabilities(page: Page): Promise<void> {
   await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
     waitUntil: "networkidle",
   });
+  await page.getByRole("tab", { name: "Connections", exact: true }).click();
   await expectVisible(page.getByRole("heading", { name: "Custom APIs" }));
 }
 
 /** Opens the one Outlook Mail provider row's detail sheet (its accounts live there). */
 async function openOutlookMailSheet(page: Page) {
   const row = page
-    .locator(".og-connection-catalog-row")
+    .locator(".og-capability-catalog-row")
     .and(page.getByRole("button", { name: /^Outlook Mail\s/ }));
   await expectVisible(row);
   await row.click();
@@ -634,6 +635,8 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
       return json({ packs: [], installations: [] });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`)
+      return json({ items: [], nextCursor: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) return json({ skills: [] });
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`)
       return json({ skills: [], nextCursor: null });

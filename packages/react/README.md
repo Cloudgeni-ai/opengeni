@@ -36,6 +36,13 @@ never place an organization key in browser props. Import
 it receives shared copy state, the copy action, and the validated verification URL.
 Omitting it preserves the default embedded presentation.
 
+`CapabilityCatalogRow` gives connections, skills, and plugins one consistent
+icon/name/description button with a decorative plus/check and visible exception
+states. Supply `onOpen` and an explicit `status`; the host owns setup and
+installation. `ConnectionCatalog` accepts the same states through each option's
+`state`. Older callers that omit `state` keep their visible status labels, so
+provider warnings are not hidden during migration.
+
 ```tsx
 import { ConnectPanel } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
