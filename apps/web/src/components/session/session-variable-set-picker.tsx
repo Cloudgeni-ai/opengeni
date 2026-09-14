@@ -22,20 +22,14 @@ import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 import { cn } from "@/lib/utils";
 import { sessionHasVariableSetBlockingWork } from "@/lib/session-variable-set-editability";
+import type { SessionVariableSetPickerSharedState } from "@/lib/use-session-variable-set-picker-state";
+export type { SessionVariableSetPickerSharedState } from "@/lib/use-session-variable-set-picker-state";
 
 function selectedVariableSetIds(
   session: Pick<Session, "variableSetIds" | "variableSetId">,
 ): string[] {
   return session.variableSetIds ?? (session.variableSetId ? [session.variableSetId] : []);
 }
-
-export type SessionVariableSetPickerSharedState = {
-  saving: boolean;
-  committedSelection: {
-    sessionId: string;
-    key: string;
-  } | null;
-};
 
 export function SessionVariableSetPicker(props: {
   session: Pick<
@@ -100,16 +94,8 @@ export function SessionVariableSetPicker(props: {
       return;
     }
     setDraftIds(currentIds);
-    if (committedSelection !== null) {
-      setSharedState((current) =>
-        current.committedSelection?.sessionId === committedSelection.sessionId &&
-        current.committedSelection.key === committedSelection.key
-          ? { ...current, committedSelection: null }
-          : current,
-      );
-    }
     setError(null);
-  }, [committedSelection, currentIds, currentKey, props.session.id, setSharedState]);
+  }, [committedSelection, currentIds, currentKey, props.session.id]);
 
   const selectedChanged = draftIds.join("\u0000") !== currentKey;
   const availableVariableSets = variableSets.variableSets.filter(
