@@ -10,7 +10,15 @@ import {
   FolderOpenIcon,
   MoreHorizontalIcon,
 } from "lucide-react";
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -21,6 +29,7 @@ import {
 import { useAppContext } from "@/context";
 import { cn } from "@/lib/utils";
 import { relativeTimeLabel } from "@/lib/sessions-group";
+import { KnowledgeCollectionCache } from "./knowledge-collection-cache";
 
 import { KNOWLEDGE_SOURCE_LABEL as SOURCE } from "./knowledge-labels";
 
@@ -114,6 +123,7 @@ type TreeProps = {
   onCreate: (kind: "note" | "group", parent: KnowledgeCollection) => void;
 };
 type TreeState = TreeProps & {
+  cache: KnowledgeCollectionCache;
   expanded: Set<string>;
   active: string;
   setActive: (path: string) => void;
@@ -121,6 +131,14 @@ type TreeState = TreeProps & {
 };
 
 export function KnowledgeTree(props: TreeProps) {
+  const { client, accessContext, workspaceStateOwnerId } = useAppContext();
+  // A new cache also remounts each open collection before it can display rows
+  // belonging to the previous principal/workspace/filter or edit generation.
+  const cache = useMemo(
+    () => new KnowledgeCollectionCache(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- these identities invalidate retained Knowledge, not constructor inputs
+    [client, accessContext, workspaceStateOwnerId, props.workspaceId, props.scope, props.refresh],
+  );
   // Paths, rather than IDs: a record can belong to several collections.
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [active, setActive] = useState("");
@@ -128,6 +146,7 @@ export function KnowledgeTree(props: TreeProps) {
   const roots = treeOrder(props.entries);
   const state: TreeState = {
     ...props,
+    cache,
     expanded,
     active: active || roots[0]?.id || "",
     setActive,
@@ -283,6 +302,7 @@ function TreeNode({
       </div>
       {folder && open ? (
         <CollectionChildren
+          key={state.cache.id}
           entry={entry}
           path={path}
           ancestors={[...ancestors, entry.id]}
@@ -305,12 +325,6 @@ function CollectionChildren({
   state: TreeState;
 }) {
   const { client } = useAppContext();
-  const [entries, setEntries] = useState<KnowledgeEntrySummary[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [retry, setRetry] = useState(0);
-  const generation = useRef(0);
   const request: KnowledgeEntryListRequest = {
     groupId: entry.id,
     scope: state.scope,
@@ -318,14 +332,28 @@ function CollectionChildren({
     limit: 50,
   };
   const requestKey = JSON.stringify(request);
+  const [entries, setEntries] = useState<KnowledgeEntrySummary[]>(
+    () => state.cache.peek(requestKey)?.entries ?? [],
+  );
+  const [cursor, setCursor] = useState<string | null>(
+    () => state.cache.peek(requestKey)?.nextCursor ?? null,
+  );
+  const [loading, setLoading] = useState(() => !state.cache.peek(requestKey));
+  const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+  const generation = useRef(0);
+  const cache = state.cache;
   useEffect(() => {
     const current = ++generation.current;
-    setLoading(true);
     setError(null);
-    setEntries([]);
-    setCursor(null);
-    void client
-      .listKnowledgeEntries(state.workspaceId, JSON.parse(requestKey))
+    const cached = cache.peek(requestKey);
+    setLoading(!cached);
+    setEntries(cached?.entries ?? []);
+    setCursor(cached?.nextCursor ?? null);
+    void cache
+      .load(requestKey, () =>
+        client.listKnowledgeEntries(state.workspaceId, JSON.parse(requestKey)),
+      )
       .then((result) => {
         if (generation.current !== current) return;
         setEntries(result.entries);
@@ -342,13 +370,15 @@ function CollectionChildren({
       // eslint-disable-next-line react-hooks/exhaustive-deps -- invalidate pending pages on unmount
       ++generation.current;
     };
-  }, [client, state.workspaceId, requestKey, state.refresh, retry]);
+  }, [client, state.workspaceId, requestKey, cache, retry]);
   async function more() {
     if (!cursor || loading) return;
     const current = generation.current;
     setLoading(true);
     setError(null);
     try {
+      // Cursor pages stay fresh: never combine a newly fetched first page with
+      // a cached continuation from an earlier collection snapshot.
       const result = await client.listKnowledgeEntries(state.workspaceId, {
         ...request,
         cursor,
