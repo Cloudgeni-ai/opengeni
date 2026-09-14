@@ -81,11 +81,13 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
     setLoading(true);
     setLoadError(null);
     void context.client
       .getWorkspaceInsights(workspaceId, {
         range,
+        signal: controller.signal,
         ...(filters.provider !== "all" ? { provider: filters.provider } : {}),
         ...(filters.model !== "all" ? { model: filters.model } : {}),
       })
@@ -102,6 +104,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [canRead, context.client, filters, range, workspaceId]);
 
