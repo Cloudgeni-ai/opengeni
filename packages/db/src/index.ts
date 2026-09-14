@@ -1,3 +1,4 @@
+import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 export * from "./artifact-catalog";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
 export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
@@ -49918,7 +49919,8 @@ async function hasPendingSessionAttemptQuiescenceTx(
         and attempt.state = 'closed'
         and attempt.quiesced_at is null
         and (
-          exists (
+          ${sessionAttemptPendingWritersSql(sql`attempt`)}
+          or exists (
             select 1
             from session_attempt_interruptions interruption
             where interruption.workspace_id = attempt.workspace_id
@@ -51046,11 +51048,35 @@ async function verifyWorkspaceMutationSettlementForAuthority(
             };
           }
           if (!admission.settled_at) {
+            const pendingAttempt = await nextSessionAttemptAwaitingQuiescence(
+              tx,
+              authorityInput.workspaceId,
+              authorityInput.sessionId,
+            );
             await tx.execute(sql`
               update sandbox_workspace_mutation_admissions set
                 provider_outcome = ${input.outcome}, settled_at = now()
               where id = ${input.admission.id} and settled_at is null
             `);
+            if (pendingAttempt) {
+              const [wakeTarget] = await tx
+                .select({ workflowId: schema.sessions.temporalWorkflowId })
+                .from(schema.sessions)
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, authorityInput.workspaceId),
+                    eq(schema.sessions.id, authorityInput.sessionId),
+                  ),
+                )
+                .limit(1);
+              await enqueueSessionWorkflowWakeInTransaction(tx, {
+                accountId: authorityInput.accountId,
+                workspaceId: authorityInput.workspaceId,
+                sessionId: authorityInput.sessionId,
+                temporalWorkflowId: wakeTarget?.workflowId ?? `session-${authorityInput.sessionId}`,
+                reason: "workspace_mutation_settled_quiescence",
+              });
+            }
           }
           if (input.outcome === "rejected") return { failure: null };
           if (authorityFailure) return authorityFailure;
@@ -52058,6 +52084,13 @@ export async function settleRetainedProcess(
           "Retained process settlement conflicts with checkpointed provider proof",
         );
       }
+      const wasAwaitingQuiescence =
+        process.ownerAttemptId !== null &&
+        (await hasPendingSessionAttemptQuiescenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          attemptId: process.ownerAttemptId,
+        }));
       const admissions = await tx.execute<AdmissionIdentityRow>(sql`
           select * from sandbox_workspace_mutation_admissions
           where id = ${process.parentAdmissionId}
@@ -52221,11 +52254,12 @@ export async function settleRetainedProcess(
       );
       if (
         process.ownerAttemptId &&
-        (await hasPendingSessionAttemptQuiescenceTx(tx, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          attemptId: process.ownerAttemptId,
-        }))
+        (wasAwaitingQuiescence ||
+          (await hasPendingSessionAttemptQuiescenceTx(tx, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            attemptId: process.ownerAttemptId,
+          })))
       ) {
         await enqueueSessionWorkflowWakeInTransaction(tx, {
           accountId: input.accountId,
@@ -65302,7 +65336,17 @@ export async function claimSessionWorkForAttempt(
           )
           .orderBy(desc(schema.sessionAttemptInterruptions.requestedAt))
           .limit(1);
-        if (unquiescedInterruption) {
+        const [unsettledWriters] = await tx.execute<{ pending: boolean }>(sql`
+          select exists (
+            select 1 from session_turn_attempts attempt
+            where attempt.workspace_id = ${workspaceId}
+              and attempt.session_id = ${sessionId}
+              and attempt.state = 'closed'
+              and attempt.quiesced_at is null
+              and ${sessionAttemptPendingWritersSql(sql`attempt`)}
+          ) as pending
+        `);
+        if (unquiescedInterruption || unsettledWriters?.pending) {
           return { action: "unclaimed", reason: "control-pending" };
         }
         const registerAttempt = async (turn: typeof schema.sessionTurns.$inferSelect) => {
@@ -67429,52 +67473,7 @@ export async function reconcileSessionAttemptQuiescence(
               and event.turn_attempt_id = attempt.id
               and event.type = 'turn.recovery.requested'
           ) as recovery_requested,
-          (
-            exists (
-              select 1
-              from sandbox_workspace_mutation_admissions admission
-              where admission.account_id = attempt.account_id
-                and admission.workspace_id = attempt.workspace_id
-                and admission.session_id = attempt.session_id
-                and admission.settled_at is null
-                and (
-                  admission.attempt_id = attempt.id
-                  or (
-                    admission.actor_kind = 'process'
-                    and exists (
-                      select 1
-                      from sandbox_retained_processes process
-                      where process.account_id = attempt.account_id
-                        and process.workspace_id = attempt.workspace_id
-                        and process.session_id = attempt.session_id
-                        and process.id = admission.actor_id
-                        and process.owner_attempt_id = attempt.id
-                        and not exists (
-                          select 1
-                          from session_background_commands command
-                          where command.retained_process_id = process.id
-                            and command.state in ('running', 'stopping')
-                        )
-                    )
-                  )
-                )
-            )
-            or exists (
-              select 1
-              from sandbox_retained_processes process
-              where process.account_id = attempt.account_id
-                and process.workspace_id = attempt.workspace_id
-                and process.session_id = attempt.session_id
-                and process.owner_attempt_id = attempt.id
-                and process.state = 'active'
-                and not exists (
-                  select 1
-                  from session_background_commands command
-                  where command.retained_process_id = process.id
-                    and command.state in ('running', 'stopping')
-                )
-            )
-          ) as writer_pending
+          ${sessionAttemptPendingWritersSql(sql`attempt`)} as writer_pending
         from session_turn_attempts attempt
         where attempt.account_id = ${input.accountId}
           and attempt.workspace_id = ${input.workspaceId}
@@ -67492,7 +67491,8 @@ export async function reconcileSessionAttemptQuiescence(
     eligibility.temporal_workflow_run_id !== input.temporalWorkflowRunId ||
     eligibility.temporal_activity_id !== input.temporalActivityId ||
     eligibility.state !== "closed" ||
-    (!eligibility.interruption_settled &&
+    (!eligibility.writer_pending &&
+      !eligibility.interruption_settled &&
       (!eligibility.recovery_requested || eligibility.outcome !== "interrupted_recoverable")) ||
     eligibility.interruption_pending
   ) {
@@ -68026,7 +68026,8 @@ async function nextSessionAttemptAwaitingQuiescence(
         eq(schema.sessionTurnAttempts.state, "closed"),
         isNull(schema.sessionTurnAttempts.quiescedAt),
         sql`(
-          exists (
+          ${sessionAttemptPendingWritersSql(sql`${schema.sessionTurnAttempts}`)}
+          or exists (
             select 1
             from session_attempt_interruptions interruption
             where interruption.workspace_id = ${schema.sessionTurnAttempts.workspaceId}

@@ -102,12 +102,11 @@ operations have external effects. Recovery is explicit and attempt-fenced.
 Provider work stays outside database retries; only idempotent settlement
 transactions may retry.
 
-Active-run writes must prove the exact current attempt/execution generation.
-Stale workers may retain compute/network activity, but cannot append authoritative
-events or settle replacements. Temporal cancellation delivers intent, not proof
-of stopped tools/sandbox work; durable quiescence evidence gates replacement admission. Completed turns also retain physical cleanup ownership until finalization
-returns; each cleanup stage has containment and explicit heartbeat/metric
-evidence. See `agent-turn/finalization-monitor.ts` and the run lifecycle doc.
+Active-run writes prove the exact current attempt/generation. Stale workers may
+remain alive but cannot authoritatively write or settle replacements. Temporal
+cancellation is intent; durable quiescence gates replacements, including closed
+attempts' unresolved writers. After execution, finalization has per-stage
+containment and heartbeat/metric evidence (`agent-turn/finalization-monitor.ts`).
 
 A recoverable activity shutdown creates a transactional workflow-wake
 obligation in Postgres. Delivery remains unacknowledged until the exact closed

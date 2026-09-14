@@ -13,6 +13,12 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import {
+  addSessionSystemUpdate,
+  applySessionTurnSettlement,
+  getSessionTurn,
+  peekSessionWork,
+  recoverSessionDispatch,
+  reconcileSessionAttemptQuiescence,
   adoptManagedSessionBackgroundCommand,
   advanceWorkspaceGeneration,
   advanceWorkspaceGenerationForDirectRequest,
@@ -35,6 +41,7 @@ import {
   SandboxRetainedProcessTerminalError,
   SessionBackgroundCommandAdoptionFencedError,
   SandboxWorkspaceMutationFencedError,
+  verifyWorkspaceMutationSettlement,
   settleRetainedProcess,
   type Database,
   type DbClient,
@@ -544,6 +551,162 @@ afterAll(async () => {
 }, 180_000);
 
 describe("retained-process terminal-owner reconciliation", () => {
+  test("a completed attempt's final provider mutation re-arms the cleanup wake", async () => {
+    if (!available) throw new Error("PostgreSQL is required for cleanup admission proof");
+    const ids = await freshWorkspace();
+    const attempt = await freshTurn(ids);
+    const { instanceId } = await insertWarmLease(ids, {
+      sessionId: attempt.sessionId,
+      holderId: attempt.holderId,
+      holderKind: "turn",
+    });
+    const authority = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      turnId: attempt.turnId,
+      executionGeneration: attempt.executionGeneration,
+      attemptId: attempt.attemptId,
+      holderId: attempt.holderId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 7,
+      expectedInstanceId: instanceId,
+      operation: "test-final-mutation",
+    };
+    const admission = await advanceWorkspaceGeneration(db, authority);
+    await applySessionTurnSettlement(db, ids.workspaceId, {
+      sessionId: attempt.sessionId,
+      turnId: attempt.turnId,
+      triggerEventId: attempt.triggerEventId,
+      attemptId: attempt.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { output: "done" } }],
+    });
+    expect(await peekSessionWork(db, ids.workspaceId, attempt.sessionId)).toEqual({
+      kind: "cancellation-wait",
+      attemptId: attempt.attemptId,
+    });
+    const [before] =
+      await admin`select wake_revision from session_workflow_wake_outbox where session_id=${attempt.sessionId}`;
+    await verifyWorkspaceMutationSettlement(db, { ...authority, admission, outcome: "rejected" });
+    const [after] =
+      await admin`select wake_revision from session_workflow_wake_outbox where session_id=${attempt.sessionId}`;
+    expect(Number(after!.wake_revision)).toBeGreaterThan(Number(before!.wake_revision));
+    expect(await peekSessionWork(db, ids.workspaceId, attempt.sessionId)).toEqual({ kind: "idle" });
+    await verifyWorkspaceMutationSettlement(db, { ...authority, admission, outcome: "rejected" });
+    const [replayed] =
+      await admin`select wake_revision from session_workflow_wake_outbox where session_id=${attempt.sessionId}`;
+    expect(replayed!.wake_revision).toBe(after!.wake_revision);
+  }, 60_000);
+
+  for (const adopted of [false, true]) {
+    test(`completed cleanup fences unadopted remote writers (adopted=${adopted})`, async () => {
+      if (!available) throw new Error("PostgreSQL is required for cleanup admission proof");
+      const fixture = await promoteTurnProcess(
+        adopted ? { backgroundCommand: "independent work" } : {},
+      );
+      const attempt = fixture.attempt!;
+      await applySessionTurnSettlement(db, fixture.workspaceId, {
+        sessionId: fixture.sessionId,
+        turnId: attempt.turnId,
+        triggerEventId: attempt.triggerEventId,
+        attemptId: attempt.attemptId,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [{ type: "turn.completed", payload: { output: "done" } }],
+      });
+      const update = await addSessionSystemUpdate(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        kind: "child_terminal_result",
+        classification: "success",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: crypto.randomUUID(),
+        summary: "Child finished",
+        payload: {
+          type: "child_terminal_result",
+          childSessionId: crypto.randomUUID(),
+          status: "idle",
+        },
+      });
+      expect(update.added).toBe(true);
+      expect(
+        await recoverSessionDispatch(db, fixture.workspaceId, {
+          sessionId: fixture.sessionId,
+          attemptId: attempt.attemptId,
+          timeoutType: "HEARTBEAT",
+          maxRedispatches: 3,
+        }),
+      ).toMatchObject({ action: "stale", turnStatus: "completed" });
+      const claim = () =>
+        claimSessionWorkForAttempt(db, fixture.workspaceId, {
+          sessionId: fixture.sessionId,
+          workflowId: `session-${fixture.sessionId}`,
+          workflowRunId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+          dispatchId: crypto.randomUUID(),
+          trigger: { kind: "next" },
+        });
+      if (adopted) {
+        expect(await peekSessionWork(db, fixture.workspaceId, fixture.sessionId)).toEqual({
+          kind: "runnable",
+        });
+        expect((await claim()).action).toBe("claimed");
+        expect(
+          (await getRetainedProcess(db, { ...fixture, processId: fixture.process.id }))?.state,
+        ).toBe("active");
+        return;
+      }
+      expect(await peekSessionWork(db, fixture.workspaceId, fixture.sessionId)).toEqual({
+        kind: "cancellation-wait",
+        attemptId: attempt.attemptId,
+      });
+      expect(await claim()).toEqual({ action: "unclaimed", reason: "control-pending" });
+      const [dispatch] =
+        await admin`select temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id from session_turn_attempts where id=${attempt.attemptId}`;
+      expect(
+        await reconcileSessionAttemptQuiescence(db, {
+          accountId: fixture.accountId,
+          workspaceId: fixture.workspaceId,
+          sessionId: fixture.sessionId,
+          attemptId: attempt.attemptId,
+          temporalWorkflowId: dispatch!.temporal_workflow_id,
+          temporalWorkflowRunId: dispatch!.temporal_workflow_run_id,
+          temporalActivityId: dispatch!.temporal_activity_id,
+          activitySettled: true,
+        }),
+      ).toEqual({ action: "pending", events: [] });
+      const [before] =
+        await admin`select wake_revision from session_workflow_wake_outbox where session_id=${fixture.sessionId}`;
+      await settleRetainedProcess(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        processId: fixture.process.id,
+        expected: retainedProcessSettlementIdentity(fixture.process),
+        outcome: "exited",
+        exitCode: 0,
+        reason: "provider_exit_banner",
+        idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+      });
+      const [after] =
+        await admin`select wake_revision from session_workflow_wake_outbox where session_id=${fixture.sessionId}`;
+      expect(Number(after!.wake_revision)).toBeGreaterThan(Number(before!.wake_revision));
+      expect(await peekSessionWork(db, fixture.workspaceId, fixture.sessionId)).toEqual({
+        kind: "runnable",
+      });
+      expect((await claim()).action).toBe("claimed");
+      expect(await getSessionTurn(db, fixture.workspaceId, attempt.turnId)).toMatchObject({
+        status: "completed",
+        executionGeneration: attempt.executionGeneration,
+      });
+    }, 60_000);
+  }
+
   test("provider identity and cursors survive fresh database reads without accepting a rebind", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({ providerCommand: true });
