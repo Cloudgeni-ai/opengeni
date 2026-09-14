@@ -52,6 +52,14 @@ describe("custom API control center diagnostics", () => {
   const sessionsUrl = `http://127.0.0.1:9/v1/workspaces/${workspaceId}/sessions`;
 
   test("allows only the route-owned paged session requests cancelled during replacement", () => {
+    for (const query of [
+      "view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active",
+      "archiveStatus=active&sortBy=updatedAt&parentSessionId=null&limit=50&view=page",
+    ]) {
+      expect(
+        isExpectedSessionPageCancellation("GET", `${sessionsUrl}?${query}`, "net::ERR_ABORTED"),
+      ).toBe(true);
+    }
     expect(
       isExpectedSessionPageCancellation(
         "GET",
@@ -76,6 +84,25 @@ describe("custom API control center diagnostics", () => {
   });
 
   test("retains other request failures as diagnostics", () => {
+    const query = "view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active";
+    for (const [method, url, error] of [
+      ["POST", `${sessionsUrl}?${query}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query}`, "net::ERR_CONNECTION_RESET"],
+      ["GET", `${sessionsUrl}?${query}&unexpected=true`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query}&sortBy=updatedAt`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query}&archivedOnly=true`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("updatedAt", "name")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("active", "all")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("50", "51")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("null", "other-session")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("&archiveStatus=active", "")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl.replace(workspaceId, accountId)}?${query}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl.replace(":9/", ":10/")}?${query}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}/other?${query}`, "net::ERR_ABORTED"],
+      ["GET", "not a URL", "net::ERR_ABORTED"],
+    ]) {
+      expect(isExpectedSessionPageCancellation(method!, url!, error!)).toBe(false);
+    }
     expect(
       isExpectedSessionPageCancellation(
         "GET",
@@ -516,6 +543,8 @@ function isExpectedSessionPageCancellation(
     .sort()
     .join("&");
   return new Set([
+    // Default root page on this fixture's capabilities route; keep exact keys and values.
+    "archiveStatus=active&limit=50&parentSessionId=null&sortBy=updatedAt&view=page",
     "limit=50&parentSessionId=null&view=page",
     "archivedOnly=true&limit=50&parentSessionId=null&view=page",
     "limit=1&pinsOnly=true&view=page",

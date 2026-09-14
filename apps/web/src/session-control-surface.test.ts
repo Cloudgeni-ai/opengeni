@@ -444,19 +444,17 @@ describe("session control surface architecture", () => {
     expect(route).toContain('context.sessionChannelProjectionAuthority,\n        "live"');
   });
 
-  test("keeps the loaded creator picker identifiable and reachable", async () => {
+  test("keeps creator grouping while removing the retired creator/date filter controls", async () => {
     const list = await source("components/rail/session-list.tsx");
     expect(list).toContain("const creatorSessions = useMemo");
     expect(list).toContain("sessionCreatorLabelMap(creatorSessions)");
-    expect(list).toContain("const activeBrowseCreator = normalizeSessionBrowseCreator(");
-    expect(list).toContain("creator: activeBrowseCreator");
-    expect(list).toContain('browseCreatorOrigin.current !== "search"');
+    expect(list).not.toContain("Date filter field");
+    expect(list).not.toContain("Filter by</DropdownMenuLabel>");
+    expect(list).toContain("archiveStatus: browseStatus");
+    expect(list).toContain("sortBy: browseSortBy");
     expect(list).toContain("updateSearchDraft(event.target.value)");
     expect(list).not.toContain('"Selected"');
     expect(list).toContain("{ creatorLabels }");
-    expect(list).toContain(
-      'className="max-h-(--radix-dropdown-menu-content-available-height) w-52 overflow-x-hidden overflow-y-auto"',
-    );
     expect(list).toContain("sessionBrowseResultCount(browseSessions, hierarchyMode)");
   });
 

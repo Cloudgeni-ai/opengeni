@@ -277,14 +277,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
       await page.getByRole("link", { name: /^Open Grouping preference proof/ }).waitFor();
 
-      await page.getByRole("button", { name: "Session filters" }).click();
+      await page.getByRole("button", { name: /^Session view/ }).click();
       await page.getByRole("menuitem", { name: /^Group by/ }).hover();
       await page.getByRole("menuitemradio", { name: "Creator" }).click();
-      await page.getByRole("button", { name: "Session filters, active" }).waitFor();
+      await page.getByRole("button", { name: "Session view, customized" }).waitFor();
 
       await page.reload();
       await page.getByRole("link", { name: /^Open Grouping preference proof/ }).waitFor();
-      await page.getByRole("button", { name: "Session filters, active" }).click();
+      await page.getByRole("button", { name: "Session view, customized" }).click();
       await page.getByRole("menuitem", { name: /^Group by/ }).hover();
       expect(
         await page.getByRole("menuitemradio", { name: "Creator" }).getAttribute("aria-checked"),
@@ -571,20 +571,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const search = page.getByRole("searchbox", { name: "Search sessions" });
       await search.fill("Created grouping child");
       await page.getByText("1 matching session.").waitFor();
-      await page.getByRole("button", { name: "Session filters" }).click();
-      await page.getByRole("menuitem", { name: /^Creator/ }).hover();
-      await page.getByRole("menuitemradio", { name: "Child-only creator" }).click();
-
-      // A creator offered only by flat child search is not a valid root filter.
-      // Leaving search clears that scoped choice instead of painting an empty
-      // hierarchy or leaving the submenu with a generic "Selected" value.
+      // Leaving flat child search returns to root browsing; creator filters
+      // are no longer offered by the compact view menu.
       await search.fill("");
       await managerRow.waitFor();
-      await page.getByRole("button", { name: "Session filters" }).click();
+      await page.getByRole("button", { name: /^Session view/ }).click();
       expect(await page.getByText("Selected", { exact: true }).count()).toBe(0);
       await page.getByRole("menuitem", { name: /^Group by/ }).hover();
       await page.getByRole("menuitemradio", { name: "Created date" }).click();
-      await page.getByRole("button", { name: "Session filters, active" }).waitFor();
+      await page.getByRole("button", { name: "Session view, customized" }).waitFor();
       const liveRegion = rail.locator('[aria-live="polite"]');
       await page.waitForFunction(() => {
         const message = document.querySelector(
@@ -1522,7 +1517,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const page = await context.newPage();
     try {
       await page.goto(webBaseUrl);
-      const workspaceId = await workspaceFromPage(page);
+      const workspaceId = await workspaceFromPage(page, "Last activity");
       const batch = `Expired cursor batch ${Date.now()}`;
       let sentinel: BrowserSession | null = null;
       // Bootstrap authority through the public API, then seed the remaining
@@ -2741,7 +2736,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     const page = await context.newPage();
     await page.goto(webBaseUrl);
-    const workspaceId = await workspaceFromPage(page);
+    // This pin/header scenario starts with the mobile navigation drawer closed
+    // and does not require project grouping.
+    const workspaceId = await workspaceFromPage(page, null);
     const target = await createSessionThroughApi(
       page,
       apiBaseUrl,
@@ -3175,7 +3172,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         discovery.sessions.some((row) => row.id === activeRoot.id || row.id === ancestor.id),
       ).toBe(false);
       expect(discovery.nextCursor).toBeTruthy();
-      await page.getByRole("button", { name: "Session filters", exact: true }).click();
+      await page.getByRole("button", { name: /^Session view/ }).click();
       await page.getByRole("menuitem", { name: /^Group by/ }).hover();
       await page.getByRole("menuitemradio", { name: "Creator", exact: true }).click();
       const activeGroup = page.getByRole("group", { name: "Active", exact: true });
@@ -3334,7 +3331,10 @@ async function reactCommitCount(page: Page): Promise<number> {
   );
 }
 
-async function workspaceFromPage(page: Page): Promise<string> {
+async function workspaceFromPage(
+  page: Page,
+  groupBy: "Project" | "Last activity" | null = "Project",
+): Promise<string> {
   try {
     await waitFor(() => /\/workspaces\/[^/]+\/sessions/.test(page.url()), {
       timeoutMs: 15_000,
@@ -3348,6 +3348,39 @@ async function workspaceFromPage(page: Page): Promise<string> {
       `Workspace route did not load at ${page.url()}: ${String(error)}\n${body.slice(0, 2_000)}\n${(browserDiagnostics.get(page.context()) ?? []).slice(-20).join("\n")}`,
       { cause: error },
     );
+  }
+  // Project scenarios need explicit folders; activity pagination and mobile
+  // header scenarios must retain their own view preconditions.
+  if (groupBy !== null) {
+    // The rail is available before draft hydration performs its initial autofocus.
+    await page
+      .getByRole("textbox", { name: "Message the agent", exact: true })
+      .and(page.locator(":focus"))
+      .waitFor();
+    await page.getByRole("button", { name: /^Session view/ }).press("Enter");
+    await page.getByRole("menuitem").first().and(page.locator(":focus")).waitFor();
+    await page.getByRole("menuitem", { name: /^Group by/ }).focus();
+    await page.keyboard.press("ArrowRight");
+    await page.getByRole("menuitemradio").first().and(page.locator(":focus")).waitFor();
+    await page.getByRole("menuitemradio", { name: groupBy, exact: true }).press("Enter");
+    await page.getByRole("menu").waitFor({ state: "hidden" });
+    await page
+      .getByRole("button", { name: /^Session view/ })
+      .and(page.locator(":focus"))
+      .waitFor();
+  }
+  if (groupBy === "Project") {
+    await page.getByRole("button", { name: /^Session view/ }).press("Enter");
+    await page.getByRole("menuitem").first().and(page.locator(":focus")).waitFor();
+    const emptyGroups = page.getByRole("menuitemcheckbox", { name: "Show empty groups" });
+    if ((await emptyGroups.getAttribute("aria-checked")) !== "true")
+      await emptyGroups.press("Enter");
+    else await page.keyboard.press("Escape");
+    await page.getByRole("menu").waitFor({ state: "hidden" });
+    await page
+      .getByRole("button", { name: /^Session view/ })
+      .and(page.locator(":focus"))
+      .waitFor();
   }
   return page.url().match(/\/workspaces\/([^/]+)\/sessions/)![1]!;
 }

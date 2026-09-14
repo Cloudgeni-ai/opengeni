@@ -651,6 +651,8 @@ export function mergeSessionDetailReadProjection(
  * Activity ordering belongs to the list too: borrowing the selected route's
  * timestamp would move that row on selection and move it back on deselection.
  * List refreshes advance recency consistently for selected and unselected rows.
+ * Creation ordering also keeps the list's exact SQL timestamp; route/lineage
+ * Date hydration can discard the microseconds that distinguish adjacent rows.
  */
 export function applySessionRailProjection(
   current: Session,
@@ -658,9 +660,9 @@ export function applySessionRailProjection(
   options: { channelOwned?: boolean } = {},
 ): Session {
   const activity =
-    current.updatedAt === projected.updatedAt
+    current.updatedAt === projected.updatedAt && current.createdAt === projected.createdAt
       ? current
-      : { ...current, updatedAt: projected.updatedAt };
+      : { ...current, updatedAt: projected.updatedAt, createdAt: projected.createdAt };
   const pinned = applySessionPinProjection(activity, projected) ?? activity;
   const merged =
     options.channelOwned === false

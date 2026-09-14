@@ -66,6 +66,38 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
 }
 
 describe("OpenGeniClient", () => {
+  test("session pages require affirmative sort and archive acknowledgments", async () => {
+    for (const response of [
+      [],
+      { pinned: [], sessions: [], nextCursor: null },
+      { pinned: [], sessions: [], nextCursor: null, sortBy: "updatedAt", archiveStatus: "active" },
+    ]) {
+      const { client } = makeClient(() => jsonResponse(response));
+      await expect(client.listSessionPage(WORKSPACE_ID, { sortBy: "name" })).rejects.toThrow(
+        "does not support",
+      );
+      await expect(client.listSessionPage(WORKSPACE_ID, { archiveStatus: "all" })).rejects.toThrow(
+        "does not support",
+      );
+    }
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        sortBy: "name",
+        archiveStatus: "all",
+      }),
+    );
+    expect(
+      await client.listSessionPage(WORKSPACE_ID, { sortBy: "name", archiveStatus: "all" }),
+    ).toMatchObject({
+      sortBy: "name",
+      archiveStatus: "all",
+    });
+    expect(requests[0]!.url).toContain("sortBy=name&archiveStatus=all");
+  });
+
   test("uses organization-scoped shared-workspace control-plane routes", async () => {
     const organizationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const membershipId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";

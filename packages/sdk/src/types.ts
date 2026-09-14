@@ -1544,6 +1544,10 @@ export type SessionListResponse = {
   pinnedTruncated?: boolean;
   /** Present only when the server recognized and applied additive list filters. */
   filtersApplied?: true;
+  /** Effective server ordering. Name: ASCII-space trim, ASCII case fold,
+   * UTF-8 byte order, id ASC. Date keys and id ties are DESC. */
+  sortBy?: "updatedAt" | "createdAt" | "name" | "archivedAt";
+  archiveStatus?: "active" | "archived" | "all";
   /** Server-resolved Site origin filter, when requested. */
   originSiteId?: string;
   sessions: Session[];

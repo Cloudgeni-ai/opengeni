@@ -708,6 +708,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(query.search ? { search: query.search } : {}),
         ...(query.pinsOnly ? { pinsOnly: true } : {}),
         ...(query.archivedOnly ? { archivedOnly: true } : {}),
+        ...(query.sortBy ? { sortBy: query.sortBy } : {}),
+        ...(query.archiveStatus ? { archiveStatus: query.archiveStatus } : {}),
         ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
         ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
         ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
@@ -4795,7 +4797,7 @@ function eventEnumList<T extends string>(
   });
 }
 
-function sessionListQuery(
+export function sessionListQuery(
   query: Record<string, string>,
   allowCursor = true,
 ): {
@@ -4806,6 +4808,8 @@ function sessionListQuery(
   search: string | undefined;
   pinsOnly: boolean;
   archivedOnly: boolean;
+  sortBy: "updatedAt" | "createdAt" | "name" | undefined;
+  archiveStatus: "active" | "archived" | "all" | undefined;
   channelId: string | null | undefined;
   createdBy: { kind: "subject" | "service"; subjectId: string } | undefined;
   updatedFrom: Date | undefined;
@@ -4852,6 +4856,20 @@ function sessionListQuery(
     throw new HTTPException(400, { message: 'archivedOnly must be the literal "true"' });
   }
   const archivedOnly = query.archivedOnly === "true";
+  const sortBy = z.enum(["updatedAt", "createdAt", "name"]).optional().safeParse(query.sortBy);
+  const archiveStatus = z
+    .enum(["active", "archived", "all"])
+    .optional()
+    .safeParse(query.archiveStatus);
+  if (!sortBy.success || !archiveStatus.success) {
+    throw new HTTPException(400, { message: "Invalid session sortBy or archiveStatus" });
+  }
+  if (archivedOnly && archiveStatus.data !== undefined && archiveStatus.data !== "archived") {
+    throw new HTTPException(400, { message: "archivedOnly conflicts with archiveStatus" });
+  }
+  if (pinsOnly && archiveStatus.data === "archived") {
+    throw new HTTPException(400, { message: "pinsOnly cannot be combined with archived status" });
+  }
   const channelId = query.channelId;
   if (
     channelId !== undefined &&
@@ -4956,6 +4974,8 @@ function sessionListQuery(
     search: search || undefined,
     pinsOnly,
     archivedOnly,
+    sortBy: sortBy.data,
+    archiveStatus: archiveStatus.data,
     channelId: channelId === undefined ? undefined : channelId === "null" ? null : channelId,
     createdBy:
       createdByKind && createdBySubjectId

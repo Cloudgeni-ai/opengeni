@@ -646,6 +646,8 @@ export type SessionListPageOptions = {
   pinsOnly?: boolean;
   /** Return archived root chats instead of the active session list. */
   archivedOnly?: boolean;
+  sortBy?: "updatedAt" | "createdAt" | "name";
+  archiveStatus?: "active" | "archived" | "all";
   /** Stop this caller's finite page read when its owning route is abandoned. */
   signal?: AbortSignal | undefined;
 };
@@ -1399,6 +1401,8 @@ export class OpenGeniClient {
           ...(options.createdBefore ? { createdBefore: options.createdBefore } : {}),
           ...(options.pinsOnly ? { pinsOnly: "true" } : {}),
           ...(options.archivedOnly ? { archivedOnly: "true" } : {}),
+          ...(options.sortBy ? { sortBy: options.sortBy } : {}),
+          ...(options.archiveStatus ? { archiveStatus: options.archiveStatus } : {}),
         },
         { signal: options.signal },
       );
@@ -1413,6 +1417,16 @@ export class OpenGeniClient {
         });
       }
       throw error;
+    }
+    if (
+      (options.sortBy !== undefined &&
+        (Array.isArray(response) || response.sortBy !== options.sortBy)) ||
+      (options.archiveStatus !== undefined &&
+        (Array.isArray(response) || response.archiveStatus !== options.archiveStatus))
+    ) {
+      throw new Error(
+        "The connected OpenGeni API does not support the requested session sorting/archive filter",
+      );
     }
     if (Array.isArray(response)) {
       // Rolling/same-major compatibility: an older API ignores `view=page` and
