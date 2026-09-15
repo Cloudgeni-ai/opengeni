@@ -1015,6 +1015,7 @@ export const FORCE_RLS_TABLES = [
   "slack_app_home_refreshes",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
+  "slack_prepared_messages",
   "slack_bot_update_operations",
   "slack_bot_user_links",
   "slack_channel_routes",
@@ -1327,6 +1328,7 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
+  "slack_prepared_messages",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",

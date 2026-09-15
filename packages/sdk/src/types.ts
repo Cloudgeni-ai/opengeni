@@ -2847,6 +2847,7 @@ export type ScheduledTaskAgentConfig = {
   tools: ToolRef[];
   metadata: Record<string, unknown>;
   slackBotConnectionId?: string | undefined;
+  additionalFirstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
@@ -3216,6 +3217,8 @@ export type FirstPartyMcpToolName =
   | "slack_bot_file_content"
   | "slack_bot_post_message"
   | "slack_bot_delete_message"
+  | "slack_bot_prepare_message"
+  | "slack_bot_send_prepared_message"
   | "fiken_companies_list"
   | "fiken_contacts_list"
   | "fiken_contact_create"
@@ -5300,6 +5303,7 @@ export type ScheduledTaskAgentConfigInput = {
   tools?: ToolRef[] | undefined;
   metadata?: Record<string, unknown> | undefined;
   slackBotConnectionId?: string | undefined;
+  additionalFirstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;

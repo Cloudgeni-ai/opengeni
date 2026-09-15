@@ -317,6 +317,7 @@ export async function createValidatedScheduledTask(input: {
           source: personalConnectionDelegationSourceForGrant(input.grant),
           authoritySelections: input.payload.connectionAuthorities,
           rejectUnselectedActivatedConnections: true,
+          ...(target ? { targetSessionId: target.id } : {}),
           ...scheduledConnectionSurfaceEligibility(runtimeSettings, target),
         });
   const creationInitiator = creationInitiatorForGrant(input.grant);
@@ -1154,6 +1155,7 @@ export async function validatedScheduledTaskUpdate(input: {
       source: personalConnectionDelegationSourceForGrant(input.grant),
       authoritySelections: input.payload.connectionAuthorities,
       rejectUnselectedActivatedConnections: true,
+      ...(nextTarget ? { targetSessionId: nextTarget.id } : {}),
       ...scheduledConnectionSurfaceEligibility(runtimeSettings, nextTarget),
     });
   }

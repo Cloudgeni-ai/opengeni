@@ -1,3 +1,4 @@
+import { prepareSlackMessage, getPreparedSlackMessage } from "@opengeni/db";
 import {
   getAttemptToolCatalog,
   createChannel,
@@ -1743,6 +1744,99 @@ function registerSlackBotTools(
     });
     return createOpenGeniSlackBotClient(deps, resolved);
   };
+
+  const authorizeMessage = async () => {
+    if (!sessionId) throw new Error("Slack message preparation requires a session");
+    await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+  };
+  server.registerTool(
+    "slack_bot_prepare_message",
+    {
+      description:
+        "Prepare a message as the OpenGeni workspace bot. This saves the exact recipient and text without sending. Use the returned messageId with slack_bot_send_prepared_message; retries of send reuse that same ID. Personal Slack messages require the user's separately authorized personal connector.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        targetKind: z4.enum(["channel", "user"]),
+        targetId: z4.string().min(1).max(128),
+        threadTimestamp: z4
+          .string()
+          .regex(/^\d+\.\d+$/)
+          .max(64)
+          .optional(),
+        text: z4.string().min(1).max(40000),
+      },
+    },
+    async ({ connectionId, targetKind, targetId, threadTimestamp, text }) => {
+      await authorizeMessage();
+      const resolved = await resolveSlackBotConnectionForTool({
+        db: deps.db,
+        grant,
+        sessionId,
+        ...(connectionId ? { requestedConnectionId: connectionId } : {}),
+      });
+      const message = await prepareSlackMessage(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: sessionId!,
+        connectionId: resolved.connection.id,
+        connectionVersion: resolved.connection.version,
+        targetKind,
+        targetId,
+        threadTimestamp: threadTimestamp ?? null,
+        text,
+      });
+      return json({
+        messageId: message.id,
+        identity: "workspace_bot",
+        targetKind,
+        targetId,
+        text,
+        sent: false,
+      });
+    },
+  );
+  server.registerTool(
+    "slack_bot_send_prepared_message",
+    {
+      description:
+        "Send an already prepared OpenGeni bot message. Supply only the messageId returned by slack_bot_prepare_message in this session. The saved recipient and text cannot change. Retry this same ID after interruption; never prepare a replacement merely to retry an uncertain send.",
+      inputSchema: { messageId: z4.string().uuid() },
+    },
+    async ({ messageId }) => {
+      await authorizeMessage();
+      const message = await getPreparedSlackMessage(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: sessionId!,
+        id: messageId,
+      });
+      if (!message) throw new Error("Prepared Slack message is not available in this session");
+      const resolved = await resolveSlackBotConnectionForTool({
+        db: deps.db,
+        grant,
+        sessionId,
+        requestedConnectionId: message.connectionId,
+      });
+      if (resolved.connection.version !== message.connectionVersion)
+        throw new Error(
+          "Slack connection changed; inspect the original delivery before proceeding. Do not prepare a replacement to retry this message.",
+        );
+      const client = createOpenGeniSlackBotClient(
+        { ...deps, authorizeProviderRequest: authorizeMessage },
+        resolved,
+      );
+      return json(
+        await client.postMessage({
+          operationId: message.id,
+          ...(message.targetKind === "channel"
+            ? { channelId: message.targetId }
+            : { userId: message.targetId }),
+          ...(message.threadTimestamp ? { threadTimestamp: message.threadTimestamp } : {}),
+          text: message.text,
+        }),
+      );
+    },
+  );
 
   server.registerTool(
     "slack_bot_list_channels",
@@ -5802,6 +5896,30 @@ function registerCapabilityDiscoveryTools(
         limit ?? 8,
       );
       const setups = await setupProjections(ranked.map(({ item }) => item));
+      // Discovery is independent of whether bot tools were selected for this
+      // turn. This reads only workspace-owned metadata, never personal tokens.
+      let workspaceBot: Record<string, unknown> | undefined;
+      if (ranked.some(({ item }) => item.id === "api:slack-bot")) {
+        workspaceBot = { identity: "workspace_bot", status: "not_verified" };
+        if (grant.permissions.includes("connections:read")) {
+          try {
+            const resolved = await resolveSlackBotConnectionForTool({
+              db: deps.db, grant, sessionId,
+            });
+            workspaceBot = {
+              identity: "workspace_bot", status: "installed",
+              connectionId: resolved.connection.id,
+              teamName: resolved.metadata.slackTeamName,
+              execution: "Select the bot in the schedule editor, or check the current chat's bot tool selection. Installation alone does not make tools executable.",
+            };
+          } catch {
+            workspaceBot = {
+              identity: "workspace_bot", status: "selection_required",
+              detail: "Inspect workspace Slack settings for an active bot and select it. This does not require personal Slack OAuth.",
+            };
+          }
+        }
+      }
       const matches = ranked.map(({ item, matchedOn }, index) => ({
         capabilityId: item.id,
         name: item.name,
@@ -5814,6 +5932,7 @@ function registerCapabilityDiscoveryTools(
         authKind: item.authKind,
         tier: item.tier,
         matchedOn,
+        ...(item.id === "api:slack-bot" ? { connection: workspaceBot } : {}),
         setup: {
           ...setups[index]!,
           requiredVariables: capabilityRequiredVariables(item),
@@ -5907,6 +6026,12 @@ async function capabilitySetupProjection(
   item: CapabilityCatalogItem,
   availableServerIds: ReadonlySet<string>,
 ): Promise<CapabilitySetupProjection> {
+  if (item.id === "api:slack-bot") {
+    return {
+      status: "unavailable", action: null,
+      detail: "Bot execution is configured in workspace Slack settings and the schedule editor. Inspect connection metadata and current bot tools; do not request personal OAuth for bot access.",
+    };
+  }
   if (item.id === "api:github-app" || item.surfaceType === "first_party_github") {
     const missing = githubAppMissingSettings(deps.settings);
     if (missing.length > 0) {

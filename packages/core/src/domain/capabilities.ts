@@ -1421,6 +1421,25 @@ function providerIntegrationCatalogItems(
 export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogItem[] {
   return [
     CapabilityCatalogItem.parse({
+      id: "api:slack-bot",
+      kind: "api",
+      source: "built_in",
+      name: "OpenGeni Slack bot",
+      description: "Read shared Slack channels and send messages as OpenGeni, including scheduled reports. Distinct from My Slack account, which acts as a personal user.",
+      category: "communication",
+      tags: ["slack", "bot", "notifications", "scheduled", "workspace"],
+      homepageUrl: "https://slack.com",
+      providerDomain: "slack.com",
+      authModel: "workspace_bot_installation",
+      authKind: "oauth2",
+      surfaceType: "first_party_slack_bot",
+      tools: [{ kind: "mcp", id: "opengeni" }],
+      runtime: { available: true, notes: "Install the workspace bot in Capabilities and select its tools or schedule binding." },
+      lifecycle: { status: "available", readiness: "setup_required", detail: "Workspace bot setup is separate from personal Slack OAuth.", managedBy: "platform" },
+      actions: ["inspect"],
+      metadata: { recommendationOnly: true },
+    }),
+    CapabilityCatalogItem.parse({
       id: "api:github-app",
       kind: "api",
       source: "built_in",

@@ -116,3 +116,19 @@ provider. Turn fallback off to use only your selected provider.
 
 Your recording remains saved while transcription retries. A recovered transcript
 appears as **Insert saved transcript**, so you can review it before sending.
+
+### Slack identities in scheduled tasks
+
+Choose **OpenGeni bot** when a scheduled task should post as OpenGeni. Choose
+**My Slack account** when it should read your personal messages or send as you.
+A task can use both when needed. Connecting the bot does not connect your account.
+
+In the schedule editor, select the connected bot or authorize your personal
+account. A schedule that creates new chats needs ongoing personal authorization;
+a schedule in an existing chat can use authorization for that chat. The schedule
+retains the account you authorized and checks that access is still valid when it
+runs. Another member sending a message does not gain access to your account.
+
+Results follow the destination chat's sharing settings. Use your Personal
+workspace for private work. Removing personal authorization stops future use of
+that account; the task does not switch to another member's account.

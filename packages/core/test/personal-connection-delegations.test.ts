@@ -1315,14 +1315,14 @@ describe("personal MCP connection delegation", () => {
         targetSessionId: crypto.randomUUID(),
       }),
     ).toEqual([always]);
-    expect(() =>
+    expect(
       personalConnectionDelegationsFromParent({
         servers,
         parentDelegations: [always],
         targetSessionId: crypto.randomUUID(),
         rejectActivatedConnections: true,
       }),
-    ).toThrow("task occurrence authority");
+    ).toEqual([always]);
   });
 
   test("children retain frozen first-party social authority alongside selected MCP grants", () => {

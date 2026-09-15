@@ -1,3 +1,4 @@
+export * from "./slack-prepared-messages";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 export * from "./artifact-catalog";
 import { grantWorkspaceAccess } from "./workspace-membership-access";

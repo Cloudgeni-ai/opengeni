@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { DEFAULT_FIRST_PARTY_MCP_PERMISSIONS } from "@opengeni/contracts";
+import {
+  type FirstPartyMcpToolName,
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+} from "@opengeni/contracts";
 import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import {
   bootstrapWorkspace,
@@ -79,6 +82,7 @@ async function workspaceGrant() {
 async function generatedTask(
   grant: Awaited<ReturnType<typeof workspaceGrant>>,
   creatorPolicy: ScheduledTaskCreatorPolicy | null,
+  additionalFirstPartyMcpTools?: FirstPartyMcpToolName[],
 ) {
   return await createScheduledTask(client.db, {
     accountId: grant.accountId,
@@ -92,6 +96,7 @@ async function generatedTask(
     overlapPolicy: "allow_concurrent",
     agentConfig: {
       prompt: "Run with the creator's boundary",
+      additionalFirstPartyMcpTools,
       resources: [],
       tools: [],
       metadata: {},
@@ -182,3 +187,34 @@ describe("scheduled-task creator policy inheritance (real PostgreSQL)", () => {
     expect(session.firstPartyMcpPermissions).toEqual(["sessions:read"]);
   }, 60_000);
 });
+
+test("explicit scheduled bot tools extend human defaults but cannot widen agent or deployment ceilings", async () => {
+  if (!available) return;
+  const grant = await workspaceGrant();
+  const extras = ["slack_bot_prepare_message", "slack_bot_send_prepared_message"] as const;
+  const humanTask = await generatedTask(grant, null, [...extras]);
+  const human = await dispatchGeneratedSession(grant, humanTask.id);
+  expect(human.session.firstPartyMcpTools).toEqual([
+    ...resolveFirstPartyMcpToolPolicy(human.settings).default,
+    ...extras,
+  ]);
+  const narrowedTask = await generatedTask(
+    grant,
+    {
+      firstPartyMcpTools: ["set_session_title"],
+      firstPartyMcpPermissions: ["sessions:read"],
+      sessionPolicy: null,
+    },
+    [...extras],
+  );
+  const narrowed = await dispatchGeneratedSession(grant, narrowedTask.id);
+  expect(narrowed.session.firstPartyMcpTools).toEqual(["set_session_title"]);
+  const boundedTask = await generatedTask(grant, null, [...extras]);
+  const bounded = await dispatchGeneratedSession(grant, boundedTask.id, {
+    allowedFirstPartyMcpTools: ["set_session_title", "slack_bot_prepare_message"],
+  });
+  expect(bounded.session.firstPartyMcpTools).toEqual([
+    "set_session_title",
+    "slack_bot_prepare_message",
+  ]);
+}, 60_000);

@@ -464,14 +464,9 @@ export function personalConnectionDelegationsFromParent(input: {
   ) {
     throw new Error("agent-created personal GitHub repository authority is unavailable");
   }
-  if (
-    input.rejectActivatedConnections &&
-    inherited.some((delegation) => delegation.userDelegation)
-  ) {
-    throw new Error(
-      "scheduled connection authority is not available until task occurrence authority is activated",
-    );
-  }
+  // Successor eligibility above admits only standing authority or the exact
+  // target-session grant. Scheduled admission freezes and revalidates that
+  // selection through the activated task-occurrence lifecycle.
   return inherited;
 }
 

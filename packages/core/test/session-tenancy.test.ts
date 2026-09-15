@@ -3,6 +3,7 @@ import type { SessionAuthorizationOperation, SessionAuthorizationPort } from "@o
 import {
   acceptOrganizationInvitation,
   createDb,
+  createConnection,
   createOrganizationInvitation,
   createSession,
   ensureManagedAccessForUser,
@@ -241,7 +242,9 @@ describe("managed-human session tenancy application service", () => {
         grant.workspaceId,
         crypto.randomUUID(),
       ),
-    ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
+    ).rejects.toMatchObject({
+      cause: { code: "42501", message: "session tenancy product is not activated" },
+    });
   }, 180_000);
 
   test("lists, issues, reissues expired identities, and route-fences revocation", async () => {
@@ -865,3 +868,89 @@ describe("managed-human session tenancy application service", () => {
     expect(hostCalls).toBe(0);
   });
 });
+
+test("preactivation personal Connection standing consent requires a canonical owning human", async () => {
+  if (!shared || !client) return;
+  const userId = `standing-${crypto.randomUUID()}`;
+  const subjectId = `user:${userId}`;
+  const access = await ensureManagedAccessForUser(client.db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "Standing consent",
+  });
+  const grant = access.workspaceGrants[0]!;
+  const authorization = {
+    grant,
+    accountGrant: access.accountGrants[0] ?? null,
+    authenticatedSubjectId: subjectId,
+    contextIntegrity: true,
+    canonicalManagedHumanSession: true,
+  } satisfies AccessGrantAuthorization;
+  const connection = await createConnection(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId,
+    kind: "oauth2",
+    providerDomain: "slack.com",
+    credentialEncrypted: "fixture",
+  });
+  const deps = {
+    db: client.db,
+    sessionAuthorization: {
+      authorizeSession: async () => {
+        throw new Error("standing consent has no target session");
+      },
+      resolveListScope: async () => ({ kind: "all" as const }),
+    },
+  };
+  const request = {
+    scope: "user",
+    resourceKind: "connection",
+    mode: "always",
+    context: "workspace_shared",
+    workspaceSharedAcknowledged: true,
+  } as const;
+  const issue = (auth: AccessGrantAuthorization) =>
+    issueManagedHumanUserResourceGrant(
+      deps,
+      auth,
+      grant.workspaceId,
+      connection.authorityId!,
+      request,
+    );
+  for (const auth of [
+    { ...authorization, canonicalManagedHumanSession: false },
+    { ...authorization, authenticatedSubjectId: "user:another" },
+    { ...authorization, contextIntegrity: false },
+    {
+      ...authorization,
+      canonicalManagedHumanSession: false,
+      grant: { ...grant, principalKind: "agent" as const },
+    },
+  ])
+    await expect(issue(auth)).rejects.toBeInstanceOf(SessionTenancyManagedHumanRequiredError);
+  const issued = await issue(authorization);
+  expect(issued).toMatchObject({
+    mode: "always",
+    context: "workspace_shared",
+    authorityEpoch: null,
+  });
+  expect(
+    (
+      await listManagedHumanUserResourceAuthorities(deps, authorization, grant.workspaceId, {
+        resourceKind: "connection",
+        limit: 50,
+      })
+    ).authorities,
+  ).toHaveLength(1);
+  expect(
+    (
+      await revokeManagedHumanUserResourceGrant(
+        deps,
+        authorization,
+        grant.workspaceId,
+        issued.grantId,
+      )
+    ).status,
+  ).toBe("revoked");
+}, 180_000);

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
-import type { AccessGrant } from "@opengeni/contracts";
+import { OPENGENI_SLACK_BOT_REQUIRED_SCOPES, type AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   enableCapabilityInstallation,
@@ -10,6 +10,7 @@ import {
   persistAttemptToolCatalog,
   bootstrapWorkspace,
   createDb,
+  createConnection,
   createSession,
   deleteWorkspace,
   listGitHubInstallationsForWorkspace,
@@ -339,3 +340,36 @@ async function seedAttempt(): Promise<{
   });
   return { sessionId: session.id, turnId: turn!.id, attemptId, executionGeneration };
 }
+
+
+test("discovers the installed bot without selected bot tools or a personal Slack catalog entry", async () => {
+  if (!shared) throw new Error("Real PostgreSQL required");
+  const attempt = await seedAttempt();
+  const connection = await createConnection(client.db, {
+    accountId: workspace.accountId, workspaceId: workspace.workspaceId,
+    subjectId: null, providerDomain: "slack.com", kind: "app_install",
+    credentialEncrypted: "test-encrypted-placeholder",
+    grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES],
+    verifiedInstallAt: new Date(), verifiedInstallVersion: 1,
+    metadata: { credentialRole: "opengeni_slack_bot", credentialLabel: "OpenGeni Slack bot",
+      slackTeamId: "T_DISCOVERY", slackTeamName: "Discovery workspace", botUserId: "U_BOT", botId: "B_BOT", botDisplayName: "OpenGeni", verifiedAt: new Date().toISOString() },
+    createdBySubjectId: workspace.subjectId,
+  });
+  const server = buildOpenGeniMcpServer({ db: client.db, settings: testSettings(), bus: new MemoryEventBus() } as ApiRouteDeps, {
+    ...workspace, subjectId: "worker:first-party-mcp", principalKind: "agent_attempt",
+    permissions: ["workspace:read", "connections:read"],
+    metadata: { sessionId: attempt.sessionId, turnId: attempt.turnId, attemptId: attempt.attemptId,
+      executionGeneration: attempt.executionGeneration, firstPartyMcpTools: ["capability_catalog_search"] },
+  });
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  const mcp = new Client({ name: "bot-discovery-test", version: "1" });
+  await server.connect(st); await mcp.connect(ct);
+  try {
+    const result = await mcp.callTool({ name: "capability_catalog_search", arguments: { query: "Slack bot scheduled notifications" } });
+    expect(result.isError).not.toBe(true);
+    const body = mcpJson(result) as { matches: Array<{ capabilityId: string; connection?: unknown }> };
+    expect(body.matches.find((item) => item.capabilityId === "api:slack-bot")?.connection).toMatchObject({ identity: "workspace_bot", status: "installed", connectionId: connection.id });
+    expect(JSON.stringify(result)).not.toContain("test-encrypted-placeholder");
+    expect((await mcp.listTools()).tools.map((tool) => tool.name)).not.toContain("slack_bot_prepare_message");
+  } finally { await Promise.all([mcp.close(), server.close()]); }
+}, 60_000);

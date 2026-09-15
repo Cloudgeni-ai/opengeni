@@ -3525,6 +3525,52 @@ export const memorySlackPublicationReceipts = pgTable(
   }),
 );
 
+// Immutable session-visible outbound bot intent. Sending reuses this identity
+// through the separate provider-operation ledger.
+export const slackPreparedMessages = pgTable(
+  "slack_prepared_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    connectionVersion: integer("connection_version").notNull(),
+    targetKind: text("target_kind").$type<"channel" | "user">().notNull(),
+    targetId: text("target_id").notNull(),
+    threadTimestamp: text("thread_timestamp"),
+    messageText: text("message_text").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => ({
+    session: index("slack_prepared_messages_session").on(table.workspaceId, table.sessionId),
+    version: check(
+      "slack_prepared_messages_connection_version_check",
+      sql`${table.connectionVersion} > 0`,
+    ),
+    target: check(
+      "slack_prepared_messages_target_kind_check",
+      sql`${table.targetKind} in ('channel', 'user')`,
+    ),
+    targetLength: check(
+      "slack_prepared_messages_target_id_check",
+      sql`length(${table.targetId}) between 1 and 128`,
+    ),
+    textLength: check(
+      "slack_prepared_messages_message_text_check",
+      sql`length(${table.messageText}) between 1 and 40000`,
+    ),
+  }),
+);
+
 // Durable provider-operation identity for OpenGeni Slack bot deletions. Slack
 // has no client-supplied idempotency key for chat.delete, so an expired
 // provider_started claim becomes outcome_unknown and must be reconciled before

@@ -941,6 +941,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_file_content",
   "slack_bot_post_message",
   "slack_bot_delete_message",
+  "slack_bot_prepare_message",
+  "slack_bot_send_prepared_message",
   "fiken_companies_list",
   "fiken_contacts_list",
   "fiken_contact_create",
@@ -9266,6 +9268,7 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     // The worker copies this non-secret pointer into session metadata; the
     // first-party Slack tools never fall back to a personal hosted-MCP grant.
     slackBotConnectionId: z.string().uuid().optional(),
+    additionalFirstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
     model: bounded
       ? scheduledTaskBoundedString(512, "scheduled task model").optional()
       : z.string().min(1).optional(),

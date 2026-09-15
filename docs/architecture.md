@@ -1698,3 +1698,11 @@ Plugin marketplace discovery uses `scripts/refresh-plugin-catalog.ts` →
 `data/catalog/plugins-snapshot.json` → the workspace-authorized capabilities
 API → SDK `discoverPlugins` → shared React `PluginDiscovery`. This metadata
 catalogue does not confer installation compatibility. See [plugin catalogue](plugin-catalog.md).
+
+Slack outbound bot messages use immutable session-visible intents in
+`slack_prepared_messages` (`packages/db/src/slack-prepared-messages.ts`), followed
+by the existing provider post/reconciliation ledger. Preparing sends nothing;
+sending consumes the saved message ID and reauthorizes the exact connection.
+Scheduled personal use is distinct: task revisions and occurrences freeze the
+human's explicit Connection grant and revalidate it at use. See
+[`slack-bot.md`](slack-bot.md) for identity selection and retry behavior.
