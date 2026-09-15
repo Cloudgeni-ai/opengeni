@@ -8,14 +8,14 @@ export type SessionBrowsePreferences = {
   showEmptyGroups: boolean;
 };
 export const DEFAULT_SESSION_BROWSE_PREFERENCES: SessionBrowsePreferences = {
-  groupBy: "activity",
+  groupBy: "project",
   sortBy: "updatedAt",
   status: "active",
   showEmptyGroups: false,
 };
 
 const SESSION_BROWSE_PREFERENCE_VERSION = 1;
-const DEFAULT_SESSION_BROWSE_GROUP_BY: SessionBrowseGroupBy = "activity";
+const DEFAULT_SESSION_BROWSE_GROUP_BY = DEFAULT_SESSION_BROWSE_PREFERENCES.groupBy;
 
 type BrowsePreferenceStorage = Pick<Storage, "getItem" | "setItem">;
 
@@ -76,7 +76,7 @@ export function readSessionBrowsePreferences(
         groupBy: readSessionBrowseGroupBy(id, storage),
       };
     return {
-      groupBy: isSessionBrowseGroupBy(parsed.groupBy) ? parsed.groupBy : "activity",
+      groupBy: isSessionBrowseGroupBy(parsed.groupBy) ? parsed.groupBy : DEFAULT_SESSION_BROWSE_GROUP_BY,
       sortBy: ["updatedAt", "createdAt", "name"].includes(parsed.sortBy)
         ? parsed.sortBy
         : "updatedAt",
