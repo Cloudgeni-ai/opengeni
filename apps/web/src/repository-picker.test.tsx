@@ -218,10 +218,8 @@ describe("additive repository picker", () => {
     expect(mounted?.getAttribute("aria-disabled")).toBe("true");
     expect(mounted?.getAttribute("aria-checked")).toBe("true");
     expect(rendered.container.textContent).toContain("Mounted");
-    expect(
-      rendered.container.querySelector<HTMLInputElement>('input[aria-label="example/app ref"]')
-        ?.disabled,
-    ).toBe(true);
+    expect(rendered.container.querySelector('input[aria-label="example/app ref"]')).toBeNull();
+    expect(rendered.container.textContent).toContain("main");
     await rendered.unmount();
   });
 
@@ -289,9 +287,13 @@ describe("additive repository picker", () => {
     let openRefreshes = 0;
     let explicitRefreshes = 0;
     let toggles = 0;
+    let manualAdds = 0;
     const bodyProps = {
       ...props,
       lockedPersonalGitHubRepoIds: new Set([personalRepository.repositoryId]),
+      onManualAdd: () => {
+        manualAdds += 1;
+      },
       onTogglePersonalGitHubRepo: () => {
         toggles += 1;
       },
@@ -314,6 +316,21 @@ describe("additive repository picker", () => {
     expect(mountedSwitch?.getAttribute("aria-disabled")).toBe("true");
     await actRun(() => mountedSwitch?.click());
     expect(toggles).toBe(0);
+    expect(
+      body.container.querySelector('input[aria-label="octocat/private-repository ref"]'),
+    ).toBeNull();
+    expect(body.container.textContent).toContain("main");
+    const addActions = [...body.container.querySelectorAll<HTMLButtonElement>("button")].filter(
+      (button) => button.textContent?.includes("Add repository URL"),
+    );
+    expect(addActions).toHaveLength(1);
+    expect(
+      [...body.container.querySelectorAll("button")].some(
+        (button) => button.textContent?.trim() === "Add",
+      ),
+    ).toBe(false);
+    await actRun(() => addActions[0]?.click());
+    expect(manualAdds).toBe(1);
     expect(body.container.textContent).toContain("Mounted");
     expect(body.container.querySelector('button[aria-label="Refresh repositories"]')).toBeNull();
     await body.rerender(
@@ -335,6 +352,17 @@ describe("additive repository picker", () => {
     await actRun(() => refresh?.click());
     expect(explicitRefreshes).toBe(1);
     expect(body.container.querySelector('[role="alert"]')?.textContent).toBe("Catalog unavailable");
+    await body.rerender(
+      createElement(RepositoryContextMenuBody, {
+        ...bodyProps,
+        lockedPersonalGitHubRepoIds: new Set<string>(),
+      }),
+    );
+    expect(
+      body.container.querySelector<HTMLInputElement>(
+        'input[aria-label="octocat/private-repository ref"]',
+      )?.disabled,
+    ).toBe(false);
     await body.unmount();
 
     const manual = await renderComponent(
