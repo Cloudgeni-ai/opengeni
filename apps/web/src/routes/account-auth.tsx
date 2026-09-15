@@ -17,6 +17,7 @@ import {
   postAccountAuthPopupMessage,
 } from "@/lib/browser-account-popup";
 import { readOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
+import { readSignInCallbackError } from "@/lib/sign-in-feedback";
 
 const browserAccountsApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 
@@ -48,7 +49,10 @@ export function AccountAuthRoute({
   const [socialBusy, setSocialBusy] = useState<ManagedSocialProvider | null>(null);
   const [socialProviders, setSocialProviders] = useState<ManagedSocialProvider[]>([]);
   const [error, setError] = useState<string | null>(
-    socialOutcome === "error" ? "Social authentication did not complete" : null,
+    socialOutcome === "error"
+      ? (readSignInCallbackError(window.location.search) ??
+          "Sign-in didn't complete. Try again or use an existing sign-in method. You can connect another provider in Personal settings → Security after signing in.")
+      : null,
   );
   const validTransactionId = isAccountAuthTransactionId(transactionId) ? transactionId : null;
 
