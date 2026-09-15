@@ -115,8 +115,10 @@ returns on the configured environment origin. The callback preserves only Better
 Auth's state cookie, resolves the exact provider login binding, adopts the newly
 created session before redirecting to `/account-auth`, and then removes the ambient
 provider session cookie. A provider cannot create a managed social identity from
-an unverified email assertion, a callback cannot select another browser slot, and
-automatic email-match account linking remains disabled.
+an unverified email assertion, and a callback cannot select another browser slot.
+Automatic linking requires both the existing local email and incoming provider
+email to be verified and matching, and must respect explicit-disconnect
+suppression. See [Personal sign-in methods](#personal-sign-in-methods).
 
 The session-set-capable signed-out surface uses that isolated Add path for sign-in
 in both `dual` and `broker`. Account creation and verification resend remain
@@ -162,13 +164,15 @@ actor epoch so binding-private state cannot survive.
 
 ## Security invariants
 
-- Browser projections contain bounded display name, verified email claim, slot
+- Browser session-set projections contain bounded display name, verified email claim, slot
   UUID/state, counters, and CSRF proof only. They contain no Better Auth token,
   provider session id, return-intent secret, canonical identity id, login-binding
   id, organization id, or workspace id.
-- Better Auth automatic account linking remains disabled. Slot identity comes
-  only from the isolated authenticated provider result and canonical binding
-  lookup; never from URL, email selection, local storage, or callback parameters.
+- Verified-email automatic linking does not choose a browser slot. Slot identity
+  comes only from the isolated authenticated provider result and canonical
+  binding lookup; never from URL, email selection, local storage, or callback
+  parameters. The separate authenticated sign-in-method projection carries an
+  expected canonical identity fence for settings mutations, not slot authority.
 - Ordinary selected-session reads are side-effect free until a fenced actor lease
   is held. Revision drift, password recovery, provider revocation, or canonical
   binding change invalidates only the affected slot.
