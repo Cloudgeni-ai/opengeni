@@ -1,7 +1,7 @@
 import { ApiError } from "@/api";
 
 export function signInMethodFailure(error: unknown): {
-  kind: "reauth" | "rejected" | "unknown";
+  kind: "identity_changed" | "reauth" | "rejected" | "unknown";
   message: string;
 } {
   if (!(error instanceof ApiError) || error.outcomeUnknown || error.status >= 500) {
@@ -12,6 +12,12 @@ export function signInMethodFailure(error: unknown): {
     };
   }
   const code = error.code?.toUpperCase().replace(/^SIGN_IN_METHOD_/, "");
+  if (code === "IDENTITY_CHANGED")
+    return {
+      kind: "identity_changed",
+      message:
+        "The signed-in account changed in this browser. Sign in again with the account whose methods you intended to manage. No new change will be submitted from this page.",
+    };
   if (error.status === 401 || code === "REAUTHENTICATION_REQUIRED") {
     return {
       kind: "reauth",

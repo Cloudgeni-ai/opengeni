@@ -49,6 +49,7 @@ test("security mutations use cookie-only actor and CSRF admission, preserving ex
   const command = await api.prepare("disconnect", {
     operationId: "00000000-0000-4000-8000-000000000002",
     expectedIdentityRevision: 4,
+    expectedIdentityId: "00000000-0000-4000-8000-000000000003",
     provider: "github",
   });
   await api.execute(command);
@@ -62,7 +63,29 @@ test("security mutations use cookie-only actor and CSRF admission, preserving ex
   expect(headers.has("authorization")).toBe(false);
   expect(headers.has("x-opengeni-access-key")).toBe(false);
   expect(mutations[0]!.init.credentials).toBe("include");
+  expect(JSON.parse(String(mutations[0]!.init.body)).expectedIdentityId).toBe(
+    "00000000-0000-4000-8000-000000000003",
+  );
   expect(mutations[0]!.url).toEndWith("/v1/auth/sign-in-methods/disconnect");
+});
+
+test("legacy refuses inventory and commands without an expected canonical identity", async () => {
+  let calls = 0;
+  globalThis.fetch = (async (_input: unknown) => {
+    calls++;
+    return Response.json({ email: "old@example.com", identityRevision: 1, methods: [] });
+  }) as typeof fetch;
+  const api = createSignInMethodsApi("legacy");
+  await expect(api.list()).rejects.toThrow("Missing canonical identity binding");
+  await expect(
+    api.prepare("disconnect", {
+      operationId: "00000000-0000-4000-8000-000000000002",
+      expectedIdentityRevision: 1,
+      expectedIdentityId: "",
+      provider: "google",
+    }),
+  ).rejects.toThrow("Missing expected canonical identity binding");
+  expect(calls).toBe(1);
 });
 test("legacy uses no session-set lookup and carries current password only in the body", async () => {
   const urls: string[] = [];
@@ -74,6 +97,7 @@ test("legacy uses no session-set lookup and carries current password only in the
   const command = await api.prepare("password", {
     operationId: "00000000-0000-4000-8000-000000000002",
     expectedIdentityRevision: 4,
+    expectedIdentityId: "00000000-0000-4000-8000-000000000003",
     newPassword: "test-new-password",
     currentPassword: "test-current-password",
   });
@@ -114,6 +138,7 @@ test("reads the auth route's flat error envelope without losing the stable secur
   const command = await api.prepare("disconnect", {
     operationId: "00000000-0000-4000-8000-000000000002",
     expectedIdentityRevision: 4,
+    expectedIdentityId: "00000000-0000-4000-8000-000000000003",
     provider: "google",
   });
   await expect(api.execute(command)).rejects.toMatchObject({

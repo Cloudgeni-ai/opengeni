@@ -22,9 +22,10 @@ function signInResponseError(status: number, body: string): ApiError {
   }
 }
 
-// Browser-only contract agreed with the backend owner. No workspace, subject,
-// or user selector is accepted: the server resolves the canonical cookie actor.
+// Browser-only contract agreed with the backend owner. The expected identity is
+// a consistency predicate, never an actor selector; the cookie selects the actor.
 export type SignInMethods = {
+  identityId: string;
   email: string;
   emailVerified: boolean;
   identityRevision: number;
@@ -42,6 +43,7 @@ export type SignInChangeResult = {
   notification: "sent" | "failed" | "outcome_unknown";
 };
 export type SignInCommand = {
+  expectedIdentityId: string;
   operationId: string;
   expectedIdentityRevision: number;
 } & ({ provider: "google" | "github" } | { newPassword: string; currentPassword?: string });
@@ -74,12 +76,19 @@ export function createSignInMethodsApi(sessionSetMode: "legacy" | "dual" | "brok
     return JSON.parse(body) as T;
   }
   return {
-    list: () => request<SignInMethods>(""),
+    list: async () => {
+      const result = await request<SignInMethods>("");
+      if (!canonicalIdentityId(result.identityId))
+        throw new Error("Missing canonical identity binding");
+      return result;
+    },
     async prepare(
       path: PreparedSignInCommand["path"],
       body: SignInCommand,
     ): Promise<PreparedSignInCommand> {
       assertActor();
+      if (!canonicalIdentityId(body.expectedIdentityId))
+        throw new Error("Missing expected canonical identity binding");
       const headers: Record<string, string> = {};
       if (sessionSetMode !== "legacy") {
         const projection = await createBrowserAccountsClient({
@@ -101,4 +110,11 @@ export function createSignInMethodsApi(sessionSetMode: "legacy" | "dual" | "brok
         body: JSON.stringify(command.body),
       }),
   };
+}
+
+function canonicalIdentityId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  );
 }

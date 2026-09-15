@@ -32,6 +32,7 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 const inventory: SignInMethods = {
+  identityId: "00000000-0000-4000-8000-000000000003",
   email: "person@example.com",
   emailVerified: true,
   identityRevision: 4,
@@ -114,11 +115,32 @@ test("uncertain mutation retries exact command without generating a second opera
   await click("Reconnect GitHub");
   expect(host.textContent).toContain("result of this change is unknown");
   const first = commands[0]!;
+  expect(first.body.expectedIdentityId).toBe(inventory.identityId);
   await click("Retry same request");
   expect(commands).toHaveLength(2);
   expect(commands[1]).toBe(first);
   expect(host.textContent).toContain("Your sign-in methods changed");
   expect(host.textContent).not.toContain("Retry same request");
+});
+
+test("identity-change rejection never refreshes into a different mutation target", async () => {
+  const { commands } = await mount(async () => {
+    throw new ApiError(409, "", { code: "SIGN_IN_METHOD_IDENTITY_CHANGED" });
+  });
+  await click("Reconnect GitHub");
+  expect(commands[0]!.body.expectedIdentityId).toBe(inventory.identityId);
+  expect(host.textContent).toContain("signed-in account changed");
+  const refresh = [...host.querySelectorAll("button")].find(
+    (button) => button.textContent === "Refresh sign-in methods",
+  )!;
+  const reauth = [...host.querySelectorAll("button")].find(
+    (button) => button.textContent === "Sign in again",
+  )!;
+  expect(refresh.disabled).toBe(true);
+  expect(reauth.disabled).toBe(false);
+  expect(
+    (host.querySelector('[aria-label="Reconnect GitHub"]') as HTMLButtonElement).disabled,
+  ).toBe(true);
 });
 test("refreshing inventory does not turn an uncertain result into permission for a new mutation", async () => {
   const { commands } = await mount(async () => {
