@@ -1,3 +1,4 @@
+import { SessionPersonalConnectionNotice } from "@/components/capabilities/session-personal-connection-notice";
 import { retainedImageId } from "@opengeni/react";
 import { useSessionConnectionAuthorities } from "@/components/capabilities/use-session-connection-authorities";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
@@ -2598,6 +2599,17 @@ function SessionChatPane(props: {
                 Retry
               </button>
             </p>
+          ) : null}
+          {!terminal && connectionContext ? (
+            <SessionPersonalConnectionNotice
+              key={`${props.session.workspaceId}:${props.session.id}`}
+              items={connectionAuthorities.needsReview}
+              workspaceId={props.session.workspaceId}
+              sessionId={props.session.id}
+              visibility={connectionContext.visibility}
+              authorityEpoch={connectionContext.authorityEpoch}
+              onConfigured={afterConnectionSetup}
+            />
           ) : null}
           <PersonalResourceAttachmentSurface
             controller={personalAttachment}

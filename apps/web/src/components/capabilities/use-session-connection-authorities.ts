@@ -82,6 +82,20 @@ export function useSessionConnectionAuthorities(
   );
   return {
     selections: matches ? result.selections : [],
+    needsReview:
+      matches && !result.error && context
+        ? catalog.filter(
+            (item) =>
+              item.enabled &&
+              item.connectionRef?.subjectScope === "subject" &&
+              item.connectionRef.authoritySource !== "host" &&
+              item.runtime.mcpServerId &&
+              selectedIds.includes(item.runtime.mcpServerId) &&
+              !result.selections.some(
+                (selection) => selection.serverId === item.runtime.mcpServerId,
+              ),
+          )
+        : [],
     error: matches ? result.error : null,
     loading: hasPersonal && !matches,
     refresh,
