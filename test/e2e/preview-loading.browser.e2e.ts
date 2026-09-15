@@ -40,13 +40,10 @@ test("preview loading survives refresh, settles, and respects reduced motion", a
   expect(await status.getByText("Preparing preview…", { exact: true }).count()).toBe(1);
   expect(await status.locator(".og-command-reel").count()).toBe(0);
   const firstFrame = await canvas.evaluate((node) => (node as HTMLCanvasElement).toDataURL());
-  await page.waitForFunction(
-    (previous) => {
-      const surface = document.querySelector<HTMLCanvasElement>(".og-preview-loading canvas");
-      return surface && surface.toDataURL() !== previous;
-    },
-    firstFrame,
-  );
+  await page.waitForFunction((previous) => {
+    const surface = document.querySelector<HTMLCanvasElement>(".og-preview-loading canvas");
+    return surface && surface.toDataURL() !== previous;
+  }, firstFrame);
   expect(await status.getByRole("button").count()).toBe(0);
   expect(await canvas.evaluate((node) => node.getBoundingClientRect().height)).toBe(320);
   await page.reload();
