@@ -2396,7 +2396,7 @@ describe("runtime event normalization", () => {
         name: "Document Search",
         url: mcp.url,
         cacheToolsList: false,
-        ...(input.legacyApproval ? { requireApproval: true as const } : {}),
+        ...(input.legacyApproval !== undefined ? { requireApproval: input.legacyApproval } : {}),
       };
       const calls: string[] = [];
       const hooks: ConnectorActionPolicyHooks = {
@@ -2469,6 +2469,44 @@ describe("runtime event normalization", () => {
       });
       return { agent, calls, mcp, prepared };
     }
+
+    test("explicit false approval survives rebuilding a connection-backed agent and its clone", async () => {
+      for (const connectorDecision of ["allow", "ask", "block"] as const) {
+        // Both an approval-resumed attempt and a later ordinary turn rebuild
+        // from the same persisted false value. Connector policy still applies.
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const fixture = await connectorPolicyFixture({
+            connectorDecision,
+            legacyApproval: false,
+          });
+          try {
+            const expected = {
+              docs__search_documents: connectorDecision === "ask",
+              docs__fetch_document: connectorDecision === "ask",
+            };
+            expect(await approvalMapForAgent(fixture.agent)).toEqual(expected);
+            expect(await approvalMapForAgent(fixture.agent.clone({}))).toEqual(expected);
+            const [tool] = (await fixture.agent.getMcpTools(new RunContext())).filter(
+              (candidate) =>
+                candidate.type === "function" && candidate.name === "docs__search_documents",
+            );
+            if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+            if (connectorDecision !== "ask") {
+              const output = await tool.invoke(
+                new RunContext(),
+                JSON.stringify({ query: "needle" }),
+                { toolCall: { callId: `call-${connectorDecision}-${attempt}` } } as any,
+              );
+              if (connectorDecision === "block") expect(output).toMatchObject({ isError: true });
+            }
+            expect(fixture.mcp.calls).toHaveLength(connectorDecision === "allow" ? 1 : 0);
+          } finally {
+            await fixture.prepared.close();
+            fixture.mcp.close();
+          }
+        }
+      }
+    });
 
     test("connector Allow executes once and preserves an existing Ask requirement", async () => {
       const fixture = await connectorPolicyFixture({
