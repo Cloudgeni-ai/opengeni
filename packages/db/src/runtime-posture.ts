@@ -357,6 +357,11 @@ const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
   "detach_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
 ] as const;
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
+  "mutate_managed_sign_in_method(text, text, jsonb)",
+  "assert_managed_sign_in_recovery(text, text, uuid, jsonb)",
+  "replay_managed_sign_in_method(text, text, jsonb)",
+  "claim_managed_sign_in_notification(uuid, text, text, integer)",
+  "settle_managed_sign_in_notification(uuid, uuid, text)",
   "ensure_canonical_human_identity(text, text)",
   "validate_canonical_human_session(text, text, boolean)",
   "get_canonical_human_identity_projection(text)",
@@ -878,6 +883,7 @@ export const FORCE_RLS_TABLES = [
   "managed_auth_login_transactions",
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
+  "managed_sign_in_method_operations",
   "mcp_operations",
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
@@ -1471,6 +1477,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "managed_auth_login_transactions",
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
+  "managed_sign_in_method_operations",
   "mcp_operations",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",

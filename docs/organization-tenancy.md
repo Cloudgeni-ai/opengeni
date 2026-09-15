@@ -3,6 +3,34 @@
 This document is the current implementation map for the accepted
 [organization-tenancy ADR](design/organization-tenancy-slice-a-2026-08-11.md).
 
+## Verified-email managed sign-in linking
+
+Migration `0477_managed_sign_in_methods.sql` and the product-owned personal
+sign-in-method API extend authentication, not tenancy. A new Google/GitHub
+account may automatically attach to an existing authentication user only when
+the provider email and the matching local email are both verified. Better Auth
+has `requireLocalEmailVerified: true`, no trusted providers, and no
+different-email linking. An unverified local account is not upgraded by an
+incoming social login to bypass this condition.
+
+No operation merges authentication users, canonical human identities,
+organizations, memberships, Personal workspaces, or owned data. Provider-account
+collisions are rejected before the canonical lifecycle can dispute another
+human. Explicit disconnect retains the revoked canonical binding, removes its
+provider account, and suppresses later implicit relinking. The session
+synchronizer does not revive inactive bindings. Explicit reconnect requires a
+fresh original actor and actual OAuth callback proof before a new provider
+account and active canonical binding can be committed together.
+
+Personal settings refuse removal of the last usable configured sign-in method;
+this is intentionally different from the older identity lost-factor recovery
+lifecycle. Legacy raw provider account/password mutation routes and direct
+managed-provider link/unlink routes cannot bypass these settings. Organization
+administrators, API keys, external identities, and agents receive no new
+personal-authentication authority. See [browser session sets](browser-login-session-sets.md#personal-sign-in-methods)
+for contracts, reauthentication, notifications, and the maintenance deployment
+boundary.
+
 ## Slice A: shipped foundation
 
 Migration `0218_organization_tenancy_foundation.sql` is rolling and additive.

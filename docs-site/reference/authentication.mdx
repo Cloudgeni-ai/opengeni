@@ -13,7 +13,7 @@ Session operations are workspace-scoped; organization routes manage shared works
 | A product backend integrating OpenGeni               | An **organization API key**                                                 |
 | A backend or automation constrained to one workspace | A **workspace API key**                                                     |
 | A host acting on behalf of its own signed-in users   | A **delegated access token** signed with the deployment's delegation secret |
-| A person in the web console                          | A managed web session (email and password)                                  |
+| A person in the web console                          | A managed web session (email/password or an enabled Google/GitHub provider) |
 | A machine you enrolled                               | The enrollment credential the installer obtained; you never handle it       |
 
 ## Credentials
@@ -24,7 +24,34 @@ Session operations are workspace-scoped; organization routes manage shared works
 | Workspace API key      | `Authorization: Bearer ogk_...` | Until revoked or expired | Issued by an authorized caller for one workspace; cannot exceed that workspace's grant                                                                                                                       |
 | Delegated access token | `Authorization: Bearer ogd_...` | Short, embedded expiry   | HMAC-signed by your host with `OPENGENI_DELEGATION_SECRET`; embeds workspace, account, and permissions                                                                                                       |
 | Deployment access key  | `x-opengeni-access-key` header  | Static                   | Optional coarse perimeter enabled by `OPENGENI_AUTH_REQUIRED=true`. Not an identity                                                                                                                          |
-| Managed web session    | Cookie                          | Session                  | Email and password sign-in in `managed` mode                                                                                                                                                                 |
+| Managed web session    | Cookie                          | Session                  | Email/password or enabled Google/GitHub sign-in in `managed` mode                                                                                                                                            |
+
+## Personal sign-in methods
+
+In managed mode, Google, GitHub, and email/password can be sign-in methods for
+the same OpenGeni user. When an enabled social provider presents the same email
+as an existing user, OpenGeni automatically links the method only if both the
+existing email and the provider's email are verified. A verified email/password
+user can therefore also sign in with a matching verified social identity without
+creating another user.
+
+Linking keeps the same workspaces, history, memberships, and billing ownership.
+It does not merge separate users. Different emails, unverified emails, and
+provider identities already owned by another user are not automatically linked.
+
+Personal settings → Security lets you inspect your methods, connect or disconnect
+Google and GitHub, and manage your password. Sensitive changes require recent
+authentication. You must keep at least one usable sign-in method. If you
+explicitly disconnect a provider, a later same-email sign-in does not silently
+reconnect it; use the explicit connect flow instead.
+
+When asked to sign in again, complete a new OpenGeni sign-in flow for the same
+user. Google or GitHub may reuse an active provider session; OpenGeni does not
+guarantee that the provider will prompt for a password or multi-factor challenge.
+
+These are login methods, not integration permissions. Google sign-in does not
+grant access to Gmail or Drive, and GitHub sign-in does not grant repository
+access. Manage those connections separately.
 
 ## Organization key access
 
