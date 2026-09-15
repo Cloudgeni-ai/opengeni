@@ -385,7 +385,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
       <ComposerMenuHeader title="Repositories" leading={props.leading} />
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain max-h-[min(calc(var(--radix-dropdown-menu-content-available-height,70vh)-3.5rem),620px)]">
-        <div className="space-y-2.5 p-2.5">
+        <div className="space-y-2 p-2">
           {props.repositories.length + (props.personalGitHubRepositories?.length ?? 0) > 5 ? (
             <Input
               aria-label="Search repositories"
@@ -403,9 +403,9 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
           {props.personalGitHubStatus?.enabled ? (
             props.personalGitHubStatus.connection?.status === "active" ? (
               <section>
-                <div className="px-3 py-2">
+                <div className="px-0 py-2">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0 truncate text-xs font-medium text-fg">
+                    <div className="min-w-0 truncate text-sm font-medium text-fg">
                       Your GitHub identity
                     </div>
                     <MetaChip dot="running" rounded="full">
@@ -415,7 +415,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                       )}
                     </MetaChip>
                   </div>
-                  <p className="mt-1 text-2xs leading-4 text-fg-subtle">Writes appear as you.</p>
+                  <p className="mt-1 text-xs leading-4 text-fg-subtle">Writes appear as you.</p>
                 </div>
                 {props.personalGitHubBusy ? (
                   <div className="flex items-center gap-2 p-3 text-xs text-fg-muted">
@@ -437,18 +437,21 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                         locked ||
                         props.selectedPersonalGitHubRepoIds?.has(repo.repositoryId) === true;
                       return (
-                        <div key={repo.repositoryId} className="px-2 py-2 hover:bg-surface-2/45">
-                          <div className="flex w-full items-center gap-2 text-left">
+                        <div key={repo.repositoryId} className="px-0 py-3 hover:bg-surface-2/45">
+                          <div className="flex w-full items-center gap-3 text-left">
                             <span className="min-w-0 flex-1">
                               <span className="flex min-w-0 items-center gap-1.5">
-                                <span className="truncate text-xs font-medium text-fg">
+                                <span className="truncate text-sm font-medium text-fg">
                                   {repo.fullName}
                                 </span>
                                 {repo.private ? (
                                   <LockIcon className="size-3 shrink-0 text-fg-subtle" />
                                 ) : null}
                               </span>
-                              <span className="mt-0.5 block truncate text-2xs text-fg-subtle">
+                              <span className="mt-0.5 block truncate text-xs text-fg-subtle">
+                                {props.selectedPersonalGitHubRepoRefs?.[repo.repositoryId] ??
+                                  repo.defaultBranch}
+                                {" · "}
                                 {repo.selectedAccess === "write" ? "Read and write" : "Read only"}
                               </span>
                             </span>
@@ -478,7 +481,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                               }
                             />
                           </div>
-                          {checked ? (
+                          {checked && !locked ? (
                             <div className="mt-1 flex items-center gap-2">
                               <RepositoryRefInput
                                 value={
@@ -505,8 +508,8 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             ) : (
               <div className="flex items-center justify-between gap-3 p-3">
                 <div className="min-w-0">
-                  <div className="text-xs font-medium text-fg">Use your GitHub identity</div>
-                  <div className="mt-0.5 text-2xs text-fg-subtle">
+                  <div className="text-sm font-medium text-fg">Use your GitHub identity</div>
+                  <div className="mt-0.5 text-xs text-fg-subtle">
                     Approve, review, and merge as yourself.
                   </div>
                 </div>
@@ -559,8 +562,8 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                     )
                     .map((group) => (
                       <div key={group.installationId} className="py-1">
-                        <div className="flex items-center justify-between gap-3 px-2 py-1.5">
-                          <div className="min-w-0 truncate text-2xs font-medium text-fg-muted">
+                        <div className="flex items-center justify-between gap-3 px-0 py-2">
+                          <div className="min-w-0 truncate text-sm font-medium text-fg-muted">
                             {group.label}
                           </div>
                         </div>
@@ -578,21 +581,21 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                                 <div
                                   key={`${repo.installationId}:${repo.id}`}
                                   className={cn(
-                                    "px-2 py-2 transition-colors hover:bg-surface-2/45",
+                                    "px-0 py-3 transition-colors hover:bg-surface-2/45",
                                     blocked && "opacity-55",
                                   )}
                                 >
-                                  <div className="flex w-full items-center gap-2 text-left">
+                                  <div className="flex w-full items-center gap-3 text-left">
                                     <span className="min-w-0 flex-1">
                                       <span className="flex min-w-0 items-center gap-1.5">
-                                        <span className="truncate text-xs font-medium text-fg">
+                                        <span className="truncate text-sm font-medium text-fg">
                                           {repo.name}
                                         </span>
                                         {repo.private ? (
                                           <LockIcon className="size-3 shrink-0 text-fg-subtle" />
                                         ) : null}
                                       </span>
-                                      <span className="mt-0.5 block truncate text-2xs text-fg-subtle">
+                                      <span className="mt-0.5 block truncate text-xs text-fg-subtle">
                                         {props.selectedRepoRefs[repo.id] ?? repo.defaultBranch}
                                       </span>
                                     </span>
@@ -618,7 +621,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                                       }
                                     />
                                   </div>
-                                  {checked ? (
+                                  {checked && !locked ? (
                                     <div className="mt-1 flex items-center gap-2">
                                       <RepositoryRefInput
                                         value={
@@ -647,12 +650,12 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
           )}
 
           {props.unavailableMountedRepositories?.map((repo) => (
-            <div key={`${repo.uri}:${repo.ref}`} className="flex items-center gap-2 px-2 py-2">
+            <div key={`${repo.uri}:${repo.ref}`} className="flex items-center gap-3 px-0 py-3">
               <div className="min-w-0 flex-1">
-                <div className="truncate text-xs font-medium text-fg" title={repo.uri}>
+                <div className="truncate text-sm font-medium text-fg" title={repo.uri}>
                   {repo.uri}
                 </div>
-                <div className="truncate text-2xs text-fg-subtle">
+                <div className="truncate text-xs text-fg-subtle">
                   {repo.ref} · Unavailable in catalog
                 </div>
               </div>
@@ -671,12 +674,12 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
           {props.manualRepos
             .filter((repo) => props.lockedManualRepoIds?.has(repo.id))
             .map((repo) => (
-              <div key={repo.id} className="flex items-center gap-2 px-2 py-2">
+              <div key={repo.id} className="flex items-center gap-3 px-0 py-3">
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-xs font-medium text-fg" title={repo.url}>
+                  <div className="truncate text-sm font-medium text-fg" title={repo.url}>
                     {repo.url}
                   </div>
-                  <div className="truncate text-2xs text-fg-subtle">{repo.ref}</div>
+                  <div className="truncate text-xs text-fg-subtle">{repo.ref}</div>
                 </div>
                 <MetaChip dot="idle" rounded="full">
                   <LockIcon className="size-3" aria-hidden="true" />
@@ -691,78 +694,92 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
               </div>
             ))}
 
-          <Collapsible open={props.manualOpen} onOpenChange={props.onManualOpenChange}>
-            <div className="border-t border-border/60 pt-1">
-              <div className="flex items-center justify-between gap-2 px-3 py-2">
-                <CollapsibleTrigger asChild>
-                  <button
+          {props.manualRepos.length === 0 ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={props.onManualAdd}
+              disabled={props.pending}
+              className="w-full justify-start text-sm text-fg-muted"
+            >
+              <PlusIcon className="size-3.5" />
+              Add repository URL
+            </Button>
+          ) : (
+            <Collapsible open={props.manualOpen} onOpenChange={props.onManualOpenChange}>
+              <div className="border-t border-border/60 pt-1">
+                <div className="flex items-center justify-between gap-2 px-3 py-2">
+                  <CollapsibleTrigger asChild>
+                    <button
+                      type="button"
+                      className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left text-xs font-medium text-fg"
+                    >
+                      <ChevronDownIcon
+                        className={cn(
+                          "size-3.5 shrink-0 text-fg-subtle transition-transform",
+                          props.manualOpen && "rotate-180",
+                        )}
+                      />
+                      <span className="truncate">Add repository URL</span>
+                      {manualCount > 0 ? <MetaChip rounded="full">{manualCount}</MetaChip> : null}
+                    </button>
+                  </CollapsibleTrigger>
+                  <Button
                     type="button"
-                    className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left text-xs font-medium text-fg"
+                    variant="ghost"
+                    size="xs"
+                    onClick={props.onManualAdd}
+                    disabled={props.pending}
+                    className="h-7 text-xs"
                   >
-                    <ChevronDownIcon
-                      className={cn(
-                        "size-3.5 shrink-0 text-fg-subtle transition-transform",
-                        props.manualOpen && "rotate-180",
-                      )}
-                    />
-                    <span className="truncate">Add repository URL</span>
-                    {manualCount > 0 ? <MetaChip rounded="full">{manualCount}</MetaChip> : null}
-                  </button>
-                </CollapsibleTrigger>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="xs"
-                  onClick={props.onManualAdd}
-                  disabled={props.pending}
-                  className="h-7 text-xs"
-                >
-                  <PlusIcon className="size-3" />
-                  Add
-                </Button>
-              </div>
-
-              <CollapsibleContent>
-                <div className="space-y-2 border-t border-border p-3">
-                  {props.manualRepos.every((repo) => props.lockedManualRepoIds?.has(repo.id)) ? (
-                    <p className="text-xs leading-5 text-fg-muted">
-                      Public HTTPS repositories only. Private GitHub repositories require the
-                      workspace App or your personal identity.
-                    </p>
-                  ) : (
-                    props.manualRepos
-                      .filter((repo) => !props.lockedManualRepoIds?.has(repo.id))
-                      .map((repo) => (
-                        <ManualRepositoryEditor
-                          key={repo.id}
-                          repository={repo}
-                          mounted={props.lockedManualRepoIds?.has(repo.id) === true}
-                          pending={props.pending}
-                          onUpdate={(patch) => props.onManualUpdate(repo.id, patch)}
-                          onRemove={() => props.onManualRemove(repo.id)}
-                          onAttach={
-                            props.onManualAttach ??
-                            (async () => {
-                              throw new Error("Repository attachment is unavailable.");
-                            })
-                          }
-                        />
-                      ))
-                  )}
-                  {props.validationError ? (
-                    <p className="text-xs leading-5 text-status-failed" role="alert">
-                      {props.validationError}
-                    </p>
-                  ) : null}
+                    <PlusIcon className="size-3" />
+                    Add
+                  </Button>
                 </div>
-              </CollapsibleContent>
-            </div>
-          </Collapsible>
+
+                <CollapsibleContent>
+                  <div className="space-y-2 border-t border-border p-3">
+                    {props.manualRepos.every((repo) => props.lockedManualRepoIds?.has(repo.id)) ? (
+                      <p className="text-xs leading-5 text-fg-muted">
+                        Public HTTPS repositories only. Private GitHub repositories require the
+                        workspace App or your personal identity.
+                      </p>
+                    ) : (
+                      props.manualRepos
+                        .filter((repo) => !props.lockedManualRepoIds?.has(repo.id))
+                        .map((repo) => (
+                          <ManualRepositoryEditor
+                            key={repo.id}
+                            repository={repo}
+                            mounted={props.lockedManualRepoIds?.has(repo.id) === true}
+                            pending={props.pending}
+                            onUpdate={(patch) => props.onManualUpdate(repo.id, patch)}
+                            onRemove={() => props.onManualRemove(repo.id)}
+                            onAttach={
+                              props.onManualAttach ??
+                              (async () => {
+                                throw new Error("Repository attachment is unavailable.");
+                              })
+                            }
+                          />
+                        ))
+                    )}
+                    {props.validationError ? (
+                      <p className="text-xs leading-5 text-status-failed" role="alert">
+                        {props.validationError}
+                      </p>
+                    ) : null}
+                  </div>
+                </CollapsibleContent>
+              </div>
+            </Collapsible>
+          )}
           <Button
             type="button"
             variant="ghost"
             size="sm"
-            className="w-full justify-start text-xs text-fg-muted"
+            className="w-full justify-start text-sm text-fg-muted"
             onClick={() => void refreshList()}
             disabled={!canRefresh || props.repoBusy || refreshBusy}
           >
@@ -789,7 +806,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
               to change them.
             </p>
           ) : null}
-          {props.validationError && !props.manualOpen ? (
+          {props.validationError && (!props.manualOpen || props.manualRepos.length === 0) ? (
             <p className="px-3 text-xs text-status-failed" role="alert">
               {props.validationError}
             </p>
