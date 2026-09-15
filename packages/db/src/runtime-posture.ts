@@ -358,6 +358,10 @@ const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
 ] as const;
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
   "mutate_managed_sign_in_method(text, text, jsonb)",
+  "assert_managed_sign_in_recovery(text, text, uuid, jsonb)",
+  "replay_managed_sign_in_method(text, text, jsonb)",
+  "claim_managed_sign_in_notification(uuid, text, text, integer)",
+  "settle_managed_sign_in_notification(uuid, uuid, text)",
   "ensure_canonical_human_identity(text, text)",
   "validate_canonical_human_session(text, text, boolean)",
   "get_canonical_human_identity_projection(text)",
@@ -702,6 +706,7 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  * commit as the migration so startup cannot silently accept an unreviewed gap.
  */
 export const FORCE_RLS_TABLES = [
+  "managed_sign_in_method_operations",
   "additional_organization_creation_receipts",
   "agent_instruction_operations",
   "agent_learning_revisions",
@@ -1425,6 +1430,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
  * The ordinary application role must have no direct table privileges on them.
  */
 export const PROTECTED_NO_DIRECT_DML_TABLES = [
+  "managed_sign_in_method_operations",
   "additional_organization_creation_receipts",
   "agent_instruction_operations",
   "agent_learning_revisions",

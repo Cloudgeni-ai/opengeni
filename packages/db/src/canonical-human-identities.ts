@@ -319,6 +319,7 @@ export type ApplyCanonicalHumanIdentityOperationInput = {
   providerId?: string | null;
   providerAccountId?: string | null;
   reason: string;
+  verifiedRecovery?: { authSessionId: string; requestDigest: string };
   actorFence?: {
     authorityHash: string;
     actorEpoch: string;
@@ -331,16 +332,24 @@ export async function applyCanonicalHumanIdentityOperation(
   input: ApplyCanonicalHumanIdentityOperationInput,
 ): Promise<CanonicalHumanIdentityMutationResponseType> {
   try {
-    if (input.actorFence) {
+    if (input.actorFence || input.verifiedRecovery) {
       return await db.transaction(async (tx) => {
         const txDb = tx as unknown as Database;
-        await rawRows(
-          txDb,
-          sql`select managed_auth_actor_mutation_fence(
+        if (input.actorFence)
+          await rawRows(
+            txDb,
+            sql`select managed_auth_actor_mutation_fence(
             ${input.actorFence!.authorityHash}, ${input.actorFence!.actorEpoch}::bigint,
             ${input.actorFence!.requestId}::uuid
           )`,
-        );
+          );
+        if (input.verifiedRecovery)
+          await rawRows(
+            txDb,
+            sql`select assert_managed_sign_in_recovery(
+          ${input.authUserId},${input.verifiedRecovery.authSessionId},${input.bindingId}::uuid,
+          ${JSON.stringify({ operationId: input.operationId, expectedIdentityRevision: input.expectedIdentityRevision, requestDigest: input.verifiedRecovery.requestDigest })}::jsonb)`,
+          );
         return await applyCanonicalHumanIdentityOperationInner(txDb, input);
       });
     }

@@ -588,6 +588,10 @@ async function grantAppRoleIfSchemaExists(
     .map(literal)
     .join(", ")}]`;
   const managedAuthSessionSetRoutines = `ARRAY[${[
+    "assert_managed_sign_in_recovery(text,text,uuid,jsonb)",
+    "replay_managed_sign_in_method(text,text,jsonb)",
+    "claim_managed_sign_in_notification(uuid,text,text,integer)",
+    "settle_managed_sign_in_notification(uuid,uuid,text)",
     "get_canonical_human_exact_login_binding(text,text)",
     "managed_auth_session_set_authority_state(text)",
     "managed_auth_session_set_snapshot(text,text,boolean,boolean,boolean)",
