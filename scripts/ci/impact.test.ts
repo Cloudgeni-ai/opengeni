@@ -29,6 +29,7 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
 ] as const;
 const AI_GATEWAY_CONNECTION_E2E = "test/e2e/ai-gateway-connection.browser.e2e.ts";
 const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
+const COMPOSER_MENUS_E2E = "test/e2e/composer-menus.browser.e2e.ts";
 const PERSONAL_WORKSPACE_ACCESSIBILITY_E2E =
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts";
 const PERSONAL_RESOURCE_ATTACHMENTS_E2E = "test/e2e/personal-resource-attachments.browser.e2e.ts";
@@ -149,6 +150,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/chat-media-entry.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
       COMPACT_SESSION_VIEW_E2E,
+      COMPOSER_MENUS_E2E,
       "test/e2e/composer-pane.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
@@ -424,6 +426,34 @@ describe("fail-closed change impact", () => {
     );
   });
 
+  test("composer menus follow the real web fixture and shared dependencies without widening leaf plans", () => {
+    for (const path of [
+      COMPOSER_MENUS_E2E,
+      "apps/web/test/composer-menus.html",
+      "apps/web/test/composer-menus-fixture.tsx",
+      "apps/web/src/components/composer-mobile-plus.tsx",
+      "apps/web/src/components/ui/composer-menu.tsx",
+      "apps/web/src/components/repository-picker.tsx",
+      "apps/web/src/components/follow-up-repository-menu-body.tsx",
+      "apps/web/src/components/session/new-session-variable-set-picker.tsx",
+      "apps/web/src/components/pickers.tsx",
+      "packages/react/src/index.ts",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(COMPOSER_MENUS_E2E);
+      expect(plan.unitTests, path).not.toContain(COMPOSER_MENUS_E2E);
+      expect(plan.integrationTests, path).not.toContain(COMPOSER_MENUS_E2E);
+    }
+    for (const path of ["packages/ogtool/src/index.ts", "packages/browserd/src/index.ts"]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toEqual([]);
+    }
+  });
+
   test("account request observation stays in the native accounts lane", () => {
     const regression = "test/e2e/browser-account-request-observation.browser.e2e.ts";
     const plan = createImpactPlan([regression]);
@@ -506,6 +536,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/chat-media-entry.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
       COMPACT_SESSION_VIEW_E2E,
+      COMPOSER_MENUS_E2E,
       "test/e2e/composer-pane.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
