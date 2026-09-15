@@ -34,15 +34,21 @@ test("preview loading survives refresh, settles, and respects reduced motion", a
   expect(await status.getAttribute("aria-busy")).toBe("true");
   expect(await page.locator("pre, .animate-og-pulse").count()).toBe(0);
   expect(
-    await status.locator("svg").evaluate((node) => getComputedStyle(node).animationName),
-  ).not.toBe("none");
+    await status
+      .locator(".og-command-reel")
+      .evaluate((node) => getComputedStyle(node).animationName),
+  ).toBe("og-activity-sweep");
+  expect(await status.getByRole("button").count()).toBe(0);
+  expect(await status.evaluate((node) => node.getBoundingClientRect().height)).toBeLessThan(64);
   await page.reload();
   await status.waitFor();
   expect(await page.locator("pre").count()).toBe(0);
   await page.emulateMedia({ reducedMotion: "reduce" });
-  expect(await status.locator("svg").evaluate((node) => getComputedStyle(node).animationName)).toBe(
-    "none",
-  );
+  expect(
+    await status
+      .locator(".og-command-reel")
+      .evaluate((node) => getComputedStyle(node).animationName),
+  ).toBe("none");
   await page.getByText("Finish generation", { exact: true }).click();
   await page.locator('[data-preview="ready"]').waitFor();
   expect(await status.count()).toBe(0);
@@ -50,6 +56,12 @@ test("preview loading survives refresh, settles, and respects reduced motion", a
   await page.getByText("Stop generation", { exact: true }).click();
   await page.getByText("Preview incomplete", { exact: true }).waitFor();
   expect(await status.getAttribute("aria-busy")).toBe("false");
-  expect(await status.locator("svg").count()).toBe(0);
+  expect(await status.locator(".og-command-reel-running").count()).toBe(0);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  expect(
+    await status
+      .locator(".og-command-reel")
+      .evaluate((node) => getComputedStyle(node).animationName),
+  ).toBe("none");
   await page.close();
 });

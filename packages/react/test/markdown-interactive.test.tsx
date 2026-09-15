@@ -24,7 +24,12 @@ test("streaming soft-closers never execute incomplete HTML", () => {
   expect(output).not.toContain("data-embed");
   expect(output).toContain("Preparing preview");
   expect(output).toContain('aria-busy="true"');
-  expect(output).toContain("motion-safe:animate-spin");
+  expect(output).toContain("og-command-reel-running");
+  expect(output).toContain("group/disclosure");
+  expect(output).not.toContain('role="button"');
+  expect(output).not.toContain("animate-spin");
+  expect(output).not.toContain("min-h-32");
+  expect(output).not.toContain("Generating the interactive content");
   expect(output).not.toContain("unfinished");
 });
 
@@ -43,6 +48,10 @@ test("replayed partial previews stay hidden and interrupted previews stop loadin
         expect(output).not.toContain("data-embed");
         expect(output).toContain(streaming ? "Preparing preview" : "Preview incomplete");
         expect(output).toContain(`aria-busy="${streaming}"`);
+        expect(output.includes("og-command-reel-running")).toBe(streaming);
+        if (!streaming) {
+          expect(output).toContain("Generation stopped before the preview was ready.");
+        }
       }
       const completed = renderToStaticMarkup(
         <Markdown streaming renderInteractiveBlock={render}>
