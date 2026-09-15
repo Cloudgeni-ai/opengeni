@@ -4,6 +4,8 @@ import { signDelegatedAccessToken, type PluginPreview } from "@opengeni/contract
 import type { ApiRouteDeps, GitHubSkillSourceClient } from "@opengeni/core";
 import {
   bootstrapWorkspace,
+  applySkillLifecycle,
+  listSkillRecords,
   createDb,
   deleteWorkspace,
   listEnabledMcpCapabilityServers,
@@ -413,10 +415,18 @@ describe("Plugin routes", () => {
         expect.objectContaining({ kind: "integration", retainedByOtherOwners: false }),
       ]),
     );
+    expect(uninstallAPreview.previewToken).toMatch(/^[0-9a-f]{64}$/);
+    expect(
+      uninstallAPreview.components.find((item: { kind: string }) => item.kind === "skill"),
+    ).toMatchObject({
+      disposition: "retained",
+      remainingOwners: [{ kind: "plugin", name: "Plugin B" }],
+    });
     const uninstallA = await request("/plugins/example%2Fplugin-a", {
       method: "DELETE",
       body: JSON.stringify({
         expectedInstallationVersion: installedABody.installationVersion,
+        expectedPreviewToken: uninstallAPreview.previewToken,
         idempotencyKey: crypto.randomUUID(),
       }),
     });
@@ -436,14 +446,41 @@ describe("Plugin routes", () => {
     expect(await listInstalledPortableSkills(client.db, workspaceId)).toHaveLength(1);
     expect(await listEnabledMcpCapabilityServers(client.db, workspaceId)).toHaveLength(1);
 
+    const finalPreview = await (
+      await request("/plugins/example%2Fplugin-b/uninstall-preview")
+    ).json();
+    const finalSkill = finalPreview.components.find(
+      (item: { kind: string }) => item.kind === "skill",
+    );
+    expect(finalSkill).toMatchObject({
+      disposition: "removed",
+      retentionReasons: [],
+      remainingOwners: [],
+      skillId: expect.any(String),
+    });
     const uninstallB = await request("/plugins/example%2Fplugin-b", {
       method: "DELETE",
       body: JSON.stringify({
         expectedInstallationVersion: updatedBBody.installationVersion,
+        expectedPreviewToken: finalPreview.previewToken,
         idempotencyKey: crypto.randomUUID(),
       }),
     });
     expect(uninstallB.status).toBe(200);
+    expect((await uninstallB.json()).skillReleases).toEqual([
+      expect.objectContaining({
+        skillId: finalSkill.skillId,
+        disposition: "deactivated",
+        eventId: expect.any(String),
+      }),
+    ]);
+    expect(
+      await listSkillRecords(
+        client.db,
+        { accountId, workspaceId, subjectId },
+        { skillId: finalSkill.skillId },
+      ),
+    ).toEqual([expect.objectContaining({ status: "inactive", activeRevisionId: null })]);
     expect(await listInstalledPortableSkills(client.db, workspaceId)).toHaveLength(0);
     expect(await listInstalledApiIntegrations(client.db, workspaceId)).toHaveLength(0);
     expect(await listEnabledMcpCapabilityServers(client.db, workspaceId)).toHaveLength(0);
@@ -465,6 +502,10 @@ describe("Plugin routes", () => {
     const installedC = await installedCResponse.json();
     const installedD = await installedDResponse.json();
     expect(await listInstalledPortableSkills(client.db, workspaceId)).toHaveLength(1);
+    const [sharedPreviewC, sharedPreviewD] = await Promise.all([
+      request("/plugins/example%2Fplugin-c/uninstall-preview").then((response) => response.json()),
+      request("/plugins/example%2Fplugin-d/uninstall-preview").then((response) => response.json()),
+    ]);
 
     const sharedUninstallKey = crypto.randomUUID();
     const [uninstallC, uninstallD] = await Promise.all([
@@ -493,10 +534,28 @@ describe("Plugin routes", () => {
     const retainedPluginKey =
       uninstallC.status === 409 ? "example%2Fplugin-c" : "example%2Fplugin-d";
     const retainedInstallation = uninstallC.status === 409 ? installedC : installedD;
+    const staleSharedPreview = uninstallC.status === 409 ? sharedPreviewC : sharedPreviewD;
+    const staleOwnerRemoval = await request(`/plugins/${retainedPluginKey}`, {
+      method: "DELETE",
+      body: JSON.stringify({
+        expectedInstallationVersion: retainedInstallation.installationVersion,
+        expectedPreviewToken: staleSharedPreview.previewToken,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(staleOwnerRemoval.status).toBe(409);
+    const refreshed = await staleOwnerRemoval.json();
+    expect(refreshed.code).toBe("plugin_uninstall_preview_changed");
+    expect(refreshed.preview.components[0]).toMatchObject({
+      disposition: "removed",
+      remainingOwners: [],
+      retainedByOtherOwners: false,
+    });
     const finalUninstall = await request(`/plugins/${retainedPluginKey}`, {
       method: "DELETE",
       body: JSON.stringify({
         expectedInstallationVersion: retainedInstallation.installationVersion,
+        expectedPreviewToken: refreshed.preview.previewToken,
         idempotencyKey: crypto.randomUUID(),
       }),
     });
@@ -548,5 +607,127 @@ describe("Plugin routes", () => {
     expect(await missingMcp.text()).toBe(
       "Plugin references MCP server missing_mcp, which is not configured by this deployment",
     );
+  }, 120_000);
+
+  test("fences customization after preview and preserves the named Skill after refreshed confirmation", async () => {
+    if (!available) return;
+    const source = "https://127.0.0.1/plugin-drift.json";
+    const installed = await (
+      await install(source, await preview(source), crypto.randomUUID())
+    ).json();
+    const path = "/plugins/example%2Fplugin-drift";
+    const before = await (await request(`${path}/uninstall-preview`)).json();
+    const component = before.components[0];
+    expect(component).toMatchObject({
+      kind: "skill",
+      disposition: "removed",
+      retainedByOtherOwners: false,
+    });
+    const serviceAuthorization = `Bearer ${await signDelegatedAccessToken(DELEGATION_SECRET, {
+      accountId,
+      workspaceId,
+      subjectId,
+      permissions: ["workspace:read", "capabilities:manage"],
+      principalKind: "service",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    })}`;
+    const forbidden = await request(path, {
+      method: "DELETE",
+      headers: { authorization: serviceAuthorization },
+      body: JSON.stringify({
+        expectedInstallationVersion: installed.installationVersion,
+        expectedPreviewToken: before.previewToken,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(forbidden.status).toBe(403);
+    expect(await listInstalledPortableSkills(client.db, workspaceId)).toHaveLength(1);
+    const [record] = await listSkillRecords(
+      client.db,
+      { accountId, workspaceId, subjectId },
+      { skillId: component.skillId },
+    );
+    expect(record).toBeDefined();
+    const files = [
+      {
+        path: "SKILL.md",
+        content:
+          "---\nname: my-custom-research\ndescription: User-owned research guidance\n---\nKeep this customized guidance.\n",
+      },
+    ];
+    const customized = await applySkillLifecycle(
+      client.db,
+      {
+        accountId,
+        workspaceId,
+        actor: { kind: "human", principalKind: "human_session", subjectId },
+      },
+      {
+        operation: "save",
+        operationId: crypto.randomUUID(),
+        skillId: component.skillId,
+        expectedRevisionId: record!.revisionId,
+        expectedScopeVersion: record!.scopeVersion,
+        files,
+        reason: "Customize before removal confirmation",
+      },
+    );
+    const key = crypto.randomUUID();
+    const stale = await request(path, {
+      method: "DELETE",
+      body: JSON.stringify({
+        expectedInstallationVersion: installed.installationVersion,
+        expectedPreviewToken: before.previewToken,
+        idempotencyKey: key,
+      }),
+    });
+    expect(stale.status).toBe(409);
+    const conflict = await stale.json();
+    expect(conflict.code).toBe("plugin_uninstall_preview_changed");
+    expect(conflict.preview.previewToken).not.toBe(before.previewToken);
+    expect(conflict.preview.components[0]).toMatchObject({
+      name: "my-custom-research",
+      skillId: component.skillId,
+      disposition: "retained",
+      retentionReasons: ["customized"],
+      remainingOwners: [],
+      retainedByOtherOwners: false,
+    });
+    expect(await listInstalledPortableSkills(client.db, workspaceId)).toHaveLength(1);
+    const confirmedRequest = {
+      expectedInstallationVersion: installed.installationVersion,
+      expectedPreviewToken: conflict.preview.previewToken,
+      idempotencyKey: key,
+    };
+    const removed = await request(path, {
+      method: "DELETE",
+      body: JSON.stringify(confirmedRequest),
+    });
+    expect(removed.status).toBe(200);
+    const receipt = await removed.json();
+    expect(receipt.retainedComponents).toEqual([component.capabilityId]);
+    expect(receipt.skillReleases).toEqual([
+      expect.objectContaining({
+        skillId: component.skillId,
+        disposition: "preserved",
+        revisionId: customized.revisionId,
+      }),
+    ]);
+    expect(
+      await listSkillRecords(
+        client.db,
+        { accountId, workspaceId, subjectId },
+        { skillId: component.skillId },
+      ),
+    ).toEqual([expect.objectContaining({ files })]);
+    expect(await listInstalledPortableSkills(client.db, workspaceId)).toHaveLength(0);
+    // The failed comparison did not consume the key, and successful replay does
+    // not compare against the now-disabled installation or remove the Skill.
+    const replay = await request(path, {
+      method: "DELETE",
+      body: JSON.stringify(confirmedRequest),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(receipt);
   }, 120_000);
 });
