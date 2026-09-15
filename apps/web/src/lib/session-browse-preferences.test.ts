@@ -88,7 +88,12 @@ describe("session browse preferences", () => {
       expect(readSessionBrowsePreferences(id, storage).groupBy).toBe(groupBy);
     }
     for (const groupBy of ["activity", "created", "creator", "project", "none"] as const) {
-      const view = { groupBy, sortBy: "updatedAt", status: "active", showEmptyGroups: false } as const;
+      const view = {
+        groupBy,
+        sortBy: "updatedAt",
+        status: "active",
+        showEmptyGroups: false,
+      } as const;
       writeSessionBrowsePreferences(id, view, storage);
       expect(readSessionBrowsePreferences(id, storage)).toEqual(view);
     }

@@ -76,7 +76,9 @@ export function readSessionBrowsePreferences(
         groupBy: readSessionBrowseGroupBy(id, storage),
       };
     return {
-      groupBy: isSessionBrowseGroupBy(parsed.groupBy) ? parsed.groupBy : DEFAULT_SESSION_BROWSE_GROUP_BY,
+      groupBy: isSessionBrowseGroupBy(parsed.groupBy)
+        ? parsed.groupBy
+        : DEFAULT_SESSION_BROWSE_GROUP_BY,
       sortBy: ["updatedAt", "createdAt", "name"].includes(parsed.sortBy)
         ? parsed.sortBy
         : "updatedAt",
