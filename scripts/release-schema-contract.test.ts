@@ -230,6 +230,12 @@ describe("release schema contract", () => {
     const goalReportRequirements = completeSourceContract.migrations.some(
       (migration) => migration.path === "0474_goal_report_requirements.sql",
     );
+    const sessionEventHistoryStatistics = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0475_session_event_history_statistics.sql",
+    );
+    const sessionEventHistoryPolicyPlanning = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0476_session_event_history_policy_planning.sql",
+    );
     const knowledgeSourceDiscovery = completeSourceContract.migrations.some(
       (migration) => migration.path === "0469_knowledge_source_discovery.sql",
     );
@@ -277,6 +283,8 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (sessionEventHistoryStatistics ? 1 : 0) +
+        (sessionEventHistoryPolicyPlanning ? 1 : 0) +
         (goalReportRequirements ? 1 : 0) +
         (organizationIntegrationPolicy ? 1 : 0) +
         (organizationUsageAnalyticalCapability ? 1 : 0) +
@@ -426,13 +434,23 @@ describe("release schema contract", () => {
         ? { latestMigration: "0473_organization_usage_analytical_capability.sql" }
         : {}),
       ...(goalReportRequirements ? { latestMigration: "0474_goal_report_requirements.sql" } : {}),
+      ...(sessionEventHistoryStatistics
+        ? { latestMigration: "0475_session_event_history_statistics.sql" }
+        : {}),
+      ...(sessionEventHistoryPolicyPlanning
+        ? { latestMigration: "0476_session_event_history_policy_planning.sql" }
+        : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: goalReportRequirements
-        ? "0474_goal_report_requirements.sql"
-        : organizationUsageAnalyticalCapability
-          ? "0473_organization_usage_analytical_capability.sql"
-          : "0472_usage_events_workspace_recent_index.sql",
+      path: sessionEventHistoryPolicyPlanning
+        ? "0476_session_event_history_policy_planning.sql"
+        : sessionEventHistoryStatistics
+          ? "0475_session_event_history_statistics.sql"
+          : goalReportRequirements
+            ? "0474_goal_report_requirements.sql"
+            : organizationUsageAnalyticalCapability
+              ? "0473_organization_usage_analytical_capability.sql"
+              : "0472_usage_events_workspace_recent_index.sql",
       deploymentMode: "rolling",
     });
     expect(
@@ -1541,6 +1559,12 @@ describe("release schema contract", () => {
     const goalReportRequirements = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0474_goal_report_requirements.sql",
     );
+    const sessionEventHistoryStatistics = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0475_session_event_history_statistics.sql",
+    );
+    const sessionEventHistoryPolicyPlanning = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0476_session_event_history_policy_planning.sql",
+    );
     const knowledgeSourceDiscovery = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0469_knowledge_source_discovery.sql",
     );
@@ -2018,6 +2042,8 @@ describe("release schema contract", () => {
       "0472_usage_events_workspace_recent_index.sql",
       "0473_organization_usage_analytical_capability.sql",
       "0474_goal_report_requirements.sql",
+      "0475_session_event_history_statistics.sql",
+      "0476_session_event_history_policy_planning.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2411,8 +2437,20 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0474_goal_report_requirements.sql",
       };
+    if (sessionEventHistoryStatistics)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0475_session_event_history_statistics.sql",
+      };
+    if (sessionEventHistoryPolicyPlanning)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0476_session_event_history_policy_planning.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (sessionEventHistoryStatistics ? 1 : 0) +
+        (sessionEventHistoryPolicyPlanning ? 1 : 0) +
         (goalReportRequirements ? 1 : 0) +
         (organizationIntegrationPolicy ? 1 : 0) +
         (organizationUsageAnalyticalCapability ? 1 : 0) +
@@ -2763,6 +2801,12 @@ describe("release schema contract", () => {
         ? { latestMigration: "0473_organization_usage_analytical_capability.sql" }
         : {}),
       ...(goalReportRequirements ? { latestMigration: "0474_goal_report_requirements.sql" } : {}),
+      ...(sessionEventHistoryStatistics
+        ? { latestMigration: "0475_session_event_history_statistics.sql" }
+        : {}),
+      ...(sessionEventHistoryPolicyPlanning
+        ? { latestMigration: "0476_session_event_history_policy_planning.sql" }
+        : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport
