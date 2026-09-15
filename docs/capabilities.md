@@ -365,10 +365,47 @@ still pinned to the current version.
 
 An update records a new immutable Plugin version, computes added/removed/
 changed/unchanged component keys, and removes stale ownership edges only after
-the replacement BOM completes. Uninstall preview reports whether each child is
-retained by another owner. Uninstall removes only this Plugin's edges, disables
-orphaned child installations, and never removes a shared component or a
-Connection.
+the replacement BOM completes. Uninstall preview returns named component impact:
+`name`, `disposition` (`removed`, `retained`, or `inactive`), `retentionReasons`,
+`remainingOwners` (`kind` and a scope-visible display `name`), and a visible
+canonical `skillId` for Skills. `retainedByOtherOwners` remains the physical
+ownership projection, including pending/repairing owners; it does not imply
+runtime availability. Reasons are `other_owners`, `customized`, `re_scoped`, or
+`registry_unavailable` (conservative retention when the head is not visible).
+Owner names are resolved only within the current workspace; unavailable names
+use a generic label, never another workspace's identity.
+
+Preview and cleanup use the same Skill release classifier. Removing the last
+source owner deactivates an untouched, source-managed workspace Skill, but keeps
+customized or re-scoped active Skills and their history. `removed` means removal
+from active use, not erasure of registry history. An already inactive Skill is
+reported as `inactive`. `retainedComponents` in the removal result includes
+customized/re-scoped Skills as well as physically shared components.
+
+Installed previews include an opaque `previewToken`. Clients should send it as
+`expectedPreviewToken` alongside `expectedInstallationVersion` and
+`idempotencyKey` on DELETE. The backend locks child installations and visible
+Skill heads, fences facet/owner changes, compares live ownership and Skill
+revision/scope/status to the preview, and holds those locks through release.
+Conflicting ownership writes use a nonblocking lock so they cannot introduce a
+cross-owner lock-order cycle. Contention or changed impact returns HTTP
+409 with `{ code: "plugin_uninstall_preview_changed", message, preview }`; review
+the refreshed preview before confirming again. A rejected comparison performs
+no removal and does not consume the idempotency key. Exact successful retries
+replay the original receipt. Older callers may omit the token, but still receive
+live classification and safe customization preservation; an installation-version
+fence alone does not prove they reviewed the current Skill impact.
+
+Cleanup carries the exact head set locked before comparison; it never widens
+that set when another subject moves a previously private Skill into workspace
+scope. Discovering a newly visible head aborts removal before acquiring that
+head's lock or deactivating it, and returns the same refreshed-preview conflict.
+The failed transaction contains no committed ownership or idempotency changes.
+
+Uninstall removes only this Plugin's ownership edges and disables orphaned child
+installations. It never disconnects or deletes a Connection, erases Skill history,
+or adds service/API-key/agent authority to remove source-bound Skills. Removing
+those sources continues to require the existing trusted human-session actor.
 
 The owning endpoints are:
 

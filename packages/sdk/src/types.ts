@@ -7546,20 +7546,29 @@ export type ListInstalledPluginsResponse = {
   plugins: PluginInstallationSummary[];
 };
 
+export type PluginUninstallComponentImpact = {
+  capabilityId: string;
+  kind: "skill" | "integration" | "mcp";
+  retainedByOtherOwners: boolean;
+  name: string;
+  disposition: "removed" | "retained" | "inactive";
+  retentionReasons: Array<"other_owners" | "customized" | "re_scoped" | "registry_unavailable">;
+  remainingOwners: Array<{ kind: "direct" | "plugin" | "pack" | "migration"; name: string }>;
+  skillId?: string | undefined;
+};
+
 export type PluginUninstallPreview = {
   pluginKey: string;
   installed: boolean;
   version: string | null;
   installationVersion: number | null;
-  components: Array<{
-    capabilityId: string;
-    kind: "skill" | "integration" | "mcp";
-    retainedByOtherOwners: boolean;
-  }>;
+  previewToken?: string | undefined;
+  components: PluginUninstallComponentImpact[];
 };
 
 export type UninstallPluginRequest = {
   expectedInstallationVersion: number;
+  expectedPreviewToken?: string | undefined;
   idempotencyKey: string;
 };
 
