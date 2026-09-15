@@ -75,6 +75,49 @@ function fixtureUrl(path: string) {
   return `${baseUrl}/test/session-artifact-navigation.html#${path}`;
 }
 
+for (const width of [1440, 390]) {
+  for (const kind of ["site", "file"] as const) {
+    test(`${kind} history preserves valid return context and drops invalid context at ${width}px`, async () => {
+      const page = await browser.newPage({ viewport: { width, height: 900 } });
+      try {
+        const detailPath =
+          kind === "site"
+            ? `/workspaces/${workspaceId}/artifacts/${siteId}`
+            : `/workspaces/${workspaceId}/artifacts/files/${fileId}`;
+        const heading = kind === "site" ? "Project overview" : "Retained file";
+        await page.goto(fixtureUrl(`${detailPath}?fromSession=${sessionId}`));
+        await page.getByRole("heading", { name: heading, exact: true }).waitFor();
+        await assertLibraryReturn(page, true);
+        await page.getByRole("link", { name: "All artifacts", exact: true }).click();
+        await page.getByRole("heading", { name: "Workspace artifacts", exact: true }).waitFor();
+        await page.reload();
+        const back = page.getByRole("link", { name: "Back to session", exact: true });
+        await back.waitFor();
+        expect(routerPath(await back.getAttribute("href"))).toBe(sessionPath);
+        await page.goBack();
+        await page.getByRole("heading", { name: heading, exact: true }).waitFor();
+        await assertLibraryReturn(page, true);
+        await page.goForward();
+        await page.getByRole("heading", { name: "Workspace artifacts", exact: true }).waitFor();
+        expect(routerPath(await back.getAttribute("href"))).toBe(sessionPath);
+        await back.click();
+        await page.getByRole("heading", { name: "Build a project overview" }).waitFor();
+        await page.goto(
+          fixtureUrl(`${detailPath}?fromSession=${encodeURIComponent("https://evil.example")}`),
+        );
+        await page.getByRole("heading", { name: heading, exact: true }).waitFor();
+        await assertLibraryReturn(page, false);
+        await page.getByRole("link", { name: "All artifacts", exact: true }).click();
+        await page.getByRole("heading", { name: "Workspace artifacts", exact: true }).waitFor();
+        expect(await back.count()).toBe(0);
+        expect(page.url()).not.toContain("fromSession");
+      } finally {
+        await page.close();
+      }
+    }, 30_000);
+  }
+}
+
 async function assertLibraryReturn(page: import("playwright").Page, fromSession: boolean) {
   const all = page.getByRole("link", { name: "All artifacts", exact: true });
   await all.waitFor();
