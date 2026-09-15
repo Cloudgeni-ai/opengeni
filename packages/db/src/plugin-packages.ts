@@ -23,6 +23,7 @@ import {
 } from "./database";
 import {
   readSkillSourceReleaseHeads,
+  SkillSourceReleaseSnapshotChangedError,
   type SkillSourceReleaseReceipt,
 } from "./skill-source-release";
 import { classifySkillSourceRelease } from "./skill-source-release-impact";
@@ -1119,12 +1120,20 @@ export async function uninstallPluginPackage(
             ),
           )
           .returning({ facetInstallationId: schema.capabilityComponentOwners.facetInstallationId });
-        const skillReleases = await cleanupOrphanedCapabilityComponents(
-          tx,
-          input.workspaceId,
-          owned.map((row) => row.facetInstallationId),
-          input.skillActor,
-        );
+        let skillReleases: SkillSourceReleaseReceipt[];
+        try {
+          skillReleases = await cleanupOrphanedCapabilityComponents(
+            tx,
+            input.workspaceId,
+            owned.map((row) => row.facetInstallationId),
+            input.skillActor,
+            skillBindings.map((head) => head.id),
+          );
+        } catch (error) {
+          if (error instanceof SkillSourceReleaseSnapshotChangedError)
+            throw new PluginUninstallPreviewChangedError();
+          throw error;
+        }
         await tx
           .update(schema.capabilityPluginInstallations)
           .set({

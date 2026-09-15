@@ -115,6 +115,7 @@ export async function cleanupOrphanedCapabilityComponents(
   workspaceId: string,
   facetInstallationIds: string[],
   skillActor?: SkillActor,
+  lockedSkillHeadIds?: readonly string[],
 ): Promise<SkillSourceReleaseReceipt[]> {
   const uniqueIds = [...new Set(facetInstallationIds)];
   if (uniqueIds.length === 0) return [];
@@ -147,6 +148,7 @@ export async function cleanupOrphanedCapabilityComponents(
     workspaceId,
     facetInstallationIds: orphanRows.map((row) => row.facetInstallationId),
     ...(skillActor ? { skillActor } : {}),
+    ...(lockedSkillHeadIds !== undefined ? { lockedHeadIds: lockedSkillHeadIds } : {}),
   });
   await db.delete(schema.capabilityFacetInstallations).where(
     inArray(

@@ -396,6 +396,12 @@ replay the original receipt. Older callers may omit the token, but still receive
 live classification and safe customization preservation; an installation-version
 fence alone does not prove they reviewed the current Skill impact.
 
+Cleanup carries the exact head set locked before comparison; it never widens
+that set when another subject moves a previously private Skill into workspace
+scope. Discovering a newly visible head aborts removal before acquiring that
+head's lock or deactivating it, and returns the same refreshed-preview conflict.
+The failed transaction contains no committed ownership or idempotency changes.
+
 Uninstall removes only this Plugin's ownership edges and disables orphaned child
 installations. It never disconnects or deletes a Connection, erases Skill history,
 or adds service/API-key/agent authority to remove source-bound Skills. Removing
