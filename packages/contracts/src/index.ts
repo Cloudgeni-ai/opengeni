@@ -15420,7 +15420,9 @@ export const HumanInputQuestion = z
     prompt: z.string().min(1).max(4096),
     label: z.string().min(1).max(128).nullable().optional(),
     helpText: z.string().max(2048).nullable().optional(),
-    skillReview: SkillReviewReference.optional(),
+    // Strict model tool schemas encode an absent optional object as null.
+    // A real review reference still requires every authority-bearing field.
+    skillReview: SkillReviewReference.nullable().optional(),
     options: z.array(HumanInputOption).max(20).default([]),
     required: z.boolean().default(true),
     // Retained on the wire for older hosts. OpenGeni's stock runtime and
