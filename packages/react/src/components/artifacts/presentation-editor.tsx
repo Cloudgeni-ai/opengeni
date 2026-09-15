@@ -1,7 +1,6 @@
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
-  ChevronsUpDownIcon,
   ExpandIcon,
   FilePlus2Icon,
   MinusIcon,
@@ -452,6 +451,15 @@ export function PresentationProjectionEditor({
       }}
     />
   );
+}
+
+function nextSlideIndexFromKey(key: string, activeIndex: number, length: number): number | null {
+  if (length === 0) return null;
+  if (key === "ArrowDown") return Math.min(length - 1, activeIndex + 1);
+  if (key === "ArrowUp") return Math.max(0, activeIndex - 1);
+  if (key === "Home") return 0;
+  if (key === "End") return length - 1;
+  return null;
 }
 
 function PresentationEditorCore({
@@ -1337,7 +1345,7 @@ function PresentationEditorCore({
       <div
         role="toolbar"
         aria-label="Presentation controls"
-        className="flex h-11 shrink-0 items-center border-b border-og-border bg-og-surface-2 sm:h-10"
+        className="flex h-10 shrink-0 items-center border-b border-og-border bg-og-surface-2"
       >
         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto px-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <button
@@ -1359,10 +1367,9 @@ function PresentationEditorCore({
             disabled={slides.length === 0}
             data-og-mobile-slide-selector
             onClick={toggleMobileSlideSelector}
-            className="inline-flex min-h-11 min-w-16 shrink-0 items-center justify-center gap-1 rounded-og-sm px-1.5 text-og-xs tabular-nums text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg disabled:opacity-35 sm:hidden"
+            className="inline-flex min-h-11 min-w-16 shrink-0 items-center justify-center rounded-og-sm px-2 text-og-xs tabular-nums text-og-fg-muted hover:bg-og-surface-3 hover:text-og-fg disabled:opacity-35 sm:hidden"
           >
             <span>{slideCountLabel}</span>
-            <ChevronsUpDownIcon className="size-3.5 shrink-0" aria-hidden />
           </button>
           <span className="hidden min-w-16 shrink-0 text-center text-og-xs tabular-nums text-og-fg-muted sm:inline">
             {slideCountLabel}
@@ -1497,12 +1504,7 @@ function PresentationEditorCore({
             }));
           }}
           onKeyDown={(event) => {
-            if (slides.length === 0) return;
-            let nextIndex: number | null = null;
-            if (event.key === "ArrowDown") nextIndex = Math.min(slides.length - 1, activeIndex + 1);
-            else if (event.key === "ArrowUp") nextIndex = Math.max(0, activeIndex - 1);
-            else if (event.key === "Home") nextIndex = 0;
-            else if (event.key === "End") nextIndex = slides.length - 1;
+            const nextIndex = nextSlideIndexFromKey(event.key, activeIndex, slides.length);
             if (nextIndex === null) return;
             event.preventDefault();
             const next = slides[nextIndex];
@@ -1558,7 +1560,7 @@ function PresentationEditorCore({
         {mobileSelectorOpen ? (
           <div
             ref={mobileSelectorPanelRef}
-            className="absolute left-2 top-2 z-40 w-56 max-w-[calc(100%-1rem)] overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 shadow-og-md sm:hidden"
+            className="absolute left-2 top-2 z-40 max-w-56 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 shadow-og-md sm:hidden"
           >
             <div
               ref={mobileRailRef}
@@ -1591,13 +1593,7 @@ function PresentationEditorCore({
                   mobileSelectorTriggerRef.current?.focus();
                   return;
                 }
-                if (slides.length === 0) return;
-                let nextIndex: number | null = null;
-                if (event.key === "ArrowDown")
-                  nextIndex = Math.min(slides.length - 1, Math.max(0, activeIndex) + 1);
-                else if (event.key === "ArrowUp") nextIndex = Math.max(0, activeIndex - 1);
-                else if (event.key === "Home") nextIndex = 0;
-                else if (event.key === "End") nextIndex = slides.length - 1;
+                const nextIndex = nextSlideIndexFromKey(event.key, activeIndex, slides.length);
                 if (nextIndex === null) return;
                 event.preventDefault();
                 const next = slides[nextIndex];
@@ -1635,7 +1631,10 @@ function PresentationEditorCore({
                           ? "bg-og-surface-3 text-og-fg"
                           : "text-og-fg-muted hover:bg-og-surface-3/70",
                       )}
-                      style={{ top: index * MOBILE_RAIL_ITEM_HEIGHT, height: MOBILE_RAIL_ITEM_HEIGHT }}
+                      style={{
+                        top: index * MOBILE_RAIL_ITEM_HEIGHT,
+                        height: MOBILE_RAIL_ITEM_HEIGHT,
+                      }}
                       data-og-mobile-slide-index={index}
                     >
                       <span className="w-7 shrink-0 text-right text-og-xs tabular-nums text-og-fg-subtle">

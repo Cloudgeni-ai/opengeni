@@ -86,13 +86,13 @@ describe("retained artifact load error presentation", () => {
       supportReference: null,
     });
 
-    expect(retainedArtifactLoadErrorPresentation(new Error("Artifact could not be loaded."))).toEqual(
-      {
-        ...unavailableCopy,
-        retryable: false,
-        supportReference: null,
-      },
-    );
+    expect(
+      retainedArtifactLoadErrorPresentation(new Error("Artifact could not be loaded.")),
+    ).toEqual({
+      ...unavailableCopy,
+      retryable: false,
+      supportReference: null,
+    });
   });
 
   test("does not expose ApiError body text", () => {

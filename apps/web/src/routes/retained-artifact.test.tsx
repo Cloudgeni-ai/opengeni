@@ -47,9 +47,7 @@ afterAll(() => GlobalRegistrator.unregister());
 async function renderRoute() {
   const { RetainedArtifactRoute } = await import("./retained-artifact");
   const route = createRootRoute({
-    component: () => (
-      <RetainedArtifactRoute workspaceId={workspaceId} artifactId={artifactId} />
-    ),
+    component: () => <RetainedArtifactRoute workspaceId={workspaceId} artifactId={artifactId} />,
   });
   const router = createRouter({
     routeTree: route,

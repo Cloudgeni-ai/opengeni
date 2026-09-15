@@ -535,9 +535,7 @@ describe("presentation artifact surface", () => {
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
     expect(trigger.textContent).toContain("4 / 5");
     expect(
-      rendered.container
-        .querySelector('[data-og-slide-index="3"]')
-        ?.getAttribute("aria-selected"),
+      rendered.container.querySelector('[data-og-slide-index="3"]')?.getAttribute("aria-selected"),
     ).toBe("true");
 
     await rendered.unmount();
@@ -587,9 +585,7 @@ describe("presentation artifact surface", () => {
     await flush();
     expect(rendered.container.textContent).toContain("8 / 8");
     expect(
-      rendered.container
-        .querySelector('[data-og-slide-index="7"]')
-        ?.getAttribute("aria-selected"),
+      rendered.container.querySelector('[data-og-slide-index="7"]')?.getAttribute("aria-selected"),
     ).toBe("true");
 
     await rendered.unmount();

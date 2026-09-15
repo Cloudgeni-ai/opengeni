@@ -175,13 +175,7 @@ function RetainedArtifactDetail({
   );
 }
 
-function RetainedArtifactLoadError({
-  error,
-  onRetry,
-}: {
-  error: Error;
-  onRetry: () => void;
-}) {
+function RetainedArtifactLoadError({ error, onRetry }: { error: Error; onRetry: () => void }) {
   const presentation = retainedArtifactLoadErrorPresentation(error);
   return (
     <div
