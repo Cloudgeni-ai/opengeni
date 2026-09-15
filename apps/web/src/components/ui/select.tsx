@@ -11,7 +11,7 @@ const Select = React.forwardRef<
     <select
       ref={ref}
       className={cn(
-        "h-9 w-full appearance-none rounded-md border border-border bg-bg px-2.5 pr-8 text-sm text-fg transition-colors hover:border-border-strong focus-visible:border-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
+        "peer h-9 w-full appearance-none rounded-md border border-border bg-bg px-2.5 pr-8 text-sm text-fg transition-colors hover:border-border-strong focus-visible:border-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
         className,
         displayValue !== undefined && "text-transparent [&_option]:text-fg [&_optgroup]:text-fg",
       )}
@@ -23,7 +23,7 @@ const Select = React.forwardRef<
       <span
         aria-hidden
         className={cn(
-          "pointer-events-none absolute inset-y-0 left-2.5 right-8 flex min-w-0 items-center text-sm text-fg",
+          "pointer-events-none absolute inset-y-0 left-2.5 right-8 flex min-w-0 items-center text-sm text-fg peer-disabled:opacity-50",
           props.disabled && "opacity-50",
         )}
       >

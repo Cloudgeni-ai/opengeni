@@ -75,7 +75,9 @@ async function render(canEdit = true) {
   );
 }
 function field(label: string) {
-  const node = [...container.querySelectorAll("label")].find((node) => node.textContent === label);
+  const node = [...container.querySelectorAll("label")].find(
+    (candidate) => candidate.textContent === label,
+  );
   if (!node) throw new Error(`Missing ${label}`);
   return document.getElementById(node.htmlFor) as HTMLSelectElement;
 }

@@ -1,5 +1,6 @@
 import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
+import { useRepositoryCatalogRefresh } from "@/lib/use-follow-up-repositories";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import {
@@ -206,6 +207,7 @@ function SessionsIndexRouteContent({
   launch: ComposerLaunchSearch;
 }) {
   const context = useAppContext();
+  const repositoryCatalogRefresh = useRepositoryCatalogRefresh(workspaceId, context);
   const firstPartyMcpToolPolicy = useMemo(
     () => clientFirstPartyMcpToolPolicy(context.clientConfig),
     [context.clientConfig],
@@ -1393,6 +1395,7 @@ function SessionsIndexRouteContent({
                           <WorkspaceRepositoryMenuBody
                             workspaceId={workspaceId}
                             disabled={busy || newSessionDraft.loading}
+                            catalogRefresh={repositoryCatalogRefresh}
                           />
                         ),
                       },
@@ -1980,15 +1983,18 @@ function WorkspaceRepositoryMenuBody({
   workspaceId,
   disabled,
   leading,
+  catalogRefresh,
 }: {
   workspaceId: string;
   disabled: boolean;
   leading?: ReactNode;
+  catalogRefresh: ReturnType<typeof useRepositoryCatalogRefresh>;
 }) {
   const context = useAppContext();
   return (
     <RepositoryContextMenuBody
       {...workspaceRepositoryPickerProps(context, workspaceId, disabled)}
+      {...catalogRefresh}
       {...(leading ? { leading } : {})}
     />
   );
