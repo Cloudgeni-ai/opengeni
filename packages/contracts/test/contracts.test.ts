@@ -2295,6 +2295,28 @@ describe("contracts", () => {
     expect(SubmittedTimelineAnnotations.safeParse([annotation, annotation]).success).toBe(false);
   });
 
+  test("accepts null skill review for ordinary questions without accepting malformed review references", () => {
+    const question = {
+      id: "choice",
+      kind: "single_select",
+      prompt: "Choose a format",
+      options: [{ id: "text", label: "Text" }],
+    };
+    for (const skillReview of [null, undefined]) {
+      const input = RequestHumanInputToolInput.parse({
+        questions: [{ ...question, skillReview }],
+      });
+      expect(input.questions[0]?.skillReview).toBe(skillReview);
+    }
+    for (const skillReview of [{}, "review", { skillId: "not-a-reference" }]) {
+      expect(
+        RequestHumanInputToolInput.safeParse({
+          questions: [{ ...question, skillReview }],
+        }).success,
+      ).toBe(false);
+    }
+  });
+
   test("validates structured human-input questions and typed client responses", () => {
     const input = RequestHumanInputToolInput.parse({
       questions: [

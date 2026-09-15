@@ -506,6 +506,34 @@ describe("structured human-input runtime boundary", () => {
     ]);
   });
 
+  test("serializes an ordinary question with an explicit null skill review", () => {
+    const serialized = serializeHumanInputRequests([
+      {
+        name: HUMAN_INPUT_TOOL_NAME,
+        rawItem: {
+          callId: "ordinary-null-review",
+          name: HUMAN_INPUT_TOOL_NAME,
+          arguments: JSON.stringify({
+            questions: [
+              {
+                id: "choice",
+                kind: "single_select",
+                prompt: "Choose one",
+                options: [{ id: "a", label: "A" }],
+                skillReview: null,
+              },
+            ],
+          }),
+        },
+      },
+    ]);
+    expect(serialized[0]?.toolCallId).toBe("ordinary-null-review");
+    expect(serialized[0]?.input.questions[0]).toMatchObject({
+      skillReview: null,
+      allowOther: true,
+    });
+  });
+
   test("preserves the exact Skill review envelope through interruption serialization", () => {
     const input = skillReviewHumanInput({
       sourceOperationId: "00000000-0000-4000-8000-000000000001",
