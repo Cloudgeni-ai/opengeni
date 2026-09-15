@@ -60,6 +60,11 @@ export function SignInCallbackNotice({ userId }: { userId: string | null }) {
             .
           </>
         )}
+        {ownReceipt && userId === null ? (
+          <p className="mt-1">
+            Sign in again as {ownReceipt.email} with a remaining sign-in method to continue.
+          </p>
+        ) : null}
       </Notice>
     </div>
   );

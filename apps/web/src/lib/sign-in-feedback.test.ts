@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { readSignInCallbackError, signInCallbackError } from "./sign-in-feedback";
+import {
+  readSignInCallbackError,
+  securityReauthenticationPath,
+  signInCallbackError,
+} from "./sign-in-feedback";
 
 test("callback failures provide a safe next step without rendering provider text", () => {
   expect(signInCallbackError("account_not_linked")).toContain("Personal settings → Security");
@@ -12,6 +16,21 @@ test("callback failures provide a safe next step without rendering provider text
   expect(readSignInCallbackError("?error=access_denied&error=state_mismatch")).toContain(
     "couldn't be completed",
   );
+});
+
+test("Security reauthentication preserves only a bounded outcome on a fixed local route", () => {
+  expect(
+    securityReauthenticationPath(
+      "?signInMethod=connected&returnTo=https://evil.example&token=secret",
+    ),
+  ).toBe("/settings/security?signInMethod=connected");
+  expect(securityReauthenticationPath("?signInMethod=error&error_description=private")).toBe(
+    "/settings/security?signInMethod=error",
+  );
+  expect(securityReauthenticationPath("?signInMethod=connected&signInMethod=error")).toBe(
+    "/settings/security",
+  );
+  expect(securityReauthenticationPath("?signInMethod=arbitrary")).toBe("/settings/security");
 });
 
 test("integration callbacks and success hints cannot claim a login change", () => {

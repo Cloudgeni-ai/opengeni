@@ -50,6 +50,10 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
 
   async function savePassword() {
     setValidation(null);
+    if (props.hasPassword && !currentPassword) {
+      setValidation("Enter your current password before changing it.");
+      return;
+    }
     if (password.length < 8 || password.length > 128) {
       setValidation("Use 8 to 128 characters for your new password.");
       return;
@@ -247,6 +251,7 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 aria-describedby="signin-password-hint"
+                aria-invalid={Boolean(validation)}
               />
               <p id="signin-password-hint" className="text-xs text-fg-subtle">
                 Use at least 8 characters. A unique password keeps your account safer.
@@ -263,10 +268,15 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
                 value={confirmation}
                 onChange={(event) => setConfirmation(event.target.value)}
                 aria-invalid={Boolean(validation)}
+                aria-describedby={validation ? "signin-password-validation" : undefined}
               />
             </div>
             {validation ? (
-              <p role="alert" className="text-sm text-status-failed">
+              <p
+                id="signin-password-validation"
+                role="alert"
+                className="text-sm text-status-failed"
+              >
                 {validation}
               </p>
             ) : null}

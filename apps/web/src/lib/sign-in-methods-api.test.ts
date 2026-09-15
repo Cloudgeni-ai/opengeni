@@ -103,3 +103,21 @@ test("an actor switch rejects old clients before dispatch and late responses aft
   release(Response.json({ email: "old@example.com" }));
   await expect(pending).rejects.toThrow();
 });
+
+test("reads the auth route's flat error envelope without losing the stable security code", async () => {
+  globalThis.fetch = (async (_input: unknown) =>
+    Response.json(
+      { code: "SIGN_IN_METHOD_LAST_USABLE_METHOD", message: "last usable method" },
+      { status: 403 },
+    )) as typeof fetch;
+  const api = createSignInMethodsApi("legacy");
+  const command = await api.prepare("disconnect", {
+    operationId: "00000000-0000-4000-8000-000000000002",
+    expectedIdentityRevision: 4,
+    provider: "google",
+  });
+  await expect(api.execute(command)).rejects.toMatchObject({
+    status: 403,
+    code: "SIGN_IN_METHOD_LAST_USABLE_METHOD",
+  });
+});
