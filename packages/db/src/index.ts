@@ -79070,6 +79070,7 @@ export {
   finalizePluginPackageInstall,
   getInstalledPluginPackage,
   getPluginPackageUninstallPreview,
+  PluginUninstallPreviewChangedError,
   installPluginMcpReference,
   listInstalledPluginPackages,
   PluginInstallationVersionConflictError,

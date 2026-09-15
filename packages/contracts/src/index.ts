@@ -12372,26 +12372,56 @@ export const ListInstalledPluginsResponse = z
   .strict();
 export type ListInstalledPluginsResponse = z.infer<typeof ListInstalledPluginsResponse>;
 
+export const PluginUninstallComponentImpact = z.object({
+  capabilityId: z.string().min(1),
+  kind: z.enum(["skill", "integration", "mcp"]),
+  retainedByOtherOwners: z.boolean(),
+  name: z.string().min(1),
+  disposition: z.enum(["removed", "retained", "inactive"]),
+  retentionReasons: z.array(
+    z.enum(["other_owners", "customized", "re_scoped", "registry_unavailable"]),
+  ),
+  remainingOwners: z.array(
+    z.object({
+      kind: z.enum(["direct", "plugin", "pack", "migration"]),
+      name: z.string().min(1),
+    }),
+  ),
+  skillId: z.string().uuid().optional(),
+});
+export type PluginUninstallComponentImpact = z.infer<typeof PluginUninstallComponentImpact>;
+
 export const PluginUninstallPreview = z
   .object({
     pluginKey: z.string().min(1),
     installed: z.boolean(),
     version: z.string().nullable(),
     installationVersion: z.number().int().positive().nullable(),
-    components: z.array(
-      z.object({
-        capabilityId: z.string().min(1),
-        kind: z.enum(["skill", "integration", "mcp"]),
-        retainedByOtherOwners: z.boolean(),
-      }),
-    ),
+    previewToken: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
+    components: z.array(PluginUninstallComponentImpact),
   })
   .strict();
 export type PluginUninstallPreview = z.infer<typeof PluginUninstallPreview>;
 
+export const PluginUninstallPreviewConflict = z
+  .object({
+    code: z.literal("plugin_uninstall_preview_changed"),
+    message: z.string().min(1),
+    preview: PluginUninstallPreview,
+  })
+  .strict();
+export type PluginUninstallPreviewConflict = z.infer<typeof PluginUninstallPreviewConflict>;
+
 export const UninstallPluginRequest = z
   .object({
     expectedInstallationVersion: z.number().int().positive(),
+    expectedPreviewToken: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
     idempotencyKey: z.string().uuid(),
   })
   .strict();
