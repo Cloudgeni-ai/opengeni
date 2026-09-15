@@ -312,7 +312,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
           description: "Choose which repositories this installation shares.",
           action: {
             label: "Change repositories",
-            onClick: () => window.location.assign(installation.configureUrl!),
+            onClick: () => window.open(installation.configureUrl!, "_blank", "noopener,noreferrer"),
           },
         }))
       : [];
@@ -402,7 +402,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
             ...(canManage && configureUrl && configurableInstallations.length === 1
               ? {
                   editLabel: "Change repositories",
-                  onEdit: () => window.location.assign(configureUrl),
+                  onEdit: () => window.open(configureUrl, "_blank", "noopener,noreferrer"),
                 }
               : {}),
           },

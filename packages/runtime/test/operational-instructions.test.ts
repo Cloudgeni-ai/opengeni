@@ -4,6 +4,21 @@ import { buildOpenGeniAgent, CODEMODE_PROGRAMMATIC_DIRECTIVE } from "../src/inde
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 
 describe("provider-neutral operational instructions", () => {
+  test("routes missing integrations through one provider-neutral human setup flow", () => {
+    const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("# Integration setup");
+    const end = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("# Session coordination", start);
+    const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(guidance).toContain("`capability_catalog_search`");
+    expect(guidance).toContain("`capability_authorization_request`");
+    expect(guidance).toContain("Use available integration tools directly");
+    expect(guidance).toContain("`setup.nextAction`");
+    expect(guidance).toContain("does not need integration-management permission");
+    expect(guidance).toContain("authenticated human must authorize");
+    expect(guidance).not.toMatch(/github|gmail|slack|atlassian/i);
+    expect(guidance.length).toBeLessThan(1000);
+  });
+
   test("separates command observation from conversation and diagnostic reads concisely", () => {
     const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
       "Use `session_events` for conversation history",
