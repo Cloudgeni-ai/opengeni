@@ -287,9 +287,13 @@ describe("additive repository picker", () => {
 
     let openRefreshes = 0;
     let explicitRefreshes = 0;
+    let toggles = 0;
     const bodyProps = {
       ...props,
       lockedPersonalGitHubRepoIds: new Set([personalRepository.repositoryId]),
+      onTogglePersonalGitHubRepo: () => {
+        toggles += 1;
+      },
       onOpenRefresh: async () => {
         openRefreshes += 1;
       },
@@ -306,7 +310,9 @@ describe("additive repository picker", () => {
     expect(body.container.textContent).toContain("Repositories");
     const mountedSwitch = body.container.querySelector<HTMLButtonElement>('button[role="switch"]');
     expect(mountedSwitch?.getAttribute("aria-checked")).toBe("true");
-    expect(mountedSwitch?.disabled).toBe(true);
+    expect(mountedSwitch?.getAttribute("aria-disabled")).toBe("true");
+    await actRun(() => mountedSwitch?.click());
+    expect(toggles).toBe(0);
     expect(body.container.textContent).toContain("Mounted");
     expect(body.container.querySelector('button[aria-label="Refresh repositories"]')).toBeNull();
     await body.rerender(
