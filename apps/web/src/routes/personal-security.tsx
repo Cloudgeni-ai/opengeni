@@ -124,6 +124,7 @@ export function SecurityController({
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [requiresAuth, setRequiresAuth] = useState(false);
+  const [identityChanged, setIdentityChanged] = useState(false);
   const [uncertain, setUncertain] = useState<PreparedSignInCommand | null>(null);
   const [revision, setRevision] = useState(0);
   const [committed, setCommitted] = useState(false);
@@ -216,7 +217,8 @@ export function SecurityController({
       const failure = signInMethodFailure(caught);
       if (failure.kind !== "unknown") {
         setUncertain(null);
-        if (failure.kind === "reauth") setRequiresAuth(true);
+        if (failure.kind === "reauth" || failure.kind === "identity_changed") setRequiresAuth(true);
+        if (failure.kind === "identity_changed") setIdentityChanged(true);
       } else {
         // Keep the exact body, UUID, revision and admission headers in memory
         // only. A transport failure is not proof the mutation failed.
@@ -239,6 +241,7 @@ export function SecurityController({
     try {
       const body: SignInCommand = {
         operationId: crypto.randomUUID(),
+        expectedIdentityId: inventory.identityId,
         expectedIdentityRevision: inventory.identityRevision,
         ...fields,
       };
@@ -346,7 +349,7 @@ export function SecurityController({
             ) : null}
             <Button
               variant="ghost"
-              disabled={busy}
+              disabled={busy || identityChanged}
               onClick={() => setRevision((value) => value + 1)}
             >
               Refresh sign-in methods

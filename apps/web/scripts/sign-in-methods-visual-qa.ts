@@ -119,6 +119,7 @@ try {
           email: "no-memberships@example.com",
           emailVerified: true,
           identityRevision: 1,
+          identityId: "00000000-0000-4000-8000-000000000003",
           freshAuthenticationRequired: false,
           methods: [
             {
