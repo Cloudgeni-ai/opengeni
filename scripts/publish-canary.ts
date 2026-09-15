@@ -36,6 +36,9 @@ export function nextCanaryVersion(
   if (lastCanary && lastCanary.startsWith(prefix)) {
     const n = Number(lastCanary.slice(prefix.length));
     if (Number.isSafeInteger(n) && n >= 0) {
+      if (minimumSequence > 0 && n >= minimumSequence) {
+        throw new Error("Canary workflow attempt is superseded; dispatch a new publication run");
+      }
       const next = Math.max(n + 1, minimumSequence);
       if (!Number.isSafeInteger(next)) throw new Error("Canary sequence exhausted");
       return `${prefix}${next}`;

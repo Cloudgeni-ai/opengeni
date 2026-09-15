@@ -11,7 +11,7 @@ describe("workflow canary sequence", () => {
     expect(later).toBeGreaterThan(retry);
     expect(nextCanaryVersion("1.0.0", "1.0.0-canary.3", first)).toBe("1.0.0-canary.1234001");
     expect(nextCanaryVersion("1.0.0", null, retry)).toBe("1.0.0-canary.1234002");
-    expect(nextCanaryVersion("1.0.0", "1.0.0-canary.1234005", first)).toBe("1.0.0-canary.1234006");
+    expect(() => nextCanaryVersion("1.0.0", "1.0.0-canary.1234005", first)).toThrow("superseded");
     expect(workflowCanarySequence()).toBe(0);
   });
 
@@ -28,6 +28,17 @@ describe("workflow canary sequence", () => {
     }
     expect(() => nextCanaryVersion("1.0.0", null, -1)).toThrow();
     expect(() => nextCanaryVersion("1.0.0", `1.0.0-canary.${Number.MAX_SAFE_INTEGER}`)).toThrow();
+  });
+
+  test("rejects older workflow retries instead of reusing a newer invisible reservation", () => {
+    for (const attempt of ["1", "2"]) {
+      expect(() =>
+        nextCanaryVersion("1.0.0", "1.0.0-canary.1235001", workflowCanarySequence("1234", attempt)),
+      ).toThrow("dispatch a new publication run");
+    }
+    expect(
+      nextCanaryVersion("1.0.0", "1.0.0-canary.1235001", workflowCanarySequence("1236", "1")),
+    ).toBe("1.0.0-canary.1236001");
   });
 
   test("keeps fixed groups aligned after an earlier partial publication", () => {

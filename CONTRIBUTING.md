@@ -88,8 +88,9 @@ Release and publishing guidance starts here; executable truth lives in [`package
 
 In GitHub Actions, `N` has a floor derived from the workflow run ID and attempt
 (`run ID * 1000 + attempt`), so retries do not reuse versions hidden by stale
-registry tags or staged publication. Visible higher versions still advance;
-fixed package groups remain aligned. A retry publishes a fresh set rather than
+registry tags or staged publication. A visible version at or above that floor
+rejects a superseded attempt: dispatch a new workflow instead of retrying the
+older one. Fixed package groups remain aligned. An admitted retry publishes a fresh set rather than
 overwriting or removing any partially published versions.
 
 Two publish-coherence rules learned the hard way (all versions are 0.x):
