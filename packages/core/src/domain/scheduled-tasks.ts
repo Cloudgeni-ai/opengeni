@@ -91,6 +91,7 @@ import {
   assertWorkspaceModelPolicyAllows,
   canonicalConfiguredModel,
   creationInitiatorForGrant,
+  settingsWithSessionMcpServerMetadata,
 } from "./sessions";
 import {
   hasReservedOpenGeniSlackBotSessionMetadata,
@@ -297,6 +298,13 @@ export async function createValidatedScheduledTask(input: {
         input.settings,
         { subjectId: input.grant.subjectId },
       );
+  // Existing-session runs use the target's persisted MCP configuration, with
+  // session definitions taking precedence over deployment servers of the same
+  // ID. Metadata selects the destination; captured grants still supply authority.
+  const hostRuntimeSettings =
+    runtimeSettings && target
+      ? settingsWithSessionMcpServerMetadata(runtimeSettings, target.mcpServers)
+      : runtimeSettings;
   const personalConnectionDelegations =
     knowledgeAction || !runtimeSettings
       ? []
@@ -370,20 +378,20 @@ export async function createValidatedScheduledTask(input: {
         variableSetId: input.payload.variableSetId ?? null,
         rigId: input.payload.rigId ?? null,
         metadata: input.payload.metadata,
-        ...(hostSelections?.length && runtimeSettings
+        ...(hostSelections?.length && hostRuntimeSettings
           ? {
               captureHostAuthority: prepareHostMcpTaskAdmission({
-                settings: runtimeSettings,
+                settings: hostRuntimeSettings,
                 tools: target?.tools ?? agentConfig.tools,
                 grant: input.grant,
                 ...(input.authorization ? { authorization: input.authorization } : {}),
                 selections: hostSelections,
               }),
             }
-          : hostSelections === undefined && creationInitiator.actor && runtimeSettings
+          : hostSelections === undefined && creationInitiator.actor && hostRuntimeSettings
             ? {
                 captureHostAuthority: prepareInheritedHostMcpTaskAdmission(
-                  runtimeSettings,
+                  hostRuntimeSettings,
                   target?.tools ?? agentConfig.tools,
                   creationInitiator.actor,
                 ),

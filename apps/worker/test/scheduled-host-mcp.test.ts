@@ -2,6 +2,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createNativeRemoteMcpCredentialsPort } from "@opengeni/core/remote-mcp-credentials";
+import { createValidatedScheduledTask } from "@opengeni/core";
+import { CreateScheduledTaskRequest } from "@opengeni/contracts";
 import {
   acquireOwnerMigratedTestDatabase,
   MemoryEventBus,
@@ -328,6 +330,103 @@ async function verifyScheduledHostSelection(selectionMode: "fixed" | "accepted_t
       attemptId,
       executionGeneration: claim.turn.executionGeneration,
     };
+    if (runMode === "existing_session") {
+      // Exercise the real admission path: the host binding exists only on the
+      // target session, not in deployment settings or the task's own tools.
+      const admission: Parameters<typeof createValidatedScheduledTask>[0] = {
+        settings: { ...settings, mcpServers: [] },
+        db: client.db,
+        objectStorage: undefined,
+        grant: {
+          accountId: owner.accountId,
+          workspaceId: owner.workspaceId,
+          subjectId: owner.subjectId,
+          permissions: [
+            "sessions:read",
+            "sessions:control",
+            "scheduled_tasks:manage",
+            "connections:read",
+          ],
+          metadata: { ...sourceActor },
+        },
+        toolsProvided: true,
+        payload: CreateScheduledTaskRequest.parse({
+          name: "Continue in the selected session",
+          schedule: { type: "manual" },
+          runMode: "existing_session",
+          targetSessionId: dispatched.sessionId,
+          agentConfig: { prompt: "Read the same product later", tools: [] },
+        }),
+      };
+      const inherited = await createValidatedScheduledTask(admission);
+      expect(inherited.agentConfig.tools).toEqual([]);
+      const captured = await getHostMcpTaskAuthorities(client.db, {
+        accountId: owner.accountId,
+        workspaceId: owner.workspaceId,
+        taskId: inherited.id,
+        taskAuthorityRevision: inherited.authorityRevision,
+      });
+      expect(captured).toHaveLength(1);
+      expect(captured[0]?.bindingId).toBe(binding.id);
+      expect(captured[0]?.delegationId).toBe(delegation.id);
+      expect(captured[0]?.ownerSubjectId).toBe(owner.subjectId);
+      // A same-ID deployment definition must not replace the target's binding.
+      const shadowed = await createValidatedScheduledTask({
+        ...admission,
+        settings: {
+          ...settings,
+          mcpServers: [{ ...mcpServer, url: "https://other.fixture.invalid/mcp" }],
+        },
+      });
+      expect(
+        await getHostMcpTaskAuthorities(client.db, {
+          accountId: owner.accountId,
+          workspaceId: owner.workspaceId,
+          taskId: shadowed.id,
+          taskAuthorityRevision: shadowed.authorityRevision,
+        }),
+      ).toHaveLength(1);
+
+      for (const descriptor of [
+        { ...mcpServer, url: "https://other.fixture.invalid/mcp" },
+        { ...mcpServer, connectionRef: undefined },
+      ]) {
+        const otherTarget = await createSession(client.db, {
+          ...owner,
+          createdBy: { kind: "subject", subjectId: owner.subjectId },
+          initialMessage: "",
+          resources: [],
+          tools,
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          mcpServers: [descriptor],
+        });
+        const create = () =>
+          createValidatedScheduledTask({
+            ...admission,
+            // Even an eligible deployment binding cannot confer authority on a
+            // session-local ordinary server with that same ID.
+            settings,
+            payload: { ...admission.payload, targetSessionId: otherTarget.id },
+          });
+        if (descriptor.connectionRef) {
+          await expect(create()).rejects.toThrow("Host task source destination changed");
+        } else {
+          const ordinary = await create();
+          expect(
+            await getHostMcpTaskAuthorities(client.db, {
+              accountId: owner.accountId,
+              workspaceId: owner.workspaceId,
+              taskId: ordinary.id,
+              taskAuthorityRevision: ordinary.authorityRevision,
+            }),
+          ).toHaveLength(0);
+        }
+      }
+    }
     const derivative = await createScheduledTask(client.db, {
       accountId: owner.accountId,
       workspaceId: workspace.id,
