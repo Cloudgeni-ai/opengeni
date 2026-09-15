@@ -250,6 +250,33 @@ test("the web catalog starts with OpenAI and clears installed badges after remov
   }
 });
 
+test("an imported plugin is installed in its details without permanently marking its discovery ID", async () => {
+  const { api, calls } = client();
+  const plugin = { ...installedPlugin, pluginKey: "custom/research" };
+  const props = { client: api, workspaceId: "imported", query: "", canManage: true };
+  const rendered = await render(<PluginDiscovery {...props} installedPlugins={[plugin]} />);
+  try {
+    await act(async () =>
+      rendered.container
+        .querySelector<HTMLButtonElement>(".og-connection-installed button")!
+        .click(),
+    );
+    expect(calls.getInstalledPluginDetails).toHaveBeenCalledWith("imported", plugin.pluginKey);
+    expect(button("Installed")?.disabled).toBe(true);
+    expect(button("Install plugin")).toBeUndefined();
+    expect(calls.installPlugin).not.toHaveBeenCalled();
+    // The selected installation must still exist in the authoritative list.
+    await rendered.rerender(<PluginDiscovery {...props} installedPlugins={[]} />);
+    expect(button("Install plugin")?.disabled).toBe(false);
+    await act(async () => button("Close")!.click());
+    const row = await openDiscovery(rendered.container);
+    expect(row.querySelector('[data-status="added"]')).toBeNull();
+    expect(button("Install plugin")?.disabled).toBe(false);
+  } finally {
+    await rendered.unmount();
+  }
+});
+
 test("installed attention state remains textual and management uses the exact installation", async () => {
   const { api } = client();
   const plugin = { ...installedPlugin, status: "needs_attention" as const };

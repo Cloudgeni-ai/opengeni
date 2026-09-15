@@ -237,7 +237,15 @@ export function PluginDiscovery({
                 key={selected.id}
                 item={selected}
                 busy={busy}
-                installed={installedIds.has(selected.id)}
+                installed={
+                  installedIds.has(selected.id) ||
+                  Boolean(
+                    selectedInstallation &&
+                    installedPlugins.some(
+                      (plugin) => plugin.pluginKey === selectedInstallation.pluginKey,
+                    ),
+                  )
+                }
                 connections={Object.fromEntries(
                   (selected.mcpServers ?? []).map((server) => [
                     server.endpoint ?? "",

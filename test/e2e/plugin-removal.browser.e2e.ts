@@ -41,6 +41,10 @@ test("plugin removal shows truthful impact, preserves focus, and rechecks stale 
         "unavailable",
         "empty",
         "refresh-error",
+        "delayed-refresh",
+        "skill-list-error",
+        "plugin-list-error",
+        "already-removed-refresh-error",
       ]) {
         const context = await browser.newContext({
           viewport: { width, height: scenario === "long" ? 600 : 900 },
@@ -145,7 +149,18 @@ test("plugin removal shows truthful impact, preserves focus, and rechecks stale 
           await dialog.getByRole("button", { name: "Remove plugin", exact: true }).click();
         }
         await dialog.waitFor({ state: "hidden" });
+        if (scenario === "delayed-refresh") {
+          // Hold both inventory requests until dialog teardown/focus restoration
+          // has completed. Confirmed deletion must already remove its opener.
+          expect(await trigger.count()).toBe(0);
+          await page.waitForFunction(() => document.activeElement?.tagName === "H1");
+          expect(await page.getByText("No plugins installed.").count()).toBe(0);
+          await page.evaluate(() =>
+            (window as unknown as { releaseRemovalRefresh: () => void }).releaseRemovalRefresh(),
+          );
+        }
         await page.getByText("No plugins installed.").waitFor();
+        expect(await trigger.count()).toBe(0);
         const requests = await page.evaluate(
           () =>
             (
@@ -160,9 +175,26 @@ test("plugin removal shows truthful impact, preserves focus, and rechecks stale 
         );
         if (scenario === "stale")
           expect(requests[0]!.idempotencyKey).not.toBe(requests[1]!.idempotencyKey);
-        if (scenario === "refresh-error")
+        if (
+          [
+            "refresh-error",
+            "skill-list-error",
+            "plugin-list-error",
+            "already-removed-refresh-error",
+          ].includes(scenario)
+        )
           await page.getByText("Removed, but the page couldn’t refresh").waitFor();
         else await page.locator("[data-refreshed]").waitFor();
+        if (scenario === "already-removed-refresh-error")
+          await page.getByText("This plugin is already removed").waitFor();
+        expect(await page.getByText("Couldn't remove this Plugin", { exact: true }).count()).toBe(
+          0,
+        );
+        expect(
+          await page
+            .getByText("Couldn’t refresh the removal details. Close this dialog and try again.")
+            .count(),
+        ).toBe(0);
         await page.waitForFunction(() => document.activeElement?.tagName === "H1");
         await context.close();
       }
