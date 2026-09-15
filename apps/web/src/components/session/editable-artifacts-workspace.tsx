@@ -117,7 +117,11 @@ export function SessionEditableArtifactsWorkspace({
         <div className="mb-4 flex min-h-10 items-center justify-between gap-2">
           <h2 className="text-sm font-medium">Session artifacts</h2>
           <Button asChild variant="ghost" size="sm">
-            <Link to="/workspaces/$workspaceId/artifacts" params={{ workspaceId }}>
+            <Link
+              to="/workspaces/$workspaceId/artifacts"
+              params={{ workspaceId }}
+              search={sessionId ? { fromSession: sessionId } : {}}
+            >
               All artifacts
             </Link>
           </Button>

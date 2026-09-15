@@ -22,7 +22,11 @@ export function ArtifactSessionPage({
       <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-b border-border p-2">
         {showAllArtifacts ? (
           <Button asChild variant="ghost" size="sm" className="mr-auto">
-            <Link to="/workspaces/$workspaceId/artifacts" params={{ workspaceId }}>
+            <Link
+              to="/workspaces/$workspaceId/artifacts"
+              params={{ workspaceId }}
+              search={fromSession ? { fromSession } : {}}
+            >
               <ArrowLeftIcon className="size-4" aria-hidden />
               All artifacts
             </Link>
