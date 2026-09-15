@@ -65,16 +65,26 @@ afterAll(async () => {
   await Promise.allSettled([browser?.close(), web?.stop()]);
 }, 30_000);
 
+function routerPath(href: string | null) {
+  if (!href) return href;
+  const hash = href.includes("#") ? href.slice(href.indexOf("#") + 1) : href;
+  return hash.startsWith("/") ? hash : href;
+}
+
+function fixtureUrl(path: string) {
+  return `${baseUrl}/test/session-artifact-navigation.html#${path}`;
+}
+
 async function assertLibraryReturn(page: import("playwright").Page, fromSession: boolean) {
   const all = page.getByRole("link", { name: "All artifacts", exact: true });
   await all.waitFor();
   expect(await all.count()).toBe(1);
-  expect(await all.getAttribute("href")).toBe(
+  expect(routerPath(await all.getAttribute("href"))).toBe(
     fromSession ? `${libraryPath}?fromSession=${sessionId}` : libraryPath,
   );
   const back = page.getByRole("link", { name: "Back to session", exact: true });
   expect(await back.count()).toBe(fromSession ? 1 : 0);
-  if (fromSession) expect(await back.getAttribute("href")).toBe(sessionPath);
+  if (fromSession) expect(routerPath(await back.getAttribute("href"))).toBe(sessionPath);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
     true,
   );
@@ -87,8 +97,7 @@ for (const width of [1440, 390]) {
       try {
         for (const fromSession of [false, true]) {
           const entry = `/workspaces/${workspaceId}/artifacts/editable/${nativeIds[modality]}${fromSession ? `?fromSession=${sessionId}` : ""}`;
-          const query = new URLSearchParams({ entry });
-          await page.goto(`${baseUrl}/test/session-artifact-navigation.html?${query}`);
+          await page.goto(fixtureUrl(entry));
           await page.getByRole("heading", { name: `Native ${modality} editor`, exact: true }).waitFor();
           for (const reload of [false, true]) {
             if (reload) await page.reload();
@@ -124,9 +133,7 @@ for (const width of [1440, 390]) {
     const page = await browser.newPage({ viewport: { width, height: 900 } });
     try {
       const entry = `/workspaces/${workspaceId}/artifacts/${siteId}?fromSession=${sessionId}`;
-      await page.goto(
-        `${baseUrl}/test/session-artifact-navigation.html?${new URLSearchParams({ entry })}`,
-      );
+      await page.goto(fixtureUrl(entry));
       await page.getByRole("heading", { name: "Project overview", exact: true }).waitFor();
       await assertLibraryReturn(page, true);
       await page.reload();
@@ -151,9 +158,7 @@ for (const width of [1440, 390]) {
     const page = await browser.newPage({ viewport: { width, height: 900 } });
     try {
       const entry = `/workspaces/${workspaceId}/artifacts/files/${fileId}?fromSession=${sessionId}`;
-      await page.goto(
-        `${baseUrl}/test/session-artifact-navigation.html?${new URLSearchParams({ entry })}`,
-      );
+      await page.goto(fixtureUrl(entry));
       await page.getByRole("heading", { name: "Retained file", exact: true }).waitFor();
       await assertLibraryReturn(page, true);
       await page.getByRole("link", { name: "All artifacts", exact: true }).click();

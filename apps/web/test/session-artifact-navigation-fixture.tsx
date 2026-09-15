@@ -4,7 +4,7 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
-  createMemoryHistory,
+  createHashHistory,
   RouterProvider,
   Outlet,
   Link,
@@ -33,6 +33,10 @@ const nativeTitles: Record<string, string> = {
 };
 const sessionPath = `/workspaces/${workspaceId}/sessions/${sessionId}`;
 const fixtureSearch = new URLSearchParams(location.search);
+if (!location.hash) {
+  const entry = fixtureSearch.get("entry") ?? sessionPath;
+  history.replaceState(null, "", `${location.pathname}#${entry}`);
+}
 let opened = false;
 let openedId = siteId;
 function Preview() {
@@ -174,7 +178,7 @@ const native = createRoute({
       <ArtifactSessionPage workspaceId={workspaceId} fromSession={fromSession} showAllArtifacts>
         <div className="min-h-0 flex-1 p-4">
           <h1>{nativeTitles[artifactId] ?? "Native unknown editor"}</h1>
-          <p>{fixtureSearch.get("state") ?? "Ready"}</p>
+          <p>Ready</p>
         </div>
       </ArtifactSessionPage>
     );
@@ -210,6 +214,31 @@ const library = createRoute({
 });
 const router = createRouter({
   routeTree: root.addChildren([session, artifact, native, retained, library]),
-  history: createMemoryHistory({ initialEntries: [fixtureSearch.get("entry") ?? sessionPath] }),
+  history: createHashHistory(),
+});
+document.addEventListener("click", (event) => {
+  if (
+    event.defaultPrevented ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey
+  )
+    return;
+  const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
+  if (!link || link.hasAttribute("download")) return;
+  const href = link.getAttribute("href") ?? "";
+  if (!href || href.startsWith("#") || href.startsWith("mailto:") || href.startsWith("javascript:"))
+    return;
+  let url: URL;
+  try {
+    url = new URL(href, location.origin);
+  } catch {
+    return;
+  }
+  if (url.origin !== location.origin || !url.pathname.startsWith("/workspaces/")) return;
+  event.preventDefault();
+  router.history.push(`${url.pathname}${url.search}`);
 });
 createRoot(document.getElementById("root")!).render(<RouterProvider router={router} />);
