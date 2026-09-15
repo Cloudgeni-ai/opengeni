@@ -57,6 +57,7 @@ import {
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
+import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Toaster } from "@/components/ui/sonner";
@@ -2928,6 +2929,7 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
+      <SignInCallbackNotice userId={authSession?.user.id ?? null} />
       {clientConfig ? (
         <Suspense fallback={null}>
           <AnalyticsManager

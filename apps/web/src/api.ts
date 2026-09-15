@@ -934,7 +934,10 @@ export async function signInEmail(input: {
 }
 
 export async function startManagedSocialSignIn(provider: "google" | "github"): Promise<void> {
-  const callbackURL = new URL("/", window.location.origin).toString();
+  const callbackURL = new URL(
+    window.location.pathname === "/settings/security" ? "/settings/security" : "/",
+    window.location.origin,
+  ).toString();
   const response = await authRequest<{ url?: unknown }>("/sign-in/social", {
     method: "POST",
     body: JSON.stringify({

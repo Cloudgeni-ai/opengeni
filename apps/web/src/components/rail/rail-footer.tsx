@@ -13,6 +13,7 @@ import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 
 import { WorkspaceNav } from "@/components/rail/workspace-nav";
+import { Link } from "@tanstack/react-router";
 import { AppearanceMenu } from "@/components/appearance-menu";
 import {
   accountMenuAriaLabel,
@@ -164,6 +165,14 @@ export function RailFooter() {
                   <OrganizationInvitationsMenuItem controller={organizationInvitations} />
                 ) : null}
                 <AppearanceMenu />
+                {managed ? (
+                  <DropdownMenuItem asChild className="min-h-11">
+                    <Link to="/settings/security">
+                      <LockIcon className="size-4" />
+                      Personal settings
+                    </Link>
+                  </DropdownMenuItem>
+                ) : null}
                 {showAnalyticsPreferences ? (
                   <DropdownMenuItem onSelect={() => openAnalyticsPreferences()}>
                     <ChartColumnIcon className="size-4" />
