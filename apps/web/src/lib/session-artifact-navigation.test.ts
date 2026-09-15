@@ -97,7 +97,7 @@ describe("session artifact navigation", () => {
       [workspace],
       undefined,
     ]) {
-      expect(artifactReturnSearch({ fromSession })).toEqual({});
+      expect(artifactReturnSearch({ fromSession })).toEqual({ fromSession: undefined });
     }
   });
 });
