@@ -1,24 +1,32 @@
 import { useVariableSets } from "@opengeni/react";
 import type { Session } from "@opengeni/sdk";
-import { BoxIcon, ChevronDownIcon, Loader2Icon } from "lucide-react";
+import { ArrowLeftIcon, BoxIcon, ChevronDownIcon, Loader2Icon } from "lucide-react";
 import {
   type ReactNode,
   type Dispatch,
   type SetStateAction,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { toast } from "sonner";
 
-import { SelectedVariableSetList } from "@/components/session/selected-variable-set-list";
+import { VariableSetShortlistEditor } from "@/components/session/variable-set-shortlist-editor";
+import { COMPOSER_MENU_PANEL_CLASS } from "@/components/ui/composer-menu";
+import {
+  readVariableSetShortlist,
+  reconcileVariableSetShortlist,
+  variableSetRuntimeIds,
+  variableSetShortlistKey,
+  writeVariableSetShortlist,
+} from "@/lib/variable-set-shortlist";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 import { cn } from "@/lib/utils";
 import { sessionHasVariableSetBlockingWork } from "@/lib/session-variable-set-editability";
@@ -81,7 +89,27 @@ export function SessionVariableSetPicker(props: {
     setLocalOpen(next);
     if (!next) props.onClose?.();
   };
-  const [draftIds, setDraftIds] = useState(currentIds);
+  const preferenceKey = variableSetShortlistKey(
+    context.accessContext?.subjectId ?? "",
+    props.session.workspaceId,
+    props.session.id,
+  );
+  const activeScope = useRef({ key: preferenceKey, generation: 0 });
+  if (activeScope.current.key !== preferenceKey) {
+    activeScope.current = { key: preferenceKey, generation: activeScope.current.generation + 1 };
+  }
+  const scope = activeScope.current;
+  const previousPreferenceKey = useRef(preferenceKey);
+  useEffect(() => {
+    if (previousPreferenceKey.current === preferenceKey) return;
+    previousPreferenceKey.current = preferenceKey;
+    setSharedState({ saving: false, committedSelection: null });
+  }, [preferenceKey, setSharedState]);
+  const loadRows = () =>
+    reconcileVariableSetShortlist(currentIds, readVariableSetShortlist(preferenceKey));
+  const [savedRows, setSavedRows] = useState(loadRows);
+  const [draftRows, setDraftRows] = useState(loadRows);
+  const draftIds = variableSetRuntimeIds(draftRows);
   const [error, setError] = useState<string | null>(null);
   const { committedSelection, saving } = props.sharedState;
   const refreshRequired = committedSelection?.sessionId === props.session.id;
@@ -93,20 +121,24 @@ export function SessionVariableSetPicker(props: {
     ) {
       return;
     }
-    setDraftIds(currentIds);
+    const rows = reconcileVariableSetShortlist(
+      currentKey ? currentKey.split("\u0000") : [],
+      readVariableSetShortlist(preferenceKey),
+    );
+    setSavedRows(rows);
+    setDraftRows(rows);
     setError(null);
-  }, [committedSelection, currentIds, currentKey, props.session.id]);
+  }, [committedSelection, currentKey, preferenceKey, props.session.id]);
 
-  const selectedChanged = draftIds.join("\u0000") !== currentKey;
-  const availableVariableSets = variableSets.variableSets.filter(
-    (variableSet) => !draftIds.includes(variableSet.id),
-  );
+  const selectedChanged = JSON.stringify(draftRows) !== JSON.stringify(savedRows);
+  const runtimeChanged = draftIds.join("\u0000") !== currentKey;
   const selectedPersonal = variableSets.variableSets.filter(
     (variableSet) => variableSet.scope === "user" && draftIds.includes(variableSet.id),
   );
   const workPending = props.busy || sessionHasVariableSetBlockingWork(props.session);
   const busy = workPending || props.goalActive || props.voiceActive;
-  const canEdit = props.canControl && props.canAttach && !refreshRequired && !busy;
+  const canEdit =
+    props.canControl && props.canAttach && !props.disabled && !refreshRequired && !busy;
   const canAdd = canEdit && props.canUse && props.canList;
   const visible =
     refreshRequired ||
@@ -115,14 +147,30 @@ export function SessionVariableSetPicker(props: {
   if (!visible && !props.embedded) return null;
 
   const save = async () => {
-    if (saving || busy || !canEdit || !selectedChanged || (draftIds.length > 0 && !props.canUse))
+    if (
+      saving ||
+      busy ||
+      !canEdit ||
+      !selectedChanged ||
+      draftIds.length > 25 ||
+      (draftIds.length > 0 && !props.canUse)
+    )
       return;
     setSharedState((current) => ({ ...current, saving: true }));
     setError(null);
     try {
+      if (!runtimeChanged) {
+        writeVariableSetShortlist(preferenceKey, draftRows);
+        setSavedRows(draftRows);
+        setOpen(false);
+        return;
+      }
       await context.client.updateSessionVariableSets(props.session.workspaceId, props.session.id, {
         variableSetIds: draftIds,
       });
+      writeVariableSetShortlist(preferenceKey, draftRows);
+      if (activeScope.current !== scope) return;
+      setSavedRows(draftRows);
       const nextCommittedKey = draftIds.join("\u0000");
       setSharedState((current) => ({
         ...current,
@@ -131,6 +179,7 @@ export function SessionVariableSetPicker(props: {
       try {
         await props.onReloadSession();
       } catch (cause) {
+        if (activeScope.current !== scope) return;
         const message = cause instanceof Error ? cause.message : String(cause);
         const refreshMessage = `The Variable Sets were updated, but the session could not be refreshed: ${message}`;
         setError(refreshMessage);
@@ -138,16 +187,19 @@ export function SessionVariableSetPicker(props: {
         toast.warning("Variable Sets updated; refresh required", { description: message });
         return;
       }
+      if (activeScope.current !== scope) return;
       setOpen(false);
       toast.success("Variable Sets updated", {
         description: "The selection will apply to the next message in a fresh sandbox.",
       });
     } catch (cause) {
+      if (activeScope.current !== scope) return;
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(message);
       toast.error("Variable Sets were not updated", { description: message });
     } finally {
-      setSharedState((current) => ({ ...current, saving: false }));
+      if (activeScope.current === scope)
+        setSharedState((current) => ({ ...current, saving: false }));
     }
   };
 
@@ -155,79 +207,49 @@ export function SessionVariableSetPicker(props: {
     setSharedState((current) => ({ ...current, saving: true }));
     try {
       await props.onReloadSession();
+      if (activeScope.current !== scope) return;
       setOpen(false);
       toast.success("Session refreshed");
     } catch (cause) {
+      if (activeScope.current !== scope) return;
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(
         `The Variable Sets were updated, but the session could not be refreshed: ${message}`,
       );
       toast.warning("Session refresh failed", { description: message });
     } finally {
-      setSharedState((current) => ({ ...current, saving: false }));
+      if (activeScope.current === scope)
+        setSharedState((current) => ({ ...current, saving: false }));
     }
   };
 
   const content = (
     <>
-      {props.leading ? (
-        <div className="flex items-center gap-2">
-          {props.leading}
-          <span className="text-sm font-medium">Variable sets</span>
-        </div>
-      ) : null}
-      <div>
-        {!props.embedded ? <div className="text-sm font-medium text-fg">Variable Sets</div> : null}
-        <p className="mt-0.5 text-2xs leading-4 text-fg-subtle">
-          Attach, remove, or reorder encrypted environment values while the session is idle.
-        </p>
-      </div>
-
-      {draftIds.length > 0 ? (
-        <SelectedVariableSetList
-          selectedIds={draftIds}
-          variableSets={variableSets.variableSets}
-          disabled={saving || !canEdit || !props.canUse}
-          onChange={setDraftIds}
-        />
-      ) : (
-        <p className="rounded-md border border-dashed border-border px-2.5 py-3 text-center text-xs text-fg-subtle">
-          No Variable Sets attached.
-        </p>
-      )}
-
-      {canAdd && availableVariableSets.length > 0 && draftIds.length < 25 ? (
-        <Select
-          value=""
-          disabled={saving}
-          onChange={(event) => {
-            const variableSetId = event.target.value;
-            if (!variableSetId) return;
-            setDraftIds((current) => [...current, variableSetId]);
-          }}
-          className="h-8 w-full text-xs"
-        >
-          <option value="">Attach Variable Set…</option>
-          {availableVariableSets
-            .filter((variableSet) => variableSet.scope !== "user")
-            .map((variableSet) => (
-              <option key={variableSet.id} value={variableSet.id}>
-                {variableSet.name} ({variableSet.variables.length} vars)
-              </option>
-            ))}
-          {availableVariableSets.some((variableSet) => variableSet.scope === "user") ? (
-            <optgroup label="Only me">
-              {availableVariableSets
-                .filter((variableSet) => variableSet.scope === "user")
-                .map((variableSet) => (
-                  <option key={variableSet.id} value={variableSet.id}>
-                    {variableSet.name} ({variableSet.variables.length} vars)
-                  </option>
-                ))}
-            </optgroup>
-          ) : null}
-        </Select>
-      ) : null}
+      <VariableSetShortlistEditor
+        key={preferenceKey}
+        rows={draftRows}
+        variableSets={variableSets.variableSets}
+        loading={variableSets.loading}
+        leading={
+          props.leading ?? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Back"
+              onClick={() => {
+                setDraftRows(savedRows);
+                setOpen(false);
+              }}
+            >
+              <ArrowLeftIcon />
+            </Button>
+          )
+        }
+        disabled={saving || !canEdit || !props.canUse}
+        canAdd={canAdd}
+        onChange={setDraftRows}
+      />
 
       {canEdit && !props.canUse && draftIds.length > 0 ? (
         <div className="flex items-center justify-between gap-3 text-xs text-fg-subtle">
@@ -239,7 +261,7 @@ export function SessionVariableSetPicker(props: {
             size="sm"
             variant="secondary"
             disabled={saving}
-            onClick={() => setDraftIds([])}
+            onClick={() => setDraftRows((rows) => rows.map((row) => ({ ...row, enabled: false })))}
           >
             Remove all
           </Button>
@@ -316,8 +338,20 @@ export function SessionVariableSetPicker(props: {
           type="button"
           size="sm"
           variant="ghost"
+          disabled={saving || !selectedChanged}
+          onClick={() => setDraftRows(savedRows)}
+        >
+          Undo
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
           disabled={saving}
-          onClick={() => setOpen(false)}
+          onClick={() => {
+            setDraftRows(savedRows);
+            setOpen(false);
+          }}
         >
           Cancel
         </Button>
@@ -336,7 +370,7 @@ export function SessionVariableSetPicker(props: {
     </>
   );
   if (props.embedded)
-    return <div className="flex min-h-0 flex-col gap-3 overflow-y-auto p-1">{content}</div>;
+    return <div className="flex min-h-0 flex-col gap-2 overflow-y-auto">{content}</div>;
 
   return (
     <DropdownMenu
@@ -345,7 +379,9 @@ export function SessionVariableSetPicker(props: {
         setOpen(next);
         if (next) {
           if (!refreshRequired) {
-            setDraftIds(currentIds);
+            const rows = loadRows();
+            setSavedRows(rows);
+            setDraftRows(rows);
             setError(null);
           }
         }
@@ -380,7 +416,7 @@ export function SessionVariableSetPicker(props: {
         side="top"
         sideOffset={8}
         collisionPadding={12}
-        className="flex w-[min(24rem,calc(100vw-1.5rem))] flex-col gap-3 rounded-xl border-border bg-surface p-3 shadow-xl"
+        className={cn(COMPOSER_MENU_PANEL_CLASS, "gap-2")}
       >
         {content}
       </DropdownMenuContent>
