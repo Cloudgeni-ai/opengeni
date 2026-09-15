@@ -22,6 +22,7 @@ import {
   interruptionKindForCallItem,
   releaseMcpResultCustomDataFromSdkEvent,
   findCompactionNeededError,
+  compactionProviderRejection,
   withRunCredentialsSession,
   runOwnedSandboxSetup,
   type SandboxFileDownload,
@@ -96,6 +97,7 @@ import {
   compactionFailureReason,
   safeErrorDiagnostic,
   compactionFailureReasonFromError,
+  compactionFailureTurnEventPayload,
   isCompactionSummaryFailure,
   PostCompactionContinuationEmptyError,
   shouldRecoverCompactionProviderFailure,
@@ -1822,6 +1824,7 @@ export async function runTurnStreamAttempt(
         let compacted = false;
         let compactionHandled = false;
         let compactionFailureMessage: string | null = null;
+        let compactionFailureError: unknown = null;
         let compactionRequestCleared = false;
         try {
           const outcome = await forceContextCompaction(
@@ -1856,6 +1859,7 @@ export async function runTurnStreamAttempt(
             {
               clearRequestedCompaction: recoveryKind === "operator",
               publishLiveEvents: publishCompactionLiveEvents,
+              providerRejection: compactionProviderRejection(compactError),
             },
           );
           compactionRequestCleared = landmark.requestConsumed;
@@ -1863,6 +1867,7 @@ export async function runTurnStreamAttempt(
           await finishParallelSessionTitle();
           const deferredSteer = await settleDeferredSteerAfterCompaction();
           if (deferredSteer) return deferredSteer;
+          compactionFailureError = compactError;
           compactionFailureMessage = String(compactionFailureReasonFromError(compactError));
           observability.warn("context compaction recovery compaction failed", {
             sessionId: input.sessionId,
@@ -1880,13 +1885,9 @@ export async function runTurnStreamAttempt(
               events: [
                 {
                   type: "turn.failed",
-                  payload: {
+                  payload: compactionFailureTurnEventPayload(compactionFailureError, {
                     error: errorMessage,
-                    code: "context_compaction_failed",
-                    retryable: false,
-                    recovery: "user_message",
-                    compacted: false,
-                  },
+                  }),
                 },
                 {
                   type: "session.status.changed",

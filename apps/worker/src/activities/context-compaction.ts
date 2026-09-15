@@ -21,6 +21,7 @@ import {
   sanitizeHistoryItemsForModel,
   summarizeForCompaction,
   type CompactionItem,
+  type CompactionProviderRejection,
 } from "@opengeni/runtime";
 import { contextInputBudgetTokens, type Settings } from "@opengeni/config";
 import type { SessionEvent } from "@opengeni/contracts";
@@ -260,6 +261,12 @@ export async function settleFailedContextCompactionLandmark(
   options: {
     clearRequestedCompaction?: boolean;
     publishLiveEvents?: (events: SessionEvent[]) => Promise<void>;
+    /**
+     * Closed identifier record of a definitive provider rejection. Carried on
+     * the visible `compaction.skipped` landmark so the timeline can name the
+     * rejected field instead of offering a retry that cannot succeed.
+     */
+    providerRejection?: CompactionProviderRejection | null;
   } = {},
 ): Promise<Extract<MaybeCompactResult, { compacted: false }>> {
   const settled = await settleSkippedAfterStart(db, scope, options, "summarization_failed");
@@ -287,6 +294,7 @@ async function settleSkippedAfterStart(
   },
   options: {
     clearRequestedCompaction?: boolean;
+    providerRejection?: CompactionProviderRejection | null;
   },
   reason:
     | "no_history"
@@ -304,6 +312,7 @@ async function settleSkippedAfterStart(
     // an operator `/compact` flag — auto/overflow never set one.
     requirePendingRequest: false,
     clearRequestedCompaction,
+    ...(options.providerRejection ? { providerRejection: options.providerRejection } : {}),
   });
   if (!skipped.recorded) {
     throw new TurnAttemptFencedError(
