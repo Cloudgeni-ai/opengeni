@@ -11,6 +11,7 @@ import "../src/styles.css";
 import "@opengeni/react/connect.css";
 
 const state = new URLSearchParams(location.search).get("state") ?? "preview";
+if (state === "github-account") localStorage.removeItem("github-connect-fixture-complete");
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const target = {
   instanceKey: "finance-calendar",
@@ -65,8 +66,28 @@ const transport: ConnectTransport = {
       throw new Error("Presentation state leaked into API request");
     return attempt;
   },
-  get: async () => attempt,
+  get: async () => {
+    if (
+      state === "github-account" &&
+      localStorage.getItem("github-connect-fixture-complete") === "yes"
+    ) {
+      attempt = { ...attempt, state: "complete", revision: 4, nextAction: { type: "none" } };
+    }
+    return attempt;
+  },
   advance: async (_workspace, _id, input) => {
+    if (state === "github-account" && input.action.type === "account") {
+      attempt = {
+        ...attempt,
+        revision: attempt.revision + 1,
+        state: "requires_user_action",
+        nextAction: {
+          type: "authorize",
+          url: "https://github.com/login/oauth/authorize?client_id=fixture",
+        },
+      };
+      return attempt;
+    }
     if (
       input.action.type !== "install" ||
       input.action.operationIds.length !== 1 ||
@@ -107,6 +128,32 @@ if (state === "credentials")
             value: `fixture-${index}`,
             label: `Finance service account ${index + 1}`,
           })),
+        },
+      ],
+    },
+  };
+if (state === "github-account")
+  attempt = {
+    ...attempt,
+    providerId: "github-app",
+    state: "account_selection",
+    completionRequirement: "connection",
+    nextAction: {
+      type: "select_account",
+      accounts: [
+        {
+          id: "42",
+          providerId: "github-app",
+          label: "Example organization",
+          ownership: "workspace",
+          status: "connected",
+        },
+        {
+          id: "new",
+          providerId: "github-app",
+          label: "Install on another account",
+          ownership: "workspace",
+          status: "connected",
         },
       ],
     },
@@ -175,6 +222,7 @@ function Fixture() {
             returnUrl: location.href,
             idempotencyKey: "fixture-operation",
             installationTarget: target,
+            ...(state === "github-account" ? { displayName: "GitHub" } : {}),
           }}
           onClose={() => setClosed(true)}
           onComplete={() => setClosed(true)}
