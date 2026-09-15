@@ -72,7 +72,7 @@ async function fill(id: string, value: string) {
   await act(async () => {
     const input = document.getElementById(id) as HTMLInputElement;
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
-    const key = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
+    const key = Object.keys(input).find((property) => property.startsWith("__reactProps$"))!;
     (
       input as unknown as Record<
         string,
