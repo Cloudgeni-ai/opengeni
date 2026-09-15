@@ -2,6 +2,7 @@ import { ChevronDownIcon, GitBranchIcon } from "lucide-react";
 import { lazy, Suspense, type ReactNode } from "react";
 
 import type { RepositoryContextPickerProps } from "@/components/repository-picker";
+import { REPOSITORY_PANEL_CLASS } from "@/components/repository-picker-layout";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -73,7 +74,7 @@ export function FollowUpRepositoryPicker(props: FollowUpRepositoryPickerProps) {
         align="start"
         side="top"
         sideOffset={8}
-        className="flex w-[min(560px,calc(100vw-2rem))] max-h-[min(70vh,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-0 shadow-2xl"
+        className={REPOSITORY_PANEL_CLASS}
       >
         <FollowUpRepositoryMenuBody {...props} />
       </DropdownMenuContent>
