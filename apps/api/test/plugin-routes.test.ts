@@ -452,11 +452,13 @@ describe("Plugin routes", () => {
     const finalSkill = finalPreview.components.find(
       (item: { kind: string }) => item.kind === "skill",
     );
+    // Keep the database input independent of subsequent receipt assertions.
+    const finalSkillId = finalSkill.skillId;
+    expect(typeof finalSkillId).toBe("string");
     expect(finalSkill).toMatchObject({
       disposition: "removed",
       retentionReasons: [],
       remainingOwners: [],
-      skillId: expect.any(String),
     });
     const uninstallB = await request("/plugins/example%2Fplugin-b", {
       method: "DELETE",
@@ -469,7 +471,7 @@ describe("Plugin routes", () => {
     expect(uninstallB.status).toBe(200);
     expect((await uninstallB.json()).skillReleases).toEqual([
       expect.objectContaining({
-        skillId: finalSkill.skillId,
+        skillId: finalSkillId,
         disposition: "deactivated",
         eventId: expect.any(String),
       }),
@@ -478,7 +480,7 @@ describe("Plugin routes", () => {
       await listSkillRecords(
         client.db,
         { accountId, workspaceId, subjectId },
-        { skillId: finalSkill.skillId },
+        { skillId: finalSkillId },
       ),
     ).toEqual([expect.objectContaining({ status: "inactive", activeRevisionId: null })]);
     expect(await listInstalledPortableSkills(client.db, workspaceId)).toHaveLength(0);
