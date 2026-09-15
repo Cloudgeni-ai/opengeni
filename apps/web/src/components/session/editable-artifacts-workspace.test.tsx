@@ -466,7 +466,9 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       createdAt: "2026-09-15T00:00:00Z",
       updatedAt: "2026-09-15T00:00:00Z",
     };
-    const { container, root } = mount();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
     const route = createRootRoute({
       component: () => (
         <SessionEditableArtifactsWorkspace

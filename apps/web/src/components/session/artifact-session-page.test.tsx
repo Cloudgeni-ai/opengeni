@@ -96,17 +96,26 @@ test("full-page close returns to the originating session without relying on brow
       link.click();
     });
     expect(router.state.location.pathname).toBe(`/workspaces/${workspaceId}/sessions/${sessionId}`);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+
+  const standalone = document.createElement("div");
+  document.body.append(standalone);
+  const standaloneRoot = createRoot(standalone);
+  try {
     await act(async () => {
-      root.render(
+      standaloneRoot.render(
         <ArtifactSessionPage workspaceId={workspaceId}>
           <div>Standalone Site</div>
         </ArtifactSessionPage>,
       );
     });
-    expect(container.querySelector("a")).toBeNull();
-    expect(container.textContent).toBe("Standalone Site");
+    expect(standalone.querySelector("a")).toBeNull();
+    expect(standalone.textContent).toBe("Standalone Site");
   } finally {
-    await act(async () => root.unmount());
-    container.remove();
+    await act(async () => standaloneRoot.unmount());
+    standalone.remove();
   }
 });

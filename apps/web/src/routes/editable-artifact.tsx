@@ -15,6 +15,7 @@ import {
 import artifactWorkerUrl from "@opengeni/sdk/editable-artifacts/worker?worker&url";
 import { useEffect, useState } from "react";
 
+import { apiBaseUrl, authHeadersForAccessKey, getStoredAccessKey } from "@/api";
 import { artifactRouteErrorMessage, mapArtifactRouteError } from "@/lib/artifact-route-error";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
