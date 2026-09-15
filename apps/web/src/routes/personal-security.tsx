@@ -6,7 +6,7 @@ import { SignInMethodsView, providerLabel } from "@/components/sign-in-methods";
 import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
-import { useAppContext } from "@/context";
+import { usePersonalSecurityContext } from "@/lib/personal-security-context";
 import {
   clearSignInChangeFeedback,
   readSignInChangeFeedback,
@@ -24,8 +24,8 @@ import {
 import { signInMethodFailure } from "@/lib/sign-in-method-failure";
 
 export function PersonalSecurityRoute() {
-  const context = useAppContext();
-  if (context.clientConfig.auth.mode !== "managedSession" || !context.authSession) {
+  const context = usePersonalSecurityContext();
+  if (!context || context.clientConfig.auth.mode !== "managedSession") {
     return (
       <ProblemPanel
         title="Sign-in methods unavailable"
@@ -33,7 +33,7 @@ export function PersonalSecurityRoute() {
       />
     );
   }
-  const mode = context.clientConfig.managedAuthSessionSetMode ?? "legacy";
+  const mode = context.clientConfig.managedAuthSessionSetMode ?? "dual";
   return mode === "legacy" ? (
     <LegacySecurity key={`${context.authSession.user.id}:${context.accessKeyVersion}`} />
   ) : (
@@ -42,7 +42,7 @@ export function PersonalSecurityRoute() {
 }
 
 function LegacySecurity() {
-  const context = useAppContext();
+  const context = usePersonalSecurityContext()!;
   const [reauthError, setReauthError] = useState<string | null>(null);
   return (
     <SecurityController
@@ -67,7 +67,7 @@ function LegacySecurity() {
   );
 }
 function BrokerSecurity() {
-  const context = useAppContext();
+  const context = usePersonalSecurityContext()!;
   const accounts = useBrowserAccounts();
   const popup = useBrowserAccountPopup();
   const [reauthError, setReauthError] = useState<string | null>(null);
@@ -307,7 +307,8 @@ export function SecurityController({
               }))}
             hasPassword={password?.connected ?? false}
             passwordAvailable={password?.available ?? false}
-            busy={busy || uncertain !== null}
+            busy={busy}
+            mutationLocked={uncertain !== null}
             recentAuthRequired={requiresAuth}
             error={reauthError ?? error}
             success={success}
