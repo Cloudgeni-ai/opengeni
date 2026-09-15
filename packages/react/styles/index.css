@@ -17,6 +17,51 @@
 @import "./tokens.css";
 @import "./effective-tokens.css";
 
+/* Full-surface preview preparation. Private palette preserves the accepted
+   ripple study; the steady label uses the host's typography and text tokens. */
+.og-preview-loading {
+  --_og-preview-ink: #bca3ef;
+  --_og-preview-glow: #8f6ccc;
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #17161d;
+  container: og-preview / inline-size;
+}
+.og-root:is([data-og-theme="light"], .og-light) .og-preview-loading,
+:is([data-og-theme="light"], .og-light) .og-root .og-preview-loading,
+.og-root :is([data-og-theme="light"], .og-light) .og-preview-loading {
+  --_og-preview-ink: #76629c;
+  --_og-preview-glow: #ba8ee0;
+  background: #faf9fd;
+}
+.og-preview-loading canvas {
+  display: block;
+  width: 100%;
+  height: 320px;
+  /* Non-canvas / pre-effect fallback, removed only after a successful paint. */
+  background-image: radial-gradient(circle, color-mix(in srgb, var(--_og-preview-ink) 30%, transparent) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+.og-preview-loading canvas[data-painted="true"] { background-image: none; }
+.og-preview-loading-label {
+  position: absolute;
+  left: 16px;
+  bottom: 14px;
+  color: var(--og-color-fg-muted);
+  font-family: var(--og-font-sans);
+  font-size: var(--og-font-size-xs);
+  line-height: var(--og-line-height-xs);
+  font-weight: 400;
+}
+@container og-preview (max-width: 500px) {
+  .og-preview-loading canvas { height: 260px; }
+}
+@media (max-width: 500px) {
+  .og-preview-loading canvas { height: 260px; }
+}
+
 /* Standalone embeds do not necessarily load Tailwind Preflight. Keep the
    control reset inside SDK roots, before utilities, without resetting the host.
    :where keeps controls at the same specificity as component utilities. */

@@ -26,6 +26,7 @@ import { tableElementToTsv } from "../lib/clipboard";
 import { prefersReducedMotion } from "../lib/motion";
 import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { CopyButton } from "./copy-button";
+import { PreviewLoading } from "./preview-loading";
 import type { observeMarkdownTableLayout } from "./markdown-table-layout";
 import { softenStreamingMarkdown } from "./soften-streaming-markdown";
 import { createStreamReveal, rehypeStreamReveal, type StreamReveal } from "./stream-reveal";
@@ -434,13 +435,17 @@ function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"
     if (!complete) {
       return (
         <div role="status" aria-live="polite" aria-busy={streaming === true} className="my-3">
-          <ActivityDisclosure
-            icon={<PanelsTopLeftIcon aria-hidden className="size-3.5" />}
-            title={streaming ? "Preparing preview…" : "Preview incomplete"}
-            running={streaming === true}
-            expandable={false}
-            preview={streaming ? undefined : "Generation stopped before the preview was ready."}
-          />
+          {streaming ? (
+            <PreviewLoading />
+          ) : (
+            <ActivityDisclosure
+              icon={<PanelsTopLeftIcon aria-hidden className="size-3.5" />}
+              title="Preview incomplete"
+              running={false}
+              expandable={false}
+              preview="Generation stopped before the preview was ready."
+            />
+          )}
         </div>
       );
     }
