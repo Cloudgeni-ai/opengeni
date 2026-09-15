@@ -29,6 +29,7 @@ export function RetainedArtifactRoute({
         key={`${workspaceId}:${artifactId}`}
         workspaceId={workspaceId}
         artifactId={artifactId}
+        fromSession={fromSession}
       />
     </LightboxProvider>
   );
@@ -44,9 +45,11 @@ export function RetainedArtifactRoute({
 function RetainedArtifactDetail({
   workspaceId,
   artifactId,
+  fromSession,
 }: {
   workspaceId: string;
   artifactId: string;
+  fromSession?: string;
 }) {
   const { client, accessKeyVersion } = useAppContext();
   const key = `${workspaceId}:${artifactId}:${accessKeyVersion}`;
@@ -120,6 +123,7 @@ function RetainedArtifactDetail({
       <Link
         to="/workspaces/$workspaceId/artifacts"
         params={{ workspaceId }}
+        search={fromSession ? { fromSession } : {}}
         className="mb-5 flex min-h-10 items-center gap-2 text-sm text-fg-muted hover:text-fg"
       >
         <ArrowLeftIcon className="size-4" />

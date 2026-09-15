@@ -1,9 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import {
-  artifactRouteErrorMessage,
-  mapArtifactRouteError,
-} from "./artifact-route-error";
+import { artifactRouteErrorMessage, mapArtifactRouteError } from "./artifact-route-error";
 
 describe("artifact route load errors", () => {
   for (const kind of ["site", "editable"] as const) {

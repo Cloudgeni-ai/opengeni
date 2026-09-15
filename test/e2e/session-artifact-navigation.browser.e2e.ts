@@ -98,7 +98,9 @@ for (const width of [1440, 390]) {
         for (const fromSession of [false, true]) {
           const entry = `/workspaces/${workspaceId}/artifacts/editable/${nativeIds[modality]}${fromSession ? `?fromSession=${sessionId}` : ""}`;
           await page.goto(fixtureUrl(entry));
-          await page.getByRole("heading", { name: `Native ${modality} editor`, exact: true }).waitFor();
+          await page
+            .getByRole("heading", { name: `Native ${modality} editor`, exact: true })
+            .waitFor();
           for (const reload of [false, true]) {
             if (reload) await page.reload();
             await assertLibraryReturn(page, fromSession);
@@ -126,7 +128,7 @@ for (const width of [1440, 390]) {
       } finally {
         await page.close();
       }
-    }, 60_000);
+    }, 30_000);
   }
 
   test(`Site full-page navigation at ${width}px preserves fromSession across reload`, async () => {
@@ -201,7 +203,7 @@ test("desktop chat link opens the dock and full-page close returns to chat", asy
   } finally {
     await page.close();
   }
-}, 60_000);
+}, 30_000);
 
 test("unknown editable modality is not intercepted and opens the full-page editor", async () => {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -228,7 +230,9 @@ for (const modality of ["document", "spreadsheet", "presentation"] as const) {
       await page.getByRole("link", { name: `Open Alpha ${modality}`, exact: true }).click();
       await page.getByRole("heading", { name: `Native ${modality} editor`, exact: true }).waitFor();
       expect(
-        await page.getByRole("tab", { name: "Artifacts", exact: true }).getAttribute("aria-selected"),
+        await page
+          .getByRole("tab", { name: "Artifacts", exact: true })
+          .getAttribute("aria-selected"),
       ).toBe("true");
       await page.getByRole("heading", { name: "Build a project overview" }).waitFor();
     } finally {

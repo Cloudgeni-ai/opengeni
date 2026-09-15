@@ -155,6 +155,22 @@ test("missing Site hides Archive and Edit with Geni", async () => {
   }
 });
 
+test("read-only Site hides mutation actions but keeps its preview", async () => {
+  loadError = null;
+  const permissions = accessContext.workspaceGrants[0]!.permissions;
+  accessContext.workspaceGrants[0]!.permissions = [];
+  const { container, root } = await renderDetail();
+  try {
+    expect(hasAction(container, "Archive")).toBe(false);
+    expect(hasAction(container, "Edit with Geni")).toBe(false);
+    expect(container.querySelector('[data-testid="site-sandbox"]')).not.toBeNull();
+  } finally {
+    accessContext.workspaceGrants[0]!.permissions = permissions;
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("malformed Site id hides mutation actions", async () => {
   loadError = new OpenGeniApiError(422, "", { correlationId: "corr-malformed-site" });
   const { container, root } = await renderDetail();

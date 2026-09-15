@@ -497,7 +497,8 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
         root.render(<RouterProvider router={router} />);
       });
       const href =
-        [...container.querySelectorAll("a")].find((link) => link.textContent === "All artifacts")
+        [...container.querySelectorAll("a")]
+          .find((link) => link.textContent === "All artifacts")
           ?.getAttribute("href") ?? "";
       expect(href).toBe(`/workspaces/${workspaceId}/artifacts?fromSession=${sessionId}`);
     } finally {

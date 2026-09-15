@@ -208,7 +208,7 @@ export function ArtifactDetailRoute({
     });
   }, [artifactId, context.client, requestedTools, siteVersionId, workspaceId]);
   const startEditSession = async () => {
-    if (!detail || detail.artifact.status === "archived") return;
+    if (!canPublish || !detail || detail.artifact.status === "archived") return;
     const artifact = detail.artifact;
     const created = await context.startSession(workspaceId, {
       text: `Help me edit the Site “${artifact.title}”: /workspaces/${workspaceId}/artifacts/${artifact.id}`,
@@ -337,35 +337,38 @@ export function ArtifactDetailRoute({
                 siteId={artifactId}
                 title={detail.artifact.title}
               />
-              {archived ? (
+              {canPublish &&
+                (archived ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void setSiteStatus("active")}
+                    disabled={!canPublish || statusBusy}
+                  >
+                    <ArchiveRestoreIcon className="mr-2 size-4" />
+                    {statusBusy ? "Restoring…" : "Restore Site"}
+                  </Button>
+                ) : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setArchiveDialogOpen(true)}
+                    disabled={!canPublish || statusBusy}
+                  >
+                    <ArchiveIcon className="mr-2 size-4" />
+                    Archive
+                  </Button>
+                ))}
+              {canPublish ? (
                 <Button
-                  variant="outline"
                   size="sm"
-                  onClick={() => void setSiteStatus("active")}
-                  disabled={!canPublish || statusBusy}
+                  onClick={() => void startEditSession()}
+                  disabled={context.busy || archived}
                 >
-                  <ArchiveRestoreIcon className="mr-2 size-4" />
-                  {statusBusy ? "Restoring…" : "Restore Site"}
+                  <SparklesIcon className="mr-2 size-4" />
+                  Edit with Geni
                 </Button>
-              ) : (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setArchiveDialogOpen(true)}
-                  disabled={!canPublish || statusBusy}
-                >
-                  <ArchiveIcon className="mr-2 size-4" />
-                  Archive
-                </Button>
-              )}
-              <Button
-                size="sm"
-                onClick={() => void startEditSession()}
-                disabled={context.busy || archived}
-              >
-                <SparklesIcon className="mr-2 size-4" />
-                Edit with Geni
-              </Button>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -396,7 +399,7 @@ export function ArtifactDetailRoute({
                 : undefined
             }
             editDisabled={context.busy || archived}
-            onEdit={() => void startEditSession()}
+            onEdit={canPublish ? () => void startEditSession() : undefined}
             toolBridge={archived ? undefined : siteToolBridge}
             connectedToolCount={content.requestedTools.length}
           />
