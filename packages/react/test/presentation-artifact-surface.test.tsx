@@ -492,6 +492,109 @@ describe("presentation artifact surface", () => {
     await rendered.unmount();
   });
 
+  test("mobile slide selector picks a non-adjacent titled slide and reports selected state", async () => {
+    const presentation = makePresentation(5, 1);
+    presentation.slides.items[3]!.title = "Quarterly recap";
+    const rendered = await renderComponent(<PresentationEditor presentation={presentation} />);
+    await flush();
+
+    const trigger = rendered.container.querySelector(
+      "[data-og-mobile-slide-selector]",
+    ) as HTMLButtonElement;
+    expect(trigger).toBeTruthy();
+    expect(trigger.className).toContain("sm:hidden");
+    expect(trigger.getAttribute("aria-haspopup")).toBe("listbox");
+    expect(trigger.getAttribute("aria-label")).toBe("Choose slide");
+    expect(trigger.textContent).toContain("1 / 5");
+    expect(rendered.container.querySelector("[data-og-mobile-slide-list]")).toBeNull();
+    expect(rendered.container.querySelectorAll('[role="listbox"]')).toHaveLength(1);
+
+    const rail = rendered.container.querySelector("[data-og-slide-rail]") as HTMLDivElement;
+    expect(rail.className).toMatch(/\bhidden\b/);
+    expect(rail.className).toContain("sm:block");
+
+    await actRun(() => trigger.click());
+    await flush();
+
+    const mobileList = rendered.container.querySelector(
+      "[data-og-mobile-slide-list]",
+    ) as HTMLDivElement;
+    expect(mobileList).toBeTruthy();
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    const titled = rendered.container.querySelector(
+      '[data-og-mobile-slide-index="3"]',
+    ) as HTMLButtonElement;
+    expect(titled.getAttribute("aria-label")).toBe("Slide 4: Quarterly recap");
+    expect(titled.className).toContain("min-h-11");
+    expect(titled.getAttribute("aria-selected")).toBe("false");
+
+    await actRun(() => titled.click());
+    await flush();
+
+    expect(rendered.container.querySelector("[data-og-mobile-slide-list]")).toBeNull();
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(trigger.textContent).toContain("4 / 5");
+    expect(
+      rendered.container
+        .querySelector('[data-og-slide-index="3"]')
+        ?.getAttribute("aria-selected"),
+    ).toBe("true");
+
+    await rendered.unmount();
+  });
+
+  test("open mobile slide selector keeps a bounded DOM for hundreds of slides", async () => {
+    const presentation = makePresentation(200, 1);
+    const rendered = await renderComponent(<PresentationEditor presentation={presentation} />);
+    await flush();
+
+    const trigger = rendered.container.querySelector(
+      "[data-og-mobile-slide-selector]",
+    ) as HTMLButtonElement;
+    await actRun(() => trigger.click());
+    await flush();
+
+    const mobileOptions = rendered.container.querySelectorAll("[data-og-mobile-slide-index]");
+    expect(mobileOptions.length).toBeGreaterThan(0);
+    expect(mobileOptions.length).toBeLessThan(20);
+    expect(rendered.container.querySelectorAll("[data-og-slide-index]").length).toBeLessThan(20);
+
+    const list = rendered.container.querySelector("[data-og-mobile-slide-list]") as HTMLDivElement;
+    list.scrollTop = 6_000;
+    await actRun(() => list.dispatchEvent(new Event("scroll", { bubbles: true })));
+    await flush();
+    const indexes = [
+      ...rendered.container.querySelectorAll<HTMLElement>("[data-og-mobile-slide-index]"),
+    ].map((element) => Number(element.dataset.ogMobileSlideIndex));
+    expect(Math.min(...indexes)).toBeGreaterThan(100);
+    expect(indexes.length).toBeLessThan(20);
+
+    await rendered.unmount();
+  });
+
+  test("closed mobile selector leaves desktop rail virtualization and End keyboard selection intact", async () => {
+    const presentation = makePresentation(8, 1);
+    const rendered = await renderComponent(<PresentationEditor presentation={presentation} />);
+    await flush();
+
+    expect(rendered.container.querySelector("[data-og-mobile-slide-list]")).toBeNull();
+    expect(rendered.container.querySelectorAll('[role="listbox"]')).toHaveLength(1);
+
+    const rail = rendered.container.querySelector("[data-og-slide-rail]") as HTMLDivElement;
+    await actRun(() =>
+      rail.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true })),
+    );
+    await flush();
+    expect(rendered.container.textContent).toContain("8 / 8");
+    expect(
+      rendered.container
+        .querySelector('[data-og-slide-index="7"]')
+        ?.getAttribute("aria-selected"),
+    ).toBe("true");
+
+    await rendered.unmount();
+  });
+
   test("canonical element order includes tables and groups in selection and hit testing", async () => {
     const presentation = Presentation.create({ slideSize: { width: 1280, height: 720 } });
     const slide = presentation.slides.add();
