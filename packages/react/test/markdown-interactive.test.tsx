@@ -24,8 +24,9 @@ test("streaming soft-closers never execute incomplete HTML", () => {
   expect(output).not.toContain("data-embed");
   expect(output).toContain("Preparing preview");
   expect(output).toContain('aria-busy="true"');
-  expect(output).toContain("og-command-reel-running");
-  expect(output).toContain("group/disclosure");
+  expect(output).toContain("og-preview-loading");
+  expect(output).toContain('<canvas aria-hidden="true"');
+  expect(output).not.toContain("group/disclosure");
   expect(output).not.toContain('role="button"');
   expect(output).not.toContain("animate-spin");
   expect(output).not.toContain("min-h-32");
@@ -48,7 +49,8 @@ test("replayed partial previews stay hidden and interrupted previews stop loadin
         expect(output).not.toContain("data-embed");
         expect(output).toContain(streaming ? "Preparing preview" : "Preview incomplete");
         expect(output).toContain(`aria-busy="${streaming}"`);
-        expect(output.includes("og-command-reel-running")).toBe(streaming);
+        expect(output.includes("og-preview-loading")).toBe(streaming);
+        expect(output).not.toContain("og-command-reel-running");
         if (!streaming) {
           expect(output).toContain("Generation stopped before the preview was ready.");
         }
@@ -60,6 +62,7 @@ test("replayed partial previews stay hidden and interrupted previews stop loadin
       );
       expect(completed).toContain(`data-embed="${kind}"`);
       expect(completed).not.toContain("Preparing preview");
+      expect(completed).not.toContain("og-preview-loading");
     }
   }
 });
