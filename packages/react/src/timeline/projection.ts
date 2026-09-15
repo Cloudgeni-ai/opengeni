@@ -945,6 +945,7 @@ export function buildTimeline(
           estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
           estimatedTokensAfter: null,
           skipReason: null,
+          providerRejection: null,
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -962,6 +963,7 @@ export function buildTimeline(
           estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
           estimatedTokensAfter: numberOrNull(payload.estimatedTokensAfter),
           skipReason: null,
+          providerRejection: null,
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -979,6 +981,7 @@ export function buildTimeline(
           estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
           estimatedTokensAfter: null,
           skipReason: typeof payload.reason === "string" ? payload.reason : null,
+          providerRejection: compactionProviderRejection(payload),
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -2124,6 +2127,29 @@ function assistantMessagePhase(value: unknown): AgentMessageItem["phase"] {
 
 function numberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Read the closed provider-rejection record a `summarization_failed` skip
+ * carries. Only bounded identifiers are accepted; a provider message is never
+ * part of the payload and would be ignored here anyway.
+ */
+function compactionProviderRejection(
+  payload: Record<string, unknown>,
+): ContextCompactionItem["providerRejection"] {
+  const record = asRecord(payload.providerRejection);
+  if (typeof record.httpStatus !== "number" || !Number.isFinite(record.httpStatus)) {
+    return null;
+  }
+  const text = (value: unknown): string | null =>
+    typeof value === "string" && value.trim() ? value : null;
+  return {
+    httpStatus: record.httpStatus,
+    type: text(record.type),
+    code: text(record.code),
+    param: text(record.param),
+    requestId: text(record.requestId),
+  };
 }
 
 function compactionTrigger(payload: Record<string, unknown>): ContextCompactionItem["trigger"] {

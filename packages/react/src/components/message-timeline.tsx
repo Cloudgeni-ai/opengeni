@@ -4,6 +4,7 @@ import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
 import { parseSandboxFileArtifactReceipt } from "@opengeni/sdk";
 import { unwrapMcpOutput } from "../timeline/parsers";
+import { compactionSkipSubtitle } from "../timeline/compaction-copy";
 import { isRetainedImageContentType } from "../timeline/retained-image";
 import { mcpToolLeaf } from "../timeline/tool-display-name";
 import type {
@@ -3260,7 +3261,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
     item.phase === "compacted"
       ? "Chat history above is unchanged"
       : item.phase === "skipped"
-        ? compactionSkipSubtitle(item.skipReason)
+        ? compactionSkipSubtitle(item.skipReason, item.providerRejection)
         : null;
   const pill =
     item.phase === "skipped" && item.skipReason === "summarization_failed"
@@ -3288,21 +3289,6 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
       </div>
     </div>
   );
-}
-
-function compactionSkipSubtitle(reason: string | null): string {
-  switch (reason) {
-    case "no_history":
-      return "No active history to compact";
-    case "replacement_not_smaller":
-      return "Checkpoint would not reduce memory size";
-    case "replacement_unchanged":
-      return "Checkpoint made no progress";
-    case "summarization_failed":
-      return "Request it again to retry. Chat history is unchanged.";
-    default:
-      return "Compaction was not needed. Chat history is unchanged.";
-  }
 }
 
 /** Hover-reveal clock beside the copy control (sent / finished). */

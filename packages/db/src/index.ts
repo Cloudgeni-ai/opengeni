@@ -41600,6 +41600,18 @@ export async function recordSkippedContextCompaction(
     requirePendingRequest?: boolean;
     /** When false, leave `compactRequested` untouched. Defaults to true. */
     clearRequestedCompaction?: boolean;
+    /**
+     * Closed, content-free identifiers of a definitive provider rejection
+     * (`summarization_failed` only): HTTP status, error type/code, rejected
+     * parameter path, provider request id. Never a provider message.
+     */
+    providerRejection?: {
+      httpStatus: number;
+      type: string | null;
+      code: string | null;
+      param: string | null;
+      requestId: string | null;
+    };
   },
 ): Promise<
   | { recorded: true; events: SessionEvent[] }
@@ -41643,7 +41655,12 @@ export async function recordSkippedContextCompaction(
                 turnAssociation: "current",
                 sequence: fence.session.lastSequence + 1,
                 type: "session.context.compaction.skipped",
-                payload: { reason: input.reason },
+                payload: {
+                  reason: input.reason,
+                  ...(input.providerRejection && input.reason === "summarization_failed"
+                    ? { providerRejection: input.providerRejection }
+                    : {}),
+                },
                 occurredAt: new Date(),
               },
               "payload",
