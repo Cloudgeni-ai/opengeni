@@ -23,6 +23,7 @@ export type SignInMethodsViewProps = {
   hasPassword: boolean;
   passwordAvailable: boolean;
   busy: boolean;
+  mutationLocked?: boolean;
   recentAuthRequired: boolean;
   error: string | null;
   success: string | null;
@@ -46,7 +47,7 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
   const [validation, setValidation] = useState<string | null>(null);
   const disconnectTrigger = useRef<HTMLButtonElement | null>(null);
   const headingRef = useRef<HTMLHeadingElement | null>(null);
-  const locked = props.busy || props.recentAuthRequired;
+  const locked = props.busy || props.recentAuthRequired || props.mutationLocked;
 
   async function savePassword() {
     setValidation(null);

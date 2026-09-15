@@ -170,3 +170,24 @@ test("switching actors discards a late mutation result and its feedback", async 
   expect(host.textContent).not.toContain("Sign-in methods updated");
   expect(sessionStorage.getItem("opengeni:sign-in-change-feedback")).toBeNull();
 });
+
+test("uncertainty locks new changes but not reauthentication after freshness expires", async () => {
+  let freshRequired = false;
+  await mount(
+    async () => {
+      throw new Error("offline");
+    },
+    async () => ({ ...inventory, freshAuthenticationRequired: freshRequired }),
+  );
+  await click("Reconnect GitHub");
+  freshRequired = true;
+  await click("Refresh sign-in methods");
+  const reauth = [...host.querySelectorAll("button")].find(
+    (button) => button.textContent === "Sign in again",
+  )!;
+  expect(reauth.disabled).toBe(false);
+  expect(
+    (host.querySelector('[aria-label="Reconnect GitHub"]') as HTMLButtonElement).disabled,
+  ).toBe(true);
+  expect(host.textContent).toContain("Retry same request");
+});
