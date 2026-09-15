@@ -113,6 +113,7 @@ export function SecurityController({
 }) {
   const api = useMemo(
     () => suppliedApi ?? createSignInMethodsApi(mode),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- actor changes invalidate the API's captured epoch even though userId is not a constructor argument
     [mode, suppliedApi, userId],
   );
   const live = useRef(false);
