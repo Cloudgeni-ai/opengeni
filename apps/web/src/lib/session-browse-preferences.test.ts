@@ -25,7 +25,7 @@ describe("session browse preferences", () => {
     writeSessionBrowsePreferences(id, view, storage);
     expect(readSessionBrowsePreferences(id, storage)).toEqual(view);
     expect(readSessionBrowsePreferences(other, storage)).toEqual({
-      groupBy: "activity",
+      groupBy: "project",
       sortBy: "updatedAt",
       status: "active",
       showEmptyGroups: false,
@@ -50,7 +50,7 @@ describe("session browse preferences", () => {
     const storage = memoryStorage();
     const id = sessionBrowsePreferenceStorageId("user:one");
 
-    expect(readSessionBrowseGroupBy(id, storage)).toBe("activity");
+    expect(readSessionBrowseGroupBy(id, storage)).toBe("project");
     writeSessionBrowseGroupBy(id, "creator", storage);
     expect(readSessionBrowseGroupBy(id, storage)).toBe("creator");
     writeSessionBrowseGroupBy(id, "created", storage);
@@ -72,8 +72,39 @@ describe("session browse preferences", () => {
       },
     };
 
-    expect(readSessionBrowseGroupBy(id, stale)).toBe("activity");
-    expect(readSessionBrowseGroupBy(id, blocked)).toBe("activity");
+    expect(readSessionBrowseGroupBy(id, stale)).toBe("project");
+    expect(readSessionBrowseGroupBy(id, blocked)).toBe("project");
+    expect(readSessionBrowseGroupBy(id, null)).toBe("project");
+    expect(readSessionBrowsePreferences(id, blocked).groupBy).toBe("project");
+    expect(readSessionBrowsePreferences(id, null).groupBy).toBe("project");
     expect(() => writeSessionBrowseGroupBy(id, "creator", blocked)).not.toThrow();
+  });
+  test("preserves saved groupings in complete and legacy preferences", () => {
+    const storage = memoryStorage();
+    const id = sessionBrowsePreferenceStorageId("user:one", "workspace:one");
+    for (const groupBy of ["activity", "created", "creator", "project", "none"] as const) {
+      writeSessionBrowseGroupBy(id, groupBy, storage);
+      expect(readSessionBrowseGroupBy(id, storage)).toBe(groupBy);
+      expect(readSessionBrowsePreferences(id, storage).groupBy).toBe(groupBy);
+    }
+    for (const groupBy of ["activity", "created", "creator", "project", "none"] as const) {
+      const view = {
+        groupBy,
+        sortBy: "updatedAt",
+        status: "active",
+        showEmptyGroups: false,
+      } as const;
+      writeSessionBrowsePreferences(id, view, storage);
+      expect(readSessionBrowsePreferences(id, storage)).toEqual(view);
+    }
+  });
+
+  test("defaults to project for malformed or incomplete saved views", () => {
+    const storage = memoryStorage();
+    const id = sessionBrowsePreferenceStorageId("user:one");
+    for (const value of ["{", "{}", '{"groupBy":"removed-grouping"}']) {
+      storage.setItem(`${id}:view`, value);
+      expect(readSessionBrowsePreferences(id, storage).groupBy).toBe("project");
+    }
   });
 });
