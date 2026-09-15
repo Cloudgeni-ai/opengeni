@@ -55,10 +55,15 @@ function keepsStableSandboxToolchainBeforeArtifactRuntime(dockerfile: string): b
   const stableToolchain = [
     "releases.hashicorp.com/terraform/${TERRAFORM_VERSION}",
     'pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"',
-    "https://aka.ms/InstallAzureCLIDeb",
     "https://cli.github.com/packages/githubcli-archive-keyring.gpg",
     "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}",
   ];
+
+  // Only the headless image installs Azure CLI. Preserve its cache-ordering
+  // check without requiring Azure tooling in the stock desktop image.
+  if (dockerfile.includes("https://aka.ms/InstallAzureCLIDeb")) {
+    stableToolchain.push("https://aka.ms/InstallAzureCLIDeb");
+  }
 
   return (
     runtimeCopy >= 0 &&
@@ -445,18 +450,35 @@ describe("release image workflow contract", () => {
     expect(keepsStableSandboxToolchainBeforeArtifactRuntime(previousOrdering)).toBe(false);
   });
 
-  test("retries the Azure CLI bootstrap in both sandbox images", async () => {
-    for (const path of ["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"]) {
-      const dockerfile = await readFile(resolve(root, path), "utf8");
-      expect(dockerfile).toContain(
-        "curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://aka.ms/InstallAzureCLIDeb",
-      );
-      expect(dockerfile).toContain("ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6");
-      expect(dockerfile).toContain(
-        'az extension add --name azure-devops --version "$AZURE_DEVOPS_EXTENSION_VERSION"',
-      );
-      expect(dockerfile).not.toContain("az extension add --name azure-devops; \\");
+  test("retries the Azure CLI bootstrap in the headless sandbox image", async () => {
+    const dockerfile = await readFile(resolve(root, "docker/sandbox.Dockerfile"), "utf8");
+    expect(dockerfile).toContain(
+      "curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://aka.ms/InstallAzureCLIDeb",
+    );
+    expect(dockerfile).toContain("ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6");
+    expect(dockerfile).toContain(
+      'az extension add --name azure-devops --version "$AZURE_DEVOPS_EXTENSION_VERSION"',
+    );
+    expect(dockerfile).not.toContain("az extension add --name azure-devops; \\");
+  });
+
+  test("desktop excludes Azure tooling while retaining browser and document tools", async () => {
+    const dockerfile = await readFile(resolve(root, "docker/desktop.Dockerfile"), "utf8");
+    for (const marker of [
+      "InstallAzureCLIDeb",
+      "azure-cli",
+      "azure-devops",
+      "AZURE_DEVOPS_EXTENSION_VERSION",
+      "AZURE_EXTENSION_DIR",
+      "/opt/az",
+    ]) {
+      expect(dockerfile).not.toContain(marker);
     }
+    expect(dockerfile).toContain("xdotool scrot ffmpeg");
+    expect(dockerfile).toContain("COPY --from=anydoc-runtime-builder /out /opt/opengeni/anydoc");
+    expect(dockerfile).toContain('test "$(anydoc --version)" = 0.1.8');
+    expect(dockerfile).toContain("COPY --from=browserd-build /out/agent-browser");
+    expect(dockerfile).toContain("ARG OPENGENI_BROWSER_BIN_AMD64=/opt/google/chrome/google-chrome");
   });
 
   test("builds Checkov outside the serial sandbox toolchain", async () => {
