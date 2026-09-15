@@ -153,6 +153,70 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       await Promise.all([mcp.close(), server.close()]);
     }
   }, 60_000);
+  test("Slack notifications discovery identifies personal authority without enabling bot tools", async () => {
+    if (!shared) throw new Error("Real PostgreSQL fixture required");
+    await upsertCapabilityCatalogItem(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      id: "mcp:slack-choice-test",
+      kind: "mcp",
+      source: "manual",
+      name: "Slack",
+      endpointUrl: "https://mcp.slack.com/mcp",
+      authModel: "oauth2",
+      tags: ["Slack", "notifications"],
+    });
+    const attempt = await seedAttempt();
+    const server = buildOpenGeniMcpServer(
+      { settings: testSettings(), db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        metadata: {
+          ...attempt,
+          firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+        },
+      },
+    );
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "slack-choice-test", version: "1" });
+    await server.connect(st);
+    await mcp.connect(ct);
+    try {
+      const result = await mcp.callTool({
+        name: "capability_catalog_search",
+        arguments: { query: "Slack notifications" },
+      });
+      expect(result.isError).not.toBe(true);
+      const body = mcpJson(result) as { matches: Array<{ capabilityId: string; usage?: unknown }> };
+      expect(
+        body.matches.find((item) => item.capabilityId === "mcp:slack-choice-test"),
+      ).toMatchObject({
+        usage: {
+          identity: "personal_user",
+          alternative: {
+            identity: "workspace_bot",
+            availability: "not_verified",
+            discoveryTools: ["slack_bot_list_channels", "slack_bot_search"],
+          },
+        },
+      });
+      expect((await mcp.listTools()).tools.some((tool) => tool.name.startsWith("slack_bot_"))).toBe(
+        false,
+      );
+      expect(
+        (await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)).some(
+          (event) => event.type === "tool.auth_needed",
+        ),
+      ).toBe(false);
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
+    }
+  }, 60_000);
+
   test("enabled personal Gmail requires consent unless this exact attempt exposes its tools", async () => {
     if (!shared) throw new Error("Real PostgreSQL fixture required");
     const capabilityId = "mcp:gmail-consent-test";

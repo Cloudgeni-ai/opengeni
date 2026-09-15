@@ -11,6 +11,24 @@ The two authorities are never substituted for one another. Nothing reads or post
 
 **There is deliberately no workspace-owned hosted Slack MCP connection.** An earlier release let one designated human's hosted-MCP grant be stored with `subjectId = null` and shared as workspace authority. That existed only because Slack's message search accepted user tokens alone, and it made every shared agent and scheduled task act as a named employee. Slack's Real-time Search API (`assistant.search.context`) accepts **bot** tokens carrying `search:read.public`, `search:read.files`, and `search:read.users`, so workspace-wide public search belongs to the bot identity. The bot manifest requests those scopes, and the first-party `slack_bot_search` tool calls `assistant.search.context` under the bot identity with `channel_types` pinned to `public_channel` server-side; an install predating the search scopes fails the tool closed with a reinstall hint instead of proxying through a human. Private-channel, DM, and MPIM search remain user-token only and therefore remain personal. Do not reinstate a workspace proxy identity. For the hosted Slack MCP resource (`https://mcp.slack.com/mcp`), a workspace-owned `oauth2` connection is rejected by OAuth start, by the callback fence (including state minted by an older deployment), by reconnect, and by capability enablement (`validateMcpCapabilityConnectionRef` treats it as personal-only exactly like Gmail); an omitted `ownership` on that resource defaults to personal. A workspace-scoped Slack MCP capability installation enabled by an earlier release is no longer runnable: `listEnabledMcpCapabilityServers` omits it, so no shared human token executes at runtime. Reconnect Slack personally to restore that member's tools. This rule is scoped to the hosted MCP resource; the separate API Integrations provider-OAuth surface for Slack's REST API is a different authority and is unaffected.
 
+## Agent selection guidance
+
+Shared channel notifications and scheduled workspace tasks should use the bot.
+Personal DMs, personal search, and explicit messages as the initiating person use
+personal hosted MCP. Capability discovery labels the hosted MCP's personal
+identity and names the bot alternative without claiming that the bot is available.
+The bundled `opengeni-help` skill explains this choice and the schedule boundary.
+
+Agents must inspect their current `slack_bot_*` tools and target-channel access.
+Missing bot tools can reflect the session's tool selection or permissions; it is
+not evidence that the bot is uninstalled. Scheduled sessions inherit their creator
+session's effective tool selection. Generic `slack_bot_post_message` is deliberately
+unavailable: verify a supported server-owned delivery path for the requested
+schedule, and report unsupported delivery if none exists. Tool selection alone
+cannot enable posting. A personal OAuth prompt does not repair
+missing bot tools, and interactive personal consent is not an unattended grant.
+Personal authority must never transfer to another workspace member's message.
+
 ## Provider identity and deployment prerequisites
 
 Slack renders the message author from the OAuth principal and renders `Sent using @…` from Slack app/provider metadata. An existing internal app may be reused for hosted MCP and may retain its current name. The first-party workspace-bot flow is stricter: if that surface is used, an authorized Slack app administrator must configure the same app as follows rather than adding generated text or changing message payloads:
