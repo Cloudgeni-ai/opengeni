@@ -283,6 +283,11 @@ causal-human field is retained even when the initiating actor is the scheduler.
 Fixed and accepted-turn server descriptors use the same exact configuration
 comparison for agent-created tasks. Scheduled, child and goal execution resolve
 only their own inherited snapshots, never reselect an owner's current account.
+For an existing-session task, admission uses the target session's persisted MCP
+metadata over same-ID deployment defaults, matching execution configuration.
+That metadata is only a destination constraint: the exact accepted attempt and
+live owner delegation must still authorize inheritance. A session-local ordinary
+server cannot acquire host authority from a same-ID deployment binding.
 
 ### Request-time gateway
 
