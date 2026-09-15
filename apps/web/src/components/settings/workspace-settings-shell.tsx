@@ -9,6 +9,7 @@ export {
   type WorkspaceManagementLocation,
 } from "@/lib/workspace-management-location";
 import { Link, useNavigate } from "@tanstack/react-router";
+import { PageHeader } from "@/components/ui/page-header";
 import {
   BarChart3Icon,
   BotIcon,
@@ -314,10 +315,7 @@ export function WorkspaceSettingsContent({
   const copy = SECTION_COPY[section];
   return (
     <ContentPage width="standard">
-      <header className="border-b border-border pb-5">
-        <h1 className="text-2xl font-semibold tracking-tight">{copy.title}</h1>
-        <p className="mt-1.5 text-sm text-fg-muted">{copy.description}</p>
-      </header>
+      <PageHeader title={copy.title} description={copy.description} />
       <div className="py-6">{children}</div>
     </ContentPage>
   );

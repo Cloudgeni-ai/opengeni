@@ -1,4 +1,4 @@
-import { Loader2Icon, MicIcon } from "lucide-react";
+import { MicIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { type AppContextValue, useAppContext } from "@/context";
@@ -7,8 +7,8 @@ import {
   type WorkspaceVoiceInputSettings,
   resolveWorkspaceVoiceInputEnabled,
 } from "@opengeni/sdk";
-import { cn } from "@/lib/utils";
 import { Select } from "@/components/ui/select";
+import { SettingsRow, SettingsSwitch } from "@/components/ui/settings-patterns";
 
 export const voiceInputProviderLabels: Record<VoiceInputProviderId, string> = {
   "supergrok-subscription": "SuperGrok subscription",
@@ -161,44 +161,23 @@ export function PreferenceToggleRow(props: {
   onToggle: () => void;
 }) {
   return (
-    <div className="flex min-h-10 items-center gap-3 px-1 py-1.5">
-      {props.icon ? <span className="shrink-0">{props.icon}</span> : null}
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium">{props.label}</div>
-        <p
-          className={cn(
-            "text-2xs text-fg-subtle",
-            props.wrapDescription ? "leading-4" : "truncate",
-          )}
-          title={props.description}
-        >
-          {props.description}
-        </p>
-      </div>
-      {props.control}
-      {props.saving ? (
-        <Loader2Icon className="size-3.5 shrink-0 animate-spin text-fg-subtle" />
-      ) : null}
-      <button
-        type="button"
-        role="switch"
-        aria-checked={props.checked}
-        aria-label={props.label}
-        disabled={props.disabled}
-        onClick={props.onToggle}
-        className={cn(
-          "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-          props.checked ? "border-brand bg-brand" : "border-border bg-surface-2",
-        )}
-      >
-        <span
-          className={cn(
-            "inline-block size-3.5 rounded-full bg-white shadow-sm transition-transform",
-            props.checked ? "translate-x-4" : "translate-x-0.5",
-          )}
-        />
-      </button>
-    </div>
+    <SettingsRow
+      title={props.label}
+      description={props.description}
+      icon={props.icon}
+      control={
+        <>
+          {props.control}
+          <SettingsSwitch
+            aria-label={props.label}
+            checked={props.checked}
+            disabled={props.disabled}
+            saving={props.saving}
+            onCheckedChange={props.onToggle}
+          />
+        </>
+      }
+    />
   );
 }
 
