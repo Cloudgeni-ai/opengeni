@@ -48,8 +48,8 @@ export function PreviewLoading() {
       context.fillRect(0, 0, w, h);
       const rows = Math.ceil(h / 18) + 7;
       const cols = Math.ceil(w / 18) + 7;
-      const points = Array.from({ length: rows }, (_, r) =>
-        Array.from({ length: cols }, (_, c) => {
+      const points = Array.from({ length: rows }, (_row, r) =>
+        Array.from({ length: cols }, (_col, c) => {
           const x = (c - 3) * 18;
           const y = (r - 3) * 18;
           const dist = Math.hypot((x - cx) * 0.8, y - cy);
