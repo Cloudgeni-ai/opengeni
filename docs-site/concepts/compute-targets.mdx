@@ -16,7 +16,9 @@ Every session picks where its commands, files, and tools run. Two kinds of targe
 
 ## Managed sandboxes
 
-A managed sandbox is a fresh box OpenGeni provisions for the session. Backends are pluggable: Docker (the local default), Modal, an in-process local provider, and several cloud sandbox providers. The stock image ships Terraform, Checkov, the Azure and GitHub CLIs, git, and common shell tools, and opt-in preparation profiles can pre-authenticate those CLIs.
+A managed sandbox is a fresh box OpenGeni provisions for the session. Backends are pluggable: Docker (the local default), Modal, an in-process local provider, and several cloud sandbox providers. Both stock images include Terraform, Checkov, AnyDoc, GitHub CLI, git, and common shell tools. The desktop image also includes the graphical desktop, Chrome/Chromium, and FFmpeg; it does not install Azure CLI or its Azure DevOps extension. The headless image still includes Azure CLI.
+
+Opt-in preparation profiles authenticate existing tools; they do not select or install an alternative image. The `azure` preparation profile requires an installed Azure CLI and must not be enabled against the stock desktop image. Azure-backed deployment, storage, and model-provider support are independent of these in-sandbox CLI packages.
 
 Sandboxes are swappable within a session, and a session's files can be recovered from a snapshot or archive after the box is gone. A session can also run with no compute attached when the task needs only model and tool calls.
 
