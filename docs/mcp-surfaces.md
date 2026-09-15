@@ -34,6 +34,23 @@ operation id cannot be approved again after execution may have started.
 
 First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
 
+### Human integration setup in chat
+
+The shared operational guidance tells the agent to use available integration
+tools directly. When needed access is missing, it routes discovery through
+`capability_catalog_search`.
+Every candidate requiring authorization includes `setup.nextAction` naming
+`capability_authorization_request` and the exact catalog capability ID. Ready or
+unavailable candidates return no setup action. Search itself is read-only.
+
+For a suitable candidate, the agent requests the card with that ID and a
+task-specific rationale. Showing the card requires no preliminary confirmation;
+the card itself presents the setup decision. The same exact-attempt-fenced `tool.auth_needed`
+event and generic chat renderer handle all catalog integrations. Requesting the
+card requires no integration-management permission and creates no connection,
+installation, credential, or grant; the authenticated human completes setup.
+Provider-specific status tools remain read-only and do not synthesize cards.
+
 ### Recovery from tool-search misses
 
 Progressive discovery uses the same authorized deferred pool on Codex-native,

@@ -12,6 +12,7 @@ import "@opengeni/react/connect.css";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { CapabilityDialogContent } from "./detail-dialog";
 import { Button } from "@/components/ui/button";
+import { selectGitHubConnectAccount } from "@/lib/github-connect-account";
 
 export type NativeConnectRequest = {
   scope: { workspaceId: string; transport: ConnectTransport };
@@ -242,6 +243,15 @@ export function NativeConnectSetup({
               className="og-connect"
               authorizeLabel={request.authorizeLabel}
               controller={controller}
+              {...(["github-app", "github-lens"].includes(request.providerId)
+                ? {
+                    onSelectAccount: (accountId: string) => {
+                      const signal = navigation.current?.signal;
+                      if (!signal) throw new Error("Connection setup is no longer active");
+                      return selectGitHubConnectAccount(controller, accountId, window, signal);
+                    },
+                  }
+                : {})}
               onAuthorize={async (attempt) => {
                 const result = await authorizeConnectAttempt(
                   transport,

@@ -327,3 +327,38 @@ describe("GitHub action approval controls", () => {
     }
   });
 });
+
+for (const count of [1, 2])
+  test(`repository configuration opens each of ${count} installations in a separate tab`, async () => {
+    const context = appContext(
+      ["github:manage"],
+      mock(async () => ({})),
+    );
+    context.githubStatus.installations = Array.from({ length: count }, (_, index) => ({
+      ...context.githubStatus.installations[0]!,
+      installationId: 71 + index,
+      configureUrl: `https://api.example.test/github/configure/${71 + index}`,
+    }));
+    const rendered = await renderAdapter(context);
+    const originalOpen = window.open;
+    const open = mock(() => null);
+    window.open = open;
+    try {
+      if (count === 1) rendered.model().access!.onEdit!();
+      else
+        for (const option of rendered.model().options) {
+          if (option.kind === "link" && option.id.startsWith("github-repositories-"))
+            option.action.onClick();
+        }
+      expect(open).toHaveBeenCalledTimes(count);
+      for (let index = 0; index < count; index++)
+        expect(open).toHaveBeenCalledWith(
+          `https://api.example.test/github/configure/${71 + index}`,
+          "_blank",
+          "noopener,noreferrer",
+        );
+    } finally {
+      window.open = originalOpen;
+      await rendered.unmount();
+    }
+  });

@@ -30,6 +30,10 @@ Stored rows remain visible for audit and unlink with lifecycle `active`,
 repositories. Provider failure, malformed provider identity, or a legacy row
 without an authority receipt is `unverified`, never healthy.
 
+Chat setup uses the provider-neutral capability discovery and human authorization
+card flow described in [MCP surfaces](mcp-surfaces.md). `github_connect_link`
+remains a status/manager-link tool; reading status never posts a setup card.
+
 ## Owner-authority flow
 
 Creating the App and binding an installation are distinct operations. A caller
@@ -42,6 +46,13 @@ enters GitHub's new installation UI directly. This lets an existing installation
 connect without preventing the owner from adding a different personal account or
 organization, and does not depend on GitHub's Configure page to return OpenGeni
 state.
+
+In the native Connect dialog, **Continue** on an account selection opens the
+next authorization stage directly in an isolated popup. A new installation's
+callback redirects that same popup to the committed owner-authorization stage;
+it does not require another **Authorize connection** click. The original dialog
+polls the durable attempt and refreshes repository state only after completion.
+Blocked popups leave the selection uncommitted so the user can retry.
 
 The selected installation then receives a second, exact fresh GitHub user
 authorization immediately before binding. The second pass is deliberate: no
@@ -75,7 +86,9 @@ silently rewrite that delegation. GitHub installation suspension, deletion, or
 repository removal remains effective immediately through live listing and
 installation-token APIs.
 
-An existing binding exposes a workspace-scoped **Repositories** action. OpenGeni
+An existing binding exposes a workspace-scoped **Change repositories** action
+that opens a new tab and preserves the current chat. The workspace refreshes
+GitHub status when the original tab regains focus. OpenGeni
 mints fresh signed browser state before opening GitHub's installation settings.
 The setup callback accepts that state from GitHub or the same-site browser
 cookie, then repeats exact OAuth authority proof before updating the binding.

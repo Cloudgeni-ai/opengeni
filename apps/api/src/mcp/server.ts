@@ -5882,7 +5882,7 @@ function registerCapabilityDiscoveryTools(
     "capability_catalog_search",
     {
       description:
-        "Search OpenGeni's reviewed workspace capability catalog when the user asks to add an integration or the task needs a capability that is not currently usable. Search by the outcome needed (for example `GitHub repositories`, `product analytics`, or `Slack notifications`), compare identity and usage guidance as well as readiness. For shared Slack notifications or schedules, first look for slack_bot tools; the hosted Slack MCP is personal user authority, not a bot replacement. This only reads secret-free metadata; it never installs, connects, or authorizes anything.",
+        "Find integrations in OpenGeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. This reads metadata only and does not connect or authorize anything. Honor Slack identity guidance: the personal hosted MCP is not workspace bot authority; discover the native OpenGeni Slack bot separately.",
       inputSchema: {
         query: z4.string().min(1).max(500),
         limit: z4.number().int().min(1).max(20).optional(),
@@ -5944,6 +5944,10 @@ function registerCapabilityDiscoveryTools(
         setup: {
           ...setups[index]!,
           requiredVariables: capabilityRequiredVariables(item),
+          nextAction:
+            setups[index]!.status === "authorization_required"
+              ? { toolName: "capability_authorization_request", capabilityId: item.id }
+              : null,
         },
       }));
       return json({ query, matches });
@@ -5954,7 +5958,7 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "After capability_catalog_search and after explaining one chosen recommendation to the user, post exactly one in-session human authorization card for that catalog capability. This tool never grants access, enables a capability, reads a secret, or mints provider credentials; the authenticated user must click and confirm the provider/domain flow. Do not call it for a candidate reported ready or unavailable. Honor the candidate usage guidance: a personal Slack authorization card is not setup for workspace bot notifications.",
+        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. Honor Slack identity guidance: the personal hosted MCP is not workspace bot authority; discover the native OpenGeni Slack bot separately.",
       inputSchema: {
         capabilityId: z4.string().min(1).max(512),
         rationale: z4.string().min(1).max(2000),
