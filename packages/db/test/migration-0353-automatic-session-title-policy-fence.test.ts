@@ -992,7 +992,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // the 0433 unified Skill tables/lifecycle capability, and the 0461 protected
     // MCP operation ledger/command capability (which grants no direct DML), and
     // the 0470 organization integration policy tables (SELECT-only at runtime),
-    // and the 0475 protected managed sign-in ledger and five runtime capabilities.
+    // and the 0477 protected managed sign-in ledger and five runtime capabilities.
     // Preserve those exact expected boundary gaps while continuing to
     // reject every other posture violation in this
     // rolling-compatibility test.

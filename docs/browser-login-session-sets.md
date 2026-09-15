@@ -278,7 +278,7 @@ Canonical source: `packages/db/drizzle/0362_managed_auth_session_sets.sql`,
 
 ## Personal sign-in methods
 
-Migration `0475_managed_sign_in_methods.sql` adds managed-human sign-in method
+Migration `0477_managed_sign_in_methods.sql` adds managed-human sign-in method
 management. This is a maintenance release: drain the old application roles,
 apply migrations, provision the restricted runtime role, then start the matching
 binary. Do not restart an old API exposing Better Auth's raw account-management
@@ -354,7 +354,7 @@ per human per minute before password hashing or OAuth-state creation; committed
 result replay does not consume that budget.
 
 Canonical implementation: `apps/api/src/routes/managed-sign-in-methods.ts`,
-`packages/contracts/src/managed-sign-in-methods.ts`, and migration 0475. The
+`packages/contracts/src/managed-sign-in-methods.ts`, and migration 0477. The
 restricted-PostgreSQL/Better Auth integration suite is
 `apps/api/test/managed-sign-in-methods.integration.test.ts`. Its simulated provider
 responses exercise real OAuth state and callback processing; they are not live

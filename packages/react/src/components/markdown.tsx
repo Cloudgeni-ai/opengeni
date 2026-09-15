@@ -19,7 +19,8 @@ import ReactMarkdown, {
   type UrlTransform,
 } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { LoaderCircleIcon } from "lucide-react";
+import { PanelsTopLeftIcon } from "lucide-react";
+import { ActivityDisclosure } from "../timeline/shared";
 import { cn } from "../lib/cn";
 import { tableElementToTsv } from "../lib/clipboard";
 import { prefersReducedMotion } from "../lib/motion";
@@ -432,28 +433,14 @@ function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"
       [...closing].every((c) => c === opening[1]![0]);
     if (!complete) {
       return (
-        <div
-          role="status"
-          aria-live="polite"
-          aria-busy={streaming === true}
-          className="my-3 flex min-h-32 items-center gap-3 rounded-og-md bg-og-surface-1/70 px-4 py-5"
-        >
-          {streaming ? (
-            <LoaderCircleIcon
-              aria-hidden
-              className="size-5 shrink-0 text-og-fg-muted motion-safe:animate-spin"
-            />
-          ) : null}
-          <div>
-            <div className="text-og-sm font-medium text-og-fg">
-              {streaming ? "Preparing preview…" : "Preview incomplete"}
-            </div>
-            <div className="mt-1 text-og-sm text-og-fg-muted">
-              {streaming
-                ? "Generating the interactive content. It will appear here when ready."
-                : "Generation stopped before the preview was ready."}
-            </div>
-          </div>
+        <div role="status" aria-live="polite" aria-busy={streaming === true} className="my-3">
+          <ActivityDisclosure
+            icon={<PanelsTopLeftIcon aria-hidden className="size-3.5" />}
+            title={streaming ? "Preparing preview…" : "Preview incomplete"}
+            running={streaming === true}
+            expandable={false}
+            preview={streaming ? undefined : "Generation stopped before the preview was ready."}
+          />
         </div>
       );
     }

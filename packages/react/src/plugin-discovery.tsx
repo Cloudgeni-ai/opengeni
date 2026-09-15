@@ -17,6 +17,8 @@ export type PluginDiscoveryProps = {
   };
   workspaceId: string;
   query: string;
+  /** Initially selected registry. Users can still switch registries or browse all. */
+  defaultProvider?: "" | "openai" | "anthropic";
   /** Discovery identities already installed in the current workspace. */
   installedIds?: ReadonlySet<string>;
   resultLimit?: number;
@@ -24,7 +26,7 @@ export type PluginDiscoveryProps = {
   onOpen: (item: PluginDiscoveryItem) => void;
 };
 export function PluginDiscovery(props: PluginDiscoveryProps) {
-  const [provider, setProvider] = useState("");
+  const [provider, setProvider] = useState(props.defaultProvider ?? "");
   return (
     <section
       className={`og-plugin-discovery ${props.resultLimit ? "og-catalog-overview" : ""}`}
@@ -34,11 +36,13 @@ export function PluginDiscovery(props: PluginDiscoveryProps) {
         <h3>{props.resultLimit ? "Plugins" : "Browse plugins"}</h3>
         {!props.resultLimit ? (
           <div className="og-plugin-filters" role="group" aria-label="Plugin registry">
-            {[
-              { value: "", label: "All" },
-              { value: "openai", label: "OpenAI plugin registry" },
-              { value: "anthropic", label: "Anthropic plugin registry" },
-            ].map((option) => (
+            {(
+              [
+                { value: "", label: "All" },
+                { value: "openai", label: "OpenAI plugin registry" },
+                { value: "anthropic", label: "Anthropic plugin registry" },
+              ] as const
+            ).map((option) => (
               <button
                 key={option.value}
                 type="button"

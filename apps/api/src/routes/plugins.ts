@@ -48,6 +48,7 @@ import {
   getConnectionMetadata,
   getInstalledPluginPackage,
   getPluginPackageUninstallPreview,
+  PluginUninstallPreviewChangedError,
   integrationBindingKey,
   installApiIntegration,
   installPluginMcpReference,
@@ -349,9 +350,14 @@ export function registerPluginRoutes(
 
   app.get("/v1/workspaces/:workspaceId/plugins/:pluginKey/uninstall-preview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const pluginKey = decodeURIComponent(c.req.param("pluginKey"));
-    const preview = await getPluginPackageUninstallPreview(deps.db, workspaceId, pluginKey);
+    const preview = await getPluginPackageUninstallPreview(
+      deps.db,
+      workspaceId,
+      pluginKey,
+      grant.subjectId,
+    );
     return c.json(PluginUninstallPreview.parse({ pluginKey, ...preview }));
   });
 
@@ -378,11 +384,33 @@ export function registerPluginRoutes(
             subjectId: grant.subjectId,
             pluginKey,
             expectedInstallationVersion: payload.expectedInstallationVersion,
+            ...(payload.expectedPreviewToken
+              ? { expectedPreviewToken: payload.expectedPreviewToken }
+              : {}),
             idempotencyKey: payload.idempotencyKey,
           })),
         }),
       );
     } catch (error) {
+      if (error instanceof PluginUninstallPreviewChangedError) {
+        const preview = error.preview ?? {
+          pluginKey,
+          ...(await getPluginPackageUninstallPreview(
+            deps.db,
+            workspaceId,
+            pluginKey,
+            grant.subjectId,
+          )),
+        };
+        return c.json(
+          {
+            code: error.code,
+            message: error.message,
+            preview: PluginUninstallPreview.parse(preview),
+          },
+          409,
+        );
+      }
       throw pluginMutationHttpError(error);
     }
   });

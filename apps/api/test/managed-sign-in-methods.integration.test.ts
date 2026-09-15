@@ -383,7 +383,7 @@ describe("managed sign-in methods restricted PostgreSQL and Better Auth", () => 
   test("maintenance drain aborts on a live runtime login and helper ACLs stay closed", async () => {
     await appSql`select 1`;
     const migration = await Bun.file(
-      new URL("../../../packages/db/drizzle/0475_managed_sign_in_methods.sql", import.meta.url),
+      new URL("../../../packages/db/drizzle/0477_managed_sign_in_methods.sql", import.meta.url),
     ).text();
     await expect(
       (async () =>

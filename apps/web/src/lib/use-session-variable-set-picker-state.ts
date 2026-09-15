@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Session } from "@opengeni/sdk";
 
 export type SessionVariableSetPickerSharedState = {
@@ -14,10 +14,16 @@ export function useSessionVariableSetPickerState(
     saving: false,
     committedSelection: null,
   });
+  const sessionId = useRef(session.id);
   const currentKey = (
     session.variableSetIds ?? (session.variableSetId ? [session.variableSetId] : [])
   ).join("\u0000");
   useEffect(() => {
+    if (sessionId.current !== session.id) {
+      sessionId.current = session.id;
+      setState({ saving: false, committedSelection: null });
+      return;
+    }
     setState((current) => {
       const committed = current.committedSelection;
       if (

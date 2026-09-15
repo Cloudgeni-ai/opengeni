@@ -117,7 +117,6 @@ export function PluginDiscovery({
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     try {
       const item = await client.getInstalledPluginDetails(workspaceId, plugin.pluginKey);
-      setInstalled((previous) => new Set([...previous, item.id]));
       setError(null);
       setSelectedInstallation(plugin);
       setSelected(item);
@@ -127,6 +126,11 @@ export function PluginDiscovery({
   }
   const [busy, setBusy] = useState(false);
   const [installed, setInstalled] = useState<Set<string>>(new Set());
+  // Optimistic installation feedback lasts until the parent reloads the
+  // authoritative list. Otherwise a removed plugin stays marked as installed.
+  useEffect(() => {
+    setInstalled(new Set());
+  }, [installedPlugins, workspaceId]);
   const installedIds = new Set([
     ...installed,
     ...installedPlugins
@@ -196,6 +200,7 @@ export function PluginDiscovery({
       {!selected && error ? <p role="alert">{error}</p> : null}
       {beforeCatalog}
       <Catalog
+        defaultProvider={resultLimit ? "" : "openai"}
         {...(resultLimit ? { resultLimit } : {})}
         {...(onShowMore ? { onShowMore } : {})}
         client={client}
@@ -232,7 +237,15 @@ export function PluginDiscovery({
                 key={selected.id}
                 item={selected}
                 busy={busy}
-                installed={installedIds.has(selected.id)}
+                installed={
+                  installedIds.has(selected.id) ||
+                  Boolean(
+                    selectedInstallation &&
+                    installedPlugins.some(
+                      (plugin) => plugin.pluginKey === selectedInstallation.pluginKey,
+                    ),
+                  )
+                }
                 connections={Object.fromEntries(
                   (selected.mcpServers ?? []).map((server) => [
                     server.endpoint ?? "",

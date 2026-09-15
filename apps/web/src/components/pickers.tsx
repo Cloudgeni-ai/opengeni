@@ -52,9 +52,9 @@ export function visibleSessionToolSelection(
 
 export { SessionConnectorsMenuBody as SessionToolsMenuBody } from "@/components/session-connectors-menu-body";
 import { SessionConnectorsMenuBody as SessionToolsMenuBody } from "@/components/session-connectors-menu-body";
+import { COMPOSER_MENU_PANEL_CLASS } from "@/components/ui/composer-menu";
 
-export const SESSION_TOOLS_PANEL_CLASS =
-  "flex max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] w-[min(20rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border-border bg-surface p-2 shadow-xl";
+export const SESSION_TOOLS_PANEL_CLASS = COMPOSER_MENU_PANEL_CLASS;
 
 export function sessionToolSelectionSummary(props: {
   servers: McpServerOption[];

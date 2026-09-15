@@ -5,7 +5,7 @@ This document is the current implementation map for the accepted
 
 ## Verified-email managed sign-in linking
 
-Migration `0475_managed_sign_in_methods.sql` and the product-owned personal
+Migration `0477_managed_sign_in_methods.sql` and the product-owned personal
 sign-in-method API extend authentication, not tenancy. A new Google/GitHub
 account may automatically attach to an existing authentication user only when
 the provider email and the matching local email are both verified. Better Auth

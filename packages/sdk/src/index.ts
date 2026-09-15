@@ -1192,6 +1192,7 @@ export type {
   InstalledPlugin,
   PluginInstallationSummary,
   ListInstalledPluginsResponse,
+  PluginUninstallComponentImpact,
   PluginUninstallPreview,
   UninstallPluginRequest,
   UninstallPluginResult,

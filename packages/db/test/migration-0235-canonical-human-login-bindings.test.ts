@@ -177,7 +177,7 @@ describe("migration 0235 canonical human identities and login bindings", () => {
       reason: "Attach verified password login",
     });
     // Exercise the generic lifecycle seam. Managed Google/GitHub inserts now
-    // atomically link in 0475 and are covered by managed-sign-in security tests.
+    // atomically link in 0477 and are covered by managed-sign-in security tests.
     await createVerifiedBinding(userId, "test-oidc", `oidc-${userId}`);
     const second = await applyCanonicalHumanIdentityOperation(client.db, {
       operationId: crypto.randomUUID(),
@@ -382,7 +382,7 @@ describe("migration 0235 canonical human identities and login bindings", () => {
     const secondIdentity = await ensureCanonicalHumanIdentityForAuthUser(client.db, secondUser);
     const providerAccountId = `collision-${crypto.randomUUID()}`;
     // This is the legacy generic collision-containment seam, not managed OAuth:
-    // 0475 rejects Google/GitHub collisions before insertion without a dispute.
+    // 0477 rejects Google/GitHub collisions before insertion without a dispute.
     const providerId = "test-oidc";
     await createVerifiedBinding(firstUser, providerId, providerAccountId);
     const linked = await applyCanonicalHumanIdentityOperation(client.db, {
