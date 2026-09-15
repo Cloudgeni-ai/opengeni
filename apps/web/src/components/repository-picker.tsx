@@ -139,6 +139,8 @@ export type RepositoryContextPickerProps = {
   onRefresh: () => Promise<void>;
   /** Passive open refresh. Caller owns provider-sync permissions and throttling. */
   onOpenRefresh?: () => Promise<void>;
+  /** False when the current principal cannot read either repository catalog. */
+  refreshAllowed?: boolean;
   onToggleRepo: (repo: GitHubRepository) => void;
   onRefChange: (repoId: number, ref: string) => void;
   onManualOpenChange: (open: boolean) => void;
@@ -162,6 +164,8 @@ export type RepositoryContextPickerProps = {
   lockedPersonalGitHubRepoIds?: ReadonlySet<string>;
   /** Manual rows already mounted on an additive surface are rendered read-only. */
   lockedManualRepoIds?: ReadonlySet<number>;
+  /** Mounted personal sources may outlive their currently authorized catalog entry. */
+  unavailableMountedRepositories?: ReadonlyArray<{ uri: string; ref: string }>;
   /** Inline validation for pending manual repository additions. */
   validationError?: string | null;
   /** New-chat route used to explain immutable mounted follow-up resources. */
@@ -206,7 +210,9 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
     props.installUrl,
     props.setupMode,
   );
-  const canRefresh = bindingPresentation.canRefresh || props.personalGitHubStatus?.enabled === true;
+  const canRefresh =
+    props.refreshAllowed !== false &&
+    (bindingPresentation.canRefresh || props.personalGitHubStatus?.enabled === true);
   async function refreshList() {
     if (!canRefresh || props.repoBusy || refreshBusy) return;
     setRefreshBusy(true);
@@ -640,6 +646,51 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             </>
           )}
 
+          {props.unavailableMountedRepositories?.map((repo) => (
+            <div key={`${repo.uri}:${repo.ref}`} className="flex items-center gap-2 px-2 py-2">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-xs font-medium text-fg" title={repo.uri}>
+                  {repo.uri}
+                </div>
+                <div className="truncate text-2xs text-fg-subtle">
+                  {repo.ref} · Unavailable in catalog
+                </div>
+              </div>
+              <MetaChip dot="idle" rounded="full">
+                <LockIcon className="size-3" aria-hidden="true" />
+                Mounted
+              </MetaChip>
+              <ComposerMenuSwitch
+                checked
+                locked
+                label={`${repo.uri} mounted`}
+                onCheckedChange={() => {}}
+              />
+            </div>
+          ))}
+          {props.manualRepos
+            .filter((repo) => props.lockedManualRepoIds?.has(repo.id))
+            .map((repo) => (
+              <div key={repo.id} className="flex items-center gap-2 px-2 py-2">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-medium text-fg" title={repo.url}>
+                    {repo.url}
+                  </div>
+                  <div className="truncate text-2xs text-fg-subtle">{repo.ref}</div>
+                </div>
+                <MetaChip dot="idle" rounded="full">
+                  <LockIcon className="size-3" aria-hidden="true" />
+                  Mounted
+                </MetaChip>
+                <ComposerMenuSwitch
+                  checked
+                  locked
+                  label={`${repo.url} mounted`}
+                  onCheckedChange={() => {}}
+                />
+              </div>
+            ))}
+
           <Collapsible open={props.manualOpen} onOpenChange={props.onManualOpenChange}>
             <div className="border-t border-border/60 pt-1">
               <div className="flex items-center justify-between gap-2 px-3 py-2">
@@ -673,28 +724,30 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
 
               <CollapsibleContent>
                 <div className="space-y-2 border-t border-border p-3">
-                  {props.manualRepos.length === 0 ? (
+                  {props.manualRepos.every((repo) => props.lockedManualRepoIds?.has(repo.id)) ? (
                     <p className="text-xs leading-5 text-fg-muted">
                       Public HTTPS repositories only. Private GitHub repositories require the
                       workspace App or your personal identity.
                     </p>
                   ) : (
-                    props.manualRepos.map((repo) => (
-                      <ManualRepositoryEditor
-                        key={repo.id}
-                        repository={repo}
-                        mounted={props.lockedManualRepoIds?.has(repo.id) === true}
-                        pending={props.pending}
-                        onUpdate={(patch) => props.onManualUpdate(repo.id, patch)}
-                        onRemove={() => props.onManualRemove(repo.id)}
-                        onAttach={
-                          props.onManualAttach ??
-                          (async () => {
-                            throw new Error("Repository attachment is unavailable.");
-                          })
-                        }
-                      />
-                    ))
+                    props.manualRepos
+                      .filter((repo) => !props.lockedManualRepoIds?.has(repo.id))
+                      .map((repo) => (
+                        <ManualRepositoryEditor
+                          key={repo.id}
+                          repository={repo}
+                          mounted={props.lockedManualRepoIds?.has(repo.id) === true}
+                          pending={props.pending}
+                          onUpdate={(patch) => props.onManualUpdate(repo.id, patch)}
+                          onRemove={() => props.onManualRemove(repo.id)}
+                          onAttach={
+                            props.onManualAttach ??
+                            (async () => {
+                              throw new Error("Repository attachment is unavailable.");
+                            })
+                          }
+                        />
+                      ))
                   )}
                   {props.validationError ? (
                     <p className="text-xs leading-5 text-status-failed" role="alert">

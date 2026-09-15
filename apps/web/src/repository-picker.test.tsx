@@ -215,7 +215,8 @@ describe("additive repository picker", () => {
     const mounted = rendered.container.querySelector<HTMLButtonElement>(
       'button[aria-label="example/app mounted"]',
     );
-    expect(mounted?.disabled).toBe(true);
+    expect(mounted?.getAttribute("aria-disabled")).toBe("true");
+    expect(mounted?.getAttribute("aria-checked")).toBe("true");
     expect(rendered.container.textContent).toContain("Mounted");
     expect(
       rendered.container.querySelector<HTMLInputElement>('input[aria-label="example/app ref"]')
@@ -280,7 +281,7 @@ describe("additive repository picker", () => {
     const row = mounted.container.querySelector<HTMLButtonElement>(
       'button[aria-label="octocat/private-repository mounted as you"]',
     );
-    expect(row?.disabled).toBe(true);
+    expect(row?.getAttribute("aria-disabled")).toBe("true");
     expect(mounted.container.textContent).toContain("@octocat");
     expect(mounted.container.textContent).toContain("Mounted");
     await mounted.unmount();
@@ -335,5 +336,33 @@ describe("additive repository picker", () => {
     expect(explicitRefreshes).toBe(1);
     expect(body.container.querySelector('[role="alert"]')?.textContent).toBe("Catalog unavailable");
     await body.unmount();
+
+    const manual = await renderComponent(
+      createElement(FollowUpRepositoryMenuBody, {
+        ...props,
+        manualRepos: [
+          { id: -1, url: "https://example.test/repo.git", ref: "release", attached: true },
+        ],
+        lockedManualRepoIds: new Set([-1]),
+        manualOpen: false,
+        unavailableMountedRepositories: [
+          { uri: "https://github.com/removed/personal.git", ref: "pinned" },
+        ],
+      }),
+    );
+    const manualSwitch = manual.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="https://example.test/repo.git mounted"]',
+    );
+    expect(manualSwitch?.getAttribute("aria-checked")).toBe("true");
+    expect(manualSwitch?.getAttribute("aria-disabled")).toBe("true");
+    expect(manual.container.textContent).toContain("release");
+    expect(manual.container.textContent).toContain("Unavailable in catalog");
+    expect(
+      manual.container
+        .querySelector('button[aria-label="https://github.com/removed/personal.git mounted"]')
+        ?.getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(manual.container.querySelector('input[aria-label="Repository URL"]')).toBeNull();
+    await manual.unmount();
   });
 });
