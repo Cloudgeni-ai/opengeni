@@ -101,7 +101,11 @@ export type DocumentIndexClient = {
 };
 
 export type ManagedEmailMessage = {
-  kind: "email_verification" | "password_reset" | "organization_user_setup";
+  kind:
+    | "email_verification"
+    | "password_reset"
+    | "organization_user_setup"
+    | "sign_in_method_changed";
   from: string;
   to: string;
   subject: string;

@@ -217,6 +217,9 @@ export async function synchronizeCanonicalHumanLoginBindings(
           binding.providerId === account.providerId &&
           binding.providerAccountId === account.providerAccountId,
       );
+      // A revoked/recovery binding is not an invitation to relink. Reconnection
+      // belongs to the explicit OAuth-proof transaction, never a session hook.
+      if (existing && existing.status !== "active") break;
       if (existing?.status === "active") {
         authority = {
           identityId: projection.activeIdentity.id,

@@ -357,6 +357,7 @@ const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
   "detach_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
 ] as const;
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
+  "mutate_managed_sign_in_method(text, text, jsonb)",
   "ensure_canonical_human_identity(text, text)",
   "validate_canonical_human_session(text, text, boolean)",
   "get_canonical_human_identity_projection(text)",

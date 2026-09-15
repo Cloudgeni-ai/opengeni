@@ -1325,6 +1325,9 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    IF to_regprocedure(format('%I.mutate_managed_sign_in_method(text,text,jsonb)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.mutate_managed_sign_in_method(text,text,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+    END IF;
     FOREACH routine_signature IN ARRAY ${managedAuthSessionSetRoutines} LOOP
       IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
         EXECUTE format(

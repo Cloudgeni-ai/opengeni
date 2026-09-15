@@ -14,7 +14,7 @@ import {
 } from "@opengeni/db/canonical-human-identities";
 import { betterAuth } from "better-auth";
 import { createEmailVerificationToken } from "better-auth/api";
-import { hashPassword } from "better-auth/crypto";
+import { hashPassword, verifyPassword } from "better-auth/crypto";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
 
@@ -24,6 +24,7 @@ import {
   currentManagedAuthAttemptId,
   recordCurrentManagedAuthSession,
   shouldDiscardCurrentManagedAuthProviderSession,
+  currentManagedSignInConnectIntent,
 } from "./managed-auth-attempt-context";
 
 // `ManagedAuth` (the Better Auth `Auth<any>` alias) is owned by @opengeni/core
@@ -64,6 +65,10 @@ export function managedAuthUserCreateAdmission(
 /** Keep Better Auth password policy and storage format behind this boundary. */
 export async function hashManagedAuthPassword(password: string): Promise<string> {
   return await hashPassword(password);
+}
+
+export async function verifyManagedAuthPassword(password: string, hash: string): Promise<boolean> {
+  return await verifyPassword({ password, hash });
 }
 
 export function createManagedAuth(
@@ -180,7 +185,18 @@ export function createManagedAuth(
         updatedAt: "updated_at",
       },
       accountLinking: {
-        enabled: false,
+        enabled: true,
+        requireLocalEmailVerified: true,
+        trustedProviders: [],
+        allowDifferentEmails: false,
+      },
+      additionalFields: {
+        managedLinkIntentId: {
+          type: "string",
+          fieldName: "managed_link_intent_id",
+          input: false,
+          returned: false,
+        },
       },
       encryptOAuthTokens: true,
       storeStateStrategy: "database",
@@ -264,6 +280,44 @@ export function createManagedAuth(
       },
     },
     databaseHooks: {
+      account: {
+        create: {
+          before: async (account) => ({
+            data: {
+              ...account,
+              ...(currentManagedSignInConnectIntent()
+                ? { managedLinkIntentId: currentManagedSignInConnectIntent() }
+                : {}),
+            },
+          }),
+          after: async (account) => {
+            if (
+              !["google", "github"].includes(account.providerId) ||
+              currentManagedSignInConnectIntent()
+            )
+              return;
+            const result =
+              await db.execute(sql`select email from auth_users where id=${account.userId}
+              and (select count(*) from auth_identities where user_id=${account.userId}) > 1`);
+            const row = (Array.isArray(result) ? result : result.rows)[0] as
+              | { email: string }
+              | undefined;
+            if (!row) return;
+            // An email outage must not roll back an already committed link or
+            // turn successful provider authentication into an ambiguous failure.
+            await sendManagedAuthEmail(managedEmailTransport, {
+              kind: "sign_in_method_changed",
+              to: row.email,
+              idempotencyKey: `sign-in-method:${account.id}`,
+              subject: "A sign-in method was added to your OpenGeni account",
+              text: `Your verified ${account.providerId} sign-in was linked to your OpenGeni account. You can disconnect it in personal sign-in settings.`,
+              html: `<p>Your verified ${account.providerId} sign-in was linked to your OpenGeni account. You can disconnect it in personal sign-in settings.</p>`,
+            }).catch(() => {
+              process.stderr.write("Managed sign-in notification delivery failed\n");
+            });
+          },
+        },
+      },
       session: {
         create: {
           before: async (session) => {

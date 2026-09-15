@@ -132,6 +132,11 @@ export function registerCanonicalHumanIdentityRoutes(app: Hono, deps: ApiRouteDe
 
   app.post(`${base}/login-bindings`, async (context) => {
     const request = await parseBody(context, LinkCanonicalHumanLoginBindingRequest);
+    if (["google", "github", "credential"].includes(request.providerId)) {
+      throw new HTTPException(403, {
+        message: "Use personal sign-in method settings with fresh provider proof",
+      });
+    }
     return await mutate(context, deps, {
       operationType: "link",
       ...request,
@@ -141,6 +146,19 @@ export function registerCanonicalHumanIdentityRoutes(app: Hono, deps: ApiRouteDe
 
   app.delete(`${base}/login-bindings/:bindingId`, async (context) => {
     const request = await parseBody(context, CanonicalHumanBindingOperationRequest);
+    const actor = await requestIdentity(context, deps);
+    const projection = await getCanonicalHumanIdentityProjection(deps.db, actor.authUserId);
+    if (
+      projection.loginBindings.some(
+        (binding) =>
+          binding.id === bindingId(context) &&
+          ["google", "github", "credential"].includes(binding.providerId),
+      )
+    ) {
+      throw new HTTPException(403, {
+        message: "Use personal sign-in method settings with last-method protection",
+      });
+    }
     return await mutate(context, deps, {
       operationType: "unlink",
       bindingId: bindingId(context),
