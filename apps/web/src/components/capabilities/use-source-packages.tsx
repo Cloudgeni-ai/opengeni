@@ -7,7 +7,7 @@
  * flows need. The Bundles section renders the rows; nothing about how a row
  * looks lives here.
  */
-import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
   lazy,
   Suspense,
@@ -17,9 +17,11 @@ import {
   useReducer,
   useState,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { toast } from "sonner";
 import { skillReleaseMessage, skillInstallationMessage } from "./skill-release-message";
+import { pluginRemovalMessage } from "./plugin-removal-result";
 
 import {
   initialSourceImportState,
@@ -82,12 +84,16 @@ export function useSourcePackages({
   connections,
   canManage,
   onChanged,
+  restoreFocusRef,
+  restoreFocusFallbackRef,
 }: {
   client: OpenGeniBrowserClient;
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
   canManage: boolean;
   onChanged: () => void | Promise<void>;
+  restoreFocusRef?: RefObject<HTMLElement | null>;
+  restoreFocusFallbackRef?: RefObject<HTMLElement | null>;
 }): SourcePackages {
   const [installedSkills, setInstalledSkills] = useState<InstalledSkillSummary[]>([]);
   const [plugins, setPlugins] = useState<PluginInstallationSummary[]>([]);
@@ -95,6 +101,7 @@ export function useSourcePackages({
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [removeTarget, setRemoveTarget] = useState<SourceRemoveTarget | null>(null);
+  const [removeNotice, setRemoveNotice] = useState<string | null>(null);
   const [sourceImport, dispatchSourceImport] = useReducer(
     sourceImportReducer,
     undefined,
@@ -233,6 +240,7 @@ export function useSourcePackages({
   }
 
   async function previewSkillRemoval(skill: InstalledSourceSkill) {
+    setRemoveNotice(null);
     setBusyKey(`skill:${skill.capabilityId}`);
     try {
       const preview = await client.previewSkillUninstall(workspaceId, skill.capabilityId);
@@ -250,12 +258,15 @@ export function useSourcePackages({
   }
 
   async function previewPluginRemoval(plugin: PluginInstallationSummary) {
+    setRemoveNotice(null);
     setBusyKey(`plugin:${plugin.pluginKey}`);
     try {
       const preview = await client.previewPluginUninstall(workspaceId, plugin.pluginKey);
       if (!preview.installed || preview.installationVersion === null) {
         throw new Error("This Plugin is no longer installed. Refresh and try again.");
       }
+      if (!preview.previewToken)
+        throw new Error("Removal details are unavailable. Refresh and try again.");
       setRemoveTarget({
         kind: "plugin",
         plugin,
@@ -278,6 +289,7 @@ export function useSourcePackages({
         ? `skill:${removeTarget.skill.capabilityId}`
         : `plugin:${removeTarget.plugin.pluginKey}`;
     setBusyKey(key);
+    setRemoveNotice(null);
     try {
       if (removeTarget.kind === "skill") {
         const result = await client.uninstallSkill(workspaceId, removeTarget.skill.capabilityId, {
@@ -293,20 +305,58 @@ export function useSourcePackages({
       } else {
         const result = await client.uninstallPlugin(workspaceId, removeTarget.plugin.pluginKey, {
           expectedInstallationVersion: removeTarget.preview.installationVersion,
+          expectedPreviewToken: removeTarget.preview.previewToken,
           idempotencyKey: removeTarget.operationId,
         });
         toast.success(`${removeTarget.plugin.name} removed`, {
-          description:
-            skillReleaseMessage(result.skillReleases) ??
-            (result.retainedComponents.length > 0
-              ? `${result.retainedComponents.length} shared components remain because another owner still uses them.`
-              : "Its Plugin-owned components were removed; Connections were retained."),
+          description: pluginRemovalMessage(result, removeTarget.preview),
         });
       }
       setRemoveTarget(null);
-      await Promise.all([load(), Promise.resolve(onChanged())]);
+      // Removal already committed. A refresh failure must not be reported as
+      // failed deletion or invite another destructive request.
+      try {
+        await Promise.all([load(), Promise.resolve().then(onChanged)]);
+      } catch {
+        toast.warning("Removed, but the page couldn’t refresh", {
+          description: "Refresh the page to see the updated skills and tools.",
+        });
+      }
       return true;
     } catch (error) {
+      if (
+        removeTarget.kind === "plugin" &&
+        error instanceof OpenGeniApiError &&
+        error.status === 409 &&
+        !error.outcomeUnknown
+      ) {
+        try {
+          const preview = await client.previewPluginUninstall(
+            workspaceId,
+            removeTarget.plugin.pluginKey,
+          );
+          if (!preview.installed) {
+            setRemoveTarget(null);
+            await load();
+            await Promise.resolve().then(onChanged);
+            toast.info("This plugin is already removed");
+            return true;
+          }
+          if (!preview.previewToken)
+            throw new Error("Removal details are unavailable.", { cause: error });
+          setRemoveTarget({ ...removeTarget, preview, operationId: crypto.randomUUID() });
+          setRemoveNotice(
+            "Something changed since you opened this dialog. Review the updated details before removing the plugin.",
+          );
+          return false;
+        } catch {
+          setRemoveNotice("Couldn’t refresh the removal details. Close this dialog and try again.");
+          return false;
+        }
+      }
+      setRemoveNotice(
+        error instanceof Error ? error.message : "Removal couldn’t be confirmed. Try again.",
+      );
       toast.error(`Couldn't remove this ${removeTarget.kind === "skill" ? "Skill" : "Plugin"}`, {
         description: error instanceof Error ? error.message : String(error),
       });
@@ -323,6 +373,9 @@ export function useSourcePackages({
         connections={connections}
         canManage={canManage}
         removeTarget={removeTarget}
+        removeNotice={removeNotice}
+        restoreFocusRef={restoreFocusRef}
+        restoreFocusFallbackRef={restoreFocusFallbackRef}
         onSourceImportOpenChange={(open) => dispatchSourceImport({ type: open ? "open" : "close" })}
         onKindChange={(kind) => dispatchSourceImport({ type: "kind", kind })}
         onUrlChange={(url) => dispatchSourceImport({ type: "url", url })}

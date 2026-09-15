@@ -137,12 +137,16 @@ export function BundlesSection({
   onStartPackSession: (skillCapabilityId: string) => void;
   onChanged: () => void | Promise<void>;
 }) {
+  const openerRef = useRef<HTMLElement | null>(null);
+  const removalFallbackRef = useRef<HTMLElement | null>(null);
   const source = useSourcePackages({
     client,
     workspaceId,
     connections,
     canManage,
     onChanged,
+    restoreFocusRef: openerRef,
+    restoreFocusFallbackRef: removalFallbackRef,
   });
   const [openSheetId, setOpenSheetId] = useState<string | null>(null);
   useEffect(() => {
@@ -156,7 +160,6 @@ export function BundlesSection({
   const [manifestOpen, setManifestOpen] = useState(false);
   // Captured synchronously when a row opens something, so closing returns focus
   // to that exact row instead of dropping it on the body.
-  const openerRef = useRef<HTMLElement | null>(null);
 
   const catalogSkills = useMemo(
     () =>
@@ -315,6 +318,8 @@ export function BundlesSection({
 
   return (
     <section
+      ref={removalFallbackRef}
+      tabIndex={-1}
       className="space-y-3"
       aria-label={section === "plugins" ? "Plugins" : "Skills and plugins"}
     >

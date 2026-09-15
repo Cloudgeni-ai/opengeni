@@ -76,6 +76,9 @@ async function render(node: ReactNode) {
   await act(async () => root.render(node));
   return {
     container,
+    rerender: async (next: ReactNode) => {
+      await act(async () => root.render(next));
+    },
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -211,6 +214,37 @@ test("installed rows use the same one-button presentation and discovery does not
       rendered.container.querySelector('[data-plugin-id] [data-status="added"]'),
     ).not.toBeNull();
     expect(button("Install plugin")).toBeUndefined();
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+test("the web catalog starts with OpenAI and clears installed badges after removal", async () => {
+  const { api, calls } = client();
+  const props = { client: api, workspaceId: "removal", query: "", canManage: true };
+  const rendered = await render(
+    <PluginDiscovery {...props} installedPlugins={[installedPlugin]} />,
+  );
+  try {
+    await act(async () =>
+      rendered.container
+        .querySelector<HTMLButtonElement>(".og-connection-installed button")!
+        .click(),
+    );
+    await act(async () => button("Close")!.click());
+    const row = await openDiscovery(rendered.container);
+    expect(calls.discoverPlugins).toHaveBeenLastCalledWith("removal", {
+      query: "",
+      provider: "openai",
+      offset: 0,
+    });
+    expect(row.querySelector('[data-status="added"]')).not.toBeNull();
+    await act(async () => button("Close")!.click());
+    await rendered.rerender(<PluginDiscovery {...props} installedPlugins={[]} />);
+    expect(row.querySelector('[data-status="added"]')).toBeNull();
+    expect(row.querySelector('[data-status="available"]')).not.toBeNull();
+    await act(async () => row.click());
+    expect(button("Install plugin")).not.toBeUndefined();
   } finally {
     await rendered.unmount();
   }
