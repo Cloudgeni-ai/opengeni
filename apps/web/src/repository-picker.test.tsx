@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { createElement } from "react";
+import { createElement, StrictMode } from "react";
 
 import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-menu-body";
 import {
   RepositoryContextPicker,
+  RepositoryContextMenuBody,
   repositoryBindingPresentation,
 } from "@/components/repository-picker";
-import { registerDom, renderComponent } from "../../../packages/react/test/render-hook";
+import { actRun, registerDom, renderComponent } from "../../../packages/react/test/render-hook";
 import type {
   GitHubRepository,
   PersonalGitHubConnectionStatusResponse,
@@ -283,5 +284,50 @@ describe("additive repository picker", () => {
     expect(mounted.container.textContent).toContain("@octocat");
     expect(mounted.container.textContent).toContain("Mounted");
     await mounted.unmount();
+
+    let openRefreshes = 0;
+    let explicitRefreshes = 0;
+    const bodyProps = {
+      ...props,
+      lockedPersonalGitHubRepoIds: new Set([personalRepository.repositoryId]),
+      onOpenRefresh: async () => {
+        openRefreshes += 1;
+      },
+      onRefresh: async () => {
+        explicitRefreshes += 1;
+        throw new Error("Catalog unavailable");
+      },
+    };
+    const body = await renderComponent(
+      createElement(StrictMode, null, createElement(RepositoryContextMenuBody, bodyProps)),
+    );
+    expect(openRefreshes).toBe(1);
+    expect(explicitRefreshes).toBe(0);
+    expect(body.container.textContent).toContain("Repositories");
+    const mountedSwitch = body.container.querySelector<HTMLButtonElement>('button[role="switch"]');
+    expect(mountedSwitch?.getAttribute("aria-checked")).toBe("true");
+    expect(mountedSwitch?.disabled).toBe(true);
+    expect(body.container.textContent).toContain("Mounted");
+    expect(body.container.querySelector('button[aria-label="Refresh repositories"]')).toBeNull();
+    await body.rerender(
+      createElement(
+        StrictMode,
+        null,
+        createElement(RepositoryContextMenuBody, {
+          ...bodyProps,
+          onOpenRefresh: async () => {
+            openRefreshes += 1;
+          },
+        }),
+      ),
+    );
+    expect(openRefreshes).toBe(1);
+    const refresh = [...body.container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent?.includes("Refresh list"),
+    );
+    await actRun(() => refresh?.click());
+    expect(explicitRefreshes).toBe(1);
+    expect(body.container.querySelector('[role="alert"]')?.textContent).toBe("Catalog unavailable");
+    await body.unmount();
   });
 });
