@@ -4076,6 +4076,75 @@ describe("useComposer durable draft and control binding", () => {
     });
   }
 
+  for (const delivery of ["send", "steer"] as const) {
+    test(`durable ${delivery} retains explicit host selection across an uncertain retry`, async () => {
+      const initial: ComposerDraft = {
+        revision: 4,
+        text: "Use this account",
+        resources: [],
+        model: "model-x",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const original = [
+        { serverId: "host-tools", delegationId: crypto.randomUUID(), generation: 1 },
+      ];
+      let selectedHostMcpDelegations = original;
+      const attempts: SendMessageInput[] = [];
+      const client = fakeClient({
+        getComposerDraft: async () => initial,
+        submitComposerDraft: async (_workspaceId, _sessionId, request) => {
+          attempts.push(request);
+          if (attempts.length === 1) throw gatewayError(502);
+          const turn = fakeTurn();
+          return {
+            accepted: makeEvent(2, "user.message"),
+            turn,
+            draft: { ...initial, revision: request.expectedDraftRevision + 1, text: "" },
+            receipt: promptReceipt(turn.id),
+            routing: "accepted_for_execution",
+            interruptionCount: 0,
+            replay: true,
+          };
+        },
+      });
+      const hook = await renderHook(
+        () =>
+          useComposer(SESSION_ID, {
+            client,
+            workspaceId: WORKSPACE_ID,
+            sendExtras: () => ({ selectedHostMcpDelegations }),
+          }),
+        undefined,
+      );
+      await flush();
+      await flushing(async () =>
+        expect(await hook.result.current[delivery]()).toBe(delivery === "send"),
+      );
+      await flush();
+      selectedHostMcpDelegations = [{ ...original[0]!, delegationId: crypto.randomUUID() }];
+      if (delivery === "send") {
+        const failed = hook.result.current.optimisticMessages?.find(
+          (message) => message.outcomeUnknown,
+        );
+        expect(failed).toBeDefined();
+        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
+        await flush();
+      } else {
+        await flushing(async () => expect(await hook.result.current.steer()).toBe(true));
+      }
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0]?.selectedHostMcpDelegations).toEqual(original);
+      expect(attempts[1]?.selectedHostMcpDelegations).toEqual(original);
+      expect(attempts[1]?.clientEventId).toBe(attempts[0]?.clientEventId);
+      expect(attempts[1]?.expectedDraftRevision).toBe(attempts[0]?.expectedDraftRevision);
+      await hook.unmount();
+    });
+  }
+
   test("durable Send forwards personal-resource intent and a definitive epoch retry requires fresh confirmed extras", async () => {
     let serverDraft: ComposerDraft = {
       revision: 4,

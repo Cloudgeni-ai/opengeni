@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { McpServerConnectionRef } from "../src";
+import { McpServerConnectionRef, SubmitComposerDraftRequest } from "../src";
 import { HostMcpBindingDefinition, hostMcpBindingMatchesSelection } from "../src/host-mcp-bindings";
 
 const ceiling = {
@@ -23,6 +23,35 @@ const binding = (connectionId: string) => ({
     ...ceiling,
     connectionRef: { ...ceiling.connectionRef, connectionId, hostBinding: undefined },
   },
+});
+
+test("durable composer submission preserves and validates explicit host selections", () => {
+  const request = {
+    text: "Use my selected account",
+    annotations: [],
+    resources: [],
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    expectedDraftRevision: 1,
+    clientEventId: crypto.randomUUID(),
+    delivery: "send",
+  };
+  const selectedHostMcpDelegations = [
+    { serverId: "host-tools", delegationId: crypto.randomUUID(), generation: 1 },
+  ];
+  expect(
+    SubmitComposerDraftRequest.parse({ ...request, selectedHostMcpDelegations }),
+  ).toMatchObject({ selectedHostMcpDelegations });
+  expect(
+    SubmitComposerDraftRequest.safeParse({
+      ...request,
+      selectedHostMcpDelegations: [{ ...selectedHostMcpDelegations[0], generation: 0 }],
+    }).success,
+  ).toBe(false);
+  expect(SubmitComposerDraftRequest.parse(request)).not.toHaveProperty(
+    "selectedHostMcpDelegations",
+  );
 });
 
 test("explicit accepted-turn descriptor permits only account choice within the exact ceiling", () => {

@@ -2,7 +2,11 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { OpenGeniClient } from "@opengeni/sdk";
+import {
+  OpenGeniClient,
+  type SendMessageInput,
+  type SubmitComposerDraftRequest,
+} from "@opengeni/sdk";
 import { signDelegatedAccessToken, type McpCredentialsRequest } from "@opengeni/contracts";
 import { createNativeRemoteMcpCredentialsPort } from "@opengeni/core/remote-mcp-credentials";
 import { type ApiRouteDeps } from "@opengeni/core";
@@ -41,7 +45,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-test.each(["configured", "session-local", "native"] as const)(
+test.each(["configured", "session-local", "native", "durable"] as const)(
   "public asUser shared %s turns capture each owner and first text after an empty realtime create",
   async (configuration) => {
     const [account] =
@@ -203,6 +207,36 @@ test.each(["configured", "session-local", "native"] as const)(
       tools: [{ kind: "mcp", id: "host-tools" }],
       idempotencyKey: crypto.randomUUID(),
     });
+    const submittedDrafts = new Map<string, SubmitComposerDraftRequest>();
+    const send = async (actor: OpenGeniClient, input: SendMessageInput | string) => {
+      if (configuration !== "durable") return actor.sendMessage(workspace.id, session.id, input);
+      const message = typeof input === "string" ? { text: input } : input;
+      const clientEventId = message.clientEventId ?? crypto.randomUUID();
+      let draftInput = submittedDrafts.get(clientEventId);
+      if (!draftInput) {
+        const current = await actor.getComposerDraft(workspace.id, session.id);
+        const saved = await actor.saveComposerDraft(workspace.id, session.id, {
+          ...current,
+          text: message.text,
+          expectedRevision: current.revision,
+        });
+        draftInput = {
+          ...saved,
+          annotations: [],
+          connectionAuthorities: [],
+          expectedDraftRevision: saved.revision,
+          clientEventId,
+          delivery: "send",
+        };
+        submittedDrafts.set(clientEventId, draftInput);
+      }
+      return (
+        await actor.submitComposerDraft(workspace.id, session.id, {
+          ...draftInput,
+          ...message,
+        })
+      ).accepted;
+    };
     const snapshots =
       () => shared.admin`select a.turn_id, a.owner_subject_id, a.binding_id, a.canonical_snapshot,
     jsonb_build_object('kind', t.initiator_kind, 'subjectId', t.initiator_subject_id) as initiator
@@ -216,7 +250,7 @@ test.each(["configured", "session-local", "native"] as const)(
       }),
     ).rejects.toMatchObject({ status: 403 });
     await expect(
-      bob.sendMessage(workspace.id, session.id, {
+      send(bob, {
         text: "Stale selection",
         selectedHostMcpDelegations: [{ ...grants[1]!.selection[0]!, generation: 2 }],
       }),
@@ -228,7 +262,7 @@ test.each(["configured", "session-local", "native"] as const)(
       grant: { scope: "user", mode: "always", context: "user_private" },
     });
     await expect(
-      bob.sendMessage(workspace.id, session.id, {
+      send(bob, {
         text: "Wrong visibility",
         selectedHostMcpDelegations: [
           { serverId: "host-tools", delegationId: privateGrant.id, generation: 1 },
@@ -241,14 +275,14 @@ test.each(["configured", "session-local", "native"] as const)(
       clientEventId: crypto.randomUUID(),
       selectedHostMcpDelegations: grants[1]!.selection,
     };
-    const firstEvent = await bob.sendMessage(workspace.id, session.id, first);
-    expect((await bob.sendMessage(workspace.id, session.id, first)).id).toBe(firstEvent.id);
+    const firstEvent = await send(bob, first);
+    expect((await send(bob, first)).id).toBe(firstEvent.id);
     const second = {
       text: "Other participant",
       clientEventId: crypto.randomUUID(),
       selectedHostMcpDelegations: grants[0]!.selection,
     };
-    await alice.sendMessage(workspace.id, session.id, second);
+    await send(alice, second);
     const captured = await snapshots();
     expect(captured).toHaveLength(2);
     for (const i of [0, 1]) {
@@ -258,19 +292,19 @@ test.each(["configured", "session-local", "native"] as const)(
       expect(own.canonical_snapshot.definition.connectionRef.connectionId).toBe(`account-${i}`);
     }
     await expect(
-      bob.sendMessage(workspace.id, session.id, {
+      send(bob, {
         ...first,
         selectedHostMcpDelegations: grants[0]!.selection,
       }),
     ).rejects.toMatchObject({ status: 409 });
     await expect(
-      bob.sendMessage(workspace.id, session.id, {
+      send(bob, {
         text: "Cannot borrow",
         selectedHostMcpDelegations: grants[0]!.selection,
       }),
     ).rejects.toMatchObject({ status: 403 });
     expect(await snapshots()).toHaveLength(2);
-    await bob.sendMessage(workspace.id, session.id, "No implicit selection");
+    await send(bob, "No implicit selection");
     expect(await snapshots()).toHaveLength(2);
     const attemptId = crypto.randomUUID();
     const claim = await claimSessionWorkForAttempt(db.db, workspace.id, {
@@ -423,7 +457,13 @@ test.each(["configured", "session-local", "native"] as const)(
       expectedGeneration: 1,
     });
     if (resolved.status === "ok") expect(await resolved.authorizeProviderRequest!()).toBe(false);
-    expect((await bob.sendMessage(workspace.id, session.id, first)).id).toBe(firstEvent.id);
+    expect((await send(bob, first)).id).toBe(firstEvent.id);
+    await expect(
+      send(bob, {
+        text: "Revoked selection cannot create a fresh turn",
+        selectedHostMcpDelegations: grants[1]!.selection,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
     expect(await snapshots()).toHaveLength(2);
   },
   90_000,
