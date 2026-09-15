@@ -147,6 +147,7 @@ export function BundlesSection({
     onChanged,
     restoreFocusRef: openerRef,
     restoreFocusFallbackRef: removalFallbackRef,
+    ...(onShowCategory ? { onManageSkills: () => onShowCategory("skills") } : {}),
   });
   const [openSheetId, setOpenSheetId] = useState<string | null>(null);
   useEffect(() => {

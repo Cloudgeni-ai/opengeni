@@ -86,6 +86,7 @@ export function useSourcePackages({
   onChanged,
   restoreFocusRef,
   restoreFocusFallbackRef,
+  onManageSkills,
 }: {
   client: OpenGeniBrowserClient;
   workspaceId: string;
@@ -94,6 +95,7 @@ export function useSourcePackages({
   onChanged: () => void | Promise<void>;
   restoreFocusRef?: RefObject<HTMLElement | null>;
   restoreFocusFallbackRef?: RefObject<HTMLElement | null>;
+  onManageSkills?: () => void;
 }): SourcePackages {
   const [installedSkills, setInstalledSkills] = useState<InstalledSkillSummary[]>([]);
   const [plugins, setPlugins] = useState<PluginInstallationSummary[]>([]);
@@ -310,6 +312,10 @@ export function useSourcePackages({
         });
         toast.success(`${removeTarget.plugin.name} removed`, {
           description: pluginRemovalMessage(result, removeTarget.preview),
+          ...(onManageSkills &&
+          result.skillReleases?.some((release) => release.disposition === "preserved")
+            ? { action: { label: "View kept skills", onClick: onManageSkills } }
+            : {}),
         });
       }
       setRemoveTarget(null);
