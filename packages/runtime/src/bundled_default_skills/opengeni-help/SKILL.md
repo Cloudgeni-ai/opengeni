@@ -52,18 +52,19 @@ holds an organization API key; the browser never receives it. Separate an
 unavailable administrative action from an unknown protocol. State any exact
 human setup step that remains, rather than claiming the account is configured.
 
-## Discovery and GitHub
+## Discovery and integrations
 
 Tool search is ranked, not exhaustive. Recover a miss through `tool_list` and
 exact-name schema loading where available. Use `capability_catalog_search` for
 reviewed integration candidates and `skill_read` for available guidance. Missing
 `ogtool` is a local executable problem, not proof that a capability is absent.
 
-For private GitHub repositories, use authorized `github_connect_link` and
-`github_repositories_list` tools when available. Distinguish App configuration,
-workspace binding, repository permission, and attachment to this session.
-Verify the actual mounted path before editing. Do not guess UI steps or claim
-that a repository is usable solely because the App is configured.
+For a chosen integration that requires setup, follow the catalog's next action
+through `capability_authorization_request` to show its human setup card in chat.
+Lacking permission to manage a connection does not prevent requesting human
+setup. Only the authenticated human can authorize it. Distinguish deployment
+configuration, connection readiness, resource access, and availability in this
+session; verify each before claiming that the integration is usable.
 
 ## Cost questions
 

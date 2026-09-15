@@ -30,11 +30,9 @@ Stored rows remain visible for audit and unlink with lifecycle `active`,
 repositories. Provider failure, malformed provider identity, or a legacy row
 without an authority receipt is `unverified`, never healthy.
 
-When an exact live agent calls `github_connect_link` for an unbound workspace,
-OpenGeni posts the same in-chat human authorization card as capability discovery.
-The response retains `status=unbound` and adds an `authorization_requested`
-receipt. It grants no management permission, browser consent token, or binding
-to the agent. The authenticated human completes setup through Connect.
+Chat setup uses the provider-neutral capability discovery and human authorization
+card flow described in [MCP surfaces](mcp-surfaces.md). `github_connect_link`
+remains a status/manager-link tool; reading status never posts a setup card.
 
 ## Owner-authority flow
 

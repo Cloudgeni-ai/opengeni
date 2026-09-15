@@ -764,7 +764,7 @@ export function buildOpenGeniMcpServer(
     registerCapabilityDiscoveryTools(server, deps, grant, sessionId, json);
   }
   if (can("github:use")) {
-    registerGitHubConnectTool(server, deps, grant, sessionId, options, json);
+    registerGitHubConnectTool(server, deps, grant, options, json);
   }
 
   if (can("github:use")) {
@@ -5787,7 +5787,7 @@ function registerCapabilityDiscoveryTools(
     "capability_catalog_search",
     {
       description:
-        "Search OpenGeni's reviewed workspace capability catalog when the user asks to add an integration or the task needs a capability that is not currently usable. Search by the outcome needed (for example `GitHub repositories`, `product analytics`, or `Slack notifications`), compare the returned candidates, and prefer a ready or verified exact match. This only reads secret-free metadata; it never installs, connects, or authorizes anything.",
+        "Search OpenGeni's reviewed workspace capability catalog when the user asks to add an integration or the task needs a capability that is not currently usable. Search by the outcome needed, compare the returned candidates, and prefer a ready or verified exact match. For a chosen candidate requiring authorization, use setup.nextAction to post its human setup card; lacking integration-management permission does not itself prevent requesting human setup. This only reads secret-free metadata; it never installs, connects, or authorizes anything.",
       inputSchema: {
         query: z4.string().min(1).max(500),
         limit: z4.number().int().min(1).max(20).optional(),
@@ -5817,6 +5817,10 @@ function registerCapabilityDiscoveryTools(
         setup: {
           ...setups[index]!,
           requiredVariables: capabilityRequiredVariables(item),
+          nextAction:
+            setups[index]!.status === "authorization_required"
+              ? { toolName: "capability_authorization_request", capabilityId: item.id }
+              : null,
         },
       }));
       return json({ query, matches });
@@ -5858,14 +5862,37 @@ function registerCapabilityDiscoveryTools(
           message: setup.detail,
         });
       }
-      const appended = await publishCapabilityAuthorizationRequest(
-        deps,
-        grant,
+      const claims = exactAgentCommandContext(grant, sessionId);
+      const payload = ToolAuthNeededPayload.parse({
+        serverId: item.runtime.mcpServerId ?? "opengeni",
+        toolName: "capability_authorization_request",
+        providerDomain: capabilityProviderDomain(item),
+        reason: "missing_connection",
+        capability: {
+          id: item.id,
+          name: item.name,
+          kind: item.kind,
+          source: item.source,
+          action: setup.action,
+          rationale,
+          requiredVariables: capabilityRequiredVariables(item),
+        },
+      });
+      const appended = await appendAndPublishTurnEventsFenced(
+        deps.db,
+        deps.bus,
+        grant.workspaceId,
         sessionId,
-        item,
-        setup.action,
-        rationale,
+        claims.callerTurnId,
+        claims.callerExecutionGeneration,
+        claims.callerAttemptId,
+        [{ type: "tool.auth_needed", payload }],
       );
+      if (!appended.accepted) {
+        throw new Error(
+          "The calling turn was replaced before the authorization request committed.",
+        );
+      }
       return json({
         capabilityId: item.id,
         status: "authorization_requested",
@@ -5876,47 +5903,6 @@ function registerCapabilityDiscoveryTools(
       });
     },
   );
-}
-
-async function publishCapabilityAuthorizationRequest(
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-  sessionId: string,
-  item: CapabilityCatalogItem,
-  action: "connect" | "add_credentials" | "enable",
-  rationale: string,
-  toolName = "capability_authorization_request",
-) {
-  const claims = exactAgentCommandContext(grant, sessionId);
-  const payload = ToolAuthNeededPayload.parse({
-    serverId: item.runtime.mcpServerId ?? "opengeni",
-    toolName,
-    providerDomain: capabilityProviderDomain(item),
-    reason: "missing_connection",
-    capability: {
-      id: item.id,
-      name: item.name,
-      kind: item.kind,
-      source: item.source,
-      action,
-      rationale,
-      requiredVariables: capabilityRequiredVariables(item),
-    },
-  });
-  const appended = await appendAndPublishTurnEventsFenced(
-    deps.db,
-    deps.bus,
-    grant.workspaceId,
-    sessionId,
-    claims.callerTurnId,
-    claims.callerExecutionGeneration,
-    claims.callerAttemptId,
-    [{ type: "tool.auth_needed", payload }],
-  );
-  if (!appended.accepted) {
-    throw new Error("The calling turn was replaced before the authorization request committed.");
-  }
-  return appended;
 }
 
 async function capabilitySetupProjection(
@@ -6040,7 +6026,6 @@ function registerGitHubConnectTool(
   server: McpServer,
   deps: ApiRouteDeps,
   grant: AccessGrant,
-  sessionId: string | null,
   options: McpServerOptions,
   json: JsonResult,
 ): void {
@@ -6048,7 +6033,7 @@ function registerGitHubConnectTool(
     "github_connect_link",
     {
       description:
-        "Check GitHub App workspace binding. If unbound, an exact live agent call posts the human connection card in this chat; wait for the user to finish it, then list repositories. Human managers may also receive a fresh owner-consent link. This tool never grants access or binds an installation.",
+        "Report truthful GitHub App workspace binding status and, for a human grant with github:manage, return the fresh GitHub owner-consent link. Server App configuration alone is never reported as a usable binding.",
       inputSchema: {},
     },
     async () => {
@@ -6069,41 +6054,9 @@ function registerGitHubConnectTool(
       }
       const installations = await listWorkspaceGitHubInstallationBindings(deps, grant.workspaceId);
       const status = githubBindingStatus(true, installations);
-      let authorization: { status: "authorization_requested"; eventId: string | null } | undefined;
-      if (sessionId && exactAgentAttemptClaims(grant)) {
-        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
-        if (status === "unbound") {
-          const catalog = await buildCapabilityCatalog({
-            db: deps.db,
-            workspaceId: grant.workspaceId,
-            settings,
-            subjectId: grant.subjectId,
-          });
-          const item = [...catalog.items, ...nativeConnectionCapabilityRecommendations()].find(
-            (candidate) => candidate.id === "api:github-app",
-          );
-          if (!item || !capabilityCatalogItemIsTrustedForExposure(item))
-            throw new Error("GitHub capability setup is unavailable.");
-          const appended = await publishCapabilityAuthorizationRequest(
-            deps,
-            grant,
-            sessionId,
-            item,
-            "connect",
-            "Connect GitHub and choose the repositories to use in this chat.",
-            "github_connect_link",
-          );
-          authorization = {
-            status: "authorization_requested",
-            eventId: appended.events[0]?.id ?? null,
-          };
-        }
-      }
       const baseUrl = githubBrowserBaseUrl(settings, options.requestOrigin);
       const state =
-        baseUrl &&
-        !exactAgentAttemptClaims(grant) &&
-        hasPermission(grant.permissions, "github:manage")
+        baseUrl && hasPermission(grant.permissions, "github:manage")
           ? createSignedState(deps.githubStateSecret, {
               accountId: grant.accountId,
               workspaceId: grant.workspaceId,
@@ -6129,7 +6082,6 @@ function registerGitHubConnectTool(
         installUrl: connectUrl,
         linkUrl: connectUrl,
         installations: installationViews,
-        ...(authorization ? { authorization } : {}),
         missing: [],
       });
     },

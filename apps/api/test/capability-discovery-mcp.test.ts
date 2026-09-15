@@ -55,125 +55,225 @@ afterAll(async () => {
 }, 60_000);
 
 describe("agent capability discovery MCP (real PostgreSQL)", () => {
-  for (const entryPoint of ["capability_authorization_request", "github_connect_link"] as const)
-    test(`${entryPoint} requests GitHub human authorization without persisting a grant`, async () => {
-      if (!shared) return;
-      const attempt = await seedAttempt();
-      const bus = new MemoryEventBus();
-      const agentGrant: AccessGrant = {
-        accountId: workspace.accountId,
-        workspaceId: workspace.workspaceId,
-        subjectId: "worker:first-party-mcp",
-        permissions: ["workspace:read", "github:use"],
-        principalKind: "agent_attempt",
-        metadata: {
-          sessionId: attempt.sessionId,
-          turnId: attempt.turnId,
-          attemptId: attempt.attemptId,
-          executionGeneration: attempt.executionGeneration,
-          firstPartyMcpTools: [
-            "capability_catalog_search",
-            "capability_authorization_request",
-            "github_connect_link",
-          ],
-        },
+  test("finds GitHub, requests human authorization, and persists no grant", async () => {
+    if (!shared) return;
+    const attempt = await seedAttempt();
+    const bus = new MemoryEventBus();
+    const agentGrant: AccessGrant = {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: "worker:first-party-mcp",
+      permissions: ["workspace:read"],
+      principalKind: "agent_attempt",
+      metadata: {
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        attemptId: attempt.attemptId,
+        executionGeneration: attempt.executionGeneration,
+        firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+      },
+    };
+    const server = buildOpenGeniMcpServer(
+      {
+        settings: testSettings({
+          githubAppId: "12345",
+          githubClientId: "github-client",
+          githubClientSecret: "github-secret",
+          githubAppSlug: "opengeni-test",
+          githubAppPrivateKey: "test-private-key",
+        }),
+        db: client.db,
+        bus,
+        githubStateSecret: "capability-discovery-state-secret",
+      } as ApiRouteDeps,
+      agentGrant,
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "capability-discovery-test", version: "1" });
+    await server.connect(serverTransport);
+    await mcp.connect(clientTransport);
+    try {
+      const search = await mcp.callTool({
+        name: "capability_catalog_search",
+        arguments: { query: "GitHub repositories" },
+      });
+      expect(search.isError).not.toBe(true);
+      const searchBody = mcpJson(search) as {
+        matches: Array<{
+          capabilityId: string;
+          providerDomain: string | null;
+          setup: { status: string; action: string | null };
+        }>;
       };
-      const server = buildOpenGeniMcpServer(
-        {
-          settings: testSettings({
-            githubAppId: "12345",
-            githubClientId: "github-client",
-            githubClientSecret: "github-secret",
-            githubAppSlug: "opengeni-test",
-            githubAppPrivateKey: "test-private-key",
-          }),
-          db: client.db,
-          bus,
-          githubStateSecret: "capability-discovery-state-secret",
-        } as ApiRouteDeps,
-        agentGrant,
-      );
-      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-      const mcp = new Client({ name: "capability-discovery-test", version: "1" });
-      await server.connect(serverTransport);
-      await mcp.connect(clientTransport);
-      try {
-        const search = await mcp.callTool({
-          name: "capability_catalog_search",
-          arguments: { query: "GitHub repositories" },
-        });
-        expect(search.isError).not.toBe(true);
-        const searchBody = mcpJson(search) as {
-          matches: Array<{
-            capabilityId: string;
-            providerDomain: string | null;
-            setup: { status: string; action: string | null };
-          }>;
-        };
-        expect(searchBody.matches[0]).toMatchObject({
-          capabilityId: "api:github-app",
-          providerDomain: "github.com",
-          setup: { status: "authorization_required", action: "connect" },
-        });
-
-        const request = await mcp.callTool({
-          name: entryPoint,
-          arguments:
-            entryPoint === "github_connect_link"
-              ? {}
-              : {
-                  capabilityId: "api:github-app",
-                  rationale:
-                    "Repository access is needed to inspect and update the requested code.",
-                },
-        });
-        expect({
-          error: request.isError ?? false,
-          ...(request.isError ? { content: request.content } : {}),
-        }).toEqual({ error: false });
-        expect(mcpJson(request)).toMatchObject(
-          entryPoint === "github_connect_link"
-            ? {
-                status: "unbound",
-                installUrl: null,
-                linkUrl: null,
-                authorization: { status: "authorization_requested" },
-              }
-            : {
-                capabilityId: "api:github-app",
-                status: "authorization_requested",
-                action: "connect",
-              },
-        );
-
-        const events = await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId);
-        const authEvent = events.find((event) => event.type === "tool.auth_needed");
-        expect(authEvent).toMatchObject({
-          turnId: attempt.turnId,
-          turnAttemptId: attempt.attemptId,
-          payload: {
-            serverId: "opengeni",
-            toolName: entryPoint,
-            providerDomain: "github.com",
-            capability: {
-              id: "api:github-app",
-              action: "connect",
-            },
+      expect(searchBody.matches[0]).toMatchObject({
+        capabilityId: "api:github-app",
+        providerDomain: "github.com",
+        setup: {
+          status: "authorization_required",
+          action: "connect",
+          nextAction: {
+            toolName: "capability_authorization_request",
+            capabilityId: "api:github-app",
           },
-        });
-        expect(bus.published.flat().some((event) => event.id === authEvent?.id)).toBe(true);
-        expect(await listGitHubInstallationsForWorkspace(client.db, workspace.workspaceId)).toEqual(
-          [],
-        );
-        const [installationCount] = await shared.admin<{ count: number }[]>`
+        },
+      });
+
+      const request = await mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: {
+          capabilityId: "api:github-app",
+          rationale: "Repository access is needed to inspect and update the requested code.",
+        },
+      });
+      expect(request.isError).not.toBe(true);
+      expect(mcpJson(request)).toMatchObject({
+        capabilityId: "api:github-app",
+        status: "authorization_requested",
+        action: "connect",
+      });
+
+      const events = await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId);
+      const authEvent = events.find((event) => event.type === "tool.auth_needed");
+      expect(authEvent).toMatchObject({
+        turnId: attempt.turnId,
+        turnAttemptId: attempt.attemptId,
+        payload: {
+          serverId: "opengeni",
+          toolName: "capability_authorization_request",
+          providerDomain: "github.com",
+          capability: {
+            id: "api:github-app",
+            action: "connect",
+          },
+        },
+      });
+      expect(bus.published.flat().some((event) => event.id === authEvent?.id)).toBe(true);
+      expect(await listGitHubInstallationsForWorkspace(client.db, workspace.workspaceId)).toEqual(
+        [],
+      );
+      const [installationCount] = await shared.admin<{ count: number }[]>`
         SELECT count(*)::int AS count
         FROM capability_installations
         WHERE workspace_id = ${workspace.workspaceId}`;
-        expect(installationCount?.count).toBe(0);
+      expect(installationCount?.count).toBe(0);
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
+    }
+  }, 60_000);
+  for (const scenario of [
+    {
+      name: "Arbitrary metrics service",
+      authModel: "api_key",
+      endpoint: true,
+      action: "add_credentials",
+    },
+    { name: "Arbitrary public search", authModel: null, endpoint: true, action: "enable" },
+    { name: "Arbitrary offline service", authModel: null, endpoint: false, action: null },
+  ] as const)
+    test(`generic setup handoff: ${scenario.name}`, async () => {
+      if (!shared) throw new Error("Real PostgreSQL fixture required");
+      const capabilityId = `mcp:fixture-${crypto.randomUUID()}`;
+      const serverId = `fixture-${crypto.randomUUID()}`;
+      await upsertCapabilityCatalogItem(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        id: capabilityId,
+        kind: "mcp",
+        source: "manual",
+        name: scenario.name,
+        endpointUrl: scenario.endpoint ? "https://arbitrary.example.test/mcp" : null,
+        authModel: scenario.authModel,
+        metadata: { mcpServerId: serverId },
+      });
+      const attempt = await seedAttempt();
+      const server = buildOpenGeniMcpServer(
+        {
+          settings: testSettings(),
+          db: client.db,
+          bus: new MemoryEventBus(),
+        } as ApiRouteDeps,
+        {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          subjectId: "worker:first-party-mcp",
+          permissions: ["workspace:read"],
+          principalKind: "agent_attempt",
+          metadata: {
+            ...attempt,
+            firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+          },
+        },
+      );
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: "generic-connect-test", version: "1" });
+      await server.connect(st);
+      await mcp.connect(ct);
+      try {
+        const search = await mcp.callTool({
+          name: "capability_catalog_search",
+          arguments: { query: scenario.name },
+        });
+        expect(search.isError).not.toBe(true);
+        const body = mcpJson(search) as {
+          matches: Array<{
+            capabilityId: string;
+            setup: { nextAction: { toolName: string; capabilityId: string } | null };
+          }>;
+        };
+        const match = body.matches.find((item) => item.capabilityId === capabilityId)!;
+        expect(match).toBeDefined();
+        expect(match.setup).toMatchObject({
+          status: scenario.action ? "authorization_required" : "unavailable",
+          action: scenario.action,
+          nextAction: scenario.action
+            ? { toolName: "capability_authorization_request", capabilityId }
+            : null,
+        });
+        expect(
+          (await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)).filter(
+            (event) => event.type === "tool.auth_needed",
+          ),
+        ).toHaveLength(0);
+        const request = await mcp.callTool({
+          name: match.setup.nextAction?.toolName ?? "capability_authorization_request",
+          arguments: {
+            capabilityId: match.setup.nextAction?.capabilityId ?? capabilityId,
+            rationale: "Access the data requested by the user.",
+          },
+        });
+        expect(request.isError).not.toBe(true);
+        expect(mcpJson(request)).toMatchObject({
+          status: scenario.action ? "authorization_requested" : "unavailable",
+        });
+        const events = (
+          await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
+        ).filter((event) => event.type === "tool.auth_needed");
+        expect(events).toHaveLength(scenario.action ? 1 : 0);
+        if (scenario.action)
+          expect(events[0]).toMatchObject({
+            turnId: attempt.turnId,
+            turnAttemptId: attempt.attemptId,
+            payload: {
+              serverId,
+              toolName: "capability_authorization_request",
+              providerDomain: "arbitrary.example.test",
+              capability: {
+                id: capabilityId,
+                name: scenario.name,
+                kind: "mcp",
+                source: "manual",
+                action: scenario.action,
+              },
+            },
+          });
+        const [installed] = await shared.admin<
+          { count: number }[]
+        >`select count(*)::int as count from capability_installations where workspace_id=${workspace.workspaceId} and capability_id=${capabilityId}`;
+        expect(installed?.count).toBe(0);
       } finally {
         await Promise.all([mcp.close(), server.close()]);
       }
-    }, 60_000);
+    });
   test("enabled personal Gmail requires consent unless this exact attempt exposes its tools", async () => {
     if (!shared) throw new Error("Real PostgreSQL fixture required");
     const capabilityId = "mcp:gmail-consent-test";
@@ -266,6 +366,10 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         ).toMatchObject({
           status: exposed === serverId ? "ready" : "authorization_required",
           action: exposed === serverId ? null : "connect",
+          nextAction:
+            exposed === serverId
+              ? null
+              : { toolName: "capability_authorization_request", capabilityId },
         });
         const request = await mcp.callTool({
           name: "capability_authorization_request",
@@ -323,12 +427,8 @@ async function seedAttempt(): Promise<{
     reasoningEffort: "medium",
     latencyMode: "standard",
     sandboxBackend: "none",
-    firstPartyMcpPermissions: ["workspace:read", "github:use"],
-    firstPartyMcpTools: [
-      "capability_catalog_search",
-      "capability_authorization_request",
-      "github_connect_link",
-    ],
+    firstPartyMcpPermissions: ["workspace:read"],
+    firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
   });
   const executionGeneration = 1;
   const [turn] = await shared!.admin<{ id: string }[]>`
