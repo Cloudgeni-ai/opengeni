@@ -15,6 +15,8 @@ export function NewSessionVariableSetPicker(props: {
   runtimeIds: string[];
   variableSets: { id: string; name: string; scope?: string }[];
   disabled: boolean;
+  canAttach: boolean;
+  canUse: boolean;
   leading?: ReactNode;
   onClose?: () => void;
   onChange: (runtimeIds: string[]) => void;
@@ -48,16 +50,27 @@ function DraftPicker(
     setRows(next);
   }, [load]);
   const changed = JSON.stringify(rows) !== JSON.stringify(saved);
+  const canEnable = props.canAttach && props.canUse;
+  // A permission may be revoked after a switch changed but before Save.
+  // Removing or switching off restored selections remains available.
+  const unauthorizedAddition =
+    !canEnable && rows.some((row) => row.enabled && !props.runtimeIds.includes(row.id));
   return (
     <div className="flex min-h-0 flex-col gap-2">
       <VariableSetShortlistEditor
         rows={rows}
         variableSets={props.variableSets}
         disabled={props.disabled}
-        canAdd={!props.disabled}
+        canAdd={!props.disabled && canEnable}
         leading={props.leading}
         onChange={setRows}
       />
+      {!canEnable ? (
+        <p className="px-2 text-2xs text-fg-subtle">
+          Attach and use permissions are required to enable variable sets. You can still turn sets
+          off or remove them from this list.
+        </p>
+      ) : null}
       <div className="flex justify-end gap-2 border-t border-border pt-2">
         <Button
           type="button"
@@ -83,8 +96,9 @@ function DraftPicker(
         <Button
           type="button"
           size="sm"
-          disabled={props.disabled || !changed}
+          disabled={props.disabled || !changed || unauthorizedAddition}
           onClick={() => {
+            if (props.disabled || unauthorizedAddition) return;
             writeVariableSetShortlist(props.preferenceKey, rows);
             setSaved(rows);
             props.onChange(variableSetRuntimeIds(rows));

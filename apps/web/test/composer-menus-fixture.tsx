@@ -123,6 +123,8 @@ function Fixture() {
             panel: (
               <NewSessionVariableSetPicker
                 workspaceId="fixture"
+                canAttach
+                canUse
                 runtimeIds={runtimeIds}
                 variableSets={Array.from({ length: 20 }, (_, index) => ({
                   id: `set-${index + 1}`,
