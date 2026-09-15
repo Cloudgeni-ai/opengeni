@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const ManagedSignInProvider = z.enum(["google", "github"]);
 export const ManagedSignInMethods = z.object({
+  identityId: z.string().uuid(),
   email: z.string().email(),
   emailVerified: z.boolean(),
   identityRevision: z.number().int().positive(),
@@ -18,6 +19,7 @@ export const ManagedSignInMethods = z.object({
 });
 export type ManagedSignInMethods = z.infer<typeof ManagedSignInMethods>;
 export const ManagedSignInMutation = z.object({
+  expectedIdentityId: z.string().uuid(),
   operationId: z.string().uuid(),
   expectedIdentityRevision: z.number().int().positive(),
 });

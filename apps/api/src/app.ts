@@ -106,6 +106,7 @@ import {
   runManagedAuthProvider,
 } from "./auth/managed-auth-attempt-context";
 import { createManagedEmailTransport } from "./auth/managed-email";
+import { startManagedSignInNotificationDelivery } from "./auth/managed-sign-in-notifications";
 import {
   assertManagedEmailTransportMetadata,
   assertOrganizationUserSetupQueryTransportConfigured,
@@ -304,6 +305,7 @@ export function createAppComposition(deps: AppDependencies): {
   const managedAuthSessionAdapter =
     deps.managedAuthSessionAdapter ??
     (managedAuth ? createBetterAuthSessionAdapter(managedAuth, deps.db) : null);
+  if (managedAuth) startManagedSignInNotificationDelivery(deps.db, managedEmailTransport);
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;
   let documentServices: DocumentServices | null = deps.documentServices ?? null;
@@ -679,6 +681,25 @@ export function createAppComposition(deps: AppDependencies): {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
+      if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
+        const body = await c.req.raw
+          .clone()
+          .json()
+          .catch(() => null);
+        if (
+          !body ||
+          !["google", "github"].includes(body.provider) ||
+          Object.prototype.hasOwnProperty.call(body, "idToken")
+        ) {
+          return c.json(
+            {
+              code: "SIGN_IN_METHOD_OAUTH_REDIRECT_REQUIRED",
+              message: "Use the browser OAuth sign-in redirect",
+            },
+            403,
+          );
+        }
+      }
       if (oauthCallbackProvider) {
         const connectResponse = await handleManagedSignInConnectCallback(
           c,
@@ -695,6 +716,7 @@ export function createAppComposition(deps: AppDependencies): {
           "set-password",
           "change-password",
           "change-email",
+          "update-user",
           "delete-user",
           "get-access-token",
           "refresh-token",

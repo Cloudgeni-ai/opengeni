@@ -19,6 +19,7 @@ import { sql } from "drizzle-orm";
 import { Pool } from "pg";
 
 import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-admission";
+import { deliverManagedSignInNotification } from "./managed-sign-in-notifications";
 import {
   currentManagedAuthProviderId,
   currentManagedAuthAttemptId,
@@ -296,25 +297,7 @@ export function createManagedAuth(
               currentManagedSignInConnectIntent()
             )
               return;
-            const result =
-              await db.execute(sql`select email from auth_users where id=${account.userId}
-              and (select count(*) from auth_identities where user_id=${account.userId}) > 1`);
-            const row = (Array.isArray(result) ? result : result.rows)[0] as
-              | { email: string }
-              | undefined;
-            if (!row) return;
-            // An email outage must not roll back an already committed link or
-            // turn successful provider authentication into an ambiguous failure.
-            await sendManagedAuthEmail(managedEmailTransport, {
-              kind: "sign_in_method_changed",
-              to: row.email,
-              idempotencyKey: `sign-in-method:${account.id}`,
-              subject: "A sign-in method was added to your OpenGeni account",
-              text: `Your verified ${account.providerId} sign-in was linked to your OpenGeni account. You can disconnect it in personal sign-in settings.`,
-              html: `<p>Your verified ${account.providerId} sign-in was linked to your OpenGeni account. You can disconnect it in personal sign-in settings.</p>`,
-            }).catch(() => {
-              process.stderr.write("Managed sign-in notification delivery failed\n");
-            });
+            await deliverManagedSignInNotification(db, managedEmailTransport, account.id);
           },
         },
       },

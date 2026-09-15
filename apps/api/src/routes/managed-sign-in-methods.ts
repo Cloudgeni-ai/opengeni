@@ -2,6 +2,7 @@ import {
   ManagedSignInMethods,
   ManagedSignInPasswordMutation,
   ManagedSignInProviderMutation,
+  ManagedSignInMutationResponse,
 } from "@opengeni/contracts/managed-sign-in-methods";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
@@ -12,6 +13,7 @@ import {
 import {
   MANAGED_AUTH_SESSION_SET_COOKIE,
   managedAuthSha256,
+  managedAuthSecretRequestDigest,
   requireManagedAuthMutationAdmission,
 } from "@opengeni/core/managed-auth-session-sets";
 import { getManagedAuthSessionSetSnapshot } from "@opengeni/db/managed-auth-session-sets";
@@ -20,13 +22,38 @@ import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
 import {
   isolatedManagedAuthOAuthCallbackRequest,
   hashManagedAuthPassword,
   verifyManagedAuthPassword,
 } from "../auth/managed-auth";
 import { runManagedSignInConnect } from "../auth/managed-auth-attempt-context";
+import { deliverManagedSignInNotification } from "../auth/managed-sign-in-notifications";
+import { managedAuthSelectedProofHeaders } from "../auth/managed-auth-session-adapter";
 import { scrubManagedAuthProviderResponse } from "./managed-auth-session-sets";
+
+const ConnectState = z.object({
+  opengeniSignInMethod: z.object({
+    intentId: z.string().uuid(),
+    provider: z.enum(["google", "github"]),
+  }),
+  link: z.object({ userId: z.string().min(1), email: z.string().email() }),
+  callbackURL: z.string().url(),
+  errorURL: z.string().url(),
+});
+const ConnectIntent = z.object({
+  authUserId: z.string().min(1),
+  authSessionId: z.string().min(1),
+  expectedIdentityId: z.string().uuid(),
+  actorFence: z
+    .object({
+      authorityHash: z.string().regex(/^[0-9a-f]{64}$/),
+      actorEpoch: z.string().regex(/^[1-9][0-9]*$/),
+      requestId: z.string().uuid(),
+    })
+    .optional(),
+});
 
 async function rows<T>(deps: ApiRouteDeps, query: ReturnType<typeof sql>): Promise<T[]> {
   const result = await deps.db.execute(query);
@@ -42,7 +69,7 @@ async function identity(context: Context, deps: ApiRouteDeps) {
   });
 }
 
-async function admitMutation(context: Context, deps: ApiRouteDeps) {
+export async function admitManagedSignInMutation(context: Context, deps: ApiRouteDeps) {
   const origin = deps.settings.publicBaseUrl ? new URL(deps.settings.publicBaseUrl).origin : null;
   if (
     !origin ||
@@ -87,23 +114,6 @@ function configured(deps: ApiRouteDeps, provider: "credential" | "google" | "git
   );
 }
 
-async function notify(deps: ApiRouteDeps, email: string, method: string, operationId: string) {
-  try {
-    const result = await deps.managedEmailTransport.send({
-      kind: "sign_in_method_changed",
-      from: deps.managedEmailTransport.sender,
-      to: email,
-      subject: "Your OpenGeni sign-in methods changed",
-      idempotencyKey: `sign-in-method:${operationId}`,
-      text: `Your OpenGeni ${method} sign-in method changed. If this was not you, reset your password and contact your administrator.`,
-      html: `<p>Your OpenGeni ${method} sign-in method changed. If this was not you, reset your password and contact your administrator.</p>`,
-    });
-    return result.status;
-  } catch {
-    return "outcome_unknown" as const;
-  }
-}
-
 function mutationError(context: Context, error: unknown): Response {
   let candidate: unknown = error;
   for (
@@ -116,6 +126,7 @@ function mutationError(context: Context, error: unknown): Response {
       return context.json(
         { code, message: code.toLowerCase().replaceAll("_", " ") },
         code.includes("CONFLICT") ||
+          code.includes("REUSED") ||
           code.includes("CHANGED") ||
           code.includes("COLLISION") ||
           code.includes("ALREADY")
@@ -156,13 +167,17 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
     return context.json(
       ManagedSignInMethods.parse({
         ...user,
+        identityId: projection.activeIdentity.id,
         identityRevision: projection.activeIdentity.identityRevision,
         freshAuthenticationRequired: !user.fresh,
         methods: (["credential", "google", "github"] as const).map((provider) => ({
           provider,
           connected: connected(provider),
           available: configured(deps, provider),
-          canDisconnect: provider !== "credential" && connected(provider) && count > 1,
+          canDisconnect:
+            provider !== "credential" &&
+            connected(provider) &&
+            count - (configured(deps, provider) ? 1 : 0) > 0,
           implicitRelinkingSuppressed:
             !connected(provider) &&
             projection.loginBindings.some(
@@ -174,7 +189,7 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
   });
   for (const kind of ["connect", "disconnect", "password"] as const) {
     app.post(`${base}/${kind}`, async (context) => {
-      await admitMutation(context, deps);
+      await admitManagedSignInMutation(context, deps);
       const actor = await identity(context, deps);
       const actorFence = getManagedAuthRequestActorLeaseStamp(context.req.raw);
       if (deps.settings.managedAuthSessionSetMode !== "legacy" && !actorFence)
@@ -185,6 +200,15 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
       if (!parsed.success)
         throw new HTTPException(422, { message: "Invalid sign-in method request" });
       const body = parsed.data;
+      const currentIdentity = await getCanonicalHumanIdentityProjection(deps.db, actor.authUserId);
+      if (currentIdentity.activeIdentity.id !== body.expectedIdentityId)
+        return context.json(
+          {
+            code: "SIGN_IN_METHOD_IDENTITY_CHANGED",
+            message: "The signed-in account changed; reload security settings",
+          },
+          409,
+        );
       const [user] = await rows<{ email: string; token: string }>(
         deps,
         sql`select u.email,s.token from auth_users u join auth_sessions s on s.user_id=u.id where u.id=${actor.authUserId} and s.id=${actor.authSessionId}`,
@@ -193,15 +217,59 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
       const request: Record<string, unknown> = {
         kind,
         operationId: body.operationId,
+        requestDigest: managedAuthSecretRequestDigest(deps.settings.betterAuthSecret!, {
+          kind,
+          ...body,
+        }),
         expectedIdentityRevision: body.expectedIdentityRevision,
+        expectedIdentityId: body.expectedIdentityId,
         usableProviders: (["credential", "google", "github"] as const).filter((p) =>
           configured(deps, p),
         ),
         ...(actorFence ? { actorFence } : {}),
       };
+      try {
+        const [prior] = await rows<{ result: unknown }>(
+          deps,
+          sql`select replay_managed_sign_in_method(${actor.authUserId},${actor.authSessionId},${JSON.stringify(request)}::jsonb) result`,
+        );
+        if (prior?.result)
+          return context.json(
+            kind === "connect"
+              ? {
+                  url: new URL(
+                    "/settings/security?signInMethod=connected",
+                    deps.settings.publicBaseUrl!,
+                  ).toString(),
+                }
+              : ManagedSignInMutationResponse.parse(prior.result),
+          );
+      } catch (error) {
+        return mutationError(context, error);
+      }
+      // Per-human, cross-replica admission before password hashing or creating
+      // OAuth state. Successful committed-result replay does not spend a slot.
+      const [limit] = await rows<{ count: number }>(
+        deps,
+        sql`
+        insert into auth_rate_limits(id,key,count,last_request)
+        values(${`sign-in-methods:${actor.authUserId}`},${`sign-in-methods:${actor.authUserId}`},1,(extract(epoch from clock_timestamp())*1000)::bigint)
+        on conflict(key) do update set
+          count=case when auth_rate_limits.last_request < (extract(epoch from clock_timestamp())*1000)::bigint-60000 then 1 else least(auth_rate_limits.count+1,11) end,
+          last_request=case when auth_rate_limits.last_request < (extract(epoch from clock_timestamp())*1000)::bigint-60000 then (extract(epoch from clock_timestamp())*1000)::bigint else auth_rate_limits.last_request end
+        returning count`,
+      );
+      if (!limit || limit.count > 10)
+        return context.json(
+          {
+            code: "SIGN_IN_METHOD_RATE_LIMITED",
+            message: "Too many sign-in method attempts; try again in one minute",
+          },
+          429,
+        );
       if ("provider" in body) {
         request.provider = body.provider;
-        if (!configured(deps, body.provider))
+        if (kind === "connect" && !configured(deps, body.provider))
           throw new HTTPException(409, { message: "Sign-in provider is not configured" });
       } else {
         const [credential] = await rows<{ password: string | null }>(
@@ -230,14 +298,8 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
           sql`select mutate_managed_sign_in_method(${actor.authUserId},${actor.authSessionId},${JSON.stringify(request)}::jsonb)`,
         );
         if (kind === "connect" && "provider" in body) {
-          const cookies = await deps.managedAuthSessionAdapter!.createLegacySelectedSessionCookies(
-            { token: user.token } as never,
-            null,
-          );
-          const headers = new Headers({
-            cookie: cookies.map((c) => c.split(";", 1)[0]).join("; "),
-            origin: new URL(deps.settings.publicBaseUrl!).origin,
-          });
+          const headers = await managedAuthSelectedProofHeaders(deps.managedAuth!, user.token);
+          headers.set("origin", new URL(deps.settings.publicBaseUrl!).origin);
           const callbackURL = new URL(
             "/settings/security?signInMethod=connected",
             deps.settings.publicBaseUrl!,
@@ -266,10 +328,9 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
         if (actorFence) markManagedAuthRequestActorTransitionApplied(context.req.raw);
         return context.json({
           reauthenticationRequired: true,
-          notification: await notify(
-            deps,
-            user.email,
-            kind === "password" ? "password" : String(request.provider),
+          notification: await deliverManagedSignInNotification(
+            deps.db,
+            deps.managedEmailTransport,
             body.operationId,
           ),
         });
@@ -292,23 +353,54 @@ export async function handleManagedSignInConnectCallback(
     await deps.managedAuth.$context
   ).internalAdapter.findVerificationValue(state);
   if (!verification?.value) return null;
-  let value: Record<string, any>;
+  let rawState: unknown;
   try {
-    value = JSON.parse(verification.value);
+    rawState = JSON.parse(verification.value);
   } catch {
     return null;
   }
-  const proof = value.opengeniSignInMethod;
-  if (!proof) return null;
-  if (proof.provider !== provider || typeof proof.intentId !== "string")
+  if (!rawState || typeof rawState !== "object" || !("opengeniSignInMethod" in rawState))
+    return null;
+  const parsed = ConnectState.safeParse(rawState);
+  if (!parsed.success)
+    throw new HTTPException(403, { message: "Invalid sign-in method OAuth proof" });
+  const value = parsed.data,
+    proof = value.opengeniSignInMethod;
+  if (
+    proof.provider !== provider ||
+    value.callbackURL !==
+      new URL(
+        "/settings/security?signInMethod=connected",
+        deps.settings.publicBaseUrl!,
+      ).toString() ||
+    value.errorURL !==
+      new URL("/settings/security?signInMethod=error", deps.settings.publicBaseUrl!).toString()
+  )
     throw new HTTPException(403);
   const [intent] = await rows<{ value: string }>(
     deps,
     sql`select value from auth_verifications where identifier=${`managed-sign-in:${proof.intentId}`} and expires_at>clock_timestamp()`,
   );
   if (!intent) throw new HTTPException(403, { message: "Sign-in method connection expired" });
-  const request = JSON.parse(intent.value);
+  const request = ConnectIntent.parse(JSON.parse(intent.value));
   const authority = getCookie(context, MANAGED_AUTH_SESSION_SET_COOKIE);
+  if (!request.actorFence) {
+    const ambient = await deps.managedAuthSessionAdapter?.resolveAmbientSession(
+      context.req.raw.headers,
+    );
+    if (
+      !ambient ||
+      ambient.session.id !== request.authSessionId ||
+      ambient.user.id !== request.authUserId
+    ) {
+      return context.redirect(
+        new URL(
+          "/settings/security?signInMethod=error&error=SIGN_IN_METHOD_IDENTITY_CHANGED",
+          deps.settings.publicBaseUrl!,
+        ).toString(),
+      );
+    }
+  }
   if (
     request.actorFence &&
     (!authority || managedAuthSha256(authority) !== request.actorFence.authorityHash)
@@ -324,8 +416,9 @@ export async function handleManagedSignInConnectCallback(
     deps,
     sql`select u.email from auth_identities a join auth_users u on u.id=a.user_id where a.managed_link_intent_id=${proof.intentId}`,
   );
-  if (linked) await notify(deps, linked.email, provider, proof.intentId);
-  if (response.status >= 400) {
+  if (linked)
+    await deliverManagedSignInNotification(deps.db, deps.managedEmailTransport, proof.intentId);
+  if (response.status >= 400 || !linked) {
     return context.redirect(
       new URL(
         "/settings/security?signInMethod=error&error=SIGN_IN_METHOD_CONNECT_FAILED",
