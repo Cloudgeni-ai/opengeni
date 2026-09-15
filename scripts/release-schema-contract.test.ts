@@ -227,6 +227,9 @@ describe("release schema contract", () => {
     const hostResolverFullOrganizationKeys = completeSourceContract.migrations.some(
       (migration) => migration.path === "0467_host_resolver_full_organization_keys.sql",
     );
+    const goalReportRequirements = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0474_goal_report_requirements.sql",
+    );
     const knowledgeSourceDiscovery = completeSourceContract.migrations.some(
       (migration) => migration.path === "0469_knowledge_source_discovery.sql",
     );
@@ -274,6 +277,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (goalReportRequirements ? 1 : 0) +
         (organizationIntegrationPolicy ? 1 : 0) +
         (organizationUsageAnalyticalCapability ? 1 : 0) +
         (usageEventsAccountRecentIndex ? 1 : 0) +
@@ -421,11 +425,14 @@ describe("release schema contract", () => {
       ...(organizationUsageAnalyticalCapability
         ? { latestMigration: "0473_organization_usage_analytical_capability.sql" }
         : {}),
+      ...(goalReportRequirements ? { latestMigration: "0474_goal_report_requirements.sql" } : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: organizationUsageAnalyticalCapability
-        ? "0473_organization_usage_analytical_capability.sql"
-        : "0472_usage_events_workspace_recent_index.sql",
+      path: goalReportRequirements
+        ? "0474_goal_report_requirements.sql"
+        : organizationUsageAnalyticalCapability
+          ? "0473_organization_usage_analytical_capability.sql"
+          : "0472_usage_events_workspace_recent_index.sql",
       deploymentMode: "rolling",
     });
     expect(
@@ -1531,6 +1538,9 @@ describe("release schema contract", () => {
     const hostResolverFullOrganizationKeys = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0467_host_resolver_full_organization_keys.sql",
     );
+    const goalReportRequirements = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0474_goal_report_requirements.sql",
+    );
     const knowledgeSourceDiscovery = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0469_knowledge_source_discovery.sql",
     );
@@ -2007,6 +2017,7 @@ describe("release schema contract", () => {
       "0471_usage_events_account_recent_index.sql",
       "0472_usage_events_workspace_recent_index.sql",
       "0473_organization_usage_analytical_capability.sql",
+      "0474_goal_report_requirements.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2395,8 +2406,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0473_organization_usage_analytical_capability.sql",
       };
+    if (goalReportRequirements)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0474_goal_report_requirements.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (goalReportRequirements ? 1 : 0) +
         (organizationIntegrationPolicy ? 1 : 0) +
         (organizationUsageAnalyticalCapability ? 1 : 0) +
         (usageEventsAccountRecentIndex ? 1 : 0) +
@@ -2745,6 +2762,7 @@ describe("release schema contract", () => {
       ...(organizationUsageAnalyticalCapability
         ? { latestMigration: "0473_organization_usage_analytical_capability.sql" }
         : {}),
+      ...(goalReportRequirements ? { latestMigration: "0474_goal_report_requirements.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport

@@ -1345,6 +1345,9 @@ async function finishStartSession(
           ...(input.goal.rootConstraints !== undefined
             ? { rootConstraints: input.goal.rootConstraints }
             : {}),
+          ...(input.goal.reportRequirements !== undefined
+            ? { reportRequirements: input.goal.reportRequirements }
+            : {}),
           ...(input.goal.maxAutoContinuations !== undefined
             ? { maxAutoContinuations: input.goal.maxAutoContinuations }
             : {}),

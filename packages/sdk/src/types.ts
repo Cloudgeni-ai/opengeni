@@ -625,10 +625,18 @@ export type SessionEffectiveToolPolicy = {
   idsTruncated: boolean;
 };
 
+export type SessionGoalReportRequirement = { id: string; title: string };
+export type SessionGoalReportDelivery = {
+  requirementId: string;
+  artifactId: string;
+  inspectionReceiptId: string;
+};
+
 export type GoalSpec = {
   text: string;
   successCriteria?: string | undefined;
   rootConstraints?: string[] | undefined;
+  reportRequirements?: SessionGoalReportRequirement[] | undefined;
   maxAutoContinuations?: number | undefined;
   mutationPolicy?: SessionGoalMutationPolicy | undefined;
 };
@@ -4900,6 +4908,8 @@ export type SessionGoal = {
   text: string;
   successCriteria: string | null;
   rootConstraints: string[];
+  /** Optional for older-server/source compatibility; current servers always supply this projection. */
+  reportRequirements?: SessionGoalReportRequirement[] | undefined;
   evidence: string | null;
   rationale: string | null;
   pausedReason: string | null;

@@ -146,19 +146,19 @@ External SDK history and append verification: [`run-lifecycle.md`](run-lifecycle
 
 ### 3.4 Long runs are bounded by policy and intent, not arbitrary loop caps
 
-Agents may work for days. Model-call counts, continuations, and elapsed time
-do not establish lack of progress. Controls are budget admission, provider
-capacity, explicit Pause/Cancel, goal state, and host policy.
-
-Recoverable conditions preserve the logical turn/session when safe. An active
-goal creates a durable Postgres continuation-evaluation obligation; Temporal
-signals and workflows are replaceable delivery nudges. Goals do not live in
-`Agent.instructions` or only in workflow memory.
-
-Do not add a generic model-call, continuation, or activity-duration cap as a
-substitute for correcting a recovery, pacing, memory, or tool-lifecycle defect.
+Agents may work for days. Call/continuation/duration counts do not prove stalled
+progress. Controls are budget admission, provider capacity, Pause/Cancel, goal
+state and host policy. Recoverable conditions preserve logical turns/sessions
+when safe. Postgres owns continuation obligations; Temporal delivers replaceable
+nudges. Goals never live in `Agent.instructions` or solely workflow memory.
+Generic caps cannot replace recovery, pacing, memory or tool-lifecycle fixes.
 
 Canonical: [`goals.md`](goals.md) and [`run-lifecycle.md`](run-lifecycle.md).
+
+Reports—including secondary audits—use native documents. Operational instructions
+route; the Documents Skill guides authoring; goal/artifact domains validate
+persisted requirements and current inspection proof. Chat/code/local-file
+exceptions remain. See [`goals.md`](goals.md).
 
 ### 3.5 Each durable store has one job
 

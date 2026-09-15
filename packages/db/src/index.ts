@@ -31,6 +31,17 @@ import {
 } from "./workspace-model-connection-access";
 export * from "./model-connection-access";
 import { createHash, randomUUID } from "node:crypto";
+import {
+  appendGoalReportRequirements,
+  goalReportRequirements,
+  GOAL_REPORT_REQUIREMENTS_KEY,
+} from "./session-goal-reports";
+import { verifyGoalReportDeliveries, type ReportArtifactActor } from "./session-goal-reports";
+export { recordNativeDocumentInspection } from "./session-goal-reports";
+import {
+  type SessionGoalReportRequirement,
+  type SessionGoalReportDelivery,
+} from "@opengeni/contracts";
 import { lockSkillPublication } from "./skill-publication";
 import {
   StoredSessionSkills,
@@ -59514,6 +59525,7 @@ export type CreateSessionGoalInput = {
   text: string;
   successCriteria?: string | null;
   rootConstraints?: string[];
+  reportRequirements?: SessionGoalReportRequirement[];
   maxAutoContinuations?: number | null;
   mutationPolicy?: SessionGoalMutationPolicy;
   expectedObjectiveRevision?: number;
@@ -59543,6 +59555,7 @@ export async function createSessionGoal(
           text: input.text,
           successCriteria: input.successCriteria ?? null,
           rootConstraints,
+          metadata: appendGoalReportRequirements({}, input.reportRequirements),
           maxAutoContinuations: input.maxAutoContinuations ?? null,
           mutationPolicy: input.mutationPolicy ?? "preserve_intent",
           createdBy: input.createdBy,
@@ -59934,6 +59947,7 @@ export async function clearSessionGoal(
   db: Database,
   workspaceId: string,
   sessionId: string,
+  options: { actor: "api" | "agent" } = { actor: "api" },
 ): Promise<{
   cleared: boolean;
   goal: SessionGoal | null;
@@ -59966,6 +59980,21 @@ export async function clearSessionGoal(
           .limit(1);
         if (!existing) {
           return { cleared: false, goal: null, event: null };
+        }
+        if (
+          existing.status !== "completed" &&
+          goalReportRequirements(existing.metadata).length > 0
+        ) {
+          if (options.actor === "agent") {
+            throw new SessionControlConflictError(
+              "An agent cannot clear pending report requirements",
+            );
+          }
+          // Exact trusted API cancellation capability; never accepted from
+          // caller JSON. Rolling writers cannot silently delete new reports.
+          await tx.execute(
+            sql`select set_config('opengeni.goal_report_clear_id', ${existing.id}, true)`,
+          );
         }
         await tx.delete(schema.sessionGoals).where(eq(schema.sessionGoals.id, existing.id));
         const sequence = session.lastSequence + 1;
@@ -60063,6 +60092,7 @@ export async function upsertSessionGoal(
             text: input.text,
             successCriteria: input.successCriteria ?? null,
             rootConstraints: suppliedRootConstraints ?? [],
+            metadata: appendGoalReportRequirements({}, input.reportRequirements),
             maxAutoContinuations: input.maxAutoContinuations ?? null,
             mutationPolicy: input.mutationPolicy ?? "preserve_intent",
             createdBy: input.createdBy,
@@ -60204,6 +60234,12 @@ export async function upsertSessionGoal(
           text: input.text,
           successCriteria: input.successCriteria ?? null,
           rootConstraints,
+          metadata: appendGoalReportRequirements(
+            existing.status === "completed"
+              ? { ...existing.metadata, [GOAL_REPORT_REQUIREMENTS_KEY]: [], reportDeliveriesV1: [] }
+              : existing.metadata,
+            input.reportRequirements,
+          ),
           maxAutoContinuations: input.maxAutoContinuations ?? null,
           mutationPolicy: input.mutationPolicy ?? existing.mutationPolicy,
           evidence: null,
@@ -60332,6 +60368,9 @@ export async function upsertScheduledSessionGoalForRun(
           successCriteria: input.successCriteria ?? null,
           maxAutoContinuations: input.maxAutoContinuations ?? null,
           ...(input.mutationPolicy ? { mutationPolicy: input.mutationPolicy } : {}),
+          ...(acceptedGoal.reportRequirements
+            ? { reportRequirements: acceptedGoal.reportRequirements }
+            : {}),
           createdBy: "scheduled_task",
         });
         const now = new Date();
@@ -60380,7 +60419,10 @@ export async function upsertScheduledSessionGoalForRun(
  */
 export async function upsertSessionGoalWithEvent(
   db: Database,
-  input: CreateSessionGoalInput & { actor: "agent" | "api" },
+  input: CreateSessionGoalInput & {
+    actor: "agent" | "api";
+    commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+  },
 ): Promise<{
   goal: SessionGoal;
   replaced: boolean;
@@ -60417,6 +60459,14 @@ export async function upsertSessionGoalWithEvent(
           throw new Error(`Session not found: ${input.sessionId}`);
         }
         if (input.actor === "agent") {
+          if (input.commandActor) {
+            await assertAgentCommandAuthorityInTransaction(tx, {
+              workspaceId: input.workspaceId,
+              actor: input.commandActor,
+              targetSessionId: input.sessionId,
+              action: "goal",
+            });
+          }
           const [existing] = await tx
             .select({
               objectiveRevision: schema.sessionGoals.objectiveRevision,
@@ -60470,6 +60520,7 @@ export async function upsertSessionGoalWithEvent(
                     ? { successCriteria: result.goal.successCriteria }
                     : {}),
                   rootConstraints: result.goal.rootConstraints,
+                  reportRequirements: result.goal.reportRequirements,
                   version: result.goal.version,
                   objectiveRevision: result.goal.objectiveRevision,
                   mutationPolicy: result.goal.mutationPolicy,
@@ -61459,6 +61510,7 @@ export async function recordSessionGoalProgressWithEvent(
   sessionId: string,
   input: {
     progressNote: string;
+    reportRequirements?: SessionGoalReportRequirement[];
     command: {
       accountId: string;
       actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
@@ -61495,6 +61547,9 @@ export async function recordSessionGoalProgressWithEvent(
         operationKey: input.command.operationKey,
         canonicalRequestHash: canonicalSessionCommandHash({
           progressNote: input.progressNote,
+          ...(input.reportRequirements !== undefined
+            ? { reportRequirements: input.reportRequirements }
+            : {}),
         }),
         identityScope: "target_operation",
       });
@@ -61533,7 +61588,14 @@ export async function recordSessionGoalProgressWithEvent(
       if (existing.status !== "active") {
         throw new Error("session goal is not active; progress cannot be recorded");
       }
-      const goal = mapSessionGoal(existing);
+      const metadata = appendGoalReportRequirements(existing.metadata, input.reportRequirements);
+      if (input.reportRequirements !== undefined) {
+        await tx
+          .update(schema.sessionGoals)
+          .set({ metadata })
+          .where(eq(schema.sessionGoals.id, existing.id));
+      }
+      const goal = mapSessionGoal({ ...existing, metadata });
       const now = new Date();
       const [event] = await tx
         .insert(schema.sessionEvents)
@@ -61553,6 +61615,9 @@ export async function recordSessionGoalProgressWithEvent(
                 goalId: goal.id,
                 objectiveRevision: goal.objectiveRevision,
                 progressNote: input.progressNote,
+                ...(input.reportRequirements !== undefined
+                  ? { reportRequirements: input.reportRequirements }
+                  : {}),
                 actor: "agent",
               },
               occurredAt: now,
@@ -61813,6 +61878,9 @@ export async function setSessionGoalStatus(
     evidence?: string;
     rationale?: string;
     pausedReason?: string;
+    reportDeliveries?: SessionGoalReportDelivery[];
+    reportArtifactActor?: ReportArtifactActor;
+    commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
   },
 ): Promise<{
   goal: SessionGoal;
@@ -61830,6 +61898,14 @@ export async function setSessionGoalStatus(
       .for("no key update")
       .limit(1);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
+    if (input.commandActor) {
+      await assertAgentCommandAuthorityInTransaction(scopedDb, {
+        workspaceId,
+        actor: input.commandActor,
+        targetSessionId: sessionId,
+        action: "goal",
+      });
+    }
     const [existing] = await scopedDb
       .select()
       .from(schema.sessionGoals)
@@ -61854,6 +61930,16 @@ export async function setSessionGoalStatus(
     if (existing.status === "completed") {
       throw new Error("session goal is completed; set a new goal to continue");
     }
+    if (input.status === "completed") {
+      await verifyGoalReportDeliveries(scopedDb, {
+        accountId: session.accountId,
+        workspaceId,
+        sessionId,
+        metadata: existing.metadata,
+        deliveries: input.reportDeliveries,
+        ...(input.reportArtifactActor ? { actor: input.reportArtifactActor } : {}),
+      });
+    }
     const [row] = await scopedDb
       .update(schema.sessionGoals)
       .set({
@@ -61864,6 +61950,7 @@ export async function setSessionGoalStatus(
         ...(input.status === "completed"
           ? {
               evidence: input.evidence ?? null,
+              metadata: { ...existing.metadata, reportDeliveriesV1: input.reportDeliveries ?? [] },
               pausedReason: null,
               continuationObservedRevision: existing.continuationWakeRevision,
             }
@@ -61933,6 +62020,9 @@ export async function setSessionGoalStatusWithEvent(
     evidence?: string;
     rationale?: string;
     pausedReason?: string;
+    reportDeliveries?: SessionGoalReportDelivery[];
+    reportArtifactActor?: ReportArtifactActor;
+    commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     event: SetSessionGoalStatusEvent;
   },
 ): Promise<{
@@ -61961,6 +62051,11 @@ export async function setSessionGoalStatusWithEvent(
       }
       const result = await setSessionGoalStatus(tx, workspaceId, sessionId, {
         status: input.status,
+        ...(input.reportDeliveries !== undefined
+          ? { reportDeliveries: input.reportDeliveries }
+          : {}),
+        ...(input.reportArtifactActor ? { reportArtifactActor: input.reportArtifactActor } : {}),
+        ...(input.commandActor ? { commandActor: input.commandActor } : {}),
         ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
         ...(input.rationale !== undefined ? { rationale: input.rationale } : {}),
         ...(input.pausedReason !== undefined ? { pausedReason: input.pausedReason } : {}),
@@ -61971,6 +62066,7 @@ export async function setSessionGoalStatusWithEvent(
           ? {
               goalId: result.goal.id,
               evidence: input.event.evidence,
+              reportDeliveries: result.goal.metadata.reportDeliveriesV1 ?? [],
               version: result.goal.version,
             }
           : input.event.type === "goal.paused"
@@ -63011,6 +63107,7 @@ function mapSessionGoal(row: typeof schema.sessionGoals.$inferSelect): SessionGo
     text: row.text,
     successCriteria: row.successCriteria,
     rootConstraints: row.rootConstraints,
+    reportRequirements: goalReportRequirements(row.metadata),
     evidence: row.evidence,
     rationale: row.rationale,
     pausedReason: row.pausedReason,
@@ -63047,6 +63144,7 @@ export type InitializeSessionStartInput = {
     text: string;
     successCriteria?: string | null;
     rootConstraints?: string[];
+    reportRequirements?: SessionGoalReportRequirement[];
     maxAutoContinuations?: number | null;
     mutationPolicy?: SessionGoalMutationPolicy;
     createdBy?: SessionGoalCreatedBy;
@@ -63199,6 +63297,7 @@ export async function initializeSessionStartAtomically(
               text: input.goal.text,
               successCriteria: input.goal.successCriteria ?? null,
               rootConstraints,
+              metadata: appendGoalReportRequirements({}, input.goal.reportRequirements),
               maxAutoContinuations: input.goal.maxAutoContinuations ?? null,
               mutationPolicy: input.goal.mutationPolicy ?? "preserve_intent",
               createdBy: input.goal.createdBy ?? "api",

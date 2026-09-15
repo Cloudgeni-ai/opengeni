@@ -48,6 +48,31 @@ const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
+  test("native report delivery belongs to the required prepared package lane, never unit shards", () => {
+    const suite = "apps/api/test/native-report-delivery.test.ts";
+    expect(OPT_IN_TESTS[suite]).toContain("required package-contracts gate");
+    const tests = discoverTestFiles();
+    expect([...tests.unit, ...tests.integration, ...tests.e2e]).not.toContain(suite);
+    for (const changed of [
+      suite,
+      "apps/api/src/editable-artifact-production.ts",
+      "apps/api/src/mcp/server.ts",
+      "packages/core/src/domain/editable-artifacts/agent-application.ts",
+      "packages/db/src/session-goal-reports.ts",
+      "packages/db/drizzle/0474_goal_report_requirements.sql",
+      "packages/contracts/src/session-goal-reports.ts",
+      "packages/testing/src/shared-pg.ts",
+      "packages/storage/src/index.ts",
+      "packages/artifact-tool/src/runtime-development.ts",
+      "scripts/prepare-development-artifact-runtime.ts",
+      ".github/workflows/ci.yml",
+    ]) {
+      const plan = createImpactPlan([changed]);
+      expect(plan.unitTests, changed).not.toContain(suite);
+      expect(plan.buildPackages, changed).toContain("@opengeni/api-router");
+    }
+  }, 30_000);
+
   test("preview loading coverage follows React and testing dependencies without widening leaf plans", () => {
     for (const path of [
       "packages/react/src/components/MessageTimeline.tsx",

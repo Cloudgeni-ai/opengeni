@@ -1,4 +1,6 @@
 export * from "./artifact-catalog";
+export * from "./session-goal-reports";
+import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";
 import { SkillReviewReference, skillReviewHumanInput } from "./skills";
 import { AgentLearningOverrides } from "./agent-learning";
@@ -6180,6 +6182,7 @@ export const SessionGoalSnapshot = z.discriminatedUnion("state", [
     text: SessionGoalTextWrite,
     successCriteria: SessionGoalSuccessCriteriaWrite.nullable(),
     rootConstraints: SessionGoalRootConstraintsWrite.default([]),
+    reportRequirements: SessionGoalReportRequirements.optional(),
     mutationPolicy: SessionGoalMutationPolicy,
     capturedAt: z.string(),
   }),
@@ -6340,6 +6343,7 @@ export const SessionGoal = z.object({
   text: z.string(),
   successCriteria: z.string().nullable(),
   rootConstraints: z.array(z.string().min(1)).default([]),
+  reportRequirements: SessionGoalReportRequirements.default([]),
   evidence: z.string().nullable(),
   rationale: z.string().nullable(),
   pausedReason: z.string().nullable(),
@@ -6363,6 +6367,7 @@ export const GoalSpec = z.object({
   text: SessionGoalTextWrite,
   successCriteria: SessionGoalSuccessCriteriaWrite.optional(),
   rootConstraints: SessionGoalRootConstraintsWrite.optional(),
+  reportRequirements: SessionGoalReportRequirements.optional(),
   maxAutoContinuations: z.number().int().positive().optional(),
   mutationPolicy: SessionGoalMutationPolicy.optional(),
 });
@@ -7336,6 +7341,9 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
   const rootConstraints = snapshot.rootConstraints.length
     ? `\nRoot constraints (must remain satisfied):\n${snapshot.rootConstraints.map((constraint) => `- ${constraint}`).join("\n")}`
     : "";
+  const reports = snapshot.reportRequirements?.length
+    ? `\nRequired native document reports (persisted; completion requires current-head inspection receipts): ${JSON.stringify(snapshot.reportRequirements)}`
+    : "";
   if (snapshot.state === "completed") {
     return `Previous session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status completed): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints} This goal is complete and remains as historical context. If the user provides a new long-running objective, create it with opengeni__goal_set; goal_update cannot revise a completed goal.`;
   }
@@ -7345,7 +7353,7 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
       : snapshot.mutationPolicy === "preserve_intent"
         ? "You may directly refine wording without changing intent; adaptations and replacements are proposals until a user applies them."
         : "You may autonomously refine, adapt, or replace the goal when explicit user direction or material new evidence justifies it.";
-  return `Standing session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status ${snapshot.state}): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints}\nMutation policy: ${snapshot.mutationPolicy}. ${policy} Treat later ordinary messages as additional context unless they explicitly redirect this objective. Root constraints are user/API authority and cannot be widened, removed, or rewritten by an agent. Semantic goal changes use opengeni__goal_update with the expected objective revision, change kind, and rationale.`;
+  return `Standing session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status ${snapshot.state}): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints}${reports}\nMutation policy: ${snapshot.mutationPolicy}. ${policy} Treat later ordinary messages as additional context unless they explicitly redirect this objective. Root constraints are user/API authority and cannot be widened, removed, or rewritten by an agent. Semantic goal changes use opengeni__goal_update with the expected objective revision, change kind, and rationale.`;
 }
 
 /**

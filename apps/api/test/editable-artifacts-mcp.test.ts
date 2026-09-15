@@ -14,6 +14,72 @@ const attemptId = "55555555-5555-4555-8555-555555555555";
 const artifactId = "a".repeat(32);
 
 describe("editable artifact MCP surface", () => {
+  test("artifact-only create, get and final body inspection return a supported handoff reference", async () => {
+    const server = new McpServer({ name: "artifact-only-report", version: "1" });
+    const requests: string[] = [];
+    registerEditableArtifactAgentTools({
+      server,
+      deps: {
+        editableArtifactAgent: {
+          async create() {
+            return metadata("document");
+          },
+          async get() {
+            return metadata("document");
+          },
+          async inspect(input: { request: { query: { kind: string } } }) {
+            requests.push(input.request.query.kind);
+            return { artifact: metadata("document"), projection: { blocks: [] } };
+          },
+        },
+      } as never,
+      grant: grant(),
+      sessionId,
+      async authorize() {
+        expect(grant().permissions).not.toContain("goals:manage");
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "artifact-only-report", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const listed = await client.listTools();
+      expect(listed.tools.some((tool) => tool.name.startsWith("goal_"))).toBe(false);
+      for (const name of ["editable_artifact_create", "editable_artifact_get"] as const) {
+        const result = await client.callTool({
+          name,
+          arguments:
+            name === "editable_artifact_create"
+              ? { modality: "document", title: "Report" }
+              : { artifactId },
+        });
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent?.artifactReference).toBe(
+          metadata("document").artifactReference,
+        );
+      }
+      const inspected = await client.callTool({
+        name: "editable_artifact_inspect",
+        arguments: {
+          artifactId,
+          modality: "document",
+          request: {
+            kind: "body",
+            startBlock: 0,
+            limits: { maxItems: 100, maxTextUtf16: 10000, maxTableCells: 100 },
+          },
+        },
+      });
+      expect(inspected.isError).not.toBe(true);
+      expect(inspected.structuredContent).toMatchObject({
+        artifact: { artifactReference: metadata("document").artifactReference },
+      });
+      expect(requests).toEqual(["body"]);
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
   test("uses exact signed attempt context and returns CodeMode-compatible structured output", async () => {
     const creates: Array<Record<string, unknown>> = [];
     let authorizationCalls = 0;
@@ -379,6 +445,7 @@ function grant(): AccessGrant {
 function metadata(modality: "spreadsheet" | "document" | "presentation") {
   return {
     id: artifactId,
+    artifactReference: `[Open report](/workspaces/${workspaceId}/artifacts/editable/${artifactId})`,
     modality,
     title: "Plan",
     lifecycle: "active" as const,
