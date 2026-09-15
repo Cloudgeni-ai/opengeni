@@ -65,41 +65,6 @@ workspace binding, repository permission, and attachment to this session.
 Verify the actual mounted path before editing. Do not guess UI steps or claim
 that a repository is usable solely because the App is configured.
 
-## Choosing Slack authority
-
-For shared channel notifications and scheduled workspace automation, prefer the
-**OpenGeni workspace bot**. Discover `slack_bot_list_channels` and
-`slack_bot_search` through the current tool list and load their schemas. Verify
-the bot's target-channel membership and the schedule's actual tool and connection
-selections before activating it. A task
-inherits its creator session's effective first-party tool selection, not all
-installed integrations.
-
-`slack_bot_post_message` is a compatibility-only stored name, deliberately absent
-from generic MCP. Bot posting requires a supported server-owned delivery path;
-internal Slack replies do not establish arbitrary scheduled channel delivery.
-Verify a supported delivery path for the requested schedule. If none is exposed,
-report that limitation; selecting the retired tool name cannot fix it.
-
-The official hosted **personal Slack MCP** acts as the authenticating person.
-Use it for that person's DMs, personal search, or an explicit request to post as
-that person. A catalog candidate named “Slack” is not evidence of bot authority;
-read its identity and usage guidance. Never substitute personal OAuth simply
-because bot tools are missing. Missing tools can mean this session's selection
-or permissions exclude them; it does not prove the deployment has no bot.
-Report the precise access gap rather than asking for the wrong connection.
-
-Personal authority is tied to the authenticated initiating human, never another
-workspace member's message. Account connection, current-turn consent, and
-scheduled authority are separate. Honor existing explicit authorization without
-asking redundantly, but do not infer a runtime grant or an unattended grant from
-conversation text. Use the supported consent and schedule-authority mechanisms.
-
-Historical workspace notes about an early rollout do not establish current
-capabilities. Check deployed tools and current docs. A Slack button alone does
-not implement authenticated approval: use a supported approval action and verify
-its authorization path before promising an approve-and-merge workflow.
-
 ## Cost questions
 
 Read the installed SDK's reply types and formatter, then the relevant accounting
@@ -137,7 +102,7 @@ Workspace Skills, inline Skills, tool permissions, and ordinary runtime rules
 remain separate. Do not copy OpenGeni product or implementation guidance into
 the embedded agent's persona. Follow the product's explicit selections.
 
-## Slack identity and scheduled work
+## Choosing Slack authority
 
 Distinguish **OpenGeni bot** (workspace `app_install`, posts as OpenGeni) from
 **My Slack account** (personal hosted MCP, reads personal messages and sends as
@@ -162,3 +127,8 @@ preparing another message is a new delivery and can duplicate the first. If thes
 tools are unavailable, explain the deployment/tool-selection limitation instead
 of claiming a personal account is required. Do not call the retired generic
 `slack_bot_post_message` name or invent a caller UUID as a delivery receipt.
+
+Honor existing explicit authorization without asking redundantly, but do not infer
+a runtime or unattended grant from conversation text. Use the supported consent
+and schedule-authority mechanisms. Historical workspace notes about an early
+rollout do not establish current capabilities; check the deployed tools and docs.

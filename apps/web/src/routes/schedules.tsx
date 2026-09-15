@@ -192,7 +192,7 @@ export function SchedulesRoute({
   const subjectId = context.accessContext.subjectId;
   const accessKeyVersion = context.accessKeyVersion;
   const setupScope = useMemo(
-    () => ({ active: true }),
+    () => ({ active: true, client, workspaceId, subjectId, accessKeyVersion }),
     [client, workspaceId, subjectId, accessKeyVersion],
   );
   useEffect(() => {

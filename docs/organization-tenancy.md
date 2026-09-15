@@ -67,12 +67,13 @@ only accepted action (`connection.use`, `document.read`, `variable_set.use`,
 Migration `0478_personal_connection_standing_consent.sql` separates exact-session
 Connection consent from this private-session product rollout. A canonical managed
 human with the resource permission can list their own Connection authorities and
-issue an explicitly acknowledged, epoch-fenced `session` grant before the
+issue an explicitly acknowledged, epoch-fenced `session` grant or an ongoing
+`always/workspace_shared` Connection grant before the
 version-1 activation receipt exists. They can revoke their own Connection grants
 without that receipt. Connection runtime authority was already activated in
 0264 and still requires the accepted turn snapshot and all live-use fences.
-Standing `always` grants and all other personal resource kinds retain the
-version-1 activation gate; their preactivation discovery remains empty. This
+Standing private-context grants and all other personal resource kinds retain the
+version-1 activation gate; non-Connection preactivation discovery remains empty. This
 exception neither activates private sessions nor upgrades legacy connection
 ownership. Subject-scoped Session reads expose credential-free
 `connectionContext` (visibility and authority epoch) independently of `tenancy`,

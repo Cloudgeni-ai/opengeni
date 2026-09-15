@@ -1373,7 +1373,7 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_create",
       {
         description:
-          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog. For shared Slack notifications, verify channel access and a supported server-owned bot delivery path before scheduling; generic slack_bot_post_message is deliberately unavailable. Do not substitute personal Slack OAuth or assume an interactive personal grant authorizes unattended runs.",
+          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog. For Slack tasks, choose the requested identity: the workspace bot uses slack_bot_prepare_message and slack_bot_send_prepared_message with a saved message ID; personal Slack uses the authorizing human's frozen grant. Generated personal tasks require standing authority, while exact-session grants can schedule that same chat. Once-only grants cannot recur. Missing bot tools are not a reason to substitute personal OAuth.",
         inputSchema: {
           name: z4.string(),
           schedule: z4.unknown(),
@@ -5905,18 +5905,24 @@ function registerCapabilityDiscoveryTools(
         if (grant.permissions.includes("connections:read")) {
           try {
             const resolved = await resolveSlackBotConnectionForTool({
-              db: deps.db, grant, sessionId,
+              db: deps.db,
+              grant,
+              sessionId,
             });
             workspaceBot = {
-              identity: "workspace_bot", status: "installed",
+              identity: "workspace_bot",
+              status: "installed",
               connectionId: resolved.connection.id,
               teamName: resolved.metadata.slackTeamName,
-              execution: "Select the bot in the schedule editor, or check the current chat's bot tool selection. Installation alone does not make tools executable.",
+              execution:
+                "Select the bot in the schedule editor, or check the current chat's bot tool selection. Installation alone does not make tools executable.",
             };
           } catch {
             workspaceBot = {
-              identity: "workspace_bot", status: "selection_required",
-              detail: "Inspect workspace Slack settings for an active bot and select it. This does not require personal Slack OAuth.",
+              identity: "workspace_bot",
+              status: "selection_required",
+              detail:
+                "Inspect workspace Slack settings for an active bot and select it. This does not require personal Slack OAuth.",
             };
           }
         }
@@ -6030,8 +6036,10 @@ async function capabilitySetupProjection(
 ): Promise<CapabilitySetupProjection> {
   if (item.id === "api:slack-bot") {
     return {
-      status: "unavailable", action: null,
-      detail: "Bot execution is configured in workspace Slack settings and the schedule editor. Inspect connection metadata and current bot tools; do not request personal OAuth for bot access.",
+      status: "unavailable",
+      action: null,
+      detail:
+        "Bot execution is configured in workspace Slack settings and the schedule editor. Inspect connection metadata and current bot tools; do not request personal OAuth for bot access.",
     };
   }
   if (item.id === "api:github-app" || item.surfaceType === "first_party_github") {

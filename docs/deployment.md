@@ -995,11 +995,11 @@ must never be interpreted as authorization to mutate staging or production.
 
 `0478_personal_connection_standing_consent.sql` is rolling. Apply it before the
 matching API/web release. It removes the private-session activation prerequisite
-only from owned Connection discovery, exact-session consent, and revocation.
+only from owned Connection discovery, exact-session consent, standing shared-workspace Connection consent, and their revocation.
 The existing 0264 runtime authority, FORCE RLS, and routine ACLs remain intact;
 there is no backfill, new privilege, or organization activation. Gmail can then
 be explicitly authorized for a session in Personal or shared workspaces even
-when the canonical activation switch remains off. Standing grants and other
+when the canonical activation switch remains off. Standing private-context grants and other
 personal resources still follow the activation procedure below. Cached older
 clients remain restricted until refreshed; older APIs do not expose the new
 `Session.connectionContext` consent metadata.

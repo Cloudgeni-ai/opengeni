@@ -2212,6 +2212,16 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
         expect(
           (await issue({ mode: "always", sessionId: undefined, expectedAuthorityEpoch: undefined }))
             .status,
+        ).toBe(200);
+        expect(
+          (
+            await issue({
+              mode: "always",
+              context: "private",
+              sessionId: undefined,
+              expectedAuthorityEpoch: undefined,
+            })
+          ).status,
         ).toBe(403);
         const issued = await issue();
         expect(issued.status).toBe(200);

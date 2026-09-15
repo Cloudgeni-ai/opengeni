@@ -414,6 +414,11 @@ export function personalConnectionDelegationsFromParent(input: {
         sameProviderDomain(candidate.providerDomain, ref.providerDomain) &&
         (!ref.kind || !candidate.kind || candidate.kind === ref.kind),
     );
+    if (delegation && input.rejectActivatedConnections && !childEligible(delegation)) {
+      throw new Error(
+        "scheduled personal connection requires ongoing consent or its exact authorized target session; once-only or different-session consent cannot be reused",
+      );
+    }
     return delegation && childEligible(delegation) ? [{ ...delegation }] : [];
   });
   const projected = [

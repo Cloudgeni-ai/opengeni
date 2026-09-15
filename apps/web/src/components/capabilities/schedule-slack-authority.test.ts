@@ -92,81 +92,85 @@ test("personal scheduling requires acknowledgement and never chooses a workspace
   expect(issue).not.toHaveBeenCalled();
 });
 
-test("existing-session schedule attaches missing Slack and uses only that session's consent", async () => {
-  let tools: Array<{ kind: "mcp"; id: string }> = [];
-  let issued = false;
-  const update = mock(
-    async (_workspace: string, _session: string, request: { tools: typeof tools }) => {
-      tools = request.tools;
-    },
-  );
-  const issue = mock(async () => {
-    issued = true;
-    return {};
-  });
-  const client = {
-    getSession: async () => ({
-      id: "chat",
-      workspaceId: "workspace",
+for (const visibility of ["private", "workspace"] as const) {
+  test(`existing-session schedule attaches missing Slack and uses fresh ${visibility} connection context without tenancy activation`, async () => {
+    let tools: Array<{ kind: "mcp"; id: string }> = [];
+    let issued = false;
+    const update = mock(
+      async (_workspace: string, _session: string, request: { tools: typeof tools }) => {
+        tools = request.tools;
+      },
+    );
+    const issue = mock(async () => {
+      issued = true;
+      return {};
+    });
+    const client = {
+      getSession: async () => ({
+        id: "chat",
+        workspaceId: "workspace",
+        tools,
+        firstPartyMcpTools: ["sessions_list"],
+        toolPolicy: { mode: "explicit" },
+        toolPolicyVersion: 2,
+        // Attaching the tool precedes the fresh authority read. No tenancy
+        // projection is available when the private-session product is off.
+        connectionContext: { visibility, authorityEpoch: tools.length ? 3 : 2 },
+      }),
+      updateSessionToolPolicy: update,
+      listConnections: async () => [connection],
+      issueUserResourceGrant: issue,
+      listUserResourceAuthorities: async () => ({
+        authorities: [
+          {
+            resourceId: connection.id,
+            authorityId: "authority",
+            status: "active",
+            grants: issued
+              ? [
+                  {
+                    mode: "session",
+                    status: "active",
+                    action: "connection.use",
+                    targetSessionId: "chat",
+                    targetWorkspaceId: "workspace",
+                    authorityEpoch: 3,
+                    context: visibility === "private" ? "user_private" : "workspace_shared",
+                    delegation: { grantId: "session-grant" },
+                  },
+                ]
+              : [],
+          },
+        ],
+        nextCursor: null,
+      }),
+    } as unknown as OpenGeniBrowserClient;
+    const result = await authorizeScheduledSlack(
+      client,
+      "workspace",
+      { ...form(), runMode: "existing_session", targetSessionId: "chat" },
+      [item],
+      () => true,
+    );
+    expect(tools).toEqual([{ kind: "mcp", id: "personal-slack" }]);
+    expect(update).toHaveBeenCalledWith("workspace", "chat", {
+      mode: "explicit",
       tools,
       firstPartyMcpTools: ["sessions_list"],
-      toolPolicy: { mode: "explicit" },
-      toolPolicyVersion: 2,
-      tenancy: { visibility: "private", authorityEpoch: 3 },
-    }),
-    updateSessionToolPolicy: update,
-    listConnections: async () => [connection],
-    issueUserResourceGrant: issue,
-    listUserResourceAuthorities: async () => ({
-      authorities: [
-        {
-          resourceId: connection.id,
-          authorityId: "authority",
-          status: "active",
-          grants: issued
-            ? [
-                {
-                  mode: "session",
-                  status: "active",
-                  action: "connection.use",
-                  targetSessionId: "chat",
-                  targetWorkspaceId: "workspace",
-                  authorityEpoch: 3,
-                  context: "user_private",
-                  delegation: { grantId: "session-grant" },
-                },
-              ]
-            : [],
-        },
-      ],
-      nextCursor: null,
-    }),
-  } as unknown as OpenGeniBrowserClient;
-  const result = await authorizeScheduledSlack(
-    client,
-    "workspace",
-    { ...form(), runMode: "existing_session", targetSessionId: "chat" },
-    [item],
-    () => true,
-  );
-  expect(tools).toEqual([{ kind: "mcp", id: "personal-slack" }]);
-  expect(update).toHaveBeenCalledWith("workspace", "chat", {
-    mode: "explicit",
-    tools,
-    firstPartyMcpTools: ["sessions_list"],
-    expectedVersion: 2,
+      expectedVersion: 2,
+    });
+    expect(issue).toHaveBeenCalledWith("workspace", "authority", {
+      scope: "user",
+      resourceKind: "connection",
+      mode: "session",
+      sessionId: "chat",
+      expectedAuthorityEpoch: 3,
+      context: visibility === "private" ? "user_private" : "workspace_shared",
+      workspaceSharedAcknowledged: visibility === "workspace",
+    });
+    expect(result?.connectionAuthorities[0]?.userDelegation.grantId).toBe("session-grant");
   });
-  expect(issue).toHaveBeenCalledWith("workspace", "authority", {
-    scope: "user",
-    resourceKind: "connection",
-    mode: "session",
-    sessionId: "chat",
-    expectedAuthorityEpoch: 3,
-    context: "user_private",
-    workspaceSharedAcknowledged: false,
-  });
-  expect(result?.connectionAuthorities[0]?.userDelegation.grantId).toBe("session-grant");
-});
+}
 
 test("adding personal access never replaces another frozen schedule authority", async () => {
   const list = mock(async () => [connection]);

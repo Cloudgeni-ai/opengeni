@@ -1658,7 +1658,7 @@ preserves selection through CAS. Skills retain workspace scope and reviewed
 hashes. Gmail startup failures remain diagnostic; discovery requests consent.
 Personal MCP requires owner-issued exact-session grants and shared-results
 acknowledgement. The composer restores only active grants matching visibility
-and epoch. Migration 0478 separates session Connection consent from
+and epoch. Migration 0478 separates exact-session and standing shared-workspace Connection consent from
 private-session activation: subject-scoped reads project `connectionContext`
 independently of gated `tenancy`. Standing grants and other resources stay gated.
 

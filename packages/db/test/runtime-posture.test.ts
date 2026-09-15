@@ -734,7 +734,14 @@ describe("runtime database posture evaluator", () => {
                     : tables === RUNTIME_DML_TABLES
                       ? 8
                       : 0;
+        const preparedSlackCount =
+          tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0;
         const expectedLength =
+          preparedSlackCount +
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_READ_ONLY_TABLES ||
           tables === RUNTIME_DML_TABLES
@@ -781,12 +788,14 @@ describe("runtime database posture evaluator", () => {
       }
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
+          1 + // Immutable prepared Slack messages.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount,
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
+          1 + // Immutable prepared Slack messages.
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount,

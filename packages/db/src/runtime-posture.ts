@@ -1015,7 +1015,6 @@ export const FORCE_RLS_TABLES = [
   "slack_app_home_refreshes",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
-  "slack_prepared_messages",
   "slack_bot_update_operations",
   "slack_bot_user_links",
   "slack_channel_routes",
@@ -1024,6 +1023,7 @@ export const FORCE_RLS_TABLES = [
   "slack_interaction_inbox",
   "slack_interaction_progress_deliveries",
   "slack_interactions",
+  "slack_prepared_messages",
   "slack_route_prompt_options",
   "slack_route_prompts",
   "slack_shared_task_origins",
@@ -1328,7 +1328,6 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
-  "slack_prepared_messages",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",
@@ -1372,6 +1371,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "session_attempt_tool_catalogs",
   "session_goal_revisions",
   "session_spawn_denials",
+  "slack_prepared_messages",
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
   "temporal_schedule_cleanup_outbox",
