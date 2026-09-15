@@ -7554,7 +7554,7 @@ export type PluginUninstallComponentImpact = {
   disposition: "removed" | "retained" | "inactive";
   retentionReasons: Array<"other_owners" | "customized" | "re_scoped" | "registry_unavailable">;
   remainingOwners: Array<{ kind: "direct" | "plugin" | "pack" | "migration"; name: string }>;
-  skillId?: string;
+  skillId?: string | undefined;
 };
 
 export type PluginUninstallPreview = {
@@ -7562,13 +7562,13 @@ export type PluginUninstallPreview = {
   installed: boolean;
   version: string | null;
   installationVersion: number | null;
-  previewToken?: string;
+  previewToken?: string | undefined;
   components: PluginUninstallComponentImpact[];
 };
 
 export type UninstallPluginRequest = {
   expectedInstallationVersion: number;
-  expectedPreviewToken?: string;
+  expectedPreviewToken?: string | undefined;
   idempotencyKey: string;
 };
 
