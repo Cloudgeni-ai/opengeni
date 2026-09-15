@@ -1623,9 +1623,6 @@
 :where(.og-root).min-h-14,:where(.og-root) .min-h-14 {
     min-height: calc(var(--spacing) * 14);
   }
-:where(.og-root).min-h-32,:where(.og-root) .min-h-32 {
-    min-height: calc(var(--spacing) * 32);
-  }
 :where(.og-root).min-h-56,:where(.og-root) .min-h-56 {
     min-height: calc(var(--spacing) * 56);
   }
@@ -5029,11 +5026,6 @@
       &:focus {
         color: var(--og-color-danger);
       }
-    }
-  }
-:where(.og-root).motion-safe\:animate-spin,:where(.og-root) .motion-safe\:animate-spin {
-    @media (prefers-reduced-motion: no-preference) {
-      animation: og-spin 1s linear infinite;
     }
   }
 :where(.og-root).motion-reduce\:animate-none,:where(.og-root) .motion-reduce\:animate-none {
