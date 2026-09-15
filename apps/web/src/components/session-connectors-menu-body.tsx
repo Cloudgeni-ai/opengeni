@@ -2,7 +2,8 @@ import { RefreshCwIcon, Loader2Icon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
-import { DropdownMenuItem, DropdownMenuLabel } from "@/components/ui/dropdown-menu";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { ComposerMenuHeader, ComposerMenuSwitchIndicator } from "@/components/ui/composer-menu";
 import type { SessionToolSelection } from "@/components/pickers";
 import type { McpServerOption } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
@@ -29,11 +30,8 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
   const connectors = props.servers.filter(isComposerConnector);
   return (
     <>
-      <div className="flex shrink-0 items-center gap-1 px-1 pb-1">
-        {props.leading}
-        <DropdownMenuLabel className="text-sm">Connectors</DropdownMenuLabel>
-      </div>
-      <div className="min-h-0 shrink overflow-y-auto overscroll-contain">
+      <ComposerMenuHeader title="Connectors" leading={props.leading} />
+      <div className="min-h-0 shrink overflow-y-auto overscroll-contain p-2">
         {props.loading && !connectors.length ? (
           <p className="px-2 py-4 text-xs text-fg-muted" role="status">
             Loading connectors…
@@ -77,18 +75,18 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
                   firstPartyToolIds: new Set(props.selection.firstPartyToolIds),
                 });
               }}
-              className="min-h-11 cursor-pointer gap-2.5 rounded-lg px-2 py-2"
+              className="min-h-11 cursor-pointer gap-3 rounded-none border-b border-border px-0 py-3 last:border-b-0"
             >
               <CapabilityLogo
                 src={server.logoSrc ?? null}
                 name={server.name}
                 size="sm"
-                className="size-7 rounded-md [&_img]:p-1"
+                className="size-8 rounded-lg [&_img]:p-1"
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm">{server.name}</span>
+                <span className="block truncate text-sm font-medium">{server.name}</span>
                 {server.detail ? (
-                  <span className="block truncate text-2xs text-fg-subtle">{server.detail}</span>
+                  <span className="mt-1 block truncate text-xs text-fg-muted">{server.detail}</span>
                 ) : null}
                 {repair || unavailable ? (
                   <span className="block text-2xs text-status-waiting">
@@ -104,20 +102,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
               ) : repair || unavailable ? (
                 <RefreshCwIcon className="size-4 text-fg-muted" />
               ) : (
-                <span
-                  aria-hidden
-                  className={cn(
-                    "inline-flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors",
-                    selected ? "bg-brand" : "bg-fg-subtle/35",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "size-3 rounded-full bg-white shadow-sm transition-transform",
-                      selected && "translate-x-3",
-                    )}
-                  />
-                </span>
+                <ComposerMenuSwitchIndicator checked={selected} />
               )}
             </ConnectorAction>
           );
