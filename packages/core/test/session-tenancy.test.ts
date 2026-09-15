@@ -241,7 +241,11 @@ describe("managed-human session tenancy application service", () => {
         grant.workspaceId,
         crypto.randomUUID(),
       ),
-    ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
+    ).rejects.toMatchObject({
+      // Revocation now reaches the owner-bound database gate so exact-session
+      // Connection grants remain revocable before private-session activation.
+      cause: { code: "42501", message: "session tenancy product is not activated" },
+    });
   }, 180_000);
 
   test("lists, issues, reissues expired identities, and route-fences revocation", async () => {
