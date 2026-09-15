@@ -3339,7 +3339,9 @@ function applyMcpApprovalPolicy(
         prefix: prefixedMcpToolName(server.id, ""),
         serverId: server.id,
         requireApproval:
-          server.requireApproval === true ? true : new Set(server.requireApproval as string[]),
+          server.requireApproval === true
+            ? true
+            : new Set(Array.isArray(server.requireApproval) ? server.requireApproval : []),
         connectorBacked: Boolean(server.connectionRef),
         connectionId,
       };
