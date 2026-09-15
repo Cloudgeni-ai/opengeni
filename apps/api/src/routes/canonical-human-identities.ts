@@ -23,6 +23,9 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { admitManagedSignInMutation } from "./managed-sign-in-methods";
+import { managedAuthSecretRequestDigest } from "@opengeni/core/managed-auth-session-sets";
+import { deliverManagedSignInNotification } from "../auth/managed-sign-in-notifications";
 
 const BindingId = z.string().uuid();
 
@@ -86,6 +89,7 @@ async function mutate(
     operationId: string;
     expectedIdentityRevision: number;
     reason: string;
+    verifiedManagedRecovery?: boolean;
   },
 ): Promise<Response> {
   const identity = await requestIdentity(context, deps);
@@ -104,10 +108,27 @@ async function mutate(
         ...(input.providerId ? { providerId: input.providerId } : {}),
         ...(input.providerAccountId ? { providerAccountId: input.providerAccountId } : {}),
         reason: input.reason,
+        ...(input.verifiedManagedRecovery
+          ? {
+              verifiedRecovery: {
+                authSessionId: identity.authSessionId,
+                requestDigest: managedAuthSecretRequestDigest(
+                  deps.settings.betterAuthSecret!,
+                  input,
+                ),
+              },
+            }
+          : {}),
         ...(actorFence ? { actorFence } : {}),
       }),
     );
     if (actorFence) markManagedAuthRequestActorTransitionApplied(context.req.raw);
+    if (input.verifiedManagedRecovery)
+      await deliverManagedSignInNotification(
+        deps.db,
+        deps.managedEmailTransport,
+        input.operationId,
+      );
     return context.json(response);
   } catch (error) {
     return identityError(context, error);
@@ -132,6 +153,11 @@ export function registerCanonicalHumanIdentityRoutes(app: Hono, deps: ApiRouteDe
 
   app.post(`${base}/login-bindings`, async (context) => {
     const request = await parseBody(context, LinkCanonicalHumanLoginBindingRequest);
+    if (["google", "github", "credential"].includes(request.providerId.trim().toLowerCase())) {
+      throw new HTTPException(403, {
+        message: "Use personal sign-in method settings with fresh provider proof",
+      });
+    }
     return await mutate(context, deps, {
       operationType: "link",
       ...request,
@@ -141,6 +167,19 @@ export function registerCanonicalHumanIdentityRoutes(app: Hono, deps: ApiRouteDe
 
   app.delete(`${base}/login-bindings/:bindingId`, async (context) => {
     const request = await parseBody(context, CanonicalHumanBindingOperationRequest);
+    const actor = await requestIdentity(context, deps);
+    const projection = await getCanonicalHumanIdentityProjection(deps.db, actor.authUserId);
+    if (
+      projection.loginBindings.some(
+        (binding) =>
+          binding.id === bindingId(context) &&
+          ["google", "github", "credential"].includes(binding.providerId),
+      )
+    ) {
+      throw new HTTPException(403, {
+        message: "Use personal sign-in method settings with last-method protection",
+      });
+    }
     return await mutate(context, deps, {
       operationType: "unlink",
       bindingId: bindingId(context),
@@ -151,6 +190,19 @@ export function registerCanonicalHumanIdentityRoutes(app: Hono, deps: ApiRouteDe
 
   app.post(`${base}/login-bindings/:bindingId/recovery`, async (context) => {
     const request = await parseBody(context, CanonicalHumanBindingOperationRequest);
+    const actor = await requestIdentity(context, deps);
+    const projection = await getCanonicalHumanIdentityProjection(deps.db, actor.authUserId);
+    if (
+      projection.loginBindings.some(
+        (binding) =>
+          binding.id === bindingId(context) &&
+          ["google", "github", "credential"].includes(binding.providerId),
+      )
+    ) {
+      throw new HTTPException(403, {
+        message: "Managed-provider recovery cannot be initiated through raw binding management",
+      });
+    }
     return await mutate(context, deps, {
       operationType: "begin_recovery",
       bindingId: bindingId(context),
@@ -161,11 +213,20 @@ export function registerCanonicalHumanIdentityRoutes(app: Hono, deps: ApiRouteDe
 
   app.post(`${base}/login-bindings/:bindingId/recovery/complete`, async (context) => {
     const request = await parseBody(context, CanonicalHumanBindingOperationRequest);
+    const actor = await requestIdentity(context, deps);
+    const projection = await getCanonicalHumanIdentityProjection(deps.db, actor.authUserId);
+    const managed = projection.loginBindings.some(
+      (binding) =>
+        binding.id === bindingId(context) &&
+        ["google", "github", "credential"].includes(binding.providerId),
+    );
+    if (managed) await admitManagedSignInMutation(context, deps);
     return await mutate(context, deps, {
       operationType: "recover",
       bindingId: bindingId(context),
       ...request,
       operationId: request.operationId ?? randomUUID(),
+      ...(managed ? { verifiedManagedRecovery: true } : {}),
     });
   });
 }

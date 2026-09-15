@@ -1,4 +1,5 @@
 import { AppearanceMenu } from "@/components/appearance-menu";
+import { Link } from "@tanstack/react-router";
 import { useBrowserAccounts } from "@opengeni/react/accounts";
 import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
 import {
@@ -7,6 +8,7 @@ import {
   Loader2Icon,
   LogOutIcon,
   RefreshCwIcon,
+  ShieldCheckIcon,
   UserRoundPlusIcon,
   UsersIcon,
 } from "lucide-react";
@@ -319,6 +321,12 @@ export function BrowserAccountMenu() {
             disabled={busy}
           />
           <AppearanceMenu />
+          <DropdownMenuItem asChild disabled={busy} className="min-h-11">
+            <Link to="/settings/security">
+              <ShieldCheckIcon className="size-4" />
+              Personal settings
+            </Link>
+          </DropdownMenuItem>
           {showAnalyticsPreferences ? (
             <DropdownMenuItem className="min-h-11" onSelect={() => openAnalyticsPreferences()}>
               <ChartColumnIcon className="size-4" />

@@ -14,27 +14,33 @@ import { cn } from "@/lib/utils";
 
 export type NoticeTone = "muted" | "info" | "success" | "waiting" | "failed";
 
-const TONE: Record<NoticeTone, { box: string; icon: string; glyph: typeof InfoIcon }> = {
+// Read live icon imports at render time: production chunk cycles can initialize
+// this table before the icon modules, so eagerly captured values may be undefined.
+const TONE: Record<NoticeTone, { box: string; icon: string; glyph: () => typeof InfoIcon }> = {
   muted: {
     box: "border-border bg-surface/40 text-fg-muted",
     icon: "text-fg-subtle",
-    glyph: InfoIcon,
+    glyph: () => InfoIcon,
   },
-  info: { box: "border-brand/30 bg-brand/[0.06] text-fg", icon: "text-brand", glyph: InfoIcon },
+  info: {
+    box: "border-brand/30 bg-brand/[0.06] text-fg",
+    icon: "text-brand",
+    glyph: () => InfoIcon,
+  },
   success: {
     box: "border-status-idle/30 bg-status-idle/[0.06] text-fg",
     icon: "text-status-idle",
-    glyph: CircleCheckIcon,
+    glyph: () => CircleCheckIcon,
   },
   waiting: {
     box: "border-status-waiting/30 bg-status-waiting/[0.06] text-fg",
     icon: "text-status-waiting",
-    glyph: CircleAlertIcon,
+    glyph: () => CircleAlertIcon,
   },
   failed: {
     box: "border-status-failed/30 bg-status-failed/[0.06] text-fg",
     icon: "text-status-failed",
-    glyph: TriangleAlertIcon,
+    glyph: () => TriangleAlertIcon,
   },
 };
 
@@ -57,7 +63,7 @@ export function Notice({
   className?: string;
 }) {
   const meta = TONE[tone];
-  const Glyph = meta.glyph;
+  const Glyph = meta.glyph();
   return (
     <div
       className={cn("flex items-start gap-2.5 rounded-lg border p-3 text-sm", meta.box, className)}

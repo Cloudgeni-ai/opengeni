@@ -11,6 +11,7 @@ import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 
 import type { AuthSession, ClientConfig } from "./types";
 import { beginAnalyticsRequest } from "./lib/analytics-observer";
+import { securityReauthenticationPath } from "./lib/sign-in-feedback";
 
 export function resolveApiBaseUrl(value: string | undefined): string {
   return (value ?? "").replace(/\/+$/, "");
@@ -934,7 +935,12 @@ export async function signInEmail(input: {
 }
 
 export async function startManagedSocialSignIn(provider: "google" | "github"): Promise<void> {
-  const callbackURL = new URL("/", window.location.origin).toString();
+  const callbackURL = new URL(
+    window.location.pathname === "/settings/security"
+      ? securityReauthenticationPath(window.location.search)
+      : "/",
+    window.location.origin,
+  ).toString();
   const response = await authRequest<{ url?: unknown }>("/sign-in/social", {
     method: "POST",
     body: JSON.stringify({

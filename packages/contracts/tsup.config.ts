@@ -20,6 +20,7 @@ export default defineConfig({
     "src/github-repository.ts",
     "src/github-repository-contracts.ts",
     "src/managed-auth-session-sets.ts",
+    "src/managed-sign-in-methods.ts",
     "src/model-picker-order.ts",
     "src/organization-recovery.ts",
     "src/personal-github.ts",

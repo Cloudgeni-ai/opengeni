@@ -132,6 +132,14 @@ Keep these boundaries explicit:
   fallback.
 - Old unscoped operational routes are deleted, not soft-deprecated. Do not add compatibility aliases unless the user explicitly changes that product decision.
 - Better Auth is only the managed-mode browser human auth resolver. It is not the tenant model and should not appear in core session/file/document/schedule route code.
+- Managed sign-in method changes belong to `apps/api/src/routes/managed-sign-in-methods.ts`
+  and its canonical identity/database guards. Discover the current contract in
+  `packages/contracts/src/managed-sign-in-methods.ts` and the rollout in
+  `docs/browser-login-session-sets.md`. Preserve verified-email linking,
+  explicit-disconnect suppression, expected-human/revision fences, recent
+  authentication, and last-usable-method protection across every login route;
+  do not expose raw provider mutation routes or use `trustedProviders` to bypass
+  email verification. Login methods are distinct from integration permissions.
 - OpenGeni organization API keys are owned by OpenGeni and use the
   `Authorization` header. The optional deployment shared key uses
   `x-opengeni-access-key`.

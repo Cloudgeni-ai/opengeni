@@ -57,6 +57,8 @@ import {
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
+import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
+import { PersonalSecurityProvider } from "@/lib/personal-security-context";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Toaster } from "@/components/ui/sonner";
@@ -2822,6 +2824,28 @@ export function RootRouteComponent() {
         />
       )}
     </Suspense>
+  ) : /^\/settings\/security\/?$/.test(pathname) &&
+    managedAuthRequired &&
+    authSession &&
+    clientConfig ? (
+    // Personal security requires the selected managed human, never a workspace
+    // grant. Keep this after authentication but before access/onboarding gates.
+    // The outer BrowserAccountsRuntime still owns broker actor transitions.
+    browserAccountsConfigured && !browserAccountsEnabled ? (
+      <LoadingPanel label="Loading the selected browser account" />
+    ) : (
+      <PersonalSecurityProvider
+        value={{
+          clientConfig,
+          authSession,
+          accessKeyVersion,
+          handleManagedSignOut,
+          revalidatePrincipalAccess,
+        }}
+      >
+        <Outlet />
+      </PersonalSecurityProvider>
+    )
   ) : accessError && !accessLoading ? (
     <ProblemPanel
       title={accessError.title}
@@ -2928,6 +2952,7 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
+      <SignInCallbackNotice userId={authSession?.user.id ?? null} />
       {clientConfig ? (
         <Suspense fallback={null}>
           <AnalyticsManager

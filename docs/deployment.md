@@ -840,9 +840,30 @@ Register these exact callback URLs against the canonical public origin:
 
 The public client config exposes only the enabled provider names. OAuth tokens,
 client secrets, Better Auth state, and provider session identifiers remain
-server-side. Better Auth automatic email-based account linking stays disabled;
-an existing email/password human is not silently merged with a newly presented
-Google or GitHub identity.
+server-side. Google and GitHub sign-ins may automatically attach a new login
+method to an existing human only when the email matches and both the existing
+email and the provider's email assertion are verified. This also supports a
+verified email/password user signing in through a social provider. Linking adds
+a method to that same canonical human; it never merges separate users or changes
+organization memberships, workspace access, or billing ownership.
+
+Keep provider email verification and local email verification checks enabled.
+Do not use Better Auth's `trustedProviders` option to bypass the incoming
+email-verification check. An unverified email or conflicting provider identity
+must not silently acquire another human's authority.
+
+Personal sign-in settings expose connected login methods separately from
+repository, Gmail, and Drive integrations. Sensitive changes require fresh
+authentication, and disconnecting the last usable method is refused. An explicit
+disconnect must remain effective: subsequent same-email sign-in cannot silently
+reconnect that method; the user must explicitly reconnect it with provider proof.
+
+The sign-in-method boundary requires a maintenance rollout, not mixed old/new
+API replicas. Follow [Personal sign-in methods](browser-login-session-sets.md#personal-sign-in-methods):
+drain the old runtime writers, apply the migration and role provisioning, then
+start the matching release. Do not restart an older API that exposes the raw
+provider-management routes. This feature does not authorize changing the
+deployment's configured browser session-set mode.
 
 ### Durable invited-user email delivery (0351)
 
