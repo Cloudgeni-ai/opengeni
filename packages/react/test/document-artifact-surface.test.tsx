@@ -783,7 +783,252 @@ describe("artifact document surface", () => {
     );
     await rendered.unmount();
   });
+
+  test("Enter inserts a plain-text newline at empty, end, middle, and selected ranges", async () => {
+    const document = Document.create();
+    const empty = document.blocks.addParagraph("");
+    const end = document.blocks.addParagraph("hello");
+    const middle = document.blocks.addParagraph("hello");
+    const selected = document.blocks.addParagraph("hello");
+    const rendered = await renderComponent(
+      <DocumentEditor document={document} layout="continuous" viewportHeight={360} />,
+    );
+    await flush();
+
+    const emptyEditor = rendered.container.querySelector<HTMLElement>(
+      `[data-og-paragraph="${empty.id}"]`,
+    )!;
+    await actRun(() => {
+      emptyEditor.focus();
+      placeCaret(emptyEditor, 0);
+      dispatchEnter(emptyEditor);
+    });
+    expect(empty.text).toBe("\n");
+    expect(emptyEditor.querySelector("br[data-og-trailing-break]")).toBeTruthy();
+    expect(emptyEditor.textContent).toBe("\n");
+
+    const endEditor = rendered.container.querySelector<HTMLElement>(
+      `[data-og-paragraph="${end.id}"]`,
+    )!;
+    await actRun(() => {
+      endEditor.focus();
+      placeCaret(endEditor, 5);
+      dispatchEnter(endEditor);
+      dispatchEnter(endEditor);
+    });
+    expect(end.text).toBe("hello\n\n");
+    expect(endEditor.querySelector("br[data-og-trailing-break]")).toBeTruthy();
+    expect(endEditor.textContent).toBe("hello\n\n");
+
+    const middleEditor = rendered.container.querySelector<HTMLElement>(
+      `[data-og-paragraph="${middle.id}"]`,
+    )!;
+    await actRun(() => {
+      middleEditor.focus();
+      placeCaret(middleEditor, 2);
+      dispatchEnter(middleEditor);
+    });
+    expect(middle.text).toBe("he\nllo");
+    expect(middleEditor.querySelector("br[data-og-trailing-break]")).toBeNull();
+
+    const selectedEditor = rendered.container.querySelector<HTMLElement>(
+      `[data-og-paragraph="${selected.id}"]`,
+    )!;
+    await actRun(() => {
+      selectedEditor.focus();
+      selectText(selectedEditor, 1, 4);
+      dispatchEnter(selectedEditor);
+    });
+    expect(selected.text).toBe("h\no");
+
+    await rendered.unmount();
+  });
+
+  test("typing and paste after a trailing newline land after it, without leaking the caret br", async () => {
+    const document = Document.create();
+    const paragraph = document.blocks.addParagraph("hello");
+    const rendered = await renderComponent(
+      <DocumentEditor document={document} layout="continuous" viewportHeight={260} />,
+    );
+    await flush();
+    const editor = rendered.container.querySelector<HTMLElement>(
+      `[data-og-paragraph="${paragraph.id}"]`,
+    )!;
+    await actRun(() => editor.focus());
+    placeCaret(editor, 5);
+    await actRun(() => dispatchEnter(editor));
+    expect(paragraph.text).toBe("hello\n");
+    expect(editor.querySelector("br[data-og-trailing-break]")).toBeTruthy();
+    expect(editor.textContent).toBe("hello\n");
+    expect(paragraph.text).not.toContain("og-trailing");
+
+    const htmlPaste = clipboardEvent("paste", "x", '<img src="https://attacker.invalid/pixel">');
+    await actRun(() => editor.dispatchEvent(htmlPaste));
+    expect(htmlPaste.defaultPrevented).toBe(true);
+    expect(editor.querySelector("img, script, a")).toBeNull();
+    expect(paragraph.text).toBe("hello\nx");
+    expect(editor.textContent).toBe("hello\nx");
+    expect(editor.querySelector("br[data-og-trailing-break]")).toBeNull();
+
+    await actRun(() => editor.blur());
+    await rendered.unmount();
+    const remounted = await renderComponent(
+      <DocumentEditor document={document} layout="continuous" viewportHeight={260} />,
+    );
+    await flush();
+    expect(paragraph.text).toBe("hello\nx");
+    expect(
+      remounted.container.querySelector(`[data-og-paragraph="${paragraph.id}"]`)?.textContent,
+    ).toBe("hello\nx");
+    await remounted.unmount();
+  });
+
+  test("IME composition Enter is ignored, composition commits are kept, and a later Enter still inserts", async () => {
+    const document = Document.create();
+    const paragraph = document.blocks.addParagraph("hello");
+    const rendered = await renderComponent(
+      <DocumentEditor document={document} layout="continuous" viewportHeight={260} />,
+    );
+    await flush();
+    const editor = rendered.container.querySelector<HTMLElement>(
+      `[data-og-paragraph="${paragraph.id}"]`,
+    )!;
+    await actRun(() => editor.focus());
+    placeCaret(editor, 5);
+
+    await actRun(() => {
+      editor.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "二" }));
+      // happy-dom CompositionEvent may not set composing.current; native
+      // isComposing / keyCode 229 are the load-bearing synthetic IME seams.
+      dispatchEnter(editor, { isComposing: true });
+    });
+    expect(paragraph.text).toBe("hello");
+
+    editor.textContent = "hello二";
+    await actRun(() => {
+      editor.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "二" }));
+      dispatchEnter(editor);
+    });
+    expect(paragraph.text).toBe("hello二");
+
+    // compositionend + assigning textContent replace the live text node;
+    // a later Enter still inserts once the caret is inside this leaf again.
+    await actRun(() => {
+      placeCaret(editor, 6);
+      dispatchEnter(editor);
+    });
+    expect(paragraph.text).toBe("hello二\n");
+
+    await actRun(() =>
+      editor.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+          isComposing: true,
+        }),
+      ),
+    );
+    expect(paragraph.text).toBe("hello二\n");
+
+    const keyCode229 = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(keyCode229, "keyCode", { get: () => 229 });
+    await actRun(() => editor.dispatchEvent(keyCode229));
+    expect(paragraph.text).toBe("hello二\n");
+
+    await rendered.unmount();
+  });
+
+  test("formatted runs, read-only, and native undo (where supported) keep newline semantics", async () => {
+    const document = Document.create();
+    const formatted = document.blocks.addParagraph([
+      new DocumentTextRun("Alpha", { italic: true }),
+      new DocumentTextRun(" beta"),
+    ]);
+    const rendered = await renderComponent(
+      <DocumentEditor document={document} layout="continuous" viewportHeight={360} />,
+    );
+    await flush();
+
+    const formattedEditor = rendered.container.querySelector<HTMLElement>(
+      `[data-og-paragraph="${formatted.id}"]`,
+    )!;
+    await actRun(() => formattedEditor.focus());
+    placeCaret(formattedEditor, 5);
+    await actRun(() => dispatchEnter(formattedEditor));
+    expect(formatted.text).toBe("Alpha\n beta");
+    expect(formatted.runs[0]?.style.italic).toBe(true);
+
+    await rendered.unmount();
+
+    const readOnly = Document.create();
+    const readOnlyParagraph = readOnly.blocks.addParagraph("Locked text");
+    const readOnlyRendered = await renderComponent(
+      <DocumentEditor document={readOnly} readOnly layout="continuous" viewportHeight={240} />,
+    );
+    await flush();
+    const readOnlyEditor = readOnlyRendered.container.querySelector<HTMLElement>(
+      `[data-og-paragraph="${readOnlyParagraph.id}"]`,
+    )!;
+    await actRun(() => readOnlyEditor.focus());
+    placeCaret(readOnlyEditor, 11);
+    await actRun(() => dispatchEnter(readOnlyEditor));
+    expect(readOnlyParagraph.text).toBe("Locked text");
+    expect(readOnlyEditor.querySelector("br[data-og-trailing-break]")).toBeNull();
+    await readOnlyRendered.unmount();
+
+    const undoDocument = Document.create();
+    const undoParagraph = undoDocument.blocks.addParagraph("hello");
+    const undoRendered = await renderComponent(
+      <DocumentEditor document={undoDocument} layout="continuous" viewportHeight={240} />,
+    );
+    await flush();
+    const undoEditor = undoRendered.container.querySelector<HTMLElement>(
+      `[data-og-paragraph="${undoParagraph.id}"]`,
+    )!;
+    await actRun(() => undoEditor.focus());
+    placeCaret(undoEditor, 5);
+    await actRun(() => dispatchEnter(undoEditor));
+    expect(undoParagraph.text).toBe("hello\n");
+    let nativeUndo = false;
+    await actRun(() => {
+      nativeUndo = globalThis.document.execCommand?.("undo") === true;
+    });
+    await flush();
+    if (nativeUndo && undoParagraph.text === "hello") {
+      expect(undoParagraph.text).toBe("hello");
+    } else {
+      // insertNode caret path has no custom undo stack; native contentEditable
+      // undo is engine-dependent and is not synthesized here.
+      expect(undoParagraph.text).toBe("hello\n");
+    }
+    await undoRendered.unmount();
+  });
 });
+
+function placeCaret(root: HTMLElement, offset: number): void {
+  const length = root.textContent?.length ?? 0;
+  if (length === 0) {
+    const range = document.createRange();
+    range.selectNodeContents(root);
+    range.collapse(true);
+    const selection = globalThis.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    return;
+  }
+  selectText(root, Math.min(offset, length), Math.min(offset, length));
+}
+
+function dispatchEnter(root: HTMLElement, init: KeyboardEventInit = {}): boolean {
+  return root.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...init }),
+  );
+}
 
 function clipboardEvent(type: "paste", plain: string, html: string): Event {
   const event = new Event(type, { bubbles: true, cancelable: true });

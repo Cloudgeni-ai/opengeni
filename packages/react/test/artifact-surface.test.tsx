@@ -577,6 +577,100 @@ describe("artifact spreadsheet surface", () => {
     await rendered.unmount();
   });
 
+  test("General display suppresses IEEE residue while formula-bar source and stored values stay exact", async () => {
+    const workbook = Workbook.create();
+    const sheet = workbook.worksheets.add("General");
+    const date = new Date("2024-06-15T00:00:00Z");
+    sheet.getRange("A1").values = [[110.00000000000001]];
+    sheet.getRange("B1").values = [[220.00000000000003]];
+    sheet.getRange("C1").formulas = [["=0.1+0.2"]];
+    sheet.getRange("D1").values = [[1e-20]];
+    sheet.getRange("E1").values = [[1e21]];
+    sheet.getRange("A2").values = [[-110.00000000000001]];
+    sheet.getRange("B2").values = [[0]];
+    sheet.getRange("C2").values = [[42]];
+    sheet.getRange("D2").values = [[true]];
+    sheet.getRange("E2").values = [["#DIV/0!"]];
+    sheet.getRange("A3").values = [[1.23456789012345]];
+    sheet.getRange("B3").values = [[date]];
+    const commits: SpreadsheetCommit[] = [];
+    const rendered = await renderComponent(
+      <SpreadsheetGrid
+        workbook={workbook}
+        worksheet={sheet}
+        onCommit={(commit) => commits.push(commit)}
+      />,
+    );
+    await flush();
+
+    expect(sheet.getRange("A1").values).toEqual([[110.00000000000001]]);
+    expect(sheet.getRange("C1").values).toEqual([[0.1 + 0.2]]);
+    expect(sheet.getRange("C1").formulas).toEqual([["=0.1+0.2"]]);
+    expect(rendered.container.querySelector('[data-og-cell="A1"]')?.textContent).toBe("110");
+    expect(
+      rendered.container.querySelector('[data-og-cell="A1"]')?.getAttribute("aria-label"),
+    ).toBe("A1, 110");
+    expect(rendered.container.querySelector('[data-og-cell="B1"]')?.textContent).toBe("220");
+    expect(rendered.container.querySelector('[data-og-cell="C1"]')?.textContent).toBe("0.3");
+    expect(rendered.container.querySelector('[data-og-cell="D1"]')?.textContent).toBe("1e-20");
+    expect(rendered.container.querySelector('[data-og-cell="E1"]')?.textContent).toBe("1e+21");
+    expect(rendered.container.querySelector('[data-og-cell="A2"]')?.textContent).toBe("-110");
+    expect(rendered.container.querySelector('[data-og-cell="B2"]')?.textContent).toBe("0");
+    expect(rendered.container.querySelector('[data-og-cell="C2"]')?.textContent).toBe("42");
+    expect(rendered.container.querySelector('[data-og-cell="D2"]')?.textContent).toBe("TRUE");
+    expect(rendered.container.querySelector('[data-og-cell="E2"]')?.textContent).toBe("#DIV/0!");
+    expect(rendered.container.querySelector('[data-og-cell="A3"]')?.textContent).toBe(
+      "1.23456789012345",
+    );
+    expect(rendered.container.querySelector('[data-og-cell="B3"]')?.textContent).toBe(
+      date.toLocaleDateString(),
+    );
+
+    const formulaBar = rendered.container.querySelector<HTMLInputElement>(
+      '[aria-label="Formula or value"]',
+    )!;
+    expect(formulaBar.value).toBe("110.00000000000001");
+
+    const grid = rendered.container.querySelector('[role="grid"]') as HTMLDivElement;
+    await actRun(() => grid.focus());
+    await actRun(() =>
+      grid.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })),
+    );
+    await actRun(() =>
+      grid.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })),
+    );
+    await flush();
+    expect(rendered.container.querySelector('[aria-label="Selected range"]')?.textContent).toBe(
+      "C1",
+    );
+    expect(formulaBar.value).toBe("=0.1+0.2");
+
+    const revision = workbook.revision;
+    await actRun(() => formulaBar.focus());
+    await actRun(() => formulaBar.blur());
+    await flush();
+    expect(commits).toEqual([]);
+    expect(workbook.revision).toBe(revision);
+    expect(sheet.getRange("A1").values).toEqual([[110.00000000000001]]);
+    expect(sheet.getRange("C1").formulas).toEqual([["=0.1+0.2"]]);
+    expect(sheet.getRange("C1").values).toEqual([[0.1 + 0.2]]);
+
+    await rendered.unmount();
+    const remounted = await renderComponent(
+      <SpreadsheetGrid workbook={workbook} worksheet={sheet} />,
+    );
+    await flush();
+    expect(sheet.getRange("A1").values).toEqual([[110.00000000000001]]);
+    expect(sheet.getRange("C1").formulas).toEqual([["=0.1+0.2"]]);
+    expect(remounted.container.querySelector('[data-og-cell="A1"]')?.textContent).toBe("110");
+    expect(remounted.container.querySelector('[data-og-cell="C1"]')?.textContent).toBe("0.3");
+    expect(
+      (remounted.container.querySelector('[aria-label="Formula or value"]') as HTMLInputElement)
+        .value,
+    ).toBe("110.00000000000001");
+    await remounted.unmount();
+  });
+
   test("external workbook changes project immediately without replacing the workbook", async () => {
     const { workbook, sheet } = makeWorkbook();
     const rendered = await renderComponent(
