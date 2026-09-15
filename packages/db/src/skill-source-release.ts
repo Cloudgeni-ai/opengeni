@@ -50,6 +50,14 @@ export class SkillSourceRemovalAuthorityError extends Error {
   }
 }
 
+/** Never disclose the identity of a head absent from the caller's locked snapshot. */
+export class SkillSourceReleaseSnapshotChangedError extends Error {
+  constructor() {
+    super("Skill source visibility changed during removal; review a refreshed preview.");
+    this.name = "SkillSourceReleaseSnapshotChangedError";
+  }
+}
+
 /**
  * Called inside the source-owner removal transaction, with source installations
  * locked. Distribution identity/history stays bound after uninstall, so reinstall
@@ -57,7 +65,13 @@ export class SkillSourceRemovalAuthorityError extends Error {
  */
 export async function releaseOrphanedSkillHeads(
   db: Database,
-  input: { workspaceId: string; facetInstallationIds: readonly string[]; skillActor?: SkillActor },
+  input: {
+    workspaceId: string;
+    facetInstallationIds: readonly string[];
+    skillActor?: SkillActor;
+    /** Exact heads already locked before the caller compared removal impact. */
+    lockedHeadIds?: readonly string[];
+  },
 ): Promise<SkillSourceReleaseReceipt[]> {
   if (!input.facetInstallationIds.length) return [];
   const bindings = await rawRows<{ id: string }>(
@@ -82,11 +96,14 @@ export async function releaseOrphanedSkillHeads(
       input.workspaceId,
       input.facetInstallationIds,
     );
+    const lockedHeadIds = new Set(input.lockedHeadIds ?? visibleHeads.map((head) => head.id));
+    if (visibleHeads.some((head) => !lockedHeadIds.has(head.id)))
+      throw new SkillSourceReleaseSnapshotChangedError();
     // The established definer lock capability accepts at most two heads; acquire
     // individual heads in canonical order rather than widening its authority.
     // An inaccessible re-scoped head is preserved, never an excuse to acquire
     // authority over another scope or disclose its identity in a receipt.
-    for (const binding of visibleHeads) {
+    for (const binding of input.lockedHeadIds === undefined ? visibleHeads : []) {
       await tx.execute(
         sql`SELECT preference_id FROM preference_registry_lock_heads(ARRAY[${binding.id}::uuid])`,
       );
@@ -96,6 +113,11 @@ export async function releaseOrphanedSkillHeads(
       input.workspaceId,
       input.facetInstallationIds,
     );
+    // A second subject may have moved a previously invisible head into this
+    // scope since either read. Never widen the locked set or acquire a new head
+    // lock out of canonical order during cleanup.
+    if (rows.some((head) => !lockedHeadIds.has(head.id)))
+      throw new SkillSourceReleaseSnapshotChangedError();
     const receipts: SkillSourceReleaseReceipt[] = [];
     for (const head of rows) {
       const impact = classifySkillSourceRelease(head, input.workspaceId);

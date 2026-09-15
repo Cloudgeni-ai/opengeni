@@ -4,6 +4,7 @@ import { signDelegatedAccessToken, type PluginPreview } from "@opengeni/contract
 import type { ApiRouteDeps, GitHubSkillSourceClient } from "@opengeni/core";
 import {
   bootstrapWorkspace,
+  changePreferenceRegistryScope,
   applySkillLifecycle,
   listSkillRecords,
   createDb,
@@ -25,6 +26,8 @@ import postgres from "postgres";
 import { registerPluginRoutes } from "../src/routes/plugins";
 
 const DELEGATION_SECRET = "plugin-route-delegation";
+const fixtureAccountExternalId = `plugin-route-account-${crypto.randomUUID()}`;
+const fixtureWorkspaceExternalId = `plugin-route-workspace-${crypto.randomUUID()}`;
 let skillCommit = "a".repeat(40);
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -163,10 +166,10 @@ beforeAll(async () => {
   subjectId = `user:plugin-route-${crypto.randomUUID()}`;
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
-    accountExternalId: `plugin-route-account-${crypto.randomUUID()}`,
+    accountExternalId: fixtureAccountExternalId,
     accountName: "Plugin route account",
     workspaceExternalSource: "test",
-    workspaceExternalId: `plugin-route-workspace-${crypto.randomUUID()}`,
+    workspaceExternalId: fixtureWorkspaceExternalId,
     workspaceName: "Plugin route workspace",
     subjectId,
   });
@@ -225,6 +228,9 @@ beforeAll(async () => {
         }
         if (url === "https://127.0.0.1/plugin-drift.json") {
           return Response.json(sharedSkillPlugin("example/plugin-drift"));
+        }
+        if (url === "https://127.0.0.1/plugin-visibility.json") {
+          return Response.json(sharedSkillPlugin("example/plugin-visibility"));
         }
         if (url === "https://127.0.0.1/plugin-header-mcp.json") {
           return Response.json(mcpOnlyPlugin("example/plugin-header-mcp", "header_mcp"));
@@ -309,6 +315,148 @@ async function install(url: string, previewed: PluginPreview, idempotencyKey: st
 }
 
 describe("Plugin routes", () => {
+  test("rolls back when another subject makes a private Skill visible after token comparison", async () => {
+    if (!available || !shared) return;
+    const subjectB = `user:plugin-visibility-${crypto.randomUUID()}`;
+    await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: fixtureAccountExternalId,
+      accountName: "Plugin route account",
+      workspaceExternalSource: "test",
+      workspaceExternalId: fixtureWorkspaceExternalId,
+      workspaceName: "Plugin route workspace",
+      subjectId: subjectB,
+    });
+    const source = "https://127.0.0.1/plugin-visibility.json";
+    const installed = await (
+      await install(source, await preview(source), crypto.randomUUID())
+    ).json();
+    const path = "/plugins/example%2Fplugin-visibility";
+    const visible = await (await request(`${path}/uninstall-preview`)).json();
+    const skillId = visible.components[0].skillId as string;
+    expect(typeof skillId).toBe("string");
+    await changePreferenceRegistryScope(client.db, {
+      accountId,
+      workspaceId,
+      actorSubjectId: subjectB,
+      principalKind: "human_session",
+      preferenceId: skillId,
+      scope: "user",
+      expectedScopeVersion: 1,
+      authorizeScope: () => {},
+      reason: "Move source Skill into subject B private scope",
+    });
+    const [privateHead] = await shared.admin<
+      { provenance: string; scope: string; subject: string }[]
+    >`
+      SELECT r.provenance_source AS provenance, h.scope, h.scope_subject_id AS subject
+      FROM preference_registry_preferences h JOIN preference_registry_revisions r ON r.id=h.active_revision_id
+      WHERE h.id=${skillId}::uuid`;
+    expect(privateHead).toEqual({ provenance: "portable_skill", scope: "user", subject: subjectB });
+    const hiddenPreview = await (await request(`${path}/uninstall-preview`)).json();
+    expect(hiddenPreview.components[0].retentionReasons).toEqual(["registry_unavailable"]);
+    expect(JSON.stringify(hiddenPreview)).not.toContain(skillId);
+    const [owner] = await shared.admin<{ id: string }[]>`
+      SELECT pi.id FROM capability_plugin_installations pi
+      JOIN capability_plugins p ON p.id=pi.plugin_id
+      WHERE pi.workspace_id=${workspaceId}::uuid AND p.plugin_key='example/plugin-visibility'`;
+    if (!owner) throw new Error("Plugin installation missing from race fixture");
+    // A real database barrier runs at owner DELETE, strictly after comparison.
+    // No production hook or timing-based sleep determines the interleaving.
+    await shared.admin.unsafe(`CREATE TABLE test_plugin_visibility_barriers (
+      workspace_id uuid PRIMARY KEY, owner_id text NOT NULL, lock_key bigint NOT NULL)`);
+    await shared.admin.unsafe(`CREATE FUNCTION test_plugin_visibility_barrier() RETURNS trigger
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+      DECLARE barrier_key bigint;
+      BEGIN
+        SELECT lock_key INTO barrier_key FROM public.test_plugin_visibility_barriers
+          WHERE workspace_id=OLD.workspace_id AND owner_id=OLD.owner_id AND OLD.owner_kind='plugin';
+        IF barrier_key IS NOT NULL THEN PERFORM pg_advisory_xact_lock(barrier_key); END IF;
+        RETURN OLD;
+      END $$`);
+    await shared.admin.unsafe(`CREATE TRIGGER test_plugin_visibility_barrier
+      BEFORE DELETE ON capability_component_owners FOR EACH ROW
+      EXECUTE FUNCTION test_plugin_visibility_barrier()`);
+    const barrierKey = 739281;
+    await shared.admin`INSERT INTO test_plugin_visibility_barriers VALUES (${workspaceId},${owner.id},${barrierKey})`;
+    const removalKey = crypto.randomUUID();
+    let removal: Promise<Response> | undefined;
+    try {
+      await shared.admin.begin(async (barrier) => {
+        await barrier`SELECT pg_advisory_xact_lock(${barrierKey}::bigint)`;
+        const [backend] = await barrier<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+        removal = request(path, {
+          method: "DELETE",
+          body: JSON.stringify({
+            expectedInstallationVersion: installed.installationVersion,
+            expectedPreviewToken: hiddenPreview.previewToken,
+            idempotencyKey: removalKey,
+          }),
+        });
+        const deadline = Date.now() + 10_000;
+        let blocked = false;
+        while (Date.now() < deadline) {
+          const [state] = await shared!.admin<{ blocked: boolean }[]>`
+            SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+              WHERE ${backend!.pid} = ANY(pg_blocking_pids(pid))) AS blocked`;
+          if (state?.blocked) {
+            blocked = true;
+            break;
+          }
+          await Bun.sleep(10);
+        }
+        expect(blocked).toBe(true);
+        await changePreferenceRegistryScope(client.db, {
+          accountId,
+          workspaceId,
+          actorSubjectId: subjectB,
+          principalKind: "human_session",
+          preferenceId: skillId,
+          scope: "workspace",
+          expectedScopeVersion: 2,
+          authorizeScope: () => {},
+          reason: "Publish B private Skill while A confirmation is paused",
+        });
+      });
+      if (!removal) throw new Error("Removal was not started");
+      const response = await removal;
+      expect(response.status).toBe(409);
+      const conflict = await response.json();
+      expect(conflict.code).toBe("plugin_uninstall_preview_changed");
+      expect(conflict.preview.components[0].skillId).toBe(skillId);
+      expect(conflict.preview.components[0].disposition).toBe("removed");
+      const [record] = await listSkillRecords(
+        client.db,
+        { accountId, workspaceId, subjectId },
+        { skillId },
+      );
+      expect(record?.status).toBe("active");
+      const [journal] = await shared.admin<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM capability_operations
+        WHERE workspace_id=${workspaceId}::uuid AND idempotency_key=${removalKey}`;
+      expect(journal?.count).toBe(0);
+      expect(await listInstalledPortableSkills(client.db, workspaceId)).toHaveLength(1);
+      await shared.admin`DELETE FROM test_plugin_visibility_barriers`;
+      const confirmed = await request(path, {
+        method: "DELETE",
+        body: JSON.stringify({
+          expectedInstallationVersion: installed.installationVersion,
+          expectedPreviewToken: conflict.preview.previewToken,
+          idempotencyKey: removalKey,
+        }),
+      });
+      expect(confirmed.status).toBe(200);
+      expect((await confirmed.json()).skillReleases[0].disposition).toBe("deactivated");
+    } finally {
+      await removal?.catch(() => undefined);
+      await shared.admin.unsafe(
+        "DROP TRIGGER test_plugin_visibility_barrier ON capability_component_owners",
+      );
+      await shared.admin.unsafe("DROP FUNCTION test_plugin_visibility_barrier()");
+      await shared.admin.unsafe("DROP TABLE test_plugin_visibility_barriers");
+    }
+  }, 60_000);
+
   test("installs, shares, updates, resumes idempotently, and safely uninstalls a component BOM", async () => {
     if (!available) return;
     const previewA = await preview("https://127.0.0.1/plugin-a.json");
