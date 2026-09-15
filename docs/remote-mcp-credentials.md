@@ -244,6 +244,14 @@ first text through `sendMessage` with that participant's explicit
 `selectedHostMcpDelegations` and `clientEventId`. This captures authority on the
 first real text turn just like every later Send/Steer. It does not grant voice
 provider delegations authority or inherit a selection from empty-shell creation.
+The durable composer `submitComposerDraft` boundary accepts the same explicit
+selection for Send and Steer. It is submission intent, not saved draft state.
+The React composer retains that selection together with the original operation
+ID and draft revision when retrying an uncertain response; changing the current
+selection does not change an already-submitted operation. Admission uses the
+same owner, generation, visibility and revocation checks as direct Send/Steer.
+An omitted selection captures no host authority, and replay with a different
+selection conflicts instead of replacing the accepted selection.
 Same-session goal continuations and child-result resumptions use a separate
 causal capture path. Migration 0435 proves the consumed machine update names
 the exact source turn, matches the unchanged session epoch and visibility, and

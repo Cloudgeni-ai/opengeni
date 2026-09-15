@@ -7599,6 +7599,7 @@ export const SubmitComposerDraftRequest = ComposerDraft.pick({
     modelContext: z.string().trim().min(1).max(32768).optional(),
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .superRefine(requireEstablishedPersonalResourceEpoch);
