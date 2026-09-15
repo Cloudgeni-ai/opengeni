@@ -414,6 +414,11 @@ export function personalConnectionDelegationsFromParent(input: {
         sameProviderDomain(candidate.providerDomain, ref.providerDomain) &&
         (!ref.kind || !candidate.kind || candidate.kind === ref.kind),
     );
+    if (delegation && input.rejectActivatedConnections && !childEligible(delegation)) {
+      throw new Error(
+        "scheduled personal connection requires ongoing consent or its exact authorized target session; once-only or different-session consent cannot be reused",
+      );
+    }
     return delegation && childEligible(delegation) ? [{ ...delegation }] : [];
   });
   const projected = [
@@ -464,14 +469,9 @@ export function personalConnectionDelegationsFromParent(input: {
   ) {
     throw new Error("agent-created personal GitHub repository authority is unavailable");
   }
-  if (
-    input.rejectActivatedConnections &&
-    inherited.some((delegation) => delegation.userDelegation)
-  ) {
-    throw new Error(
-      "scheduled connection authority is not available until task occurrence authority is activated",
-    );
-  }
+  // Successor eligibility above admits only standing authority or the exact
+  // target-session grant. Scheduled admission freezes and revalidates that
+  // selection through the activated task-occurrence lifecycle.
   return inherited;
 }
 

@@ -201,6 +201,8 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   slack_bot_file_info: { allOf: ["connections:read"] },
   slack_bot_file_content: { allOf: ["connections:read"] },
   slack_bot_post_message: { allOf: ["connections:read"] },
+  slack_bot_prepare_message: { sessionRequired: true, allOf: ["connections:read"] },
+  slack_bot_send_prepared_message: { sessionRequired: true, allOf: ["connections:read"] },
   slack_bot_delete_message: { allOf: ["connections:read"] },
   fiken_companies_list: { allOf: ["connections:read"] },
   fiken_contacts_list: { allOf: ["connections:read"] },

@@ -1,3 +1,4 @@
+import { prepareSlackMessage, getPreparedSlackMessage, createConnection } from "../src";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -1446,3 +1447,72 @@ describe("migration 0303 session tenancy product activation", () => {
     }
   });
 });
+
+test("prepared Slack content follows private-session RLS and rejects foreign identities", async () => {
+  if (!shared || !client) throw new Error("Real PostgreSQL required");
+  const fixture = await sessionVisibilityFixture();
+  const { ownerGrant, ownerSubjectId, otherSubjectId, session } = fixture;
+  await transitionSessionVisibility(client.db, {
+    workspaceId: ownerGrant.workspaceId,
+    sessionId: session.id,
+    actorSubjectId: ownerSubjectId,
+    targetVisibility: "user_private",
+    expectedAuthorityEpoch: 1,
+    operationKey: crypto.randomUUID(),
+  });
+  const connection = await createConnection(client.db, {
+    accountId: ownerGrant.accountId,
+    workspaceId: ownerGrant.workspaceId,
+    subjectId: null,
+    kind: "app_install",
+    providerDomain: "slack.com",
+    credentialEncrypted: "unused-fixture",
+    createdBySubjectId: ownerSubjectId,
+  });
+  const scope = {
+    accountId: ownerGrant.accountId,
+    workspaceId: ownerGrant.workspaceId,
+    sessionId: session.id,
+  };
+  const message = await withSessionRlsActorContext({ subjectId: ownerSubjectId }, () =>
+    prepareSlackMessage(client!.db, {
+      ...scope,
+      connectionId: connection.id,
+      connectionVersion: connection.version,
+      targetKind: "user",
+      targetId: "U_PRIVATE",
+      threadTimestamp: null,
+      text: "Private notification",
+    }),
+  );
+  expect(
+    await withSessionRlsActorContext({ subjectId: ownerSubjectId }, () =>
+      getPreparedSlackMessage(client!.db, { ...scope, id: message.id }),
+    ),
+  ).toMatchObject({ text: "Private notification" });
+  expect(
+    await withSessionRlsActorContext({ subjectId: otherSubjectId }, () =>
+      getPreparedSlackMessage(client!.db, { ...scope, id: message.id }),
+    ),
+  ).toBeNull();
+  // Deliberately query the whole table as the non-owner runtime role, not through the adapter's session filter.
+  const rows = await withSessionRlsActorContext({ subjectId: otherSubjectId }, () =>
+    withWorkspaceRls(client!.db, ownerGrant.workspaceId, (tx) =>
+      tx.execute(drizzleSql`select id from slack_prepared_messages where id = ${message.id}::uuid`),
+    ),
+  );
+  expect(Array.from(rows)).toHaveLength(0);
+  const foreign = await sessionVisibilityFixture();
+  await expectSqlState(
+    () =>
+      withSessionRlsActorContext({ subjectId: ownerSubjectId }, () =>
+        withWorkspaceRls(client!.db, ownerGrant.workspaceId, (tx) =>
+          tx.execute(drizzleSql`insert into slack_prepared_messages
+      (account_id, workspace_id, session_id, connection_id, connection_version, target_kind, target_id, message_text)
+      values (${ownerGrant.accountId}::uuid, ${ownerGrant.workspaceId}::uuid, ${foreign.session.id}::uuid,
+        ${connection.id}::uuid, ${connection.version}, 'channel', 'C_TEST', 'must fail')`),
+        ),
+      ),
+    "42501",
+  );
+}, 60_000);

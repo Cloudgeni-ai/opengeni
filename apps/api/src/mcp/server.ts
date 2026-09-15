@@ -1,3 +1,5 @@
+import { prepareSlackMessage, getPreparedSlackMessage } from "@opengeni/db";
+import { capabilityUsageGuidance } from "./capability-usage-guidance";
 import {
   getAttemptToolCatalog,
   createChannel,
@@ -1371,7 +1373,7 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_create",
       {
         description:
-          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog.",
+          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog. For Slack tasks, choose the requested identity: the workspace bot uses slack_bot_prepare_message and slack_bot_send_prepared_message with a saved message ID; personal Slack uses the authorizing human's frozen grant. Generated personal tasks require standing authority, while exact-session grants can schedule that same chat. Once-only grants cannot recur. Missing bot tools are not a reason to substitute personal OAuth.",
         inputSchema: {
           name: z4.string(),
           schedule: z4.unknown(),
@@ -1743,6 +1745,99 @@ function registerSlackBotTools(
     });
     return createOpenGeniSlackBotClient(deps, resolved);
   };
+
+  const authorizeMessage = async () => {
+    if (!sessionId) throw new Error("Slack message preparation requires a session");
+    await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+  };
+  server.registerTool(
+    "slack_bot_prepare_message",
+    {
+      description:
+        "Prepare a message as the OpenGeni workspace bot. This saves the exact recipient and text without sending. Use the returned messageId with slack_bot_send_prepared_message; retries of send reuse that same ID. Personal Slack messages require the user's separately authorized personal connector.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        targetKind: z4.enum(["channel", "user"]),
+        targetId: z4.string().min(1).max(128),
+        threadTimestamp: z4
+          .string()
+          .regex(/^\d+\.\d+$/)
+          .max(64)
+          .optional(),
+        text: z4.string().min(1).max(40000),
+      },
+    },
+    async ({ connectionId, targetKind, targetId, threadTimestamp, text }) => {
+      await authorizeMessage();
+      const resolved = await resolveSlackBotConnectionForTool({
+        db: deps.db,
+        grant,
+        sessionId,
+        ...(connectionId ? { requestedConnectionId: connectionId } : {}),
+      });
+      const message = await prepareSlackMessage(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: sessionId!,
+        connectionId: resolved.connection.id,
+        connectionVersion: resolved.connection.version,
+        targetKind,
+        targetId,
+        threadTimestamp: threadTimestamp ?? null,
+        text,
+      });
+      return json({
+        messageId: message.id,
+        identity: "workspace_bot",
+        targetKind,
+        targetId,
+        text,
+        sent: false,
+      });
+    },
+  );
+  server.registerTool(
+    "slack_bot_send_prepared_message",
+    {
+      description:
+        "Send an already prepared OpenGeni bot message. Supply only the messageId returned by slack_bot_prepare_message in this session. The saved recipient and text cannot change. Retry this same ID after interruption; never prepare a replacement merely to retry an uncertain send.",
+      inputSchema: { messageId: z4.string().uuid() },
+    },
+    async ({ messageId }) => {
+      await authorizeMessage();
+      const message = await getPreparedSlackMessage(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: sessionId!,
+        id: messageId,
+      });
+      if (!message) throw new Error("Prepared Slack message is not available in this session");
+      const resolved = await resolveSlackBotConnectionForTool({
+        db: deps.db,
+        grant,
+        sessionId,
+        requestedConnectionId: message.connectionId,
+      });
+      if (resolved.connection.version !== message.connectionVersion)
+        throw new Error(
+          "Slack connection changed; inspect the original delivery before proceeding. Do not prepare a replacement to retry this message.",
+        );
+      const client = createOpenGeniSlackBotClient(
+        { ...deps, authorizeProviderRequest: authorizeMessage },
+        resolved,
+      );
+      return json(
+        await client.postMessage({
+          operationId: message.id,
+          ...(message.targetKind === "channel"
+            ? { channelId: message.targetId }
+            : { userId: message.targetId }),
+          ...(message.threadTimestamp ? { threadTimestamp: message.threadTimestamp } : {}),
+          text: message.text,
+        }),
+      );
+    },
+  );
 
   server.registerTool(
     "slack_bot_list_channels",
@@ -5787,7 +5882,7 @@ function registerCapabilityDiscoveryTools(
     "capability_catalog_search",
     {
       description:
-        "Find integrations in OpenGeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. This reads metadata only and does not connect or authorize anything.",
+        "Find integrations in OpenGeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. This reads metadata only and does not connect or authorize anything. Honor Slack identity guidance: the personal hosted MCP is not workspace bot authority; discover the native OpenGeni Slack bot separately.",
       inputSchema: {
         query: z4.string().min(1).max(500),
         limit: z4.number().int().min(1).max(20).optional(),
@@ -5802,6 +5897,36 @@ function registerCapabilityDiscoveryTools(
         limit ?? 8,
       );
       const setups = await setupProjections(ranked.map(({ item }) => item));
+      // Discovery is independent of whether bot tools were selected for this
+      // turn. This reads only workspace-owned metadata, never personal tokens.
+      let workspaceBot: Record<string, unknown> | undefined;
+      if (ranked.some(({ item }) => item.id === "api:slack-bot")) {
+        workspaceBot = { identity: "workspace_bot", status: "not_verified" };
+        if (grant.permissions.includes("connections:read")) {
+          try {
+            const resolved = await resolveSlackBotConnectionForTool({
+              db: deps.db,
+              grant,
+              sessionId,
+            });
+            workspaceBot = {
+              identity: "workspace_bot",
+              status: "installed",
+              connectionId: resolved.connection.id,
+              teamName: resolved.metadata.slackTeamName,
+              execution:
+                "Select the bot in the schedule editor, or check the current chat's bot tool selection. Installation alone does not make tools executable.",
+            };
+          } catch {
+            workspaceBot = {
+              identity: "workspace_bot",
+              status: "selection_required",
+              detail:
+                "Inspect workspace Slack settings for an active bot and select it. This does not require personal Slack OAuth.",
+            };
+          }
+        }
+      }
       const matches = ranked.map(({ item, matchedOn }, index) => ({
         capabilityId: item.id,
         name: item.name,
@@ -5814,6 +5939,8 @@ function registerCapabilityDiscoveryTools(
         authKind: item.authKind,
         tier: item.tier,
         matchedOn,
+        ...(item.id === "api:slack-bot" ? { connection: workspaceBot } : {}),
+        usage: capabilityUsageGuidance(item),
         setup: {
           ...setups[index]!,
           requiredVariables: capabilityRequiredVariables(item),
@@ -5831,7 +5958,7 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable.",
+        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. Honor Slack identity guidance: the personal hosted MCP is not workspace bot authority; discover the native OpenGeni Slack bot separately.",
       inputSchema: {
         capabilityId: z4.string().min(1).max(512),
         rationale: z4.string().min(1).max(2000),
@@ -5911,6 +6038,14 @@ async function capabilitySetupProjection(
   item: CapabilityCatalogItem,
   availableServerIds: ReadonlySet<string>,
 ): Promise<CapabilitySetupProjection> {
+  if (item.id === "api:slack-bot") {
+    return {
+      status: "unavailable",
+      action: null,
+      detail:
+        "Bot execution is configured in workspace Slack settings and the schedule editor. Inspect connection metadata and current bot tools; do not request personal OAuth for bot access.",
+    };
+  }
   if (item.id === "api:github-app" || item.surfaceType === "first_party_github") {
     const missing = githubAppMissingSettings(deps.settings);
     if (missing.length > 0) {

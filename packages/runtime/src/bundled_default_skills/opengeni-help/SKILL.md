@@ -1,6 +1,6 @@
 ---
 name: opengeni-help
-description: Answer questions about OpenGeni setup, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application's AI provider. No installation is needed for this bundled guide.
+description: Answer questions about OpenGeni setup, product integration, SDK/API behavior, billing, GitHub access, Slack integration selection, scheduled notifications, and development setup. Read the official product docs before making product-specific claims or replacing an application's AI provider. No installation is needed for this bundled guide.
 ---
 
 # OpenGeni product help
@@ -99,3 +99,34 @@ only supported capability guides. This includes opting out of this guide.
 Workspace Skills, inline Skills, tool permissions, and ordinary runtime rules
 remain separate. Do not copy OpenGeni product or implementation guidance into
 the embedded agent's persona. Follow the product's explicit selections.
+
+## Choosing Slack authority
+
+Distinguish **OpenGeni bot** (workspace `app_install`, posts as OpenGeni) from
+**My Slack account** (personal hosted MCP, reads personal messages and sends as
+that human). Choose from the requested identity and destination. Prefer the bot
+for shared reports; use personal Slack when the user requests their messages or
+sending as them. Do not request personal OAuth merely because bot tools are absent
+from this chat. A connected integration and a selected executable tool are separate:
+check the authorized workspace connection metadata and available tool selection
+before saying another Slack integration does not exist.
+
+Both identities support explicit scheduled tasks when the deployed setup provides
+the corresponding authority. Personal schedules retain the authorizing human's
+frozen grant; no other member's message supplies that authority. New chats need
+ongoing consent, while an existing-chat schedule may use consent bound to that exact
+chat. Never turn once-only access into recurring access. Offer the schedule editor
+for missing authorization and name which identity will run.
+
+For outbound bot messages, discover `slack_bot_prepare_message` and
+`slack_bot_send_prepared_message`. Prepare the exact recipient/text once, then send
+using the returned saved message ID. Retry that ID after an uncertain result;
+preparing another message is a new delivery and can duplicate the first. If these
+tools are unavailable, explain the deployment/tool-selection limitation instead
+of claiming a personal account is required. Do not call the retired generic
+`slack_bot_post_message` name or invent a caller UUID as a delivery receipt.
+
+Honor existing explicit authorization without asking redundantly, but do not infer
+a runtime or unattended grant from conversation text. Use the supported consent
+and schedule-authority mechanisms. Historical workspace notes about an early
+rollout do not establish current capabilities; check the deployed tools and docs.

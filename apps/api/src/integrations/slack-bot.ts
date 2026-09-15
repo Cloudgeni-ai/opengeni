@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
@@ -1051,6 +1051,7 @@ export class OpenGeniSlackBotClient {
       const targetKind = input.userId ? "user" : "channel";
       const targetId = input.userId ?? input.channelId!;
       const blocks = validateSlackMessageBlocks(input.blocks);
+      const wireBlocks = slackMessageWireBlocks(blocks);
       const requestDigest = this.postRequestDigest({
         operationId: input.operationId,
         targetKind,
@@ -1132,7 +1133,7 @@ export class OpenGeniSlackBotClient {
       const posted = await this.call(headers, "chat.postMessage", {
         channel: channelId,
         text: input.text,
-        ...(blocks ? { blocks: JSON.stringify(blocks) } : {}),
+        ...(wireBlocks ? { blocks: JSON.stringify(wireBlocks) } : {}),
         client_msg_id: input.operationId,
         unfurl_links: "false",
         unfurl_media: "false",
@@ -1196,6 +1197,7 @@ export class OpenGeniSlackBotClient {
     let claimAcquired = false;
     let providerCallStarted = false;
     const blocks = validateSlackMessageBlocks(input.blocks);
+    const wireBlocks = slackMessageWireBlocks(blocks);
     try {
       const headers = await this.headersFor(operation);
       await this.requireMemberChannel(headers, input.channelId);
@@ -1235,7 +1237,7 @@ export class OpenGeniSlackBotClient {
         channel: input.channelId,
         ts: input.timestamp,
         text: input.text,
-        ...(blocks ? { blocks: JSON.stringify(blocks) } : {}),
+        ...(wireBlocks ? { blocks: JSON.stringify(wireBlocks) } : {}),
       });
       const slackChannelId = requiredSlackString(updated.channel, "channel");
       const slackMessageTimestamp = requiredSlackString(updated.ts, "ts");
@@ -2998,6 +3000,33 @@ export function nextSlackFilesListPage(
     throw new SlackBotProviderError("invalid_files_paging");
   }
   return nextPage;
+}
+
+/**
+ * Slack action IDs are unique within a block. Keep the logical card untouched
+ * for the durable request digest, and partition repeated actions only on the
+ * provider wire. In particular, a legacy invalid_blocks receipt can retry with
+ * its original operation ID and digest; completed/uncertain posts keep their
+ * existing replay/reconciliation path. Values and action IDs remain exact.
+ */
+export function slackMessageWireBlocks(
+  blocks: SlackMessageBlock[] | undefined,
+): SlackMessageBlock[] | undefined {
+  if (!blocks) return undefined;
+  const wire = blocks.flatMap((block, index): SlackMessageBlock[] => {
+    if (
+      block.type !== "actions" ||
+      new Set(block.elements.map((e) => e.action_id)).size === block.elements.length
+    )
+      return [block];
+    const id = createHash("sha256").update(`${index}:${block.block_id}`).digest("hex").slice(0, 24);
+    return block.elements.map((element, position) => ({
+      type: "actions",
+      block_id: `opengeni_wire_${id}_${position}`,
+      elements: [element],
+    }));
+  });
+  return validateSlackMessageBlocks(wire);
 }
 
 function validateSlackMessageBlocks(

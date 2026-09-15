@@ -1,3 +1,4 @@
+import { authorizeScheduledSlack } from "@/components/capabilities/schedule-slack-authority";
 import { AgentLearningDraftEditor } from "@/components/knowledge/agent-learning-settings";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
@@ -63,6 +64,7 @@ import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
   agentConfigFromFormState,
+  scheduledSlackDestination,
   applyScheduledTaskCadence,
   CALENDAR_DAY_LABEL,
   CALENDAR_DAY_ORDER,
@@ -163,8 +165,11 @@ export function SchedulesRoute({
   const context = useAppContext();
   const navigate = useNavigate();
   const client = context.client;
+
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  const fleet = useWorkspaceMachines({ pollIntervalMs: MACHINES_COMPOSER_POLL_MS });
+  const fleet = useWorkspaceMachines({
+    pollIntervalMs: MACHINES_COMPOSER_POLL_MS,
+  });
   const [list, setList] = useState<ScheduleListSnapshot>(EMPTY_LIST);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
@@ -173,8 +178,39 @@ export function SchedulesRoute({
   // the next refresh.
   const [runHistory, setRunHistory] = useState<Record<string, TaskRunHistory>>({});
   const [recurringSourceSessionId, setRecurringSourceSessionId] = useState(sourceSessionId ?? null);
-  const [open, setOpen] = useState(Boolean(sourceSessionId));
-  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [open, setOpenState] = useState(Boolean(sourceSessionId));
+  const dialogGeneration = useRef(0);
+  const setOpen = (value: boolean | ((previous: boolean) => boolean)) => {
+    dialogGeneration.current += 1;
+    setOpenState(value);
+  };
+  const [editingTaskId, setEditingTaskIdState] = useState<string | null>(null);
+  const setEditingTaskId = (value: string | null) => {
+    dialogGeneration.current += 1;
+    setEditingTaskIdState(value);
+  };
+  const subjectId = context.accessContext.subjectId;
+  const accessKeyVersion = context.accessKeyVersion;
+  const setupScope = useMemo(
+    () => ({ active: true, client, workspaceId, subjectId, accessKeyVersion }),
+    [client, workspaceId, subjectId, accessKeyVersion],
+  );
+  useEffect(() => {
+    setupScope.active = true;
+    return () => {
+      setupScope.active = false;
+    };
+  }, [setupScope]);
+  const currentSetup = useRef({
+    client,
+    workspaceId,
+    open,
+    editingTaskId,
+    subjectId,
+    accessKeyVersion,
+  });
+  currentSetup.current = { client, workspaceId, open, editingTaskId, subjectId, accessKeyVersion };
+
   // Several cards may show their runs at once, so expansion is a set rather than
   // the single "which card is open" id this page used to keep.
   const [expandedTaskIds, setExpandedTaskIds] = useState<ReadonlySet<string>>(
@@ -468,7 +504,26 @@ export function SchedulesRoute({
           context.managedSelfContext,
         ),
       );
+      const submittedGeneration = ++dialogGeneration.current;
+      const personalSlack = await authorizeScheduledSlack(
+        client,
+        workspaceId,
+        form,
+        context.workspaceCapabilityCatalog,
+        () =>
+          setupScope.active &&
+          dialogGeneration.current === submittedGeneration &&
+          currentSetup.current.subjectId === subjectId &&
+          currentSetup.current.accessKeyVersion === accessKeyVersion &&
+          currentSetup.current.client === client &&
+          currentSetup.current.workspaceId === workspaceId &&
+          currentSetup.current.open,
+      );
+      const agentConfig = agentConfigFromFormState(form);
+      if (personalSlack && !agentConfig.tools.some((tool) => tool.id === personalSlack.serverId))
+        agentConfig.tools.push({ kind: "mcp", id: personalSlack.serverId });
       await client.createScheduledTask(workspaceId, {
+        ...(personalSlack ? { connectionAuthorities: personalSlack.connectionAuthorities } : {}),
         ...(form.agentLearning && Object.keys(form.agentLearning).length
           ? { agentLearning: { scope, settings: form.agentLearning } }
           : {}),
@@ -478,7 +533,7 @@ export function SchedulesRoute({
         ...(form.runMode === "existing_session" ? { targetSessionId: form.targetSessionId } : {}),
         overlapPolicy: form.overlapPolicy,
         metadata: taskMetadataFromFormState(form),
-        agentConfig: agentConfigFromFormState(form),
+        agentConfig,
       });
       setOpen(false);
       clearRecurringLaunch();
@@ -520,7 +575,26 @@ export function SchedulesRoute({
     }
     setBusyTaskId(task.id);
     try {
+      const submittedGeneration = ++dialogGeneration.current;
+      const personalSlack = await authorizeScheduledSlack(
+        client,
+        workspaceId,
+        form,
+        context.workspaceCapabilityCatalog,
+        () =>
+          setupScope.active &&
+          dialogGeneration.current === submittedGeneration &&
+          currentSetup.current.subjectId === subjectId &&
+          currentSetup.current.accessKeyVersion === accessKeyVersion &&
+          currentSetup.current.client === client &&
+          currentSetup.current.workspaceId === workspaceId &&
+          currentSetup.current.editingTaskId === task.id,
+      );
+      const agentConfig = agentConfigFromFormState(form, task);
+      if (personalSlack && !agentConfig.tools.some((tool) => tool.id === personalSlack.serverId))
+        agentConfig.tools.push({ kind: "mcp", id: personalSlack.serverId });
       await client.updateScheduledTask(workspaceId, task.id, {
+        ...(personalSlack ? { connectionAuthorities: personalSlack.connectionAuthorities } : {}),
         ...(form.agentLearningVersion !== undefined &&
         (form.agentLearningDirty ||
           form.agentLearningDestinationKey !== scheduledLearningDestinationKey(form))
@@ -547,7 +621,7 @@ export function SchedulesRoute({
         targetSessionId: form.runMode === "existing_session" ? form.targetSessionId : null,
         overlapPolicy: form.overlapPolicy,
         metadata: taskMetadataFromFormState(form, task),
-        agentConfig: agentConfigFromFormState(form, task),
+        agentConfig,
       });
       setEditingTaskId(null);
       await refresh();
@@ -1328,6 +1402,54 @@ function ScheduledTaskForm(props: {
 }) {
   const context = useAppContext();
   const [form, setForm] = useState(props.initialState);
+  const [slackBots, setSlackBots] = useState<Array<{ id: string; label: string }>>([]);
+  const [slackError, setSlackError] = useState<string | null>(null);
+  useEffect(() => {
+    let current = true;
+    void context.client
+      .listConnections(props.workspaceId)
+      .then((connections) => {
+        if (!current) return;
+        setSlackBots(
+          connections
+            .filter(
+              (connection) =>
+                connection.subjectId === null &&
+                connection.status === "active" &&
+                connection.kind === "app_install" &&
+                connection.metadata.credentialRole === "opengeni_slack_bot",
+            )
+            .map((connection) => ({
+              id: connection.id,
+              label: String(connection.metadata.slackTeamName ?? "OpenGeni workspace bot"),
+            })),
+        );
+      })
+      .catch((error) => {
+        if (current) setSlackError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      current = false;
+    };
+  }, [
+    context.client,
+    props.workspaceId,
+    context.accessContext.subjectId,
+    context.accessKeyVersion,
+  ]);
+  useEffect(() => {
+    setForm((previous) => ({
+      ...previous,
+      personalSlackCapabilityId: "",
+      personalSlackAcknowledged: false,
+    }));
+  }, [context.accessContext.subjectId, context.accessKeyVersion]);
+  const personalSlackItems = context.workspaceCapabilityCatalog.filter(
+    (item) =>
+      item.enabled &&
+      item.endpointUrl?.replace(/\/+$/, "") === "https://mcp.slack.com/mcp" &&
+      item.connectionRef?.subjectScope === "subject",
+  );
   const [learningOpen, setLearningOpen] = useState(false);
   const learningScope = scheduledLearningScope(
     form,
@@ -1385,6 +1507,13 @@ function ScheduledTaskForm(props: {
     setForm((current) => ({ ...current, [key]: value }));
   };
   const selectedSession = props.sessions.find((session) => session.id === form.targetSessionId);
+  useEffect(() => {
+    if (form.runMode !== "existing_session" || !selectedSession) return;
+    setForm((previous) => {
+      const next = scheduledSlackDestination(previous, selectedSession);
+      return next.slackBotConnectionId === previous.slackBotConnectionId ? previous : next;
+    });
+  }, [form.runMode, selectedSession]);
   const selectedMachine = props.machines.find(
     (machine) => machine.sandboxId === form.machineSandboxId,
   );
@@ -1400,7 +1529,10 @@ function ScheduledTaskForm(props: {
       isMachineComputeSelectable(machine.state),
     );
     if (firstSelectable) {
-      setForm((current) => ({ ...current, machineSandboxId: firstSelectable.sandboxId }));
+      setForm((current) => ({
+        ...current,
+        machineSandboxId: firstSelectable.sandboxId,
+      }));
     }
   }, [form.executionTarget, form.machineSandboxId, form.runMode, props.machines]);
   const selectedModel = findPickerRow(props.modelRows, form.model);
@@ -1483,7 +1615,19 @@ function ScheduledTaskForm(props: {
           <Label>Each run</Label>
           <Select
             value={form.runMode}
-            onChange={(event) => update("runMode", event.target.value as ScheduledTask["runMode"])}
+            disabled={props.busy}
+            onChange={(event) =>
+              setForm((previous) =>
+                scheduledSlackDestination(
+                  {
+                    ...previous,
+                    runMode: event.target.value as ScheduledTask["runMode"],
+                    personalSlackAcknowledged: false,
+                  },
+                  props.sessions.find((session) => session.id === previous.targetSessionId),
+                ),
+              )
+            }
           >
             <option value="new_session_per_run">Start a new chat</option>
             <option value="reusable_session">Continue the same chat</option>
@@ -1497,8 +1641,15 @@ function ScheduledTaskForm(props: {
             <Label>Chat to continue</Label>
             <Select
               value={form.targetSessionId}
-              disabled={!props.canTargetSessions}
-              onChange={(event) => update("targetSessionId", event.target.value)}
+              disabled={props.busy || !props.canTargetSessions}
+              onChange={(event) =>
+                setForm((previous) =>
+                  scheduledSlackDestination(
+                    { ...previous, targetSessionId: event.target.value },
+                    props.sessions.find((session) => session.id === event.target.value),
+                  ),
+                )
+              }
             >
               <option value="">Choose a chat</option>
               {/* Preserve a stored target even when the current viewer can no
@@ -1609,26 +1760,117 @@ function ScheduledTaskForm(props: {
             <option value="buffer_one">Wait and run next</option>
           </Select>
         </div>
+        <div className="grid gap-2">
+          <Label>OpenGeni Slack bot</Label>
+          {form.runMode === "existing_session" ? (
+            <p className="text-sm text-fg-muted">
+              {form.slackBotConnectionId
+                ? "Uses this chat's existing OpenGeni bot connection."
+                : "This chat has no scheduled bot connection. Choose Start a new chat or Continue the same chat to set one up."}
+            </p>
+          ) : (
+            <Select
+              aria-label="OpenGeni Slack bot"
+              value={form.slackBotConnectionId}
+              disabled={props.busy || !props.canAttachOpenGeniTool}
+              onChange={(event) =>
+                setForm((previous) => ({
+                  ...previous,
+                  slackBotConnectionId: event.target.value,
+                  includeOpenGeniTool: true,
+                }))
+              }
+            >
+              <option value="">No scheduled bot connection</option>
+              {form.slackBotConnectionId &&
+              !slackBots.some((bot) => bot.id === form.slackBotConnectionId) ? (
+                <option value={form.slackBotConnectionId}>
+                  Current bot connection (unavailable)
+                </option>
+              ) : null}
+              {slackBots.map((bot) => (
+                <option key={bot.id} value={bot.id}>
+                  OpenGeni bot · {bot.label}
+                </option>
+              ))}
+            </Select>
+          )}
+          <Label>Personal Slack access</Label>
+          <SchedulePersonalConnectionDisclosure connections={form.existingPersonalConnections} />
+          {form.existingPersonalConnections?.length ? (
+            <p className="text-2xs text-fg-subtle">
+              Existing personal access is kept, including when you add a bot. Create a separate
+              schedule to use another personal account.
+            </p>
+          ) : (
+            <Select
+              aria-label="Personal Slack access"
+              value={form.personalSlackCapabilityId ?? ""}
+              disabled={props.busy}
+              onChange={(event) =>
+                setForm((previous) => ({
+                  ...previous,
+                  personalSlackCapabilityId: event.target.value,
+                  personalSlackAcknowledged: false,
+                }))
+              }
+            >
+              <option value="">No additional personal access</option>
+              {personalSlackItems.map((item) => (
+                <option key={item.id} value={item.id}>
+                  My Slack account
+                </option>
+              ))}
+            </Select>
+          )}
+          {slackError ? <p className="text-sm text-danger">{slackError}</p> : null}
+          <p className="text-2xs text-fg-subtle">
+            The bot posts as OpenGeni. Your personal account can read your messages and send as you.
+            You can enable both; specify who should send in the instructions. Connect missing
+            accounts in Capabilities.
+          </p>
+          {form.personalSlackCapabilityId ? (
+            <label className="flex gap-2 text-sm">
+              <input
+                type="checkbox"
+                disabled={props.busy}
+                checked={form.personalSlackAcknowledged ?? false}
+                onChange={(event) => update("personalSlackAcknowledged", event.target.checked)}
+              />
+              <span>
+                {form.runMode === "existing_session"
+                  ? "Allow this chat's scheduled runs to use my Slack account. Results follow the chat's sharing settings."
+                  : "Allow ongoing use of my Slack account for tasks I authorize in this workspace. Scheduled results may be shared with workspace members."}
+              </span>
+            </label>
+          ) : null}
+        </div>
         <div className="flex min-h-10 items-center justify-between gap-4 pt-1">
           <div className="min-w-0">
             <p className="text-sm font-medium text-fg">Workspace tools</p>
             <p className="mt-0.5 text-2xs text-fg-subtle">
               {props.canAttachOpenGeniTool
-                ? "Allow this schedule to use tools enabled for this workspace."
+                ? form.slackBotConnectionId
+                  ? "Workspace tools are required for the selected OpenGeni Slack bot."
+                  : "Allow this schedule to use tools enabled for this workspace."
                 : "Workspace tools are not available in this deployment."}
             </p>
           </div>
           <button
             type="button"
             role="switch"
-            aria-checked={form.includeOpenGeniTool}
+            aria-checked={form.includeOpenGeniTool || Boolean(form.slackBotConnectionId)}
             aria-label="Workspace tools"
-            disabled={!props.canAttachOpenGeniTool || props.busy}
+            disabled={
+              !props.canAttachOpenGeniTool || props.busy || Boolean(form.slackBotConnectionId)
+            }
             onClick={() => update("includeOpenGeniTool", !form.includeOpenGeniTool)}
             className={cn(
               "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg",
-              form.includeOpenGeniTool ? "border-brand bg-brand" : "border-border bg-surface-2",
+              form.includeOpenGeniTool || form.slackBotConnectionId
+                ? "border-brand bg-brand"
+                : "border-border bg-surface-2",
             )}
           >
             <span

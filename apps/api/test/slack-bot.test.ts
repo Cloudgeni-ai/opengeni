@@ -1,3 +1,8 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { MemoryEventBus } from "@opengeni/testing";
+import type { ApiRouteDeps } from "@opengeni/core";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Settings } from "@opengeni/config";
@@ -4358,3 +4363,113 @@ describe("OpenGeni Slack bot connection", () => {
     expect(slackAdapterSource).toContain("saveDestination");
   });
 });
+
+test.each(["channel", "user"] as const)(
+  "prepared bot messages to %s survive send retries and cannot be substituted across sessions",
+  async (targetKind) => {
+    if (!shared) throw new Error("Real PostgreSQL required");
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({ loseFirstPostResponse: true });
+    const { connection } = await connectedTestBot(workspace, slack.fetch);
+    const session = await createSession(client.db, {
+      ...workspace,
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: settings.openaiModel,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      initialMessage: "Send a scheduled notification",
+      createdBy: { kind: "subject", subjectId: "subject-a" },
+    });
+    const open = async (sessionId: string) => {
+      const server = buildOpenGeniMcpServer(
+        {
+          db: client.db,
+          settings,
+          bus: new MemoryEventBus(),
+          slackFetch: slack.fetch,
+        } as ApiRouteDeps,
+        {
+          ...workspace,
+          subjectId: "subject-a",
+          principalKind: "human_session",
+          permissions: ["connections:read", "sessions:read", "sessions:control"],
+          metadata: {
+            sessionId,
+            firstPartyMcpTools: ["slack_bot_prepare_message", "slack_bot_send_prepared_message"],
+          },
+        },
+      );
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: "prepared-slack-test", version: "1" });
+      await server.connect(st);
+      await mcp.connect(ct);
+      return { server, mcp };
+    };
+    const { server, mcp } = await open(session.id);
+    try {
+      const prepared = await mcp.callTool({
+        name: "slack_bot_prepare_message",
+        arguments: {
+          connectionId: connection.id,
+          targetKind,
+          targetId: targetKind === "user" ? "U_MEMBER" : "C_MEMBER",
+          text: "Scheduled bot report",
+        },
+      });
+      expect(prepared.isError).not.toBe(true);
+      const content = prepared.content as Array<{ type: string; text?: string }>;
+      const body = JSON.parse(content.find((part) => part.type === "text")!.text!);
+      expect(body).toMatchObject({ identity: "workspace_bot", sent: false });
+      expect(slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(0);
+      const send = () =>
+        mcp.callTool({
+          name: "slack_bot_send_prepared_message",
+          arguments: { messageId: body.messageId },
+        });
+      expect((await send()).isError).toBe(true);
+      expect((await send()).isError).not.toBe(true);
+      expect((await send()).isError).not.toBe(true);
+      expect(slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(1);
+      await shared!
+        .admin`update connections set version = version + 1, verified_install_version = version + 1
+      where id = ${connection.id}`;
+      const changed = await send();
+      expect(changed.isError).toBe(true);
+      expect(JSON.stringify(changed)).toContain("inspect the original delivery");
+      expect(JSON.stringify(changed)).toContain("Do not prepare a replacement");
+      expect(slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(1);
+      const other = await createSession(client.db, {
+        ...workspace,
+        resources: [],
+        tools: [],
+        metadata: {},
+        model: settings.openaiModel,
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        initialMessage: "Other chat",
+        createdBy: { kind: "subject", subjectId: "subject-a" },
+      });
+      const otherClient = await open(other.id);
+      try {
+        expect(
+          (
+            await otherClient.mcp.callTool({
+              name: "slack_bot_send_prepared_message",
+              arguments: { messageId: body.messageId },
+            })
+          ).isError,
+        ).toBe(true);
+      } finally {
+        await Promise.all([otherClient.mcp.close(), otherClient.server.close()]);
+      }
+      expect(slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(1);
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
+    }
+  },
+  60_000,
+);

@@ -92,11 +92,21 @@ pages for one exact resource kind, include the opaque resource/origin identity,
 and return only grants targeting the route workspace. Resource kind derives the
 only accepted action (`connection.use`, `document.read`, `variable_set.use`,
 `rig.use`, or `connected_machine.use`) and its exact product permission gate.
-For a canonical managed human with that permission, an organization without
-the version-1 activation receipt has exactly zero usable personal authorities,
-so discovery returns an empty page. Issue, revoke, and runtime use remain
-activation-gated; the empty discovery answer does not activate the product or
-weaken any mutation fence.
+Migration `0478_personal_connection_standing_consent.sql` separates exact-session
+Connection consent from this private-session product rollout. A canonical managed
+human with the resource permission can list their own Connection authorities and
+issue an explicitly acknowledged, epoch-fenced `session` grant or an ongoing
+`always/workspace_shared` Connection grant before the
+version-1 activation receipt exists. They can revoke their own Connection grants
+without that receipt. Connection runtime authority was already activated in
+0264 and still requires the accepted turn snapshot and all live-use fences.
+Standing private-context grants and all other personal resource kinds retain the
+version-1 activation gate; non-Connection preactivation discovery remains empty. This
+exception neither activates private sessions nor upgrades legacy connection
+ownership. Subject-scoped Session reads expose credential-free
+`connectionContext` (visibility and authority epoch) independently of `tenancy`,
+so the consent UI does not confuse private-session enablement with connection
+readiness. Neither projection grants access.
 The managed personal-workspace projection includes `rigs:use`, allowing its
 owner to discover and propose changes to personal Rigs without granting the
 administrative `rigs:manage` capability.

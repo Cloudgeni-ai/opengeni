@@ -1,6 +1,14 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, useCallback, useState } from "react";
+import {
+  Outlet,
+  RouterProvider,
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+} from "@tanstack/react-router";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { AppContextValue } from "./context";
@@ -70,6 +78,7 @@ function testContext(input: {
       return (await input.prepareSlack?.(requestedWorkspaceId)) ?? null;
     },
     refreshWorkspace: async () => null,
+    refreshPersonalGitHub: async () => undefined,
     refreshGitHub: async () => {
       calls.github += 1;
     },
@@ -193,4 +202,110 @@ describe("workspace shell authority", () => {
     expect(rendered.container.querySelector("aside")).toBeNull();
     await act(async () => rendered.root.unmount());
   });
+
+  for (const transition of ["dismiss", "principal", "access refresh"] as const) {
+    test(`completed Slack linking survives its own access refresh, then clears on ${transition}`, async () => {
+      const pending = deferred<SlackUserLinkAccessRequest | null>();
+      const { context: initial } = testContext({
+        workspaces: [workspace],
+        workspaceGrants: [
+          { accountId, workspaceId, subjectId, permissions: ["sessions:read"] },
+        ] as AppContextValue["accessContext"]["workspaceGrants"],
+        slackWorkspaceId: workspaceId,
+        prepareSlack: () => pending.promise,
+      });
+      let change!: (transition: "principal" | "access refresh") => void;
+      function Harness() {
+        const [context, setContext] = useState(initial);
+        const clear = useCallback(
+          () => setContext((current) => ({ ...current, slackLinkContinuationWorkspaceId: null })),
+          [],
+        );
+        const revalidate = useCallback(
+          () =>
+            setContext((current) => ({
+              ...current,
+              accessKeyVersion: current.accessKeyVersion + 1,
+            })),
+          [],
+        );
+        change = (kind) =>
+          setContext((current) => ({
+            ...current,
+            accessKeyVersion: current.accessKeyVersion + 1,
+            ...(kind === "principal"
+              ? {
+                  accessContext: {
+                    ...current.accessContext,
+                    subjectId: "user:bea",
+                    workspaceGrants: [],
+                  },
+                }
+              : {}),
+          }));
+        return (
+          <WorkspaceShellRouteContent
+            workspaceId={workspaceId}
+            context={{
+              ...context,
+              clearSlackLinkContinuation: clear,
+              revalidatePrincipalAccess: revalidate,
+            }}
+            navigate={async () => undefined}
+          />
+        );
+      }
+      const rootRoute = createRootRoute({ component: Outlet });
+      const route = createRoute({
+        getParentRoute: () => rootRoute,
+        path: `/workspaces/${workspaceId}/organization`,
+        component: Harness,
+      });
+      const router = createRouter({
+        routeTree: rootRoute.addChildren([route]),
+        history: createMemoryHistory({
+          initialEntries: [`/workspaces/${workspaceId}/organization`],
+        }),
+      });
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      try {
+        await router.load();
+        await act(async () => root.render(<RouterProvider router={router} />));
+        await act(async () => {
+          pending.resolve({
+            id: "33333333-3333-4333-8333-333333333333",
+            workspaceId,
+            workspaceDisplayName: "Operations",
+            subjectLabel: "Ada",
+            status: "completed",
+            version: 2,
+            expiresAt: "2026-08-20T09:00:00.000Z",
+            requestedAt: null,
+            decidedAt: null,
+            completedAt: "2026-08-20T08:00:00.000Z",
+            createdAt: "2026-08-20T08:00:00.000Z",
+            updatedAt: "2026-08-20T08:00:00.000Z",
+          });
+          await pending.promise;
+        });
+        expect(container.textContent).toContain("Your Slack identity is linked");
+        expect(container.textContent).toContain("check your bot DMs");
+        await act(async () => {
+          if (transition === "dismiss") {
+            const dismiss = [...container.querySelectorAll("button")].find(
+              (button) => button.textContent === "Dismiss",
+            );
+            expect(dismiss).toBeDefined();
+            dismiss!.click();
+          } else change(transition);
+        });
+        expect(container.textContent).not.toContain("Your Slack identity is linked");
+      } finally {
+        await act(async () => root.unmount());
+        container.remove();
+      }
+    });
+  }
 });

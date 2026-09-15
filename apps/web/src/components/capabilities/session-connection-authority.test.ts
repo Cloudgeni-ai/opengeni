@@ -190,3 +190,88 @@ test("unselected duplicate accounts do not block messages; an exact grant restor
   expect(selections).toHaveLength(1);
   expect(selections[0]?.connectionId).toBe("connection");
 });
+
+test("session consent restores and issues without private-session activation", async () => {
+  const preactivation = {
+    id: session.id,
+    workspaceId: session.workspaceId,
+    connectionContext: { visibility: "workspace", authorityEpoch: 4 },
+  } as Session;
+  const h = harness([grant]);
+  expect(await sessionConnectionAuthorities(h.client, preactivation, [item])).toEqual([
+    { serverId: "example", connectionId: "connection", userDelegation: grant.delegation },
+  ]);
+  const fresh = harness();
+  fresh.client.getSession = async () => preactivation;
+  await authorizeSessionPersonalConnection(
+    fresh.client,
+    "workspace",
+    "session",
+    item,
+    "workspace",
+    true,
+    () => true,
+  );
+  expect(fresh.issueUserResourceGrant.mock.calls[0]?.[2]).toMatchObject({
+    mode: "session",
+    context: "workspace_shared",
+    expectedAuthorityEpoch: 4,
+  });
+});
+
+test("current connection context takes precedence and private consent needs no shared acknowledgement", async () => {
+  const current = {
+    ...session,
+    connectionContext: { visibility: "private", authorityEpoch: 5 },
+  } as Session;
+  const h = harness([grant]);
+  h.client.getSession = async () => current;
+  expect(await sessionConnectionAuthorities(h.client, current, [item])).toEqual([]);
+  await authorizeSessionPersonalConnection(
+    h.client,
+    "workspace",
+    "session",
+    item,
+    "private",
+    false,
+    () => true,
+  );
+  expect(h.issueUserResourceGrant.mock.calls[0]?.[2]).toMatchObject({
+    context: "user_private",
+    expectedAuthorityEpoch: 5,
+    workspaceSharedAcknowledged: false,
+  });
+});
+
+test("an older session projection does not block ordinary messages or authorize consent", async () => {
+  const older = { id: session.id, workspaceId: session.workspaceId } as Session;
+  const h = harness([grant]);
+  h.client.getSession = async () => older;
+  h.client.listUserResourceAuthorities = mock(async () => {
+    throw new Error("unexpected lookup");
+  });
+  expect(await sessionConnectionAuthorities(h.client, older, [item])).toEqual([]);
+  expect(h.client.listUserResourceAuthorities).not.toHaveBeenCalled();
+  await expect(
+    authorizeSessionPersonalConnection(
+      h.client,
+      "workspace",
+      "session",
+      item,
+      "workspace",
+      true,
+      () => true,
+    ),
+  ).rejects.toThrow("visibility changed");
+  expect(h.issueUserResourceGrant).not.toHaveBeenCalled();
+});
+
+test("a failed authority lookup remains retryable instead of silently dropping consent", async () => {
+  const h = harness([grant]);
+  h.client.listUserResourceAuthorities = async () => {
+    throw new Error("unavailable");
+  };
+  await expect(sessionConnectionAuthorities(h.client, session, [item])).rejects.toThrow(
+    "unavailable",
+  );
+});
