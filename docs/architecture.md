@@ -1,6 +1,6 @@
 # OpenGeni architecture reference
 
-> Orientation; code and focused docs define behavior.
+> Code and docs define behavior.
 > Setup: [`../AGENTS.md`](../AGENTS.md). Documentation index: [`README.md`](README.md).
 
 ## Navigation
@@ -12,9 +12,9 @@
 
 ---
 
-## 1. Scope
+## 1. Startup
 
-Product, invariants, execution, ownership.
+Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-lock.ts`; readiness: `scripts/dev-stack.sh`.
 
 ---
 

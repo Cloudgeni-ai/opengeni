@@ -546,9 +546,7 @@ describe("observability", () => {
       console.warn = originalWarn;
     }
 
-    expect(observed).toEqual([
-      "Startup dependency Temporal connection failed; retrying (1/3 in 100ms)",
-    ]);
+    expect(observed).toEqual(["Startup dependency Temporal check failed; retrying (1/3 in 100ms)"]);
   });
 
   test("keeps safe retry context in structured startup logs", () => {
