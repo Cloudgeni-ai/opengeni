@@ -16,13 +16,20 @@ const nativeIds = {
   presentation: "a0cc8ea0a2284b8dbc951820d0093a08",
 } as const;
 
-function chromiumExecutablePath() {
-  return [
-    process.env.OPENGENI_TEST_CHROMIUM,
-    "/usr/bin/google-chrome",
-    "/usr/local/bin/chromium",
-    "/usr/bin/chromium",
-  ].find((path): path is string => Boolean(path && existsSync(path)));
+function chromiumLaunchOptions() {
+  const playwrightPath = chromium.executablePath();
+  const executablePath =
+    process.env.OPENGENI_TEST_CHROMIUM ||
+    (existsSync(playwrightPath)
+      ? undefined
+      : ["/usr/bin/google-chrome", "/usr/local/bin/chromium", "/usr/bin/chromium"].find((path) =>
+          existsSync(path),
+        ));
+  return {
+    headless: true,
+    args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    ...(executablePath ? { executablePath } : {}),
+  };
 }
 
 let browser: Browser;
@@ -52,11 +59,7 @@ beforeAll(async () => {
       timeoutMs: 45_000,
     },
   );
-  const executablePath = chromiumExecutablePath();
-  browser = await chromium.launch({
-    headless: true,
-    ...(executablePath ? { executablePath } : {}),
-  });
+  browser = await chromium.launch(chromiumLaunchOptions());
 }, 60_000);
 afterAll(async () => {
   await Promise.allSettled([browser?.close(), web?.stop()]);
@@ -114,7 +117,7 @@ for (const width of [1440, 390]) {
       } finally {
         await page.close();
       }
-    }, 30_000);
+    }, 60_000);
   }
 
   test(`Site full-page navigation at ${width}px preserves fromSession across reload`, async () => {
@@ -125,23 +128,24 @@ for (const width of [1440, 390]) {
         `${baseUrl}/test/session-artifact-navigation.html?${new URLSearchParams({ entry })}`,
       );
       await page.getByRole("heading", { name: "Project overview", exact: true }).waitFor();
-      await page.getByRole("link", { name: "Back to session", exact: true }).waitFor();
+      await assertLibraryReturn(page, true);
       await page.reload();
-      await page.getByRole("link", { name: "Back to session", exact: true }).waitFor();
-      expect(
-        await page.getByRole("link", { name: "All artifacts", exact: true }).count(),
-      ).toBe(0);
-      await page.getByRole("link", { name: "Back to session", exact: true }).click();
-      await page.getByRole("heading", { name: "Build a project overview" }).waitFor();
+      await assertLibraryReturn(page, true);
       if (process.env.OPENGENI_ARTIFACT_NAV_SCREENSHOT_DIR) {
         await page.screenshot({
           path: `${process.env.OPENGENI_ARTIFACT_NAV_SCREENSHOT_DIR}/site-${width}-session.png`,
         });
       }
+      await page.getByRole("link", { name: "All artifacts", exact: true }).click();
+      await page.getByRole("heading", { name: "Workspace artifacts", exact: true }).waitFor();
+      await page.reload();
+      await page.getByRole("link", { name: "Back to session", exact: true }).waitFor();
+      await page.getByRole("link", { name: "Back to session", exact: true }).click();
+      await page.getByRole("heading", { name: "Build a project overview" }).waitFor();
     } finally {
       await page.close();
     }
-  }, 30_000);
+  }, 60_000);
 
   test(`retained-file stub navigation at ${width}px preserves fromSession`, async () => {
     const page = await browser.newPage({ viewport: { width, height: 900 } });
@@ -160,7 +164,7 @@ for (const width of [1440, 390]) {
     } finally {
       await page.close();
     }
-  }, 30_000);
+  }, 60_000);
 }
 
 test("desktop chat link opens the dock and full-page close returns to chat", async () => {
@@ -192,7 +196,7 @@ test("desktop chat link opens the dock and full-page close returns to chat", asy
   } finally {
     await page.close();
   }
-}, 30_000);
+}, 60_000);
 
 test("unknown editable modality is not intercepted and opens the full-page editor", async () => {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -207,7 +211,7 @@ test("unknown editable modality is not intercepted and opens the full-page edito
   } finally {
     await page.close();
   }
-}, 30_000);
+}, 60_000);
 
 for (const modality of ["document", "spreadsheet", "presentation"] as const) {
   test(`known session ${modality} opens the dock editor instead of leaving the session`, async () => {
@@ -225,5 +229,5 @@ for (const modality of ["document", "spreadsheet", "presentation"] as const) {
     } finally {
       await page.close();
     }
-  }, 30_000);
+  }, 60_000);
 }

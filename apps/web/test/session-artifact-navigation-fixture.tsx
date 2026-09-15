@@ -149,7 +149,16 @@ const artifact = createRoute({
     const { fromSession } = artifact.useSearch();
     return (
       <ArtifactSessionPage workspaceId={workspaceId} fromSession={fromSession}>
-        <Preview />
+        <div className="min-h-0 flex-1 p-4">
+          <Link
+            to="/workspaces/$workspaceId/artifacts"
+            params={{ workspaceId }}
+            search={fromSession ? { fromSession } : {}}
+          >
+            All artifacts
+          </Link>
+          <Preview />
+        </div>
       </ArtifactSessionPage>
     );
   },
