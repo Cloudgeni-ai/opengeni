@@ -208,6 +208,10 @@ import { registerOrganizationSessionRoutes } from "./routes/organization-session
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
 import {
+  registerManagedSignInMethodRoutes,
+  handleManagedSignInConnectCallback,
+} from "./routes/managed-sign-in-methods";
+import {
   registerManagedAuthSessionSetRoutes,
   requireManagedAuthProviderRouteAllowed,
   scrubManagedAuthProviderResponse,
@@ -670,10 +674,41 @@ export function createAppComposition(deps: AppDependencies): {
   // wildcard handler or the provider returns its own 404 first.
   registerManagedOnboardingRoutes(app, routeDeps);
   registerManagedAuthSessionSetRoutes(app, routeDeps);
+  registerManagedSignInMethodRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
+      if (oauthCallbackProvider) {
+        const connectResponse = await handleManagedSignInConnectCallback(
+          c,
+          routeDeps,
+          oauthCallbackProvider,
+        );
+        if (connectResponse) return connectResponse;
+      }
+      if (
+        new Set([
+          "link-social",
+          "unlink-account",
+          "list-accounts",
+          "set-password",
+          "change-password",
+          "change-email",
+          "delete-user",
+          "get-access-token",
+          "refresh-token",
+          "account-info",
+        ]).has(pathname.slice("/v1/auth/".length))
+      ) {
+        return c.json(
+          {
+            code: "SIGN_IN_METHOD_PRODUCT_ROUTE_REQUIRED",
+            message: "Use personal sign-in method settings",
+          },
+          403,
+        );
+      }
       if (deps.settings.managedAuthSessionSetMode === "legacy") {
         return oauthCallbackProvider
           ? await runManagedAuthProvider(

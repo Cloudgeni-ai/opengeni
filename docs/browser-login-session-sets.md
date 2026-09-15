@@ -271,3 +271,60 @@ Canonical source: `packages/db/drizzle/0362_managed_auth_session_sets.sql`,
 `apps/api/src/auth/managed-auth-session-adapter.ts`,
 `packages/contracts/src/managed-auth-session-sets.ts`,
 `packages/sdk/src/accounts.ts`, and `packages/react/src/accounts.tsx`.
+
+## Personal sign-in methods
+
+Migration `0475_managed_sign_in_methods.sql` adds managed-human sign-in method
+management. This is a maintenance release: drain the old application roles,
+apply migrations, provision the restricted runtime role, then start the matching
+binary. Do not restart an old API exposing Better Auth's raw account-management
+routes. It does not change the configured `legacy` / `dual` / `broker` rollout.
+
+The product-owned API is:
+
+- `GET /v1/auth/sign-in-methods`: verified-email status, canonical identity
+  revision, freshness requirement, and secret-free credential/Google/GitHub
+  availability, connection, disconnect, and implicit-relink-suppression flags.
+- `POST /v1/auth/sign-in-methods/connect`: `operationId`,
+  `expectedIdentityRevision`, and `provider` (`google` or `github`); returns an
+  OAuth authorization `url`. A provider account ID supplied by a client is never
+  proof. The callback consumes Better Auth's database-backed state and a separate
+  expiring, single-use product intent bound to the original human/session/actor.
+- `POST /v1/auth/sign-in-methods/disconnect`: the same request shape, without
+  OAuth navigation. It refuses to remove the last usable configured method.
+- `POST /v1/auth/sign-in-methods/password`: `operationId`,
+  `expectedIdentityRevision`, `newPassword` (8–128 characters), and
+  `currentPassword` when a password already exists. Existing password proof is
+  rechecked by hash comparison under the same transaction as the update.
+
+All mutations require a verified local email, a live canonical managed-cookie
+session authenticated within five minutes, same-origin JSON browser admission,
+and the expected identity revision. Session refresh/mirroring does not create a
+new authentication timestamp. Dual/broker callers must first establish a selected
+session set and send its CSRF and actor-epoch headers. The commit rechecks actor
+authority and refuses competing actor mutations. OAuth completion rechecks the
+original actor again; switching, revoking, or aging out its proof cannot transfer
+a pending connection to another human.
+
+Changes use the canonical binding/revision lifecycle and invalidate the human's
+existing provider sessions. Affected slots become `reauth_required`, selected
+actors require reconciliation, and successful password/disconnect responses carry
+`reauthenticationRequired: true`. Connect returns to
+`/settings/security?signInMethod=connected` or `/settings/security?signInMethod=error`; the latter may include an
+`error` code. Clients must not continue using the old actor after success.
+
+Sensitive changes send notices through the existing managed-email transport.
+Password/disconnect responses expose delivery as `notification: sent | failed |
+outcome_unknown`; delivery failure does not undo committed security changes.
+Automatic-link/OAuth callback notices are best-effort, without a durable retry
+queue. Provider tokens, account IDs, password hashes, internal sessions and intent
+payloads are excluded from the list response. Reconcile after a lost mutation
+response; an operation ID is not an authorization or a promise that a revoked
+session can replay the response.
+
+Canonical implementation: `apps/api/src/routes/managed-sign-in-methods.ts`,
+`packages/contracts/src/managed-sign-in-methods.ts`, and migration 0475. The
+restricted-PostgreSQL/Better Auth integration suite is
+`apps/api/test/managed-sign-in-methods.integration.test.ts`. Its simulated provider
+responses exercise real OAuth state and callback processing; they are not live
+Google/GitHub acceptance evidence.
