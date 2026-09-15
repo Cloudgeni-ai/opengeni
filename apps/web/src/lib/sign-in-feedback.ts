@@ -78,3 +78,13 @@ export function readSignInCallbackError(search: string): string | null {
   // Never render provider error descriptions or arbitrary callback text.
   return errors.length ? signInCallbackError(errors.length === 1 ? errors[0] : "unknown") : null;
 }
+
+/** Fixed local destination only; never carry a caller-supplied return URL or provider text. */
+export function securityReauthenticationPath(search: string): string {
+  const params = new URLSearchParams(search);
+  const outcomes = params.getAll("signInMethod");
+  const outcome = outcomes.length === 1 ? outcomes[0] : null;
+  return outcome === "connected" || outcome === "error"
+    ? `/settings/security?signInMethod=${outcome}`
+    : "/settings/security";
+}

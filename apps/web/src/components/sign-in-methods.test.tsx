@@ -175,3 +175,33 @@ test("provider handles are plain text and pending operations disable every mutat
   expect(button("Disconnect Google").disabled).toBe(true);
   expect(button("Set password").disabled).toBe(true);
 });
+
+test("changing a password requires the current password and clears both secrets after submission", async () => {
+  const received: Array<[string, string | undefined]> = [];
+  await mount({
+    hasPassword: true,
+    async onPassword(next, current) {
+      received.push([next, current]);
+      return false;
+    },
+  });
+  await click("Change password");
+  await fill("signin-new-password", "new-secret-password");
+  await fill("signin-confirm-password", "new-secret-password");
+  await act(async () =>
+    host
+      .querySelector("form")!
+      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+  );
+  expect(received).toEqual([]);
+  expect(host.textContent).toContain("Enter your current password");
+  await fill("signin-current-password", "old-secret-password");
+  await act(async () =>
+    host
+      .querySelector("form")!
+      .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+  );
+  expect(received).toEqual([["new-secret-password", "old-secret-password"]]);
+  expect((document.getElementById("signin-current-password") as HTMLInputElement).value).toBe("");
+  expect((document.getElementById("signin-new-password") as HTMLInputElement).value).toBe("");
+});

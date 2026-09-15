@@ -1,11 +1,26 @@
 import { createBrowserAccountsClient } from "@opengeni/sdk/accounts";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "@opengeni/contracts";
 import {
+  ApiError,
   apiBaseUrl,
   apiErrorFromResponseBody,
   currentManagedActorEpoch,
   managedActorFetch,
 } from "@/api";
+
+function signInResponseError(status: number, body: string): ApiError {
+  const nested = apiErrorFromResponseBody(status, body);
+  if (nested.code) return nested;
+  try {
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    return new ApiError(status, body, {
+      ...(typeof parsed.code === "string" ? { code: parsed.code } : {}),
+      ...(parsed.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
+    });
+  } catch {
+    return nested;
+  }
+}
 
 // Browser-only contract agreed with the backend owner. No workspace, subject,
 // or user selector is accepted: the server resolves the canonical cookie actor.
@@ -55,7 +70,7 @@ export function createSignInMethodsApi(sessionSetMode: "legacy" | "dual" | "brok
     });
     const body = await response.text();
     assertActor();
-    if (!response.ok) throw apiErrorFromResponseBody(response.status, body);
+    if (!response.ok) throw signInResponseError(response.status, body);
     return JSON.parse(body) as T;
   }
   return {

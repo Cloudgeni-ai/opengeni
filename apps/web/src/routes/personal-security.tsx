@@ -1,6 +1,5 @@
 import { useBrowserAccounts } from "@opengeni/react/accounts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ApiError } from "@/api";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { PersonalSettingsShell } from "@/components/settings/personal-settings-shell";
 import { SignInMethodsView, providerLabel } from "@/components/sign-in-methods";
@@ -13,6 +12,7 @@ import {
   readSignInChangeFeedback,
   retainSignInChangeFeedback,
   signInCallbackError,
+  securityReauthenticationPath,
 } from "@/lib/sign-in-feedback";
 import {
   createSignInMethodsApi,
@@ -21,6 +21,7 @@ import {
   type SignInCommand,
   type SignInMethods,
 } from "@/lib/sign-in-methods-api";
+import { signInMethodFailure } from "@/lib/sign-in-method-failure";
 
 export function PersonalSecurityRoute() {
   const context = useAppContext();
@@ -50,11 +51,12 @@ function LegacySecurity() {
       email={context.authSession!.user.email}
       reauthError={reauthError}
       onReauthenticate={() => {
+        const returnPath = securityReauthenticationPath(window.location.search);
         // Sign out through the root's established principal transition before
         // presenting login. Never replace a managed cookie behind its back.
         void context
           .handleManagedSignOut()
-          .then(() => window.location.assign("/settings/security"))
+          .then(() => window.location.assign(returnPath))
           .catch(() =>
             setReauthError(
               "Couldn't finish signing out. Try again before continuing with reauthentication.",
@@ -145,10 +147,20 @@ export function SecurityController({
           clearSignInChangeFeedback();
         }
         const callback = new URLSearchParams(window.location.search).get("signInMethod");
-        if (callback === "connected")
+        if (callback === "connected") {
+          const usable = result.methods
+            .filter((method) => method.connected && method.available)
+            .map((method) =>
+              method.provider === "credential"
+                ? "email and password"
+                : providerLabel(method.provider),
+            );
           setSuccess(
-            "The provider returned to OpenGeni. Your current sign-in methods are shown below; only methods marked connected can be used to sign in.",
+            usable.length
+              ? `Sign-in methods confirmed: ${usable.join(", ")}. You can use these to access your OpenGeni account.`
+              : "The provider returned to OpenGeni, but no usable sign-in method was confirmed. Review the methods below before continuing.",
           );
+        }
         if (callback === "error")
           setError(
             signInCallbackError(
@@ -193,7 +205,7 @@ export function SecurityController({
           ? ""
           : " The change succeeded, but the security notification could not be confirmed as delivered.";
       const message = `${changed}${notification} Sign in again as ${email} with a remaining sign-in method to continue.`;
-      retainSignInChangeFeedback({ userId, email, message });
+      retainSignInChangeFeedback({ userId, email, message: `${changed}${notification}` });
       setSuccess(message);
       setRequiresAuth(true);
       setCommitted(true);
@@ -201,37 +213,16 @@ export function SecurityController({
       return true;
     } catch (caught) {
       if (!isCurrent() || acceptedLifecycle !== lifecycle.current) return false;
-      const code = caught instanceof ApiError ? (caught.code?.toLowerCase() ?? "") : "";
-      if (caught instanceof ApiError && !caught.outcomeUnknown && caught.status < 500) {
+      const failure = signInMethodFailure(caught);
+      if (failure.kind !== "unknown") {
         setUncertain(null);
-        if (caught.status === 401 || code.includes("fresh") || code.includes("reauth")) {
-          setRequiresAuth(true);
-          setError(
-            "Sign in again with an existing method, then review and retry this change. If this dialog is open, cancel it to continue.",
-          );
-        } else if (code.includes("last") || code.includes("usable")) {
-          setError(
-            "You can't remove your last usable sign-in method. Connect another method or set a password first.",
-          );
-        } else if (code.includes("password")) {
-          setError(
-            "The password change was not accepted. Check your current password and use 8 to 128 characters for the new password.",
-          );
-        } else if (caught.status === 409) {
-          setError(
-            "Your sign-in methods changed. Cancel any open dialog and refresh before making another change.",
-          );
-        } else {
-          setError("The sign-in change was not accepted. Refresh your methods and try again.");
-        }
+        if (failure.kind === "reauth") setRequiresAuth(true);
       } else {
         // Keep the exact body, UUID, revision and admission headers in memory
         // only. A transport failure is not proof the mutation failed.
         setUncertain(command);
-        setError(
-          "The result of this change is unknown. Cancel any open dialog, then retry the same request or refresh to check your methods. Don't submit a new change yet.",
-        );
       }
+      setError(failure.message);
       return false;
     }
   }
