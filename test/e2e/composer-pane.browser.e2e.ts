@@ -136,6 +136,25 @@ describe("console composer in a split desktop pane", () => {
         await page.getByRole("menuitem", { name: new RegExp(name) }).click();
         const dialog = page.getByRole("menu");
         await dialog.waitFor({ state: "visible" });
+        // The already-visible root menu changes size when a picker opens.
+        // Collision positioning follows that resize; visibility alone can
+        // still expose the root menu's old position with the picker's width.
+        // Require the same viewport bounds before sampling, without allowing
+        // persistent overflow or relaxing any of the assertions below.
+        await page.waitForFunction(
+          (element) => {
+            if (!element) return false;
+            const bounds = element.getBoundingClientRect();
+            return (
+              bounds.x >= 0 &&
+              bounds.y >= 0 &&
+              bounds.right <= window.innerWidth &&
+              bounds.bottom <= window.innerHeight
+            );
+          },
+          await dialog.elementHandle(),
+          { timeout: 2_000 },
+        );
         const box = (await dialog.boundingBox())!;
         expect(box.height).toBeGreaterThan(name === "Connectors" ? 60 : 120);
         expect(box.x).toBeGreaterThanOrEqual(0);
