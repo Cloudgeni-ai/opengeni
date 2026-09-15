@@ -752,7 +752,7 @@ describe("runtime database posture evaluator", () => {
               personalResourceProtectedTableCount +
               managedAuthSessionSetProtectedTableCount +
               organizationRecoveryProtectedTableCount +
-              1 // Additive protected MCP operation ledger; no runtime DML.
+              2 // Protected MCP and managed sign-in operation ledgers; no runtime DML.
             : length);
         expect(tables).toHaveLength(expectedLength);
         expect(new Set(tables).size).toBe(tables.length);
@@ -760,7 +760,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 1 + 2 + 2;
+      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2;
       for (const table of [
         "organization_integration_policies",
         "organization_integration_policy_operations",
@@ -773,6 +773,9 @@ describe("runtime database posture evaluator", () => {
       expect(FORCE_RLS_TABLES).toContain("mcp_operations");
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("mcp_operations");
       expect(RUNTIME_TABLE_PRIVILEGES.mcp_operations).toBeUndefined();
+      expect(FORCE_RLS_TABLES).toContain("managed_sign_in_method_operations");
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("managed_sign_in_method_operations");
+      expect(RUNTIME_TABLE_PRIVILEGES.managed_sign_in_method_operations).toBeUndefined();
       expect(FORCE_RLS_TABLES).toContain("host_mcp_turn_authorities");
       expect(RUNTIME_TABLE_PRIVILEGES.host_mcp_turn_authorities).toEqual(["SELECT", "INSERT"]);
       for (const table of ["host_mcp_bindings", "host_mcp_delegations"] as const) {
