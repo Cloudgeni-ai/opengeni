@@ -4,7 +4,11 @@
 // failed override that falls through as if it were a suggestion, and any path
 // that quietly serves a request from a workspace the person did not name.
 import { describe, expect, test } from "bun:test";
-import { slackPostSeed, withWorkspaceLine } from "../src/integrations/slack-interactions";
+import {
+  slackPostSeed,
+  slackWorkspaceDestinationLabel,
+  withWorkspaceLine,
+} from "../src/integrations/slack-interactions";
 import {
   isSlackDirectMessageConversation,
   splitSlackLeadingMention,
@@ -470,5 +474,26 @@ describe("the workspace line", () => {
     expect(first.text).toBe(second.text);
     expect(first.text.endsWith("\n-> Platform")).toBe(true);
     expect(first.text.length).toBeLessThanOrEqual(3_500);
+  });
+});
+
+describe("workspace destination links", () => {
+  const url = "https://staging.app.example.test/workspaces/00000000-0000-4000-8000-000000000001";
+  test("links the frozen destination in both Slack surfaces", () => {
+    const label = slackWorkspaceDestinationLabel("Personal workspace", url);
+    expect(label).toBe(`<${url}|Personal workspace>`);
+    const rendered = withWorkspaceLine(label, "Done", [
+      { type: "section", text: { type: "mrkdwn", text: "Done" } },
+    ]);
+    expect(rendered.text).toContain(label);
+    expect(JSON.stringify(rendered.blocks)).toContain(label);
+  });
+  test("bounds escaped Unicode labels without enabling Slack mentions", () => {
+    for (const destination of [url, null, "https://example.test/" + "x".repeat(200)]) {
+      const value = slackWorkspaceDestinationLabel("<!channel>|😀<&".repeat(40), destination);
+      expect(Buffer.byteLength(value, "utf8")).toBeLessThanOrEqual(128);
+      expect(value).not.toContain("<!channel>");
+      expect(value).not.toContain("�");
+    }
   });
 });
