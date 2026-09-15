@@ -36,14 +36,16 @@ First-party project tools use existing session permissions: `project_list/get` r
 
 ### Human integration setup in chat
 
-When an integration is missing or unavailable to the current turn, the shared
-operational guidance routes the agent through `capability_catalog_search`.
+The shared operational guidance tells the agent to use available integration
+tools directly. When needed access is missing, it routes discovery through
+`capability_catalog_search`.
 Every candidate requiring authorization includes `setup.nextAction` naming
 `capability_authorization_request` and the exact catalog capability ID. Ready or
 unavailable candidates return no setup action. Search itself is read-only.
 
-After choosing and explaining a suitable candidate, the agent requests the card
-with that ID and a rationale. The same exact-attempt-fenced `tool.auth_needed`
+For a suitable candidate, the agent requests the card with that ID and a
+task-specific rationale. Showing the card requires no preliminary confirmation;
+the card itself presents the setup decision. The same exact-attempt-fenced `tool.auth_needed`
 event and generic chat renderer handle all catalog integrations. Requesting the
 card requires no integration-management permission and creates no connection,
 installation, credential, or grant; the authenticated human completes setup.

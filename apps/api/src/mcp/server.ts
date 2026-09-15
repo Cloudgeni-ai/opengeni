@@ -5787,7 +5787,7 @@ function registerCapabilityDiscoveryTools(
     "capability_catalog_search",
     {
       description:
-        "Search OpenGeni's reviewed workspace capability catalog when the user asks to add an integration or the task needs a capability that is not currently usable. Search by the outcome needed, compare the returned candidates, and prefer a ready or verified exact match. For a chosen candidate requiring authorization, use setup.nextAction to post its human setup card; lacking integration-management permission does not itself prevent requesting human setup. This only reads secret-free metadata; it never installs, connects, or authorizes anything.",
+        "Find integrations in OpenGeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. This reads metadata only and does not connect or authorize anything.",
       inputSchema: {
         query: z4.string().min(1).max(500),
         limit: z4.number().int().min(1).max(20).optional(),
@@ -5831,7 +5831,7 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "After capability_catalog_search and after explaining one chosen recommendation to the user, post exactly one in-session human authorization card for that catalog capability. This tool never grants access, enables a capability, reads a secret, or mints provider credentials; the authenticated user must click and confirm the provider/domain flow. Do not call it for a candidate reported ready or unavailable.",
+        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable.",
       inputSchema: {
         capabilityId: z4.string().min(1).max(512),
         rationale: z4.string().min(1).max(2000),

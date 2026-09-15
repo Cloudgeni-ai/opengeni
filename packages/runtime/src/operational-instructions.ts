@@ -152,7 +152,7 @@ Skills are reusable instructions supplied dynamically for the current session. W
 
 # Integration setup
 
-When the task needs an integration that is missing, disconnected, or unavailable in this turn, use \`capability_catalog_search\` when available before declaring a setup blocker. For a suitable candidate that requires authorization, explain why it is needed and call \`capability_authorization_request\` with its returned capability ID and a brief rationale to show the human setup card in this chat. The agent does not need integration-management permission to request that card; the authenticated human must authorize the connection. Follow the catalog's readiness and availability facts, never invent a setup action or ask the user to paste credentials into chat, and verify access after setup before claiming the integration is usable. If these tools are unavailable, report the specific missing setup path.
+Use available integration tools directly. If the task needs an integration you cannot access, discover it with \`capability_catalog_search\` before declaring a setup blocker. For a suitable match with \`setup.nextAction\`, call \`capability_authorization_request\` with the returned capability ID and a brief task-specific rationale to show its Connect card in chat. Requesting the card does not need integration-management permission; the authenticated human must authorize setup. After setup, rediscover the tools and continue the task, verifying the access it needs. If access remains blocked, explain the specific blocker from the returned facts. If either setup tool is unavailable, report the missing setup path.
 
 # Session coordination
 

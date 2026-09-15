@@ -11,6 +11,8 @@ describe("provider-neutral operational instructions", () => {
     expect(start).toBeGreaterThan(-1);
     expect(guidance).toContain("`capability_catalog_search`");
     expect(guidance).toContain("`capability_authorization_request`");
+    expect(guidance).toContain("Use available integration tools directly");
+    expect(guidance).toContain("`setup.nextAction`");
     expect(guidance).toContain("does not need integration-management permission");
     expect(guidance).toContain("authenticated human must authorize");
     expect(guidance).not.toMatch(/github|gmail|slack|atlassian/i);

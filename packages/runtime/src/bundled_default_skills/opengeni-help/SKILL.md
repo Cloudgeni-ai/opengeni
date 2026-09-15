@@ -59,12 +59,9 @@ exact-name schema loading where available. Use `capability_catalog_search` for
 reviewed integration candidates and `skill_read` for available guidance. Missing
 `ogtool` is a local executable problem, not proof that a capability is absent.
 
-For a chosen integration that requires setup, follow the catalog's next action
-through `capability_authorization_request` to show its human setup card in chat.
-Lacking permission to manage a connection does not prevent requesting human
-setup. Only the authenticated human can authorize it. Distinguish deployment
-configuration, connection readiness, resource access, and availability in this
-session; verify each before claiming that the integration is usable.
+For connection setup, follow the shared Integration setup guidance and the
+catalog's returned next action. Account-management permissions and the ability
+to request human setup are separate.
 
 ## Cost questions
 
