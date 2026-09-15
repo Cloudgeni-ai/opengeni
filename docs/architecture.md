@@ -1660,7 +1660,7 @@ Personal MCP requires owner-issued exact-session grants and shared-results
 acknowledgement. The composer restores only active grants matching visibility
 and epoch. Migration 0478 separates exact-session and standing shared-workspace Connection consent from
 private-session activation: subject-scoped reads project `connectionContext`
-independently of gated `tenancy`. Standing grants and other resources stay gated.
+independently of gated `tenancy`. Standing private-context grants and other resources stay gated.
 
 Host-owned shared MCP servers may explicitly select `hostBinding.selection:
 "accepted_turn"` instead of a fixed binding. The configuration fixes the entire

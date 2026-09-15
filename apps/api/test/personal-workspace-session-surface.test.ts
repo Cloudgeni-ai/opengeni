@@ -2217,7 +2217,7 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
           (
             await issue({
               mode: "always",
-              context: "private",
+              context: "user_private",
               sessionId: undefined,
               expectedAuthorityEpoch: undefined,
             })
