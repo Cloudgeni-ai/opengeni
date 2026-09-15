@@ -34,7 +34,10 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
       `${row.label} ${row.id} ${row.providerLabel} ${row.billingClassLabel} ${payerSummaryForModel(row.catalog)}`.toLowerCase();
     return words.every((word) => text.includes(word));
   });
-  const groups = groupPickerRowsByBillingClass(filtered);
+  const matchingIds = new Set(filtered.map((row) => row.id));
+  const groups = groupPickerRowsByBillingClass(rows, { codexOnly: props.codexOnly === true })
+    .map((group) => ({ ...group, rows: group.rows.filter((row) => matchingIds.has(row.id)) }))
+    .filter((group) => group.rows.length > 0);
   const choose = (row: ClientPickerModelRow) => {
     if (!row.selectable || props.disabled) return;
     if (row.id !== props.model) props.onModelChange(row.id);
@@ -139,8 +142,12 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
         ) : (
           <>
             {groups.map((group) => (
-              <section key={group.billingClass} aria-label={group.label} className="py-1">
-                <div className="flex items-center gap-2 px-2.5 py-1.5 text-og-control font-medium text-og-fg-subtle">
+              <section
+                key={group.billingClass}
+                aria-label={group.label}
+                className="py-2.5 first:pt-1 [&+section]:border-t [&+section]:border-og-border"
+              >
+                <div className="flex items-center gap-2 px-2.5 py-1.5 text-og-control font-semibold text-og-fg">
                   <BillingClassMark billingClass={group.billingClass} aria-label="" />
                   {group.label}
                 </div>

@@ -14,9 +14,12 @@ export async function acquirePreKnowledgeTestDatabase(
   const admin = postgres(blank.databaseUrl, { max: 4, onnotice: () => undefined });
   try {
     await admin`CREATE TABLE schema_migrations(name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
-    await admin`INSERT INTO schema_migrations(name) VALUES ('0461_unified_knowledge.sql')`;
+    // 0468/0469 depend on Knowledge withheld with 0461.
+    await admin`INSERT INTO schema_migrations(name) VALUES
+      ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql')`;
     await migrate(blank.databaseUrl);
-    await admin`DELETE FROM schema_migrations WHERE name='0461_unified_knowledge.sql'`;
+    await admin`DELETE FROM schema_migrations WHERE name IN
+      ('0461_unified_knowledge.sql','0468_knowledge_relationship_projection.sql','0469_knowledge_source_discovery.sql')`;
     if (!blank.appPassword)
       throw new Error("Historical fixture requires the shared runtime password");
     await provisionRoles(blank.databaseUrl, {

@@ -165,6 +165,28 @@ function queueSnapshot(
 }
 
 describe("useWorkspaceSessions", () => {
+  test("forwards sorting and archive mode and reloads on either change", async () => {
+    const seen: string[] = [];
+    const client = fakeClient({
+      listSessionPage: async (_workspaceId, options) => {
+        seen.push(`${options?.sortBy}:${options?.archiveStatus}`);
+        return { pinned: [], sessions: [], nextCursor: null };
+      },
+    });
+    const hook = await renderHook(
+      (props: { sortBy: "name" | "createdAt"; archiveStatus: "active" | "all" }) =>
+        useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID, ...props }),
+      { sortBy: "name", archiveStatus: "active" },
+    );
+    await flush();
+    await hook.rerender({ sortBy: "createdAt", archiveStatus: "active" });
+    await flush();
+    await hook.rerender({ sortBy: "createdAt", archiveStatus: "all" });
+    await flush();
+    expect(seen).toEqual(["name:active", "createdAt:active", "createdAt:all"]);
+    await hook.unmount();
+  });
+
   test("unmount aborts its native session-page read", async () => {
     let nativeSignal: AbortSignal | undefined;
     const client = fakeClient({

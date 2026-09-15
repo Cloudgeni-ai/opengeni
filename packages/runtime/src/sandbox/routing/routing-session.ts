@@ -34,7 +34,13 @@ import {
   type ProviderCommandSession,
 } from "../provider-command-session";
 import type { SandboxProviderCommand } from "@opengeni/contracts";
-import { hasTypedExecHandleLoss } from "../exec-banner";
+import { hasTypedExecHandleLoss, parseExecResponseBanner } from "../exec-banner";
+import {
+  SandboxMaterializationVerificationError,
+  materializationVerificationDiagnostic,
+  retainMaterializationVerificationDiagnostic,
+  type MaterializationFailureReason,
+} from "../materialization-verification-error";
 import { CAPABILITY_DESCRIPTORS, type SandboxBackend } from "@opengeni/contracts";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
 import {
@@ -102,6 +108,8 @@ export interface RoutableBackendSession extends ProviderCommandSession {
   pathExists?(path: string, runAs?: string): Promise<boolean>;
   viewImage?(args: unknown): Promise<unknown>;
   materializeEntry?(args: unknown): Promise<void>;
+  /** Provider-owned fixed read-only probe; never an agent command surface. */
+  verifyMaterializedPath?(path: string, workdir: string): Promise<void>;
   supportsPty?(): boolean;
   resolveExposedPort?(port: number): Promise<ExposedPortEndpoint>;
   serializeSessionState?(): Promise<unknown>;
@@ -299,6 +307,7 @@ export type RoutingSandboxOperationObservation = {
   op: string;
   outcome: "ok" | "not_found" | "failed";
   durationMs: number;
+  materializationFailureReason?: MaterializationFailureReason;
 };
 
 export type RoutingSandboxOperationObserver = (
@@ -1689,11 +1698,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<T> {
     const startedAt = performance.now();
     let outcome: RoutingSandboxOperationObservation["outcome"] = "failed";
+    let materializationFailureReason: MaterializationFailureReason | undefined;
     try {
       const result = await withSandboxProviderOperation(backend.session, fn, onCaptureWait);
       outcome = "ok";
       return result;
     } catch (error) {
+      materializationFailureReason = materializationVerificationDiagnostic(error)?.reason;
       if (
         (op === "readFile" || op === "listDir" || op === "pathExists" || op === "viewImage") &&
         isDefinitePathNotFoundError(error)
@@ -1708,6 +1719,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           op,
           outcome,
           durationMs: Math.max(0, performance.now() - startedAt),
+          ...(materializationFailureReason ? { materializationFailureReason } : {}),
         });
       } catch {
         // Telemetry is never part of provider or durable-settlement authority.
@@ -2289,6 +2301,9 @@ async function assertProviderCanSeeMaterializedPath(
   session: RoutableBackendSession,
   path: string,
 ): Promise<void> {
+  if (session.verifyMaterializedPath) {
+    return session.verifyMaterializedPath(path, providerManifestRoot(session) ?? "/workspace");
+  }
   const command = `test -e ${shellSingleQuote(path)} && printf %s ${shellSingleQuote(
     MATERIALIZED_PATH_MARKER,
   )}`;
@@ -2300,18 +2315,68 @@ async function assertProviderCanSeeMaterializedPath(
     tty: false,
   };
   let output: string;
-  if (session.execCommand) {
-    output = await session.execCommand(args);
-  } else if (session.exec) {
-    output = formatExecResult(await session.exec(args));
-  } else {
+  let result: unknown;
+  if (!session.execCommand && !session.exec) {
     throw new RoutingUnsupportedError("materializeEntry.verify", "unknown");
   }
-  if (!output.includes(MATERIALIZED_PATH_MARKER)) {
-    throw new Error(
-      `Sandbox materialization completed but the provider cannot read the destination path: ${path}`,
-    );
+  try {
+    result = session.execCommand ? await session.execCommand(args) : await session.exec!(args);
+  } catch (cause) {
+    retainMaterializationVerificationDiagnostic(cause, {
+      reason: "command_error",
+      path,
+      workdir: args.workdir,
+      command,
+      output: null,
+      exitCode: null,
+      providerSessionId: null,
+      causeMessage: cause instanceof Error ? cause.message : String(cause),
+    });
+    throw cause;
   }
+  try {
+    output = formatExecResult(result);
+  } catch (cause) {
+    const record = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+    const returnedOutput = [record.output, record.stderr, record.stdout]
+      .filter((value): value is string => typeof value === "string")
+      .join("\n");
+    throw new SandboxMaterializationVerificationError({
+      reason: "invalid_response",
+      path,
+      workdir: args.workdir,
+      command,
+      output: returnedOutput || null,
+      exitCode: null,
+      providerSessionId: null,
+      causeMessage: cause instanceof Error ? cause.message : String(cause),
+    });
+  }
+  const status = parseExecResponseBanner(output);
+  const markerPresent = stripExecBanner(output).includes(MATERIALIZED_PATH_MARKER);
+  if (
+    markerPresent &&
+    (status.kind === "absent" || (status.kind === "exited" && status.exitCode === 0))
+  ) {
+    return;
+  }
+  const reason: MaterializationFailureReason =
+    status.kind === "running"
+      ? "command_pending"
+      : status.kind === "exited" && status.exitCode === 1
+        ? "path_not_visible"
+        : status.kind === "exited" && status.exitCode !== 0
+          ? "command_failed"
+          : "invalid_response";
+  throw new SandboxMaterializationVerificationError({
+    reason,
+    path,
+    workdir: args.workdir,
+    command,
+    output,
+    exitCode: status.kind === "exited" ? status.exitCode : null,
+    providerSessionId: status.kind === "running" ? status.sessionId : null,
+  });
 }
 
 function providerManifestRoot(session: RoutableBackendSession): string | null {

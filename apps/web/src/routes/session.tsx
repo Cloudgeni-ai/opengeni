@@ -12,6 +12,7 @@ import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
+import { connectorSelectionUpdate } from "@/lib/composer-connectors";
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
@@ -65,7 +66,7 @@ import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
-import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
+import { WorkspaceComposerPlus as ComposerMobilePlus } from "@/components/workspace-composer-plus";
 import { LoadingPanel } from "@/components/common";
 import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
 import { MarkdownText } from "@/components/markdown";
@@ -80,10 +81,8 @@ import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "@/components/session/artifact-link-boundary";
-import {
-  SessionVariableSetPicker,
-  type SessionVariableSetPickerSharedState,
-} from "@/components/session/session-variable-set-picker";
+import { SessionVariableSetPicker } from "@/components/session/session-variable-set-picker";
+import { useSessionVariableSetPickerState } from "@/lib/use-session-variable-set-picker-state";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
@@ -149,7 +148,6 @@ import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
   sessionPolicyPickerIds,
-  toolsForPolicySelection,
 } from "@/lib/session-tools";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
 import {
@@ -333,6 +331,30 @@ export function SessionRoute({
         : null,
     [queue.effectiveControl, sessionSeed, sessionStatus, sessionStatusSequence],
   );
+  // Dispatch retries update their durable ledger without timeline events. Read
+  // that evidence only while this visible session is queued, with no overlapping
+  // requests, so a moving retry schedule cannot masquerade as active execution.
+  const waitingForDispatch =
+    session?.status === "queued" &&
+    session.activeTurnId === null &&
+    session.effectiveControl.state === "active";
+  useEffect(() => {
+    if (!waitingForDispatch) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      try {
+        if (document.visibilityState === "visible") await refreshSession();
+      } finally {
+        if (!stopped) timer = setTimeout(() => void refresh(), 15_000);
+      }
+    };
+    timer = setTimeout(() => void refresh(), 15_000);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [waitingForDispatch, sessionId, refreshSession]);
   // /clear-view: a LOCAL, this-device-only collapse of the transcript. It hides
   // every event at or before the sequence seen when the operator ran it; the
   // server log is untouched and newer events (higher sequence) keep streaming
@@ -1555,11 +1577,9 @@ function SessionChatPane(props: {
   const onVoiceActiveChange = useCallback((active: boolean) => {
     setVoiceActive(active);
   }, []);
-  const [variableSetPickerState, setVariableSetPickerState] =
-    useState<SessionVariableSetPickerSharedState>({
-      saving: false,
-      committedSelection: null,
-    });
+  const [variableSetPickerState, setVariableSetPickerState] = useSessionVariableSetPickerState(
+    props.session,
+  );
   const variableSetComposerBlocked =
     variableSetPickerState.saving ||
     variableSetPickerState.committedSelection?.sessionId === props.session.id;
@@ -1671,9 +1691,8 @@ function SessionChatPane(props: {
     mcpServerIds: new Set(policyToolIds),
     firstPartyToolIds: new Set(props.session.firstPartyMcpTools),
   }));
-  const [durableToolPolicyVersion, setDurableToolPolicyVersion] = useState(
-    () => props.session.toolPolicyVersion,
-  );
+  const [durableToolsSnapshot, setDurableToolsSnapshot] = useState(props.session);
+  const durableToolsSaveInFlight = useRef(false);
   const [durableToolsHydrated, setDurableToolsHydrated] = useState(false);
   const durableToolsSessionId = useRef(props.session.id);
   const [durableToolsSaving, setDurableToolsSaving] = useState(false);
@@ -1689,39 +1708,50 @@ function SessionChatPane(props: {
   useEffect(() => {
     if (durableToolsSessionId.current !== props.session.id) {
       durableToolsSessionId.current = props.session.id;
+      setDurableToolsSnapshot(props.session);
       setDurableToolsHydrated(false);
       return;
     }
     if (!context.workspaceMcpCatalogReady) {
-      if (durableToolsHydrated) {
-        setDurableToolsHydrated(false);
-      }
+      setDurableToolsHydrated(false);
       return;
     }
-    if (
-      durableToolsSaving ||
-      (durableToolsHydrated && props.session.toolPolicyVersion <= durableToolPolicyVersion)
-    ) {
-      return;
-    }
-    setDurableToolSelection({
-      mcpServerIds: new Set(policyToolIds),
-      firstPartyToolIds: new Set(props.session.firstPartyMcpTools),
-    });
-    setDurableToolPolicyVersion(props.session.toolPolicyVersion);
+    if (durableToolsSaving) return;
+    // A PATCH response can be newer than the parent query. Never let stale
+    // props restore a connector the user just excluded.
+    const snapshot =
+      props.session.toolPolicyVersion > durableToolsSnapshot.toolPolicyVersion
+        ? props.session
+        : durableToolsSnapshot;
+    if (snapshot !== durableToolsSnapshot) setDurableToolsSnapshot(snapshot);
+    const nextMcpIds = sessionPolicyPickerIds(
+      snapshot,
+      selectableToolIds,
+      context.workspaceDefaultToolIds,
+    );
+    const nextFirstPartyIds = new Set(snapshot.firstPartyMcpTools);
+    setDurableToolSelection((current) =>
+      current.mcpServerIds.size === nextMcpIds.size &&
+      [...nextMcpIds].every((id) => current.mcpServerIds.has(id)) &&
+      current.firstPartyToolIds.size === nextFirstPartyIds.size &&
+      [...nextFirstPartyIds].every((id) => current.firstPartyToolIds.has(id))
+        ? current
+        : { mcpServerIds: nextMcpIds, firstPartyToolIds: nextFirstPartyIds },
+    );
     setDurableToolsHydrated(true);
   }, [
     context.workspaceMcpCatalogReady,
-    durableToolsHydrated,
+    context.workspaceDefaultToolIds,
+    selectableToolIds,
     durableToolsSaving,
-    durableToolPolicyVersion,
-    policyToolIds,
-    props.session.id,
-    props.session.firstPartyMcpTools,
-    props.session.toolPolicyVersion,
+    durableToolsSnapshot,
+    props.session,
   ]);
   const saveDurableToolPolicy = useCallback(
     async (next: SessionToolSelection) => {
+      if (durableToolsSaveInFlight.current) return;
+      durableToolsSaveInFlight.current = true;
+      const targetSessionId = props.session.id;
       setDurableToolSelection({
         mcpServerIds: new Set(next.mcpServerIds),
         firstPartyToolIds: new Set(next.firstPartyToolIds),
@@ -1729,21 +1759,17 @@ function SessionChatPane(props: {
       setDurableToolsSaving(true);
       setDurableToolsError(null);
       try {
-        const tools = toolsForPolicySelection({
-          selectedMcpServerIds: next.mcpServerIds,
-          baselineMcpServerIds: [],
-          forceExplicit: true,
-        });
         const updated = await context.client.updateSessionToolPolicy(
           props.session.workspaceId,
-          props.session.id,
-          {
-            mode: "explicit",
-            tools: tools ?? [],
-            firstPartyMcpTools: [...next.firstPartyToolIds],
-            expectedVersion: durableToolPolicyVersion,
-          },
+          targetSessionId,
+          connectorSelectionUpdate(
+            durableToolsSnapshot,
+            durableToolSelection.mcpServerIds,
+            next.mcpServerIds,
+            context.workspaceDefaultToolIds,
+          ),
         );
+        if (durableToolsSessionId.current !== targetSessionId) return;
         setDurableToolSelection({
           mcpServerIds: sessionPolicyPickerIds(
             updated,
@@ -1752,7 +1778,7 @@ function SessionChatPane(props: {
           ),
           firstPartyToolIds: new Set(updated.firstPartyMcpTools),
         });
-        setDurableToolPolicyVersion(updated.toolPolicyVersion);
+        setDurableToolsSnapshot(updated);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setDurableToolsError(message);
@@ -1764,6 +1790,7 @@ function SessionChatPane(props: {
             props.session.workspaceId,
             props.session.id,
           );
+          if (durableToolsSessionId.current !== targetSessionId) return;
           setDurableToolSelection({
             mcpServerIds: sessionPolicyPickerIds(
               refreshed,
@@ -1772,19 +1799,29 @@ function SessionChatPane(props: {
             ),
             firstPartyToolIds: new Set(refreshed.firstPartyMcpTools),
           });
-          setDurableToolPolicyVersion(refreshed.toolPolicyVersion);
+          setDurableToolsSnapshot(refreshed);
         } catch {
-          // Keep the last authoritative selection when reconciliation is also
-          // unavailable; the visible error makes the state non-silent.
+          if (durableToolsSessionId.current === targetSessionId) {
+            setDurableToolSelection({
+              mcpServerIds: sessionPolicyPickerIds(
+                durableToolsSnapshot,
+                selectableToolIds,
+                context.workspaceDefaultToolIds,
+              ),
+              firstPartyToolIds: new Set(durableToolsSnapshot.firstPartyMcpTools),
+            });
+          }
         }
       } finally {
+        durableToolsSaveInFlight.current = false;
         setDurableToolsSaving(false);
       }
     },
     [
       context.client,
       context.workspaceDefaultToolIds,
-      durableToolPolicyVersion,
+      durableToolsSnapshot,
+      durableToolSelection,
       props.session.id,
       props.session.workspaceId,
       selectableToolIds,
@@ -2505,8 +2542,8 @@ function SessionChatPane(props: {
         </div>
       ) : null}
 
-      {props.session.inputWait &&
-      props.session.status === "idle" &&
+      {((props.session.inputWait && props.session.status === "idle") ||
+        (props.session.status === "queued" && !props.session.activeTurnId)) &&
       props.session.effectiveControl.state === "active" ? (
         <Suspense fallback={null}>
           <LazySessionWaitStatus session={props.session} />
@@ -2597,6 +2634,7 @@ function SessionChatPane(props: {
                         : "workspace",
                     canEdit: workspacePermissions.includes("sessions:control"),
                   }}
+                  workspaceId={props.session.workspaceId}
                   disabled={terminal || composer.sending}
                   fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
                   servers={selectableSessionMcpServers}

@@ -5,6 +5,8 @@ import type { Database } from "@opengeni/db";
 import { readSignedState } from "@opengeni/github";
 import { testSettings } from "@opengeni/testing";
 import { HTTPException } from "hono/http-exception";
+import { PgDialect } from "drizzle-orm/pg-core";
+import type { SQL } from "drizzle-orm";
 import { ApiHttpError } from "../src/http/api-error";
 import {
   parseSocialCredentialBundle,
@@ -25,8 +27,27 @@ function settingsWithClients(clients: Record<string, unknown>): Settings {
   }) as Settings;
 }
 
-// startSocialOAuth never touches the database; the deps type just carries it.
-const noDb = null as unknown as Database;
+// URL/state unit tests now perform a real policy read. Keep a strict, read-only
+// SQL fixture here; transaction/race behavior is exercised against PostgreSQL in
+// organization-integration-oauth-policy.test.ts, without global module mocks.
+const policyDb = {
+  select: () => ({
+    from: () => ({ where: () => ({ limit: async () => [{ accountId: startContext.accountId }] }) }),
+  }),
+  transaction: async (run: (tx: Database) => Promise<unknown>) => run(policyDb),
+  execute: async (query: SQL) => {
+    const text = new PgDialect().sqlToQuery(query).sql;
+    if (text.includes("set_config(")) return [];
+    if (text.includes("as account_id"))
+      return [{ account_id: startContext.accountId, workspace_id: startContext.workspaceId }];
+    if (text.includes("transaction_isolation")) return [{ level: "read committed" }];
+    if (text.includes("pg_advisory_xact_lock_shared")) return [];
+    if (text.includes("organization_integration_policies"))
+      return [{ policy: { mode: "unrestricted", allowedIntegrationKeys: [], revision: 0 } }];
+    if (text.includes("select id from workspaces")) return [{ id: startContext.workspaceId }];
+    throw new Error(`Unexpected policy fixture SQL: ${text}`);
+  },
+} as unknown as Database;
 
 const startContext = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -40,7 +61,7 @@ describe("startSocialOAuth", () => {
   test("x: builds a PKCE S256 authorization URL with default scopes", async () => {
     const settings = settingsWithClients({ x: { clientId: "x-client", clientSecret: "s" } });
     const result = await startSocialOAuth(
-      { db: noDb, settings },
+      { db: policyDb, settings },
       { ...startContext, payload: { provider: "x" } },
     );
     const url = new URL(result.authorizationUrl!);
@@ -58,7 +79,7 @@ describe("startSocialOAuth", () => {
   test("reddit: requests a permanent grant and skips PKCE", async () => {
     const settings = settingsWithClients({ reddit: { clientId: "r-client" } });
     const result = await startSocialOAuth(
-      { db: noDb, settings },
+      { db: policyDb, settings },
       { ...startContext, payload: { provider: "reddit" } },
     );
     const url = new URL(result.authorizationUrl!);
@@ -71,7 +92,7 @@ describe("startSocialOAuth", () => {
   test("state is signed, typed, and carries the workspace binding", async () => {
     const settings = settingsWithClients({ x: { clientId: "x-client" } });
     const result = await startSocialOAuth(
-      { db: noDb, settings },
+      { db: policyDb, settings },
       {
         ...startContext,
         payload: { provider: "x", ownership: "personal", returnPath: "/social?tab=x" },
@@ -91,7 +112,7 @@ describe("startSocialOAuth", () => {
   test("caller-provided scopes replace defaults", async () => {
     const settings = settingsWithClients({ x: { clientId: "x-client" } });
     const result = await startSocialOAuth(
-      { db: noDb, settings },
+      { db: policyDb, settings },
       { ...startContext, payload: { provider: "x", scopes: ["tweet.read", "users.read"] } },
     );
     expect(new URL(result.authorizationUrl!).searchParams.get("scope")).toBe(
@@ -102,7 +123,7 @@ describe("startSocialOAuth", () => {
   test("unconfigured provider returns actionable operator configuration details", async () => {
     const settings = settingsWithClients({ x: { clientId: "x-client" } });
     const error = await startSocialOAuth(
-      { db: noDb, settings },
+      { db: policyDb, settings },
       { ...startContext, payload: { provider: "reddit" } },
     ).catch((cause: unknown) => cause);
     expect(error).toBeInstanceOf(ApiHttpError);
@@ -120,7 +141,7 @@ describe("startSocialOAuth", () => {
     const settings = settingsWithClients({ x: { clientId: "x-client" } });
     await expect(
       startSocialOAuth(
-        { db: noDb, settings },
+        { db: policyDb, settings },
         { ...startContext, payload: { provider: "x", returnPath: "https://evil.example/steal" } },
       ),
     ).rejects.toThrow(HTTPException);
@@ -131,7 +152,7 @@ describe("startSocialOAuth", () => {
     // `..` collapses /a, leaving //h//@evil.com — a browser-absolute Location.
     await expect(
       startSocialOAuth(
-        { db: noDb, settings },
+        { db: policyDb, settings },
         { ...startContext, payload: { provider: "x", returnPath: "/a/..//h//@evil.com" } },
       ),
     ).rejects.toThrow(HTTPException);

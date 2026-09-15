@@ -88,7 +88,7 @@ verified from the turn's frozen initiating-human identity. Existing Personal
 workspace artifact-authorization gaps and service-only turns without that human
 fail closed; the report guard does not widen artifact permissions.
 
-Migration `0468_goal_report_requirements.sql` adds rolling-compatible requirement,
+Migration `0474_goal_report_requirements.sql` adds rolling-compatible requirement,
 completion, inspection-receipt and cancellation fences without a new table.
 Pending requirements are append-only through semantic rewrites. Explicit
 human/API cancellation remains supported; agents cannot clear them to bypass

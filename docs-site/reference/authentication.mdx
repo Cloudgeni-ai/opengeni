@@ -28,7 +28,7 @@ Session operations are workspace-scoped; organization routes manage shared works
 
 ## Organization key access
 
-Read-only organization keys and organization-wide session inventory require a deployment containing the [chat integration changes](https://github.com/Cloudgeni-ai/opengeni/pull/2310). See the [package and deployment setup](/guides/integrate-your-product#connect-your-backend) for availability.
+Verify organization-key access against your deployment and installed SDK. See the [package and deployment setup](/guides/integrate-your-product#connect-your-backend) for compatibility checks.
 
 Choose an access tier when creating an organization key:
 
@@ -45,9 +45,37 @@ Both tiers can use `listOrganizationSessions` or `iterateOrganizationSessions` t
 
 `createChatHandler` uses your product's `resolve(request)` hook on sends, history reads, and approval/question responses. Verify the product's session cookie or bearer, then return the user's allowed tenant and user ID. The organization key authenticates your backend to OpenGeni; it does not authenticate a product user to your backend.
 
-The handler namespaces client conversation IDs to the resolved user. An opaque end-user label is not an OpenGeni account and does not grant authority. If you omit the user label, the host must resolve an authorized conversation itself.
+Conversation identity is independent of the acting user; different user IDs do not isolate a shared conversation ID. The host must authorize which conversations a user may open. An opaque end-user label does not grant workspace membership. If you omit the user label, the host must resolve an authorized conversation itself.
 
-For the React component, bind `authKey` to your signed-in user and tenant when using cookie authentication, change it on identity switches, and unmount on sign-out. This clears the old transcript and pending requests in the browser. The key stays local and does not replace server-side authentication. See [Integrate your product](/guides/integrate-your-product).
+On sign-out or user/tenant changes, abort old requests and clear transcripts and pending requests from your frontend. Reset or remount session components when their authenticated identity changes. Client cleanup does not replace server-side authorization. See [Integrate your product](/guides/integrate-your-product).
+
+## External-user onboarding
+
+Passing `user` through the chat facade, or using `asUser` on the full SDK, can
+establish an external identity. It does not grant access to a shared workspace.
+After your backend has approved a user's tenant membership, provision the
+corresponding workspace membership with the full SDK:
+
+```ts
+await serviceClient.addExternalWorkspaceMember(authorizedWorkspaceId, {
+  identity: { externalId: authenticatedUser.id, source: "my-product" },
+  permissions: approvedProductPermissions,
+  operationId: persistedOnboardingOperationId,
+});
+```
+
+Use the same stable `source` as the chat facade. Derive the user and workspace
+from authenticated host records. `approvedProductPermissions` is the explicit
+permission list for the product's supported features; it must include the session
+operations the product needs. The service requires `members:manage` and cannot
+grant permissions above its own ceiling. User requests intersect this membership
+with the initiating key's permissions.
+
+Run this as a deliberate onboarding operation, not on every browser request.
+Persist the operation UUID before calling and reuse it with the exact same
+request after an uncertain result. Replaying it does not restore a subsequently
+removed membership; changed permissions conflict. Keep service administration
+separate from ordinary user chat requests.
 
 ## Rules that hold everywhere
 

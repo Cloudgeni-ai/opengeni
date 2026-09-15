@@ -84,9 +84,7 @@ function Conversation({
         onLoadOlder={feed.loadOlder}
         hasNewer={feed.hasNewer}
         loadingNewer={feed.loadingNewer}
-        onLoadNewer={() => {
-          void feed.loadNewer();
-        }}
+        onLoadNewer={feed.loadNewer}
         onJumpToStart={async () => {
           await feed.loadOldest();
         }}

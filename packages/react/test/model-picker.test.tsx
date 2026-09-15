@@ -153,6 +153,7 @@ describe("ModelPicker", () => {
     );
     const select = picker(container)!;
     expect(select.value).toBe("codex/gpt-5.6-luna");
+    expect(select.querySelector("optgroup")?.label).toBe("Codex (ChatGPT subscription)");
     const options = [...select.querySelectorAll("option")];
     expect(options.map((option) => option.value)).toContain("gpt-5.6-sol");
     expect(options.find((option) => option.value === "gpt-5.6-sol")?.disabled).toBe(true);

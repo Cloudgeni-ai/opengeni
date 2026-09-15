@@ -131,22 +131,13 @@ export function bundleAccessibleDetail(
   return provenance ? `${kindLabel}, ${bundleProvenanceSpokenLabel(provenance)}` : kindLabel;
 }
 
-/**
- * The row's single description line. The taxonomy leads because it is what a
- * reader scans for and it never truncates away; the bundle's own sentence
- * follows and is the part that truncates. The full text stays in the detail.
- * An unknown provenance is omitted rather than guessed.
- */
+/** Catalog rows show only the description; kind and provenance live in the detail. */
 export function bundleRowDescription(
-  kind: BundleKind,
-  provenance: BundleProvenance | null,
+  _kind: BundleKind,
+  _provenance: BundleProvenance | null,
   description: string,
 ): string {
-  const prefix = provenance
-    ? `${bundleKindLabel(kind)} · ${bundleProvenanceLabel(provenance)}`
-    : bundleKindLabel(kind);
-  const trimmed = description.trim();
-  return trimmed ? `${prefix} · ${trimmed}` : prefix;
+  return description.trim();
 }
 
 /** Up to two letters from the bundle's own name; the last-resort mark. */

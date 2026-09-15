@@ -1,4 +1,5 @@
 import { ModelPolicyPickerMenu } from "../src/components/model-policy-picker-menu";
+import { projectClientModelRows } from "../src/model-policy";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ClientModel } from "@opengeni/sdk";
 import { act } from "react";
@@ -118,6 +119,116 @@ async function mount(node: React.ReactElement): Promise<HTMLElement> {
 }
 
 describe("ModelPolicyPicker", () => {
+  test.each([false, true])(
+    "renders usable Codex first without mutating selection (codexOnly=%s)",
+    async (codexOnly) => {
+      const rows = projectClientModelRows([
+        { ...MODELS[0]!, id: "free", label: "Free", source: "opengeni", cost: "free" },
+        { ...MODELS[0]!, id: "paid", label: "Paid", source: "opengeni", cost: "credits" },
+        ...MODELS,
+      ])
+        .map((row) =>
+          row.id === "paid"
+            ? { ...row, selectable: false, unavailableReason: "Blocked by workspace policy" }
+            : row,
+        )
+        .map((row) => ({
+          ...row,
+          catalog: {
+            ...row.catalog,
+            credentialReadiness: {
+              status: "ready" as const,
+              reason: null,
+              basis: "configuration" as const,
+              checkedAt: null,
+            },
+            availability: {
+              status: "available" as const,
+              selectable: row.selectable,
+              reason: null,
+              checkedAt: null,
+            },
+          },
+        }));
+      const calls: unknown[] = [];
+      const container = await mount(
+        <ModelPolicyPickerMenu
+          rows={rows}
+          model="free"
+          codexOnly={codexOnly}
+          effort="medium"
+          latencyMode="standard"
+          onModelChange={(id) => calls.push(id)}
+          onEffortChange={(effort) => calls.push(effort)}
+          onLatencyModeChange={(mode) => calls.push(mode)}
+        />,
+      );
+      expect(
+        [...container.querySelectorAll("section")].map((section) =>
+          section.getAttribute("aria-label"),
+        ),
+      ).toEqual(["Codex", "OpenGeni"]);
+      expect(
+        container.querySelector('[data-testid="model-picker-choice-free"] [aria-label="Selected"]'),
+      ).toBeTruthy();
+      const blocked = container.querySelector<HTMLButtonElement>(
+        '[data-testid="model-picker-choice-paid"]',
+      )!;
+      expect(blocked.disabled).toBe(true);
+      expect(blocked.textContent).toContain("Blocked by workspace policy");
+      expect(container.querySelector('[aria-label="Search models or providers"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="model-picker-reasoning"]')).toBeTruthy();
+      const codexButtons = container.querySelectorAll<HTMLButtonElement>(
+        'section[aria-label="Codex"] button',
+      );
+      codexButtons[0]!.focus();
+      await act(async () =>
+        codexButtons[0]!.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+        ),
+      );
+      expect(document.activeElement).toBe(codexButtons[1]!);
+      expect(calls).toEqual([]);
+      expect(rows[0]?.selectable).toBe(true);
+    },
+  );
+
+  test("search does not promote Codex when selectable paid models are filtered out", async () => {
+    const calls: unknown[] = [];
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={[
+          { ...MODELS[0]!, id: "free", label: "Match Free", source: "opengeni", cost: "free" },
+          { ...MODELS[0]!, id: "paid", label: "Paid", source: "opengeni", cost: "credits" },
+          { ...MODELS[0]!, label: "Match Codex" },
+        ]}
+        model="paid"
+        effort="medium"
+        latencyMode="standard"
+        onModelChange={(id) => calls.push(id)}
+        onEffortChange={(effort) => calls.push(effort)}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const input = container.querySelector("input")!;
+    input.value = "Match";
+    const key = Object.keys(input).find((property) => property.startsWith("__reactProps$"))!;
+    const handler = (
+      input as unknown as Record<
+        string,
+        { onChange: (event: { target: HTMLInputElement }) => void }
+      >
+    )[key]!;
+    await act(async () => handler.onChange({ target: input }));
+    expect(container.querySelector('[data-testid="model-picker-choice-paid"]')).toBeNull();
+    expect(
+      [...container.querySelectorAll("section")].map((section) =>
+        section.getAttribute("aria-label"),
+      ),
+    ).toEqual(["OpenGeni", "Codex"]);
+    expect(calls).toEqual([]);
+  });
+
   test("shows subscription copy once per provider and keeps selection in its group", async () => {
     const container = await mount(
       <ModelPolicyPickerMenu

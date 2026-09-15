@@ -1,3 +1,4 @@
+import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 export * from "./artifact-catalog";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
 export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
@@ -5090,6 +5091,12 @@ export async function recordModelCallFact(
     },
   );
 }
+
+export {
+  getOrganizationUsageSummary,
+  getOrganizationUsageWorkspacePage,
+  organizationUsageWindow,
+} from "./organization-usage";
 
 export async function listUsageEvents(
   db: Database,
@@ -30812,9 +30819,16 @@ function resolvedSessionMcpApproval(
 
 function resolvedConnectorWritePolicy(
   resolved: ResolvedConnectorActionPolicy,
-  approvalMode: "connector" | "connector_write",
+  approvalMode: "connector" | "connector_write" | "session_mcp",
   actionName: string,
 ): ResolvedConnectorActionPolicy {
+  if (approvalMode === "session_mcp") {
+    // Explicit Block still wins for header-backed / credential-free servers.
+    // Allow cannot lower the separately frozen session approval floor.
+    return resolved.managed && connectorActionPolicyDecision(resolved) !== "allow"
+      ? resolved
+      : resolvedSessionMcpApproval(actionName);
+  }
   return approvalMode === "connector_write" && !resolved.managed
     ? {
         managed: true,
@@ -31402,19 +31416,16 @@ export async function prepareConnectorActionApproval(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const snapshot = await connectorActionAttemptSnapshot(tx as unknown as Database, identity);
-        const resolved =
-          normalized.approvalMode === "session_mcp"
-            ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-            : resolvedConnectorWritePolicy(
-                resolveConnectorActionPolicy(snapshot, {
-                  connectionId: normalized.connectionId!,
-                  serverId: normalized.serverId,
-                  toolName: normalized.toolName,
-                  actionName: normalized.policyActionSelector,
-                }),
-                normalized.approvalMode,
-                normalized.policyActionSelector,
-              );
+        const resolved = resolvedConnectorWritePolicy(
+          resolveConnectorActionPolicy(snapshot, {
+            connectionId: normalized.connectionId!,
+            serverId: normalized.serverId,
+            toolName: normalized.toolName,
+            actionName: normalized.policyActionSelector,
+          }),
+          normalized.approvalMode,
+          normalized.policyActionSelector,
+        );
         if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
         const durable = durableConnectorActionInvocation(
           identity,
@@ -31471,19 +31482,16 @@ export async function previewConnectorActionApproval(
     { accountId: identity.accountId, workspaceId: identity.workspaceId },
     async (scopedDb) => {
       const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
-      const resolved =
-        normalized.approvalMode === "session_mcp"
-          ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-          : resolvedConnectorWritePolicy(
-              resolveConnectorActionPolicy(snapshot, {
-                connectionId: normalized.connectionId!,
-                serverId: normalized.serverId,
-                toolName: normalized.toolName,
-                actionName: normalized.policyActionSelector,
-              }),
-              normalized.approvalMode,
-              normalized.policyActionSelector,
-            );
+      const resolved = resolvedConnectorWritePolicy(
+        resolveConnectorActionPolicy(snapshot, {
+          connectionId: normalized.connectionId!,
+          serverId: normalized.serverId,
+          toolName: normalized.toolName,
+          actionName: normalized.policyActionSelector,
+        }),
+        normalized.approvalMode,
+        normalized.policyActionSelector,
+      );
       if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
       const durable = durableConnectorActionInvocation(
         identity,
@@ -31533,19 +31541,16 @@ export async function beginConnectorActionExecution(
         let row = existing;
         let inserted = false;
         if (!row) {
-          const resolved =
-            normalized.approvalMode === "session_mcp"
-              ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-              : resolvedConnectorWritePolicy(
-                  resolveConnectorActionPolicy(snapshot, {
-                    connectionId: normalized.connectionId!,
-                    serverId: normalized.serverId,
-                    toolName: normalized.toolName,
-                    actionName: normalized.policyActionSelector,
-                  }),
-                  normalized.approvalMode,
-                  normalized.policyActionSelector,
-                );
+          const resolved = resolvedConnectorWritePolicy(
+            resolveConnectorActionPolicy(snapshot, {
+              connectionId: normalized.connectionId!,
+              serverId: normalized.serverId,
+              toolName: normalized.toolName,
+              actionName: normalized.policyActionSelector,
+            }),
+            normalized.approvalMode,
+            normalized.policyActionSelector,
+          );
           if (!resolved.managed) return { allowed: true, managed: false } as const;
           const durable = durableConnectorActionInvocation(
             identity,
@@ -33826,7 +33831,7 @@ export type SessionListSnapshotCursor = {
   offset: number;
   parentSessionFilter: string;
   search: string | null;
-  archiveMode: "active" | "archived";
+  archiveMode: "active" | "archived" | "all";
   /** Additive filter identity; absent on legacy snapshot cursors. */
   filter?: string;
 };
@@ -33834,15 +33839,15 @@ export type SessionListSnapshotCursor = {
 export type SessionListKeysetCursor = {
   kind: "keyset";
   /** Absent on v2 cursors, which always used session updatedAt. */
-  sortBy?: "updatedAt" | "archivedAt";
+  sortBy?: "updatedAt" | "archivedAt" | "createdAt" | "name";
   /** Decimal committed workspace activity revision frozen on page one. */
   snapshotRevision: string;
-  /** Exact PostgreSQL timestamp text, including microseconds. */
+  /** Exact PostgreSQL timestamp (including microseconds), or normalized name for name order. */
   sortAt: string;
   id: string;
   parentSessionFilter: string;
   search: string | null;
-  archiveMode: "active" | "archived";
+  archiveMode: "active" | "archived" | "all";
   /** Canonical identity for channel, creator, and time-bound filters. */
   filter?: string;
 };
@@ -33877,6 +33882,8 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions &
     pinsOnly?: boolean | undefined;
     /** List personally archived chats instead of active chats. */
     archivedOnly?: boolean | undefined;
+    sortBy?: "updatedAt" | "createdAt" | "name" | undefined;
+    archiveStatus?: "active" | "archived" | "all" | undefined;
     /** Return a continuation cursor. Disable for legacy one-page array reads. */
     materializeSnapshot?: boolean | undefined;
     authorizationScope?: SessionAuthorizationListScope | undefined;
@@ -34655,6 +34662,7 @@ function sessionFilters(
     | "search"
     | "subjectId"
     | "archivedOnly"
+    | "archiveStatus"
     | "channelId"
     | "originSiteId"
     | "createdBy"
@@ -34688,7 +34696,10 @@ function sessionFilters(
       and archive_state.session_id = ${schema.sessions.rootSessionId}
       and archive_state.archived = true
   )`;
-  filters.push(options.archivedOnly ? archivedRoot : sql`not (${archivedRoot})`);
+  const archiveStatus = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
+  if (archiveStatus !== "all") {
+    filters.push(archiveStatus === "archived" ? archivedRoot : sql`not (${archivedRoot})`);
+  }
   if (options.authorizationScope) {
     filters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
   }
@@ -34913,7 +34924,8 @@ export function encodeSessionListCursor(cursor: SessionListCursor): string {
     JSON.stringify(
       cursor.kind === "keyset"
         ? {
-            version: cursor.sortBy === "archivedAt" ? 3 : 2,
+            version: 4,
+            sortBy: cursor.sortBy ?? "updatedAt",
             // Preserve the old cursor envelope until every pre-v2 replica has
             // rolled away. It resolves only to the typed expiry/rebase path.
             snapshotId: SESSION_LIST_KEYSET_LEGACY_SNAPSHOT_ID,
@@ -34943,6 +34955,7 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
   try {
     const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
       version?: unknown;
+      sortBy?: unknown;
       snapshotId?: unknown;
       offset?: unknown;
       snapshotRevision?: unknown;
@@ -34962,17 +34975,24 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
         parentSessionFilter === "null" ||
         (typeof parentSessionFilter === "string" && UUID_PATTERN.test(parentSessionFilter))) &&
       (search === null || (typeof search === "string" && search.length <= 200)) &&
-      (archiveMode === "active" || archiveMode === "archived") &&
+      (archiveMode === "active" ||
+        archiveMode === "archived" ||
+        (parsed.version === 4 && archiveMode === "all")) &&
       typeof filter === "string" &&
       filter.length <= 2_048;
     if (!filtersAreValid) return null;
 
-    if (parsed.version === 2 || parsed.version === 3) {
+    if (parsed.version === 2 || parsed.version === 3 || parsed.version === 4) {
+      const sortBy =
+        parsed.version === 4 ? parsed.sortBy : parsed.version === 3 ? "archivedAt" : "updatedAt";
       if (
-        (parsed.version === 3 && archiveMode !== "archived") ||
+        !["updatedAt", "createdAt", "name", "archivedAt"].includes(sortBy as string) ||
+        (sortBy === "archivedAt" && archiveMode !== "archived") ||
         typeof parsed.snapshotRevision !== "string" ||
         typeof parsed.sortAt !== "string" ||
-        !isSessionListCursorTimestamp(parsed.sortAt) ||
+        (sortBy !== "name" && !isSessionListCursorTimestamp(parsed.sortAt)) ||
+        (sortBy === "name" &&
+          (parsed.sortAt.length > 10_000 || parsed.sortAt.includes("\u0000"))) ||
         typeof parsed.id !== "string" ||
         !UUID_PATTERN.test(parsed.id)
       ) {
@@ -34980,7 +35000,9 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       }
       return {
         kind: "keyset",
-        ...(parsed.version === 3 ? { sortBy: "archivedAt" as const } : {}),
+        ...(parsed.version !== 2
+          ? { sortBy: sortBy as NonNullable<SessionListKeysetCursor["sortBy"]> }
+          : {}),
         snapshotRevision: normalizeSessionActivityRevision(
           parsed.snapshotRevision,
           "cursor snapshot revision",
@@ -34994,6 +35016,7 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       };
     }
 
+    if (parsed.version !== undefined) return null;
     const offset = parsed.offset;
     if (
       typeof parsed.snapshotId !== "string" ||
@@ -35110,28 +35133,52 @@ export async function listSessionsForSubject(
           workspaceId,
         );
 
+        const archiveMode = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
+        const sortBy = options.sortBy ?? (archiveMode === "archived" ? "archivedAt" : "updatedAt");
+        if (options.archivedOnly && archiveMode !== "archived") {
+          throw new SessionListCursorError("archivedOnly conflicts with archiveStatus");
+        }
         const filters = [eq(schema.sessions.workspaceId, workspaceId), ...sessionFilters(options)];
-        const ordinaryPinFilter = options.archivedOnly
-          ? sql`true`
-          : or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false))!;
+        const ordinaryPinFilter =
+          archiveMode === "archived"
+            ? sql`true`
+            : or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false))!;
         const parentFilter = sessionParentFilter(options.parentSessionId);
         const searchFilter = sessionSearchFilter(options.search);
-        const archiveMode = options.archivedOnly ? "archived" : "active";
         // Descendants inherit their root's subject-specific archive ordering,
         // just as they inherit its archive visibility in sessionFilters.
-        const ordinarySortAt = options.archivedOnly
-          ? sql`(select archive_order.archived_at
+        const archiveSortAt = sql`(select archive_order.archived_at
               from ${schema.sessionPins} archive_order
               where archive_order.workspace_id = ${schema.sessions.workspaceId}
                 and archive_order.subject_id = ${options.subjectId}
                 and archive_order.session_id = ${schema.sessions.rootSessionId}
-                and archive_order.archived = true)`
-          : schema.sessions.updatedAt;
-        const exactOrdinarySortAt = sql<string>`to_char(${ordinarySortAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+                and archive_order.archived = true)`;
+        // Locale-independent normalization shared with the UI contract. Do not
+        // use localeCompare/lower(): those depend on deployment/client locale.
+        const ordinarySortAt =
+          sortBy === "name"
+            ? sql`translate(btrim(coalesce(${schema.sessions.title}, '')), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') collate "C"`
+            : sortBy === "createdAt"
+              ? schema.sessions.createdAt
+              : sortBy === "archivedAt"
+                ? archiveSortAt
+                : schema.sessions.updatedAt;
+        const exactOrdinarySortAt =
+          sortBy === "name"
+            ? sql<string>`${ordinarySortAt}`
+            : sql<string>`to_char(${ordinarySortAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+        const exactArchiveSortAt =
+          archiveMode === "active"
+            ? sql<string>`null`
+            : sql<string>`to_char(${archiveSortAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+        const ordinaryOrder =
+          sortBy === "name"
+            ? [asc(ordinarySortAt), asc(schema.sessions.id)]
+            : [desc(ordinarySortAt), desc(schema.sessions.id)];
         const listFilter = sessionListFilterIdentity(options);
         const now = new Date();
 
-        if (options.pinsOnly && options.archivedOnly) {
+        if (options.pinsOnly && archiveMode === "archived") {
           throw new SessionListCursorError(
             "pins-only and archived session lists cannot be combined",
           );
@@ -35139,13 +35186,14 @@ export async function listSessionsForSubject(
         if (options.pinsOnly && options.cursor) {
           throw new SessionListCursorError("pins-only session lists do not accept a cursor");
         }
-        // Never reinterpret an updatedAt boundary as an archivedAt boundary.
-        // v3 envelopes retain the reserved snapshot id so older replicas also
+        // Never reinterpret a boundary from a different ordering domain.
+        // v4 envelopes retain the reserved snapshot id so older replicas also
         // take the typed expiry/rebase path instead of mixing sort domains.
         if (
           options.cursor &&
-          options.cursor.archiveMode === "archived" &&
-          (options.cursor.kind === "snapshot" || options.cursor.sortBy !== "archivedAt")
+          ((options.cursor.kind === "snapshot" &&
+            (sortBy !== "updatedAt" || archiveMode !== "active")) ||
+            (options.cursor.kind === "keyset" && (options.cursor.sortBy ?? "updatedAt") !== sortBy))
         ) {
           throw new SessionListCursorExpiredError();
         }
@@ -35164,6 +35212,9 @@ export async function listSessionsForSubject(
         // Keep archive ordering precision in the public root projection as well
         // as the cursor. Drizzle's Date hydration otherwise loses microseconds.
         const exactArchiveTimestamps = new Map<string, string>();
+        // The public selected date key must match the SQL/cursor key so clients
+        // merging pages do not collapse sub-millisecond ordering into id ties.
+        const exactOrdinaryTimestamps = new Map<string, string>();
         if (options.pinsOnly) {
           // The rail polls the complete personal pin section independently from
           // its root page. Do not turn that cheap projection into an O(N)
@@ -35266,6 +35317,7 @@ export async function listSessionsForSubject(
               session: schema.sessions,
               pin: schema.sessionPins,
               sortAt: exactOrdinarySortAt,
+              archiveAt: exactArchiveSortAt,
             })
             .from(schema.sessions)
             .leftJoin(
@@ -35277,12 +35329,15 @@ export async function listSessionsForSubject(
               ),
             )
             .where(and(...filters, ordinaryPinFilter))
-            .orderBy(desc(ordinarySortAt), desc(schema.sessions.id))
+            .orderBy(...ordinaryOrder)
             .limit(limit);
           pageIds = ordinaryIdRows.map((row) => row.id);
           selectedOrdinaryRows = ordinaryIdRows;
-          if (options.archivedOnly) {
-            for (const row of ordinaryIdRows) exactArchiveTimestamps.set(row.id, row.sortAt);
+          if (sortBy === "updatedAt" || sortBy === "createdAt") {
+            for (const row of ordinaryIdRows) exactOrdinaryTimestamps.set(row.id, row.sortAt);
+          }
+          if (archiveMode !== "active") {
+            for (const row of ordinaryIdRows) exactArchiveTimestamps.set(row.id, row.archiveAt);
           }
         } else {
           const cursor = options.cursor?.kind === "keyset" ? options.cursor : undefined;
@@ -35299,13 +35354,21 @@ export async function listSessionsForSubject(
             ? normalizeSessionActivityRevision(cursor.snapshotRevision, "cursor snapshot revision")
             : await readWorkspaceSessionActivityRevision(tx, workspaceId);
           const cursorPredicate = cursor
-            ? or(
-                sql`${ordinarySortAt} < ${cursor.sortAt}::text::timestamptz`,
-                and(
-                  sql`${ordinarySortAt} = ${cursor.sortAt}::text::timestamptz`,
-                  lt(schema.sessions.id, cursor.id),
-                ),
-              )
+            ? sortBy === "name"
+              ? or(
+                  sql`${ordinarySortAt} > ${cursor.sortAt}::text collate "C"`,
+                  and(
+                    sql`${ordinarySortAt} = ${cursor.sortAt}::text collate "C"`,
+                    gt(schema.sessions.id, cursor.id),
+                  ),
+                )
+              : or(
+                  sql`${ordinarySortAt} < ${cursor.sortAt}::text::timestamptz`,
+                  and(
+                    sql`${ordinarySortAt} = ${cursor.sortAt}::text::timestamptz`,
+                    lt(schema.sessions.id, cursor.id),
+                  ),
+                )
             : undefined;
           const ordinaryIdRows = await tx
             .select({
@@ -35313,6 +35376,7 @@ export async function listSessionsForSubject(
               session: schema.sessions,
               pin: schema.sessionPins,
               sortAt: exactOrdinarySortAt,
+              archiveAt: exactArchiveSortAt,
             })
             .from(schema.sessions)
             .leftJoin(
@@ -35331,20 +35395,23 @@ export async function listSessionsForSubject(
                 cursorPredicate,
               ),
             )
-            .orderBy(desc(ordinarySortAt), desc(schema.sessions.id))
+            .orderBy(...ordinaryOrder)
             .limit(limit + 1);
           const hasMore = ordinaryIdRows.length > limit;
           const page = ordinaryIdRows.slice(0, limit);
           pageIds = page.map((row) => row.id);
           selectedOrdinaryRows = page;
-          if (options.archivedOnly) {
-            for (const row of page) exactArchiveTimestamps.set(row.id, row.sortAt);
+          if (sortBy === "updatedAt" || sortBy === "createdAt") {
+            for (const row of page) exactOrdinaryTimestamps.set(row.id, row.sortAt);
+          }
+          if (archiveMode !== "active") {
+            for (const row of page) exactArchiveTimestamps.set(row.id, row.archiveAt);
           }
           const last = page.at(-1);
           if (hasMore && last) {
             nextCursor = encodeSessionListCursor({
               kind: "keyset",
-              ...(options.archivedOnly ? { sortBy: "archivedAt" as const } : {}),
+              sortBy,
               snapshotRevision,
               sortAt: last.sortAt,
               id: last.id,
@@ -35355,22 +35422,23 @@ export async function listSessionsForSubject(
             });
           }
         }
-        const pinnedLookaheadRows = options.archivedOnly
-          ? []
-          : await tx
-              .select({ session: schema.sessions, pin: schema.sessionPins })
-              .from(schema.sessionPins)
-              .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionPins.sessionId))
-              .where(
-                and(
-                  eq(schema.sessionPins.workspaceId, workspaceId),
-                  eq(schema.sessionPins.subjectId, options.subjectId),
-                  eq(schema.sessionPins.pinned, true),
-                  ...filters,
-                ),
-              )
-              .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id))
-              .limit(SESSION_LIST_MAX_PINNED + 1);
+        const pinnedLookaheadRows =
+          archiveMode === "archived"
+            ? []
+            : await tx
+                .select({ session: schema.sessions, pin: schema.sessionPins })
+                .from(schema.sessionPins)
+                .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionPins.sessionId))
+                .where(
+                  and(
+                    eq(schema.sessionPins.workspaceId, workspaceId),
+                    eq(schema.sessionPins.subjectId, options.subjectId),
+                    eq(schema.sessionPins.pinned, true),
+                    ...filters,
+                  ),
+                )
+                .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id))
+                .limit(SESSION_LIST_MAX_PINNED + 1);
         const pinnedTruncated = pinnedLookaheadRows.length > SESSION_LIST_MAX_PINNED;
         const pinnedRows = pinnedLookaheadRows.slice(0, SESSION_LIST_MAX_PINNED);
         const ordinaryRows =
@@ -35461,6 +35529,12 @@ export async function listSessionsForSubject(
                   },
                   { subjectId: options.subjectId, activated: tenancyActivated },
                 ),
+                ...(sortBy === "updatedAt" && exactOrdinaryTimestamps.has(session.id)
+                  ? { updatedAt: exactOrdinaryTimestamps.get(session.id)! }
+                  : {}),
+                ...(sortBy === "createdAt" && exactOrdinaryTimestamps.has(session.id)
+                  ? { createdAt: exactOrdinaryTimestamps.get(session.id)! }
+                  : {}),
                 treeStats: treeStats.get(session.id) ?? EMPTY_SESSION_TREE_STATS,
               },
               requiresActionSince,
@@ -35473,6 +35547,8 @@ export async function listSessionsForSubject(
           pinnedTruncated,
           sessions: pageRows.map(mapListSession),
           nextCursor,
+          sortBy,
+          archiveStatus: archiveMode,
         };
       },
       { isolationLevel: "read committed" },
@@ -49929,7 +50005,8 @@ async function hasPendingSessionAttemptQuiescenceTx(
         and attempt.state = 'closed'
         and attempt.quiesced_at is null
         and (
-          exists (
+          ${sessionAttemptPendingWritersSql(sql`attempt`)}
+          or exists (
             select 1
             from session_attempt_interruptions interruption
             where interruption.workspace_id = attempt.workspace_id
@@ -51057,11 +51134,35 @@ async function verifyWorkspaceMutationSettlementForAuthority(
             };
           }
           if (!admission.settled_at) {
+            const pendingAttempt = await nextSessionAttemptAwaitingQuiescence(
+              tx,
+              authorityInput.workspaceId,
+              authorityInput.sessionId,
+            );
             await tx.execute(sql`
               update sandbox_workspace_mutation_admissions set
                 provider_outcome = ${input.outcome}, settled_at = now()
               where id = ${input.admission.id} and settled_at is null
             `);
+            if (pendingAttempt) {
+              const [wakeTarget] = await tx
+                .select({ workflowId: schema.sessions.temporalWorkflowId })
+                .from(schema.sessions)
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, authorityInput.workspaceId),
+                    eq(schema.sessions.id, authorityInput.sessionId),
+                  ),
+                )
+                .limit(1);
+              await enqueueSessionWorkflowWakeInTransaction(tx, {
+                accountId: authorityInput.accountId,
+                workspaceId: authorityInput.workspaceId,
+                sessionId: authorityInput.sessionId,
+                temporalWorkflowId: wakeTarget?.workflowId ?? `session-${authorityInput.sessionId}`,
+                reason: "workspace_mutation_settled_quiescence",
+              });
+            }
           }
           if (input.outcome === "rejected") return { failure: null };
           if (authorityFailure) return authorityFailure;
@@ -52069,6 +52170,13 @@ export async function settleRetainedProcess(
           "Retained process settlement conflicts with checkpointed provider proof",
         );
       }
+      const wasAwaitingQuiescence =
+        process.ownerAttemptId !== null &&
+        (await hasPendingSessionAttemptQuiescenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          attemptId: process.ownerAttemptId,
+        }));
       const admissions = await tx.execute<AdmissionIdentityRow>(sql`
           select * from sandbox_workspace_mutation_admissions
           where id = ${process.parentAdmissionId}
@@ -52232,11 +52340,12 @@ export async function settleRetainedProcess(
       );
       if (
         process.ownerAttemptId &&
-        (await hasPendingSessionAttemptQuiescenceTx(tx, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          attemptId: process.ownerAttemptId,
-        }))
+        (wasAwaitingQuiescence ||
+          (await hasPendingSessionAttemptQuiescenceTx(tx, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            attemptId: process.ownerAttemptId,
+          })))
       ) {
         await enqueueSessionWorkflowWakeInTransaction(tx, {
           accountId: input.accountId,
@@ -64084,9 +64193,13 @@ function agentSteerCausalActor(update: Pick<BoundedSystemUpdate, "kind" | "linea
 
 function systemUpdateCausalExecutionKey(
   update: Pick<BoundedSystemUpdate, "id" | "kind" | "lineage">,
+  causalExecutionKeys: ReadonlyMap<string, string | null>,
 ): string | null {
   const targetTurnId = systemUpdateCausalHumanTurnId(update);
-  if (targetTurnId) return `target-turn:${targetTurnId}`;
+  if (targetTurnId) {
+    const human = causalExecutionKeys.get(targetTurnId);
+    return human ? `target-human:${human}` : `target-turn:${targetTurnId}`;
+  }
   if (
     isChildLifecycleSystemUpdateKind(update.kind) ||
     update.kind === "goal_continuation" ||
@@ -64112,6 +64225,7 @@ function systemUpdateCausalExecutionKey(
 function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
   selected: readonly T[],
   candidate: T,
+  causalExecutionKeys: ReadonlyMap<string, string | null>,
 ): boolean {
   const first = selected[0];
   if (
@@ -64122,13 +64236,13 @@ function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
   }
   // Null is compatible context (for example an ordinary notice riding with a
   // goal continuation). Once a batch contains frozen causal execution, every
-  // further authority-bearing member must name that exact same origin. Agent
+  // further authority-bearing member must have equivalent inherited authority. Agent
   // Steer uses its caller identity and therefore never borrows a child/goal
   // continuation's target-turn human.
   const selectedCausalKey = selected
-    .map((update) => systemUpdateCausalExecutionKey(update))
+    .map((update) => systemUpdateCausalExecutionKey(update, causalExecutionKeys))
     .find((key): key is string => key !== null);
-  const candidateCausalKey = systemUpdateCausalExecutionKey(candidate);
+  const candidateCausalKey = systemUpdateCausalExecutionKey(candidate, causalExecutionKeys);
   return (
     selectedCausalKey === undefined ||
     candidateCausalKey === null ||
@@ -64196,11 +64310,15 @@ function internalUpdateEventMember(update: BoundedSystemUpdate) {
 function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(
   updates: readonly T[],
   canCoalesce: (selected: readonly T[], candidate: T) => boolean = () => true,
+  skipIncompatibleCommands = false,
 ): T[] {
   const selected: T[] = [];
   let selectedBytes = 0;
   for (const update of updates) {
-    if (selected[0] && !canCoalesce(selected, update)) break;
+    if (selected[0] && !canCoalesce(selected, update)) {
+      if (skipIncompatibleCommands && update.kind === "background_command_result") continue;
+      break;
+    }
     const updateBytes = Buffer.byteLength(
       JSON.stringify({
         id: update.id,
@@ -64632,6 +64750,7 @@ export async function claimSessionWorkForAttempt(
             supersedeGoalContinuations?: boolean;
             deliverUpdates?: boolean;
             pendingEventSequenceBeforeOrAt?: number;
+            commandOnlyMayRun?: boolean;
           } = {},
         ): Promise<{
           count: number;
@@ -64739,6 +64858,9 @@ export async function claimSessionWorkForAttempt(
                     ),
                   )
                   .orderBy(
+                    // Command notices are retained context, not a reason to
+                    // strand later actionable input behind the read limit.
+                    sql`case when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
                     asc(schema.sessionSystemUpdates.createdAt),
                     asc(schema.sessionSystemUpdates.id),
                   )
@@ -64870,17 +64992,121 @@ export async function claimSessionWorkForAttempt(
             }
             validUpdates.push(update);
           }
+          const candidates = validUpdates.filter(
+            (update) =>
+              !expectedXaiAuthority ||
+              frozenXaiExecutionAuthorityKey(frozenXaiExecutionAuthority(update)) ===
+                frozenXaiExecutionAuthorityKey(expectedXaiAuthority),
+          );
           if (
-            expectedXaiAuthority &&
-            validUpdates[0] &&
-            frozenXaiExecutionAuthorityKey(frozenXaiExecutionAuthority(validUpdates[0])) !==
-              frozenXaiExecutionAuthorityKey(expectedXaiAuthority)
+            options.commandOnlyMayRun === false &&
+            candidates.every((update) => update.kind === "background_command_result")
           ) {
-            validUpdates.length = 0;
+            candidates.length = 0;
           }
+          const causalTurnIds = [
+            ...new Set(
+              candidates
+                .map(systemUpdateCausalHumanTurnId)
+                .filter((id): id is string => id !== null),
+            ),
+          ];
+          const causalTurns =
+            causalTurnIds.length === 0
+              ? []
+              : await tx
+                  .select({
+                    id: schema.sessionTurns.id,
+                    human: schema.sessionTurns.initiatingHumanSubjectId,
+                    initiatorKind: schema.sessionTurns.initiatorKind,
+                    initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+                    // Inheritance copies these permissions from the first
+                    // causal turn. Equivalence must include all of them,
+                    // including revoked snapshots (never native fallback).
+                    externalLink: sql<unknown>`(select a.canonical_snapshot
+                      from external_link_turn_authorities a
+                      where a.account_id = ${accountId}::uuid
+                        and a.workspace_id = ${workspaceId}::uuid
+                        and a.session_id = ${sessionId}::uuid
+                        and a.turn_id = ${schema.sessionTurns.id})`,
+                  })
+                  .from(schema.sessionTurns)
+                  .where(
+                    and(
+                      eq(schema.sessionTurns.accountId, accountId),
+                      eq(schema.sessionTurns.workspaceId, workspaceId),
+                      eq(schema.sessionTurns.sessionId, sessionId),
+                      inArray(schema.sessionTurns.id, causalTurnIds),
+                    ),
+                  );
+          // Host authority is owner-scoped. Resolve one batch per causal
+          // human, never mistake RLS-hidden selections for an empty grant set.
+          const turnsByHuman = new Map<string, string[]>();
+          for (const turn of causalTurns) {
+            const human =
+              turn.human ?? (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
+            if (!human) continue;
+            turnsByHuman.set(human, [...(turnsByHuman.get(human) ?? []), turn.id]);
+          }
+          const hostAuthorityByTurn = new Map<string, unknown[]>();
+          const incomingSubjectId = await rlsSubjectIdOrEmpty(tx);
+          try {
+            for (const [human, turnIds] of turnsByHuman) {
+              const authorities = await withWorkspaceSubjectRls(
+                tx,
+                workspaceId,
+                human,
+                async (subjectTx) =>
+                  subjectTx
+                    .select({
+                      turnId: schema.hostMcpTurnAuthorities.turnId,
+                      authority: sql<unknown>`${schema.hostMcpTurnAuthorities.canonicalSnapshot} - 'acceptedWork' - 'source'`,
+                    })
+                    .from(schema.hostMcpTurnAuthorities)
+                    .where(
+                      and(
+                        eq(schema.hostMcpTurnAuthorities.accountId, accountId),
+                        eq(schema.hostMcpTurnAuthorities.workspaceId, workspaceId),
+                        eq(schema.hostMcpTurnAuthorities.sessionId, sessionId),
+                        eq(schema.hostMcpTurnAuthorities.ownerSubjectId, human),
+                        inArray(schema.hostMcpTurnAuthorities.turnId, turnIds),
+                      ),
+                    )
+                    .orderBy(asc(schema.hostMcpTurnAuthorities.serverId)),
+              );
+              for (const row of authorities) {
+                hostAuthorityByTurn.set(row.turnId, [
+                  ...(hostAuthorityByTurn.get(row.turnId) ?? []),
+                  row.authority,
+                ]);
+              }
+            }
+          } finally {
+            await tx.execute(sql`select set_config(
+              'opengeni.subject_id', ${incomingSubjectId}, true
+            )`);
+          }
+          const causalExecutionKeys = new Map(
+            causalTurns.map((turn) => {
+              const human =
+                turn.human ?? (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
+              return [
+                turn.id,
+                human
+                  ? stableJson({
+                      human,
+                      externalLink: turn.externalLink,
+                      hostMcp: hostAuthorityByTurn.get(turn.id) ?? [],
+                    })
+                  : null,
+              ] as const;
+            }),
+          );
           const deliverable = selectBoundedSystemUpdateBatch(
-            validUpdates,
-            systemUpdatesCanCoalesceForExecution,
+            candidates,
+            (selected, candidate) =>
+              systemUpdatesCanCoalesceForExecution(selected, candidate, causalExecutionKeys),
+            true,
           );
           if (deliverable.length === 0) {
             let sequence = nextSequence - 1;
@@ -65284,7 +65510,17 @@ export async function claimSessionWorkForAttempt(
           )
           .orderBy(desc(schema.sessionAttemptInterruptions.requestedAt))
           .limit(1);
-        if (unquiescedInterruption) {
+        const [unsettledWriters] = await tx.execute<{ pending: boolean }>(sql`
+          select exists (
+            select 1 from session_turn_attempts attempt
+            where attempt.workspace_id = ${workspaceId}
+              and attempt.session_id = ${sessionId}
+              and attempt.state = 'closed'
+              and attempt.quiesced_at is null
+              and ${sessionAttemptPendingWritersSql(sql`attempt`)}
+          ) as pending
+        `);
+        if (unquiescedInterruption || unsettledWriters?.pending) {
           return { action: "unclaimed", reason: "control-pending" };
         }
         const registerAttempt = async (turn: typeof schema.sessionTurns.$inferSelect) => {
@@ -66075,6 +66311,16 @@ export async function claimSessionWorkForAttempt(
             return { action: "unclaimed", reason: "no-work" };
           }
 
+          const commandWait = await sessionInputWaitStateTx(tx, workspaceId, sessionId, session);
+          const wakeClasses = await pendingSystemUpdateWakeClassesTx(tx, workspaceId, sessionId);
+          if (
+            !wakeClasses.immediate &&
+            !wakeClasses.deferred &&
+            !(wakeClasses.command && commandWait.disposition === "held")
+          ) {
+            return { action: "unclaimed", reason: "no-work" };
+          }
+
           const pendingUpdates = await tx
             .select({ id: schema.sessionSystemUpdates.id })
             .from(schema.sessionSystemUpdates)
@@ -66112,6 +66358,8 @@ export async function claimSessionWorkForAttempt(
             session.lastSequence + 1,
             now,
             triggerEventId,
+            undefined,
+            { commandOnlyMayRun: commandWait.disposition === "held" },
           );
           if (delivered.count === 0) {
             if (delivered.events.length > 0) {
@@ -67399,52 +67647,7 @@ export async function reconcileSessionAttemptQuiescence(
               and event.turn_attempt_id = attempt.id
               and event.type = 'turn.recovery.requested'
           ) as recovery_requested,
-          (
-            exists (
-              select 1
-              from sandbox_workspace_mutation_admissions admission
-              where admission.account_id = attempt.account_id
-                and admission.workspace_id = attempt.workspace_id
-                and admission.session_id = attempt.session_id
-                and admission.settled_at is null
-                and (
-                  admission.attempt_id = attempt.id
-                  or (
-                    admission.actor_kind = 'process'
-                    and exists (
-                      select 1
-                      from sandbox_retained_processes process
-                      where process.account_id = attempt.account_id
-                        and process.workspace_id = attempt.workspace_id
-                        and process.session_id = attempt.session_id
-                        and process.id = admission.actor_id
-                        and process.owner_attempt_id = attempt.id
-                        and not exists (
-                          select 1
-                          from session_background_commands command
-                          where command.retained_process_id = process.id
-                            and command.state in ('running', 'stopping')
-                        )
-                    )
-                  )
-                )
-            )
-            or exists (
-              select 1
-              from sandbox_retained_processes process
-              where process.account_id = attempt.account_id
-                and process.workspace_id = attempt.workspace_id
-                and process.session_id = attempt.session_id
-                and process.owner_attempt_id = attempt.id
-                and process.state = 'active'
-                and not exists (
-                  select 1
-                  from session_background_commands command
-                  where command.retained_process_id = process.id
-                    and command.state in ('running', 'stopping')
-                )
-            )
-          ) as writer_pending
+          ${sessionAttemptPendingWritersSql(sql`attempt`)} as writer_pending
         from session_turn_attempts attempt
         where attempt.account_id = ${input.accountId}
           and attempt.workspace_id = ${input.workspaceId}
@@ -67462,7 +67665,8 @@ export async function reconcileSessionAttemptQuiescence(
     eligibility.temporal_workflow_run_id !== input.temporalWorkflowRunId ||
     eligibility.temporal_activity_id !== input.temporalActivityId ||
     eligibility.state !== "closed" ||
-    (!eligibility.interruption_settled &&
+    (!eligibility.writer_pending &&
+      !eligibility.interruption_settled &&
       (!eligibility.recovery_requested || eligibility.outcome !== "interrupted_recoverable")) ||
     eligibility.interruption_pending
   ) {
@@ -67996,7 +68200,8 @@ async function nextSessionAttemptAwaitingQuiescence(
         eq(schema.sessionTurnAttempts.state, "closed"),
         isNull(schema.sessionTurnAttempts.quiescedAt),
         sql`(
-          exists (
+          ${sessionAttemptPendingWritersSql(sql`${schema.sessionTurnAttempts}`)}
+          or exists (
             select 1
             from session_attempt_interruptions interruption
             where interruption.workspace_id = ${schema.sessionTurnAttempts.workspaceId}
@@ -68176,12 +68381,13 @@ async function queuedSteerHasUnquiescedPredecessor(
  * Which wake classes are represented among a session's pending machine inputs.
  * `immediate` kinds make the session runnable even against a current
  * `wait_for_input` declaration; deferred child notices only do so without one.
+ * Command results are separate: only a current explicit wait lets them wake.
  */
 async function pendingSystemUpdateWakeClassesTx(
   db: Database,
   workspaceId: string,
   sessionId: string,
-): Promise<{ immediate: boolean; deferred: boolean }> {
+): Promise<{ immediate: boolean; deferred: boolean; command: boolean }> {
   const rows = await db
     .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
     .from(schema.sessionSystemUpdates)
@@ -68194,13 +68400,18 @@ async function pendingSystemUpdateWakeClassesTx(
     );
   let immediate = false;
   let deferred = false;
+  let command = false;
   for (const row of rows) {
+    if (row.kind === "background_command_result") {
+      command = true;
+      continue;
+    }
     const wakeClass =
       SESSION_SYSTEM_UPDATE_WAKE_CLASS[row.kind as SessionSystemUpdateKind] ?? "immediate";
     if (wakeClass === "deferred") deferred = true;
     else immediate = true;
   }
-  return { immediate, deferred };
+  return { immediate, deferred, command };
 }
 
 /**
@@ -68568,8 +68779,10 @@ export async function peekSessionWork(
       // child status notices stay parked until the wait times out, is superseded
       // by newer input, or an immediate input arrives.
       const wakeClasses = await pendingSystemUpdateWakeClassesTx(scopedDb, workspaceId, sessionId);
-      if (wakeClasses.immediate) return { kind: "runnable" };
-      return inputWaitPeek ?? { kind: "runnable" };
+      if (wakeClasses.immediate || (wakeClasses.command && waitState.disposition === "held")) {
+        return { kind: "runnable" };
+      }
+      return inputWaitPeek ?? { kind: wakeClasses.deferred ? "runnable" : "idle" };
     }
     const [pendingAgentSteer] = await scopedDb
       .select({ id: schema.sessionSystemUpdates.id })
@@ -74548,6 +74761,7 @@ export async function markSessionWorkflowWakeDelivered(
                   ({ kind }) =>
                     SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] ===
                       "immediate" &&
+                    (kind !== "background_command_result" || wait.disposition === "held") &&
                     (!isChildLifecycleSystemUpdateKind(kind as SessionSystemUpdateKind) ||
                       goal?.status === "active" ||
                       wait.disposition === "held" ||
@@ -75118,6 +75332,10 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // durable pending row that the next claim delivers coalesced.
         const wakeClass = SESSION_SYSTEM_UPDATE_WAKE_CLASS[input.kind];
         const childLifecycleKind = isChildLifecycleSystemUpdateKind(input.kind);
+        const commandMayWake =
+          input.kind !== "background_command_result" ||
+          (await sessionInputWaitStateTx(tx, input.workspaceId, input.sessionId, session))
+            .disposition === "held";
         // Every immediate kind except the goal's own synthesized continuation
         // is external input for the goal. A child notice may not revive an
         // already-failed parent (settled authority); every other kind already
@@ -75125,6 +75343,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // resumed without a workflow wake would strand its obligation.
         const externalGoalInput =
           wakeClass === "immediate" &&
+          commandMayWake &&
           input.kind !== "goal_continuation" &&
           (!childLifecycleKind || session.status !== "failed");
         let goalStatus: string | null = null;
@@ -75199,6 +75418,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
           (session.status !== "failed" && (goalStatus === "active" || waitingForInput));
         const shouldWake =
           wakeClass === "immediate" &&
+          commandMayWake &&
           childNoticeMayWake &&
           !realtimeActive &&
           session.activeTurnId === null &&
@@ -75579,12 +75799,21 @@ function backgroundCommandTerminalMutation(input: {
         )
         .returning();
       if (!pendingEvent) throw new Error("Failed to append background command pending event");
-      const autoResumed = await autoResumeGoalPausedByCapInTransaction(tx, {
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        cause: { kind: "background_command_result", updateId: insertedUpdate.id },
-        now,
-      });
+      const commandWait = await sessionInputWaitStateTx(
+        tx,
+        input.workspaceId,
+        input.sessionId,
+        session,
+      );
+      const waitingForInput = commandWait.disposition === "held";
+      const autoResumed = waitingForInput
+        ? await autoResumeGoalPausedByCapInTransaction(tx, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            cause: { kind: "background_command_result", updateId: insertedUpdate.id },
+            now,
+          })
+        : null;
       const [resumedEvent] = autoResumed
         ? await tx
             .insert(schema.sessionEvents)
@@ -75614,6 +75843,7 @@ function backgroundCommandTerminalMutation(input: {
         input.sessionId,
       );
       const shouldWake =
+        waitingForInput &&
         session.status !== "failed" &&
         session.activeTurnId === null &&
         controlActive &&
@@ -77495,6 +77725,34 @@ async function mapSessionWithControl(
     tenancyViewer,
   );
   mapped.codexCurrentSelection = null;
+  mapped.dispatchWait = null;
+  if (row.status === "queued" && row.activeTurnId === null && control.state === "active") {
+    // Read only the existing delivery ledger. Neither a claimed wake nor a
+    // Temporal acknowledgement proves that a worker has admitted a turn.
+    const [wake] = await db
+      .select({
+        wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
+        deliveredRevision: schema.sessionWorkflowWakeOutbox.deliveredRevision,
+        attempts: schema.sessionWorkflowWakeOutbox.attempts,
+        nextAttemptAt: schema.sessionWorkflowWakeOutbox.nextAttemptAt,
+        lastError: schema.sessionWorkflowWakeOutbox.lastError,
+      })
+      .from(schema.sessionWorkflowWakeOutbox)
+      .where(
+        and(
+          eq(schema.sessionWorkflowWakeOutbox.workspaceId, row.workspaceId),
+          eq(schema.sessionWorkflowWakeOutbox.sessionId, row.id),
+        ),
+      )
+      .limit(1);
+    const pending = wake && wake.wakeRevision > wake.deliveredRevision;
+    mapped.dispatchWait = {
+      state: pending ? "pending" : wake ? "acknowledged" : "unavailable",
+      attempts: pending ? wake.attempts : 0,
+      nextAttemptAt: pending ? wake.nextAttemptAt.toISOString() : null,
+      lastError: pending ? wake.lastError : null,
+    };
+  }
   if (row.activeTurnId) {
     const [turn] = await db
       .select({
@@ -78868,4 +79126,65 @@ export * from "./knowledge-entries";
 
 export * from "./knowledge-indexing";
 
+import type { ConnectorToolPermission } from "@opengeni/contracts";
 export * from "./knowledge-document-preparation";
+
+export async function listConnectorToolPermissionPolicies(
+  db: Database,
+  input: { accountId: string; workspaceId: string; connectionId: string },
+) {
+  return withRlsContext(db, input, async (tx) =>
+    tx
+      .select()
+      .from(schema.connectorActionPolicies)
+      .where(
+        and(
+          eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+          eq(schema.connectorActionPolicies.connectionId, input.connectionId),
+        ),
+      )
+      .orderBy(asc(schema.connectorActionPolicies.id)),
+  );
+}
+
+/** All tools in a group change together, and never exceed the attempt snapshot bound. */
+export async function updateConnectorToolPermissionPolicies(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    serverId: string;
+    toolNames: string[];
+    policy: ConnectorToolPermission;
+  },
+): Promise<void> {
+  await withRlsContext(db, input, async (scoped) =>
+    scoped.transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`connector-tool-permissions:${input.workspaceId}`}, 0))`,
+      );
+      const existing = await tx
+        .select()
+        .from(schema.connectorActionPolicies)
+        .where(eq(schema.connectorActionPolicies.workspaceId, input.workspaceId));
+      const names = [...new Set(input.toolNames)].sort((left, right) => left.localeCompare(right));
+      const added = names.filter(
+        (name) =>
+          !existing.some(
+            (row) =>
+              row.connectionId === input.connectionId &&
+              row.serverId === input.serverId &&
+              row.toolName === name &&
+              row.actionName === "*",
+          ),
+      );
+      if (existing.length + added.length > 2048)
+        throw new Error("The workspace tool permission limit has been reached");
+      for (const toolName of names) {
+        await upsertConnectorActionPolicy(tx, { ...input, toolName, actionName: "*" });
+      }
+    }),
+  );
+}

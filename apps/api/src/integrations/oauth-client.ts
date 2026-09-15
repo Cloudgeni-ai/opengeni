@@ -1,4 +1,9 @@
 import { safeReturnPath } from "./oauth-return-path";
+import { assertOrganizationIntegrationAllowed, stableJson } from "@opengeni/contracts";
+import {
+  withOrganizationIntegrationAcquisition,
+  withOrganizationIntegrationPolicyFence,
+} from "@opengeni/db/organization-integration-policy";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -9,7 +14,7 @@ import {
   type ConnectionOwnership,
   type OAuthStartRequest,
 } from "@opengeni/contracts";
-import { requireEnvironmentEncryption } from "@opengeni/core";
+import { requireEnvironmentEncryption, integrationKeyForConnectProvider } from "@opengeni/core";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import type { Observability } from "@opengeni/observability";
 import {
@@ -63,6 +68,7 @@ import { ApiHttpError } from "../http/api-error";
 import { requireConnectOwnerAuthority } from "./connect-authority";
 import {
   DEFAULT_OAUTH_PROFILE,
+  OFFICIAL_GMAIL_MCP_URL,
   DEPLOYMENT_MANAGED_CLIENTS,
   builtInOAuthProfileByKey,
   assertAuthorizationServerNotReserved,
@@ -95,6 +101,8 @@ type OAuthClientDeps = {
 };
 
 export type OAuthStartContext = {
+  /** Server-selected dedicated adapter identity; never copied from request metadata. */
+  integrationKey?: "gmail" | "slack-personal";
   connectAttemptId?: string;
   externalContinuation?: ExternalActorContinuation;
   accountId: string;
@@ -129,6 +137,7 @@ type OAuthClientRegistration = {
 };
 
 type OAuthStatePayload = {
+  integrationKey?: "gmail" | "slack-personal";
   connectAttemptId?: string;
   externalContinuation?: ExternalActorContinuation;
   returnUrl?: string;
@@ -312,10 +321,90 @@ class OAuthCallbackDeadline {
   }
 }
 
+/** Policy is the outermost lock. Receipt replay still runs normal authorization,
+ * but the DB calls authorizeAcquisition only for uncommitted progress. Provider
+ * requests must happen after this transaction, never inside either wrapper. */
+export async function claimOAuthAcquisition(
+  db: Database,
+  scope: Parameters<typeof claimConnectOperation>[1],
+  input: Parameters<typeof claimConnectOperation>[2],
+  integrationKey: string | null,
+  acquiring = true,
+) {
+  if (!acquiring) return claimConnectOperation(db, scope, input);
+  return withOrganizationIntegrationPolicyFence(db, scope, (tx, policy) =>
+    claimConnectOperation(tx, scope, {
+      ...input,
+      authorizeAcquisition: async (locked, attempt) => {
+        assertOrganizationIntegrationAllowed(policy, integrationKey);
+        await input.authorizeAcquisition?.(locked, attempt);
+      },
+    }),
+  );
+}
+
+type IntegrationSourceSelection = Record<string, unknown> & {
+  id: string;
+  syncEnabled: boolean;
+  readPolicy: "allow" | "ask" | "block";
+};
+
+/** Compare server-bound selections, not provider classification. Removing a
+ * source, disabling sync, or narrowing its read permission acquires no authority.
+ * Generation/timestamp bookkeeping does not turn an unchanged save into setup. */
+export function integrationSourceSelectionRequiresAcquisition(
+  previous: readonly IntegrationSourceSelection[],
+  requested: readonly IntegrationSourceSelection[],
+): boolean {
+  const rank = { block: 0, ask: 1, allow: 2 };
+  const config = (source: IntegrationSourceSelection) => {
+    const {
+      selectedAt: _selectedAt,
+      configGeneration: _generation,
+      syncEnabled: _enabled,
+      readPolicy: _readPolicy,
+      ...binding
+    } = source;
+    return stableJson(binding);
+  };
+  return requested.some((source) => {
+    const existing = previous.find((candidate) => candidate.id === source.id);
+    return (
+      !existing ||
+      (!existing.syncEnabled && source.syncEnabled) ||
+      rank[source.readPolicy] > rank[existing.readPolicy] ||
+      config(existing) !== config(source)
+    );
+  });
+}
+
+export async function finishOAuthAcquisition(
+  db: Database,
+  scope: Parameters<typeof finishConnectOperation>[1],
+  input: Parameters<typeof finishConnectOperation>[2],
+  integrationKey: string | null,
+) {
+  return withOrganizationIntegrationPolicyFence(db, scope, (tx, policy) =>
+    finishConnectOperation(tx, scope, {
+      ...input,
+      authorizeAcquisition: async (locked, attempt) => {
+        assertOrganizationIntegrationAllowed(policy, integrationKey);
+        await input.authorizeAcquisition?.(locked, attempt);
+      },
+    }),
+  );
+}
+
 export async function startMcpOAuth(
   deps: OAuthClientDeps,
   context: OAuthStartContext,
 ): Promise<OAuthStartResponse> {
+  await withOrganizationIntegrationAcquisition(
+    deps.db,
+    context,
+    [context.integrationKey ?? "custom:mcp"],
+    async () => {},
+  );
   const deadline = new OAuthStartDeadline(deps.oauthStartDeadlineMs ?? OAUTH_START_DEADLINE_MS);
   try {
     return await startMcpOAuthWithinDeadline(deps, context, deadline);
@@ -439,10 +528,12 @@ async function startMcpOAuthWithinDeadline(
       context.payload.oauthClient,
       profile,
       signal,
+      context,
     ),
   );
   const key = requireEnvironmentEncryption(settings);
   const state = createSignedState(requireIntegrationsStateSecret(settings), {
+    ...(context.integrationKey ? { integrationKey: context.integrationKey } : {}),
     ...(context.connectAttemptId ? { connectAttemptId: context.connectAttemptId } : {}),
     accountId: context.accountId,
     workspaceId: context.workspaceId,
@@ -627,6 +718,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
 ): Promise<OAuthCallbackResult> {
   const { db, settings, observability } = deps;
   let state: OAuthStatePayload | null = null;
+  let integrationKey: string | null = "custom:mcp";
   let connectOperation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
   if (!input.state) {
     const error = new OAuthCallbackStageError(
@@ -644,10 +736,22 @@ async function completeMcpOAuthCallbackWithinDeadline(
   }
   try {
     state = readOAuthState(input.state, settings);
+    integrationKey = state.integrationKey ?? "custom:mcp";
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(db, state, state.connectAttemptId);
+      // Native Gmail setup uses its own provider id, but shares this callback.
+      // Bind that id to the exact reviewed personal Gmail destination before
+      // claiming an operation (including receipt replay), not to arbitrary MCP.
+      const gmailAttemptMatches =
+        stored.attempt.providerId === "gmail" &&
+        state.mcpUrl === OFFICIAL_GMAIL_MCP_URL &&
+        state.providerDomain === "gmailmcp.googleapis.com" &&
+        builtInOAuthProfileFor(state)?.key === "official-gmail" &&
+        state.ownership === "personal" &&
+        personalOwnerStateAccepted(state);
       if (
-        !["mcp-oauth", "slack-personal"].includes(stored.attempt.providerId) ||
+        (!["mcp-oauth", "slack-personal"].includes(stored.attempt.providerId) &&
+          !gmailAttemptMatches) ||
         stored.attempt.ownership !== state.ownership ||
         stored.returnUrl !== state.returnUrl
       )
@@ -657,12 +761,19 @@ async function completeMcpOAuthCallbackWithinDeadline(
         operationId: `oauth:${state.nonce}`,
         inputDigest: createHash("sha256").update(input.state).digest("hex"),
       };
-      const claim = await claimConnectOperation(db, state, {
-        ...connectOperation,
-        expectedRevision: stored.attempt.revision,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
-      });
+      integrationKey = integrationKeyForConnectProvider(stored.attempt.providerId);
+      const claim = await claimOAuthAcquisition(
+        db,
+        state,
+        {
+          ...connectOperation,
+          expectedRevision: stored.attempt.revision,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        },
+        integrationKey,
+        Boolean(input.code),
+      );
       if (claim.status === "replayed") return { redirectTo: stored.returnUrl, exactReturn: true };
     }
     // Fence state minted by an older deployment too: a rolling update must not
@@ -711,6 +822,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         reason: "missing_code",
       });
     }
+    await withOrganizationIntegrationAcquisition(db, state, [integrationKey], async () => {});
     const consumed = await runCallbackDatabaseStage(
       deadline,
       "state_verify",
@@ -843,38 +955,45 @@ async function completeMcpOAuthCallbackWithinDeadline(
     };
     if (connectOperation) {
       await runCallbackDatabaseStage(deadline, "persist", db, (scopedDb) =>
-        finishConnectOperation(scopedDb, state!, {
-          ...connectOperation!,
-          authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
-          commit: async (tx, current) => {
-            const connection = await persist(tx);
-            if (!connection)
-              throw new HTTPException(409, {
-                message: "connection changed during OAuth reconnect",
-              });
-            return {
-              ...current,
-              revision: current.revision + 1,
-              state: "complete",
-              completionRequirement: "connection",
-              credentialsCommitted: true,
-              nextAction: { type: "none" },
-              account: {
-                id: connection.id,
-                version: connection.version,
-                providerId: current.providerId,
-                label: state!.providerDomain,
-                ownership: current.ownership,
-                status: "connected",
-              },
-            };
+        finishOAuthAcquisition(
+          scopedDb,
+          state!,
+          {
+            ...connectOperation!,
+            authorize: (tx, _attempt, origin) =>
+              requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+            commit: async (tx, current) => {
+              const connection = await persist(tx);
+              if (!connection)
+                throw new HTTPException(409, {
+                  message: "connection changed during OAuth reconnect",
+                });
+              return {
+                ...current,
+                revision: current.revision + 1,
+                state: "complete",
+                completionRequirement: "connection",
+                credentialsCommitted: true,
+                nextAction: { type: "none" },
+                account: {
+                  id: connection.id,
+                  version: connection.version,
+                  providerId: current.providerId,
+                  label: state!.providerDomain,
+                  ownership: current.ownership,
+                  status: "connected",
+                },
+              };
+            },
           },
-        }),
+          integrationKey,
+        ),
       );
       return { redirectTo: state.returnUrl!, exactReturn: true };
     }
-    const connection = await runCallbackDatabaseStage(deadline, "persist", db, persist);
+    const connection = await runCallbackDatabaseStage(deadline, "persist", db, (scopedDb) =>
+      withOrganizationIntegrationAcquisition(scopedDb, state!, [integrationKey], persist),
+    );
     if (!connection) {
       throw new HTTPException(409, {
         message: "connection changed during OAuth reconnect; start again",
@@ -1206,6 +1325,7 @@ async function registerOAuthClient(
   manual: OAuthStartRequest["oauthClient"],
   profile: OAuthProviderProfile,
   signal: AbortSignal,
+  acquisition: Pick<OAuthStartContext, "accountId" | "workspaceId" | "integrationKey">,
 ): Promise<OAuthClientRegistration> {
   const operator = operatorClientForAs(settings, as);
   if (operator) {
@@ -1220,6 +1340,7 @@ async function registerOAuthClient(
       redirectUri,
       scopes,
       signal,
+      acquisition,
     );
   }
   if (selfRegistration === "cimd") {
@@ -1244,7 +1365,15 @@ async function registerOAuthClient(
       ),
     };
   }
-  return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri, scopes, signal);
+  return await getOrCreateDynamicClientRegistration(
+    db,
+    settings,
+    as,
+    redirectUri,
+    scopes,
+    signal,
+    acquisition,
+  );
 }
 
 export function preferredOAuthSelfRegistration(
@@ -1272,6 +1401,7 @@ async function getOrCreateDynamicClientRegistration(
   redirectUri: string,
   scopes: string[],
   signal: AbortSignal,
+  acquisition: Pick<OAuthStartContext, "accountId" | "workspaceId" | "integrationKey">,
 ): Promise<OAuthClientRegistration> {
   const storedClient = await loadIntegrationOAuthClient(db, settings, as.issuer);
   if (storedClient && storedDcrClientSatisfiesPolicy(storedClient, as, redirectUri, scopes)) {
@@ -1292,6 +1422,12 @@ async function getOrCreateDynamicClientRegistration(
       message: "manual OAuth client credentials are required for this authorization server",
     });
   }
+  await withOrganizationIntegrationAcquisition(
+    db,
+    acquisition,
+    [acquisition.integrationKey ?? "custom:mcp"],
+    async () => {},
+  );
   const dcr = await dynamicClientRegistration(settings, as, redirectUri, scopes, signal);
   const key = dcr.clientSecret ? requireEnvironmentEncryption(settings) : null;
   const storeInput = {
@@ -1303,34 +1439,43 @@ async function getOrCreateDynamicClientRegistration(
     tokenEndpointAuthMethod: dcr.tokenEndpointAuthMethod,
     metadata: registrationMetadata(as, redirectUri, scopes),
   };
-  if (storedClient) {
-    const replaced = await replaceIntegrationOAuthClientIfCurrent(db, {
-      ...storeInput,
-      expectedClientId: storedClient.clientId,
-    });
-    if (replaced?.clientId === dcr.clientId) {
-      return dcr;
-    }
-    return await loadCompatibleDcrWinner(db, settings, as, redirectUri, scopes);
-  }
-  const storedWinner = await storeIntegrationOAuthClient(db, storeInput);
-  if (storedWinner.clientId === dcr.clientId) {
-    return dcr;
-  }
-  const winner = await loadIntegrationOAuthClient(db, settings, as.issuer);
-  if (winner && storedDcrClientSatisfiesPolicy(winner, as, redirectUri, scopes)) {
-    return dcrRegistrationFromStored(winner);
-  }
-  if (winner) {
-    const replaced = await replaceIntegrationOAuthClientIfCurrent(db, {
-      ...storeInput,
-      expectedClientId: winner.clientId,
-    });
-    if (replaced?.clientId === dcr.clientId) {
-      return dcr;
-    }
-  }
-  return await loadCompatibleDcrWinner(db, settings, as, redirectUri, scopes);
+  // Registration has already happened outside this transaction. Fence only the
+  // durable client credential; a restriction racing DCR must not persist it.
+  return withOrganizationIntegrationAcquisition(
+    db,
+    acquisition,
+    [acquisition.integrationKey ?? "custom:mcp"],
+    async (tx) => {
+      if (storedClient) {
+        const replaced = await replaceIntegrationOAuthClientIfCurrent(tx, {
+          ...storeInput,
+          expectedClientId: storedClient.clientId,
+        });
+        if (replaced?.clientId === dcr.clientId) {
+          return dcr;
+        }
+        return await loadCompatibleDcrWinner(tx, settings, as, redirectUri, scopes);
+      }
+      const storedWinner = await storeIntegrationOAuthClient(tx, storeInput);
+      if (storedWinner.clientId === dcr.clientId) {
+        return dcr;
+      }
+      const winner = await loadIntegrationOAuthClient(tx, settings, as.issuer);
+      if (winner && storedDcrClientSatisfiesPolicy(winner, as, redirectUri, scopes)) {
+        return dcrRegistrationFromStored(winner);
+      }
+      if (winner) {
+        const replaced = await replaceIntegrationOAuthClientIfCurrent(tx, {
+          ...storeInput,
+          expectedClientId: winner.clientId,
+        });
+        if (replaced?.clientId === dcr.clientId) {
+          return dcr;
+        }
+      }
+      return await loadCompatibleDcrWinner(tx, settings, as, redirectUri, scopes);
+    },
+  );
 }
 
 function storedDcrClientSatisfiesPolicy(
@@ -1641,6 +1786,13 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   if (!payload) {
     throw new HTTPException(400, { message: "invalid or expired OAuth state" });
   }
+  if (
+    payload.integrationKey !== undefined &&
+    payload.integrationKey !== "gmail" &&
+    payload.integrationKey !== "slack-personal"
+  ) {
+    throw new HTTPException(400, { message: "invalid OAuth integration identity" });
+  }
   const nowSeconds = Math.floor(Date.now() / 1000);
   const iat = numberValue(payload.iat);
   if (iat === undefined || nowSeconds - iat > oauthStateTtlMs / 1000 || nowSeconds < iat) {
@@ -1697,6 +1849,9 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     ownership: connectionOwnership(payload.ownership) ?? "personal",
     // Absent on a legacy state, which therefore cannot land a personal owner.
     personalOwnerVerified: personalOwnerVerifiedInState(payload),
+    ...(payload.integrationKey
+      ? { integrationKey: payload.integrationKey as "gmail" | "slack-personal" }
+      : {}),
     providerDomain: requiredString(payload.providerDomain, "state.providerDomain"),
     mcpUrl: stringValue(payload.mcpUrl) ?? resource,
     resource,

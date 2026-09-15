@@ -1,7 +1,17 @@
 import {
+  withOrganizationIntegrationAcquisition,
+  withOrganizationIntegrationPolicyFence,
+} from "@opengeni/db/organization-integration-policy";
+import {
+  claimOAuthAcquisition,
+  finishOAuthAcquisition,
+  integrationSourceSelectionRequiresAcquisition,
+} from "./oauth-client";
+import {
   scheduledTaskKnowledgeSource,
   requireScheduledTaskKnowledgeSource,
   knowledgeSourceAgentConfig,
+  assertOrganizationIntegrationAllowed,
 } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
 import { createHash } from "node:crypto";
@@ -44,7 +54,6 @@ import {
   ConnectionDisconnectGenerationError,
   ConnectionDisconnectIdempotencyError,
   consumeIntegrationOAuthStateNonce,
-  claimConnectOperation,
   finishConnectOperation,
   getConnectAttempt,
   decryptEnvironmentValue,
@@ -132,6 +141,7 @@ export async function startAtlassianOAuth(
     externalContinuation?: ExternalActorContinuation;
   },
 ): Promise<AtlassianOAuthStartResponse> {
+  await withOrganizationIntegrationAcquisition(deps.db, input, ["atlassian"], async () => {});
   const oauth = requireAtlassianSettings(deps.settings);
   const existing = input.payload.connectionId
     ? await getConnectionMetadata(
@@ -208,12 +218,18 @@ export async function completeAtlassianOAuthCallback(
         operationId: `oauth:${state.nonce}`,
         inputDigest: createHash("sha256").update(input.state!).digest("hex"),
       };
-      const claim = await claimConnectOperation(deps.db, state, {
-        ...operation,
-        expectedRevision: stored.attempt.revision,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
-      });
+      const claim = await claimOAuthAcquisition(
+        deps.db,
+        state,
+        {
+          ...operation,
+          expectedRevision: stored.attempt.revision,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        },
+        "atlassian",
+        Boolean(input.code && !input.error),
+      );
       if (claim.status === "replayed") return { redirectTo: exactReturnUrl, exactReturn: true };
     }
     await requireCallbackGrant(deps, state);
@@ -247,6 +263,7 @@ export async function completeAtlassianOAuthCallback(
     }
     if (input.error) throw new AtlassianCallbackError("provider_denied");
     if (!input.code) throw new AtlassianCallbackError("missing_code");
+    await withOrganizationIntegrationAcquisition(deps.db, state, ["atlassian"], async () => {});
 
     const oauth = requireAtlassianSettings(deps.settings);
     const redirectUri = `${baseUrl}/v1/integrations/atlassian/callback`;
@@ -360,36 +377,46 @@ export async function completeAtlassianOAuthCallback(
           });
     };
     if (operation) {
-      await finishConnectOperation(deps.db, acceptedState, {
-        ...operation,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
-        commit: async (tx, current) => {
-          const connection = await persist(tx);
-          if (!connection) throw new AtlassianCallbackError("connection_conflict");
-          return {
-            ...current,
-            revision: current.revision + 1,
-            state: "complete",
-            credentialsCommitted: true,
-            nextAction: { type: "none" },
-            account: {
-              id: connection.id,
-              version: connection.version,
-              providerId: "atlassian",
-              label: profile.displayName ?? "Atlassian",
-              ownership: "personal",
-              status: "connected",
-            },
-          };
+      await finishOAuthAcquisition(
+        deps.db,
+        acceptedState,
+        {
+          ...operation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+          commit: async (tx, current) => {
+            const connection = await persist(tx);
+            if (!connection) throw new AtlassianCallbackError("connection_conflict");
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete",
+              credentialsCommitted: true,
+              nextAction: { type: "none" },
+              account: {
+                id: connection.id,
+                version: connection.version,
+                providerId: "atlassian",
+                label: profile.displayName ?? "Atlassian",
+                ownership: "personal",
+                status: "connected",
+              },
+            };
+          },
         },
-      });
+        "atlassian",
+      );
       return { redirectTo: exactReturnUrl!, exactReturn: true };
     }
-    const connection = await deps.db.transaction(async (tx) => {
-      await requireCallbackGrant({ ...deps, db: tx }, acceptedState);
-      return persist(tx);
-    });
+    const connection = await withOrganizationIntegrationAcquisition(
+      deps.db,
+      acceptedState,
+      ["atlassian"],
+      async (tx) => {
+        await requireCallbackGrant({ ...deps, db: tx }, acceptedState);
+        return persist(tx);
+      },
+    );
     if (!connection) throw new AtlassianCallbackError("connection_conflict");
     return {
       redirectTo: returnUrl(returnBaseUrl, state.returnPath, "connected", connection.id),
@@ -705,9 +732,28 @@ export async function saveAtlassianSources(
     initiatingSubjectId: input.subjectId,
   });
 
-  const available = (await browseAtlassianSources(deps, input)).items;
+  const requestedSelection = parsed.data.sources.map((source) => ({
+    ...source,
+    destination,
+    syncCadence: parsed.data.syncCadence,
+    syncEnabled: parsed.data.syncEnabled,
+    readPolicy: parsed.data.readPolicy,
+  }));
+  const acquiring = integrationSourceSelectionRequiresAcquisition(
+    metadata.selectedSources,
+    requestedSelection,
+  );
+  if (acquiring) {
+    await withOrganizationIntegrationAcquisition(deps.db, input, ["atlassian"], async () => {});
+  }
+
+  const available =
+    acquiring && parsed.data.sources.length
+      ? (await browseAtlassianSources(deps, input)).items
+      : [];
   const availableById = new Map(available.map((source) => [source.id, source]));
   const verified = parsed.data.sources.map((source) => {
+    if (!acquiring) return source;
     const current = availableById.get(source.id);
     if (
       !current ||
@@ -724,28 +770,39 @@ export async function saveAtlassianSources(
     return current;
   });
   const previousSources = metadata.selectedSources;
-  const updated = await transitionConnectionState(deps.db, {
-    workspaceId: input.workspaceId,
-    connectionId: existing.id,
-    visibleToSubjectId: input.subjectId,
-    expectedVersion: existing.version,
-    metadata: AtlassianConnectionMetadata.parse({
-      ...metadata,
-      documentDestination: destination,
-      selectedSources: verified.map((source) => ({
-        ...source,
-        destination,
-        syncCadence: parsed.data.syncCadence,
-        syncEnabled: parsed.data.syncEnabled,
-        configGeneration:
-          (previousSources.find((previous) => previous.id === source.id)?.configGeneration ?? 0) +
-          1,
-        readPolicy: parsed.data.readPolicy,
-        selectedAt: new Date().toISOString(),
-      })),
-    }),
-    updatedBySubjectId: input.subjectId,
-  });
+  const updated = await withOrganizationIntegrationPolicyFence(
+    deps.db,
+    input,
+    async (tx, policy) => {
+      // The exact generation checked by transitionConnectionState binds this
+      // comparison to the row being changed. Provider verification already ended.
+      if (integrationSourceSelectionRequiresAcquisition(previousSources, requestedSelection)) {
+        assertOrganizationIntegrationAllowed(policy, "atlassian");
+      }
+      return transitionConnectionState(tx, {
+        workspaceId: input.workspaceId,
+        connectionId: existing.id,
+        visibleToSubjectId: input.subjectId,
+        expectedVersion: existing.version,
+        metadata: AtlassianConnectionMetadata.parse({
+          ...metadata,
+          documentDestination: destination,
+          selectedSources: verified.map((source) => ({
+            ...source,
+            destination,
+            syncCadence: parsed.data.syncCadence,
+            syncEnabled: parsed.data.syncEnabled,
+            configGeneration:
+              (previousSources.find((previous) => previous.id === source.id)?.configGeneration ??
+                0) + 1,
+            readPolicy: parsed.data.readPolicy,
+            selectedAt: new Date().toISOString(),
+          })),
+        }),
+        updatedBySubjectId: input.subjectId,
+      });
+    },
+  );
   if (!updated) throw new HTTPException(409, { message: "Atlassian connection changed" });
   await materializeSchedules(deps, {
     ...input,
@@ -783,14 +840,27 @@ export async function transitionAtlassianLifecycle(
   if (target === "paused") {
     await deauthorizeConnectionSources(deps, connection, input.subjectId, "connection_paused");
   }
-  const updated = await transitionConnectionState(deps.db, {
-    workspaceId: input.workspaceId,
-    connectionId: input.connectionId,
-    visibleToSubjectId: input.subjectId,
-    expectedVersion: connection.version,
-    metadata: AtlassianConnectionMetadata.parse({ ...metadata, lifecycle: lifecycle(target) }),
-    updatedBySubjectId: input.subjectId,
-  });
+  const persist = (tx: Database) =>
+    transitionConnectionState(tx, {
+      workspaceId: input.workspaceId,
+      connectionId: input.connectionId,
+      visibleToSubjectId: input.subjectId,
+      expectedVersion: connection.version,
+      metadata: AtlassianConnectionMetadata.parse({ ...metadata, lifecycle: lifecycle(target) }),
+      updatedBySubjectId: input.subjectId,
+    });
+  const updated =
+    target === "active"
+      ? await withOrganizationIntegrationPolicyFence(
+          deps.db,
+          { accountId: connection.accountId, workspaceId: input.workspaceId },
+          (tx, policy) => {
+            if ((metadata.lifecycle?.state ?? "active") !== "active")
+              assertOrganizationIntegrationAllowed(policy, "atlassian");
+            return persist(tx);
+          },
+        )
+      : await persist(deps.db);
   if (!updated) throw new HTTPException(409, { message: "Atlassian connection changed" });
   await setSchedulePause(deps, input.workspaceId, input.connectionId, target === "paused");
   return updated;

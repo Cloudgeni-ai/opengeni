@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "182363157bd87ca47b0e67ab2365976849f7f88efa62bd82bf2ebd922976834b"
+      "sha256": "da63dfa0686fc10b7029c6152bd8ae8fe9b24044d08cbdcd0aa63731a038d0cc"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -642,6 +642,12 @@
       "job": "package-contracts",
       "step": "Install pinned artifact-kernel build toolchain",
       "sha256": "4b16355061365f4914d4e87afb8eeb3c12b30cd6bf63573c548e15016bd143f0"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "package-contracts",
+      "step": "Native report delivery contracts",
+      "sha256": "f2a29e986e8d98bc124d9fbd9ea179d89787212a7ff354ec08d7b53863028b80"
     },
     {
       "workflow": ".github/workflows/ci.yml",

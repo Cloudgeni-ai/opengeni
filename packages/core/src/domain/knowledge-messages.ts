@@ -82,6 +82,7 @@ export async function retainKnowledgeMessage(
         content: text,
         source: {
           kind: "conversation",
+          purpose: "evidence",
           sessionId: event.sessionId,
           externalId: event.id,
           capturedAt: event.occurredAt,

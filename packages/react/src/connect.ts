@@ -3,6 +3,12 @@
 // attempt another observer is displaying or a durable backend operation.
 import { useMemo, useSyncExternalStore } from "react";
 export {
+  CapabilityCatalogRow,
+  CapabilityCatalogIndicator,
+  type CapabilityCatalogRowProps,
+  type CapabilityCatalogStatus,
+} from "./capability-catalog-row";
+export {
   SkillDiscovery,
   type SkillDiscoveryProps,
   type SkillDiscoveryClient,

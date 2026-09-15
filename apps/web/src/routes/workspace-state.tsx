@@ -34,7 +34,8 @@ import {
   useWorkspaceInstructionPolicyOnboardingProposals,
   useWorkspaceStateInventory,
 } from "./workspace-state-loader";
-import { SkillsPanel } from "./skills-panel";
+import { KnowledgeSkills } from "@/components/knowledge/knowledge-skills";
+import { PluginSearch } from "@/components/capabilities/capability-catalog-sections";
 
 const KnowledgeFilesPanel = lazyRouteComponent(() => import("./documents"), "KnowledgeFilesPanel");
 
@@ -1277,13 +1278,23 @@ export function WorkspaceStateRoute({
   fileId?: string;
   review?: boolean;
 }) {
+  const [skillsQuery, setSkillsQuery] = useState("");
   return (
-    <AgentKnowledgePage key={workspaceId} workspaceId={workspaceId} section={view ?? "knowledge"}>
+    <AgentKnowledgePage
+      key={workspaceId}
+      workspaceId={workspaceId}
+      section={view ?? "knowledge"}
+      search={
+        view === "skills" ? (
+          <PluginSearch scope="skills" query={skillsQuery} onQueryChange={setSkillsQuery} />
+        ) : undefined
+      }
+    >
       <Suspense fallback={<WorkspaceStateLoading />}>
         {view === "files" ? (
           <KnowledgeFilesPanel workspaceId={workspaceId} />
         ) : view ? (
-          <WorkspaceBehaviorPanel workspaceId={workspaceId} view={view} />
+          <WorkspaceBehaviorPanel workspaceId={workspaceId} view={view} skillsQuery={skillsQuery} />
         ) : (
           <KnowledgePanel
             workspaceId={workspaceId}
@@ -1299,8 +1310,10 @@ export function WorkspaceStateRoute({
 function WorkspaceBehaviorPanel({
   workspaceId,
   view,
+  skillsQuery,
 }: {
   workspaceId: string;
+  skillsQuery: string;
   view: "instructions" | "skills";
 }) {
   const context = useAppContext();
@@ -1342,7 +1355,11 @@ function WorkspaceBehaviorPanel({
               />
             ) : null}
             {view === "skills" ? (
-              <SkillsPanel workspaceId={workspaceId} personalWorkspace={personalWorkspace} />
+              <KnowledgeSkills
+                workspaceId={workspaceId}
+                personalWorkspace={personalWorkspace}
+                query={skillsQuery}
+              />
             ) : null}
           </div>
         ) : null}

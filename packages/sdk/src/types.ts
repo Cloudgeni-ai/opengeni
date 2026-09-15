@@ -1,6 +1,7 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
 
 export type BundledSkillId =
+  | "builtin:opengeni-help"
   | "builtin:opengeni-visualize"
   | "builtin:document-parsing"
   | "builtin:opengeni-skills"
@@ -585,11 +586,13 @@ export type ToolRef = {
 export type SessionToolPolicy = {
   mode: "workspace_default" | "explicit" | "inherited";
   inheritedFromSessionId: string | null;
+  excludedMcpServerIds?: string[] | undefined;
 };
 
 export type UpdateSessionToolPolicyRequest =
   | {
       mode: "workspace_default";
+      excludedMcpServerIds?: string[] | undefined;
       expectedVersion: number;
     }
   | {
@@ -1379,6 +1382,16 @@ export type CancelSessionBackgroundCommandResult = {
 };
 
 export type Session = {
+  /** Detail-only dispatch evidence; delivery does not prove turn execution. */
+  dispatchWait?:
+    | {
+        state: "pending" | "acknowledged" | "unavailable";
+        attempts: number;
+        nextAttemptAt: string | null;
+        lastError: string | null;
+      }
+    | null
+    | undefined;
   /** Detail-only failure evidence through lastSequence; independent of timeline paging. */
   failureDiagnostics?:
     | {
@@ -1539,6 +1552,10 @@ export type SessionListResponse = {
   pinnedTruncated?: boolean;
   /** Present only when the server recognized and applied additive list filters. */
   filtersApplied?: true;
+  /** Effective server ordering. Name: ASCII-space trim, ASCII case fold,
+   * UTF-8 byte order, id ASC. Date keys and id ties are DESC. */
+  sortBy?: "updatedAt" | "createdAt" | "name" | "archivedAt";
+  archiveStatus?: "active" | "archived" | "all";
   /** Server-resolved Site origin filter, when requested. */
   originSiteId?: string;
   sessions: Session[];
@@ -2914,6 +2931,7 @@ export type CreateSessionRequest = {
     | undefined;
   /** Omitted: defaults/inheritance; []: no bundled guidance. Children cannot widen. */
   bundledSkillIds?: BundledSkillId[] | undefined;
+  excludedMcpServerIds?: string[] | undefined;
   // Optional UUID preallocated by an embedding host so it can durably link its
   // projection before OpenGeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
@@ -3062,6 +3080,7 @@ export type Permission = KnownPermission | (string & {});
 
 export type FirstPartyMcpToolName =
   | "knowledge_search"
+  | "knowledge_prepare_save"
   | "knowledge_get"
   | "knowledge_browse"
   | "knowledge_save"
@@ -4507,6 +4526,7 @@ export type WorkspaceSessionDefaults = {
 };
 
 export type WorkspaceSessionToolDefaults = {
+  inheritConnectedMcpServers?: boolean | undefined;
   mcpServerIds?: string[];
   firstPartyMcpTools?: FirstPartyMcpToolName[];
 };
@@ -4574,7 +4594,11 @@ export type UpdateWorkspaceSettingsRequest = {
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
   sessionToolDefaults?:
-    | { mcpServerIds?: string[] | null; firstPartyMcpTools?: FirstPartyMcpToolName[] | null }
+    | {
+        mcpServerIds?: string[] | null;
+        firstPartyMcpTools?: FirstPartyMcpToolName[] | null;
+        inheritConnectedMcpServers?: boolean | null;
+      }
     | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
@@ -5007,6 +5031,7 @@ export type ComposerDraft = {
 
 export type NewSessionDraftOptions = {
   agentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
+  excludedMcpServerIds?: string[] | undefined;
   visibility?: SessionVisibility | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   targetSandboxId?: string | undefined;
@@ -8376,3 +8401,26 @@ export type ModelConnectionAccessResponse = {
   workspaces: Array<{ id: string; name: string }>;
   personalWorkspacesSupported: boolean;
 };
+
+export type ConnectorToolPermission = "allow" | "ask" | "block";
+export type ConnectorToolPermissionEntry = {
+  name: string;
+  title?: string | undefined;
+  description?: string | undefined;
+  group: "read" | "write" | "other";
+  permission: ConnectorToolPermission;
+  inherited: boolean;
+  approvalRequired: boolean;
+};
+export type ConnectorToolPermissionsResponse = {
+  connectionId: string;
+  serverId: string;
+  defaultPermission: ConnectorToolPermission | null;
+  tools: ConnectorToolPermissionEntry[];
+  discoveryError: string | null;
+  canManage: boolean;
+};
+export type UpdateConnectorToolPermissionsRequest = {
+  connectionId: string;
+  permission: ConnectorToolPermission;
+} & ({ target: "default" } | { target: "tools"; toolNames: string[] });

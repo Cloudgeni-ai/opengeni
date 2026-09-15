@@ -11,6 +11,8 @@ export type UseWorkspaceSessionsOptions = ClientOverride & {
   /** Return only the complete personal pinned projection. */
   pinsOnly?: boolean | undefined;
   archivedOnly?: boolean | undefined;
+  sortBy?: "updatedAt" | "createdAt" | "name" | undefined;
+  archiveStatus?: "active" | "archived" | "all" | undefined;
   /** Refresh interval (ms) for fleet/manager views. Off by default. */
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
@@ -49,6 +51,8 @@ export function useWorkspaceSessions(
   const search = options.search;
   const pinsOnly = options.pinsOnly;
   const archivedOnly = options.archivedOnly;
+  const sortBy = options.sortBy;
+  const archiveStatus = options.archiveStatus;
   const enabled = options.enabled ?? true;
   const nextReadRevision = useRef(0);
   const nextReadGeneration = useRef(0);
@@ -61,6 +65,8 @@ export function useWorkspaceSessions(
     search ?? "",
     pinsOnly ? "1" : "",
     archivedOnly ? "archived" : "active",
+    sortBy ?? "",
+    archiveStatus ?? "",
   ].join("\u0000");
   const previousQueryKey = useRef(queryKey);
   const queryKeyTransition = previousQueryKey.current !== queryKey;
@@ -77,6 +83,8 @@ export function useWorkspaceSessions(
         ...(search !== undefined ? { search } : {}),
         ...(pinsOnly ? { pinsOnly: true } : {}),
         ...(archivedOnly ? { archivedOnly: true } : {}),
+        ...(sortBy ? { sortBy } : {}),
+        ...(archiveStatus ? { archiveStatus } : {}),
         signal,
       });
       return {
@@ -96,6 +104,8 @@ export function useWorkspaceSessions(
       search,
       pinsOnly,
       archivedOnly,
+      sortBy,
+      archiveStatus,
       queryKey,
     ],
   );

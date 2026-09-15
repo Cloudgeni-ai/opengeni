@@ -13,6 +13,21 @@ const documents = "builtin:opengeni-documents" as const;
 const sites = "builtin:opengeni-sites" as const;
 const projects = "builtin:opengeni-projects" as const;
 
+test("product help is addressable and cannot escape a host's empty selection", () => {
+  const help = "builtin:opengeni-help" as const;
+  expect(
+    CreateSessionRequest.parse({ initialMessage: "Help", bundledSkillIds: [help] }).bundledSkillIds,
+  ).toEqual([help]);
+  expect(
+    ScheduledTaskAgentConfig.parse({ prompt: "Help", bundledSkillIds: [help] }).bundledSkillIds,
+  ).toEqual([help]);
+  expect(
+    AutomationSessionTemplate.parse({ prompt: "Help", bundledSkillIds: [help] }).bundledSkillIds,
+  ).toEqual([help]);
+  expect(resolveBundledSkillSelection(undefined, [])).toEqual([]);
+  expect(() => resolveBundledSkillSelection([help], [])).toThrow("cannot widen");
+});
+
 test("Projects uses the ordinary bundle selection and inheritance contract", () => {
   expect(
     CreateSessionRequest.parse({ initialMessage: "Organize", bundledSkillIds: [projects] })

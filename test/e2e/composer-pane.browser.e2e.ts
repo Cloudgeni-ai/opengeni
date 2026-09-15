@@ -42,6 +42,23 @@ describe("console composer in a split desktop pane", () => {
       viewport: { width: 1775, height: 1000 },
       reducedMotion: "reduce",
     });
+    // Keep the production settings editor, but supply deterministic context at
+    // the fixture boundary instead of bootstrapping a live authenticated app.
+    await page.route("**/src/context.tsx", (route) =>
+      route.fulfill({
+        contentType: "application/javascript",
+        body: `let settings = {}; const context = {
+        client: {
+          getAgentLearningSettings: async () => ({ version: 1, settings }),
+          saveAgentLearningSettings: async (_workspace, input) => {
+            settings = { ...settings, ...input.settings };
+            return { version: 2, settings };
+          }
+        },
+        captureWorkspaceInvocation: () => ({}), ownsWorkspaceInvocation: () => true
+      }; export function useAppContext() { return context; }`,
+      }),
+    );
     await page.goto(url, { waitUntil: "networkidle" });
   }, 60_000);
 
@@ -88,10 +105,10 @@ describe("console composer in a split desktop pane", () => {
     await page.screenshot({ path: `${root}/composer-pane-fixed.png` });
   });
 
-  test("shared actions keep repositories, tools, and variable sets reachable", async () => {
+  test("shared actions keep repositories, connectors, and variable sets reachable", async () => {
     await page.getByRole("button", { name: "More composer actions" }).click();
     expect(await page.getByRole("menuitem", { name: /Repositories/ }).isVisible()).toBe(true);
-    expect(await page.getByRole("menuitem", { name: /Tools/ }).isVisible()).toBe(true);
+    expect(await page.getByRole("menuitem", { name: /Connectors/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: /Variable sets/ }).isVisible()).toBe(true);
     expect(await page.getByRole("menuitem", { name: "Chat settings", exact: true }).count()).toBe(
       1,
@@ -99,7 +116,7 @@ describe("console composer in a split desktop pane", () => {
     await page.keyboard.press("Escape");
   });
 
-  test("new-session panels use the viewport and preserve navigation and focus", async () => {
+  test("new-session popovers fit the viewport and preserve navigation and focus", async () => {
     await page.goto(`${page.url().split("?")[0]}?new-session`, { waitUntil: "networkidle" });
     for (const viewport of [
       { width: 1280, height: 800 },
@@ -109,7 +126,7 @@ describe("console composer in a split desktop pane", () => {
       await page.locator("main").evaluate((node) => {
         node.style.width = "min(448px, calc(100vw - 32px))";
       });
-      for (const name of ["Repositories", "Tools", "Variable sets"]) {
+      for (const name of ["Repositories", "Connectors", "Variable sets"]) {
         const plus = page.getByRole("button", { name: "More composer actions" });
         expect(await page.getByRole("button", { name: "More composer actions" }).count()).toBe(1);
         await plus.click();
@@ -117,15 +134,15 @@ describe("console composer in a split desktop pane", () => {
           await page.getByRole("menuitem", { name: "Chat settings", exact: true }).count(),
         ).toBe(1);
         await page.getByRole("menuitem", { name: new RegExp(name) }).click();
-        const dialog = page.getByRole("dialog", { name, exact: true });
+        const dialog = page.getByRole("menu");
         await dialog.waitFor({ state: "visible" });
         const box = (await dialog.boundingBox())!;
-        expect(box.height).toBeGreaterThan(300);
+        expect(box.height).toBeGreaterThan(name === "Connectors" ? 60 : 120);
         expect(box.x).toBeGreaterThanOrEqual(0);
         expect(box.y).toBeGreaterThanOrEqual(0);
         expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
         expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
-        if (name !== "Tools") {
+        if (name !== "Connectors") {
           const scroll = dialog.getByTestId("picker-scroll");
           expect(await scroll.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
           await dialog.getByRole("button", { name: /option 30/ }).scrollIntoViewIfNeeded();
@@ -144,9 +161,44 @@ describe("console composer in a split desktop pane", () => {
       }
       await page.getByRole("button", { name: "More composer actions" }).click();
       await page.getByRole("menuitem", { name: /Repositories/ }).click();
-      await page.getByRole("dialog").waitFor({ state: "visible" });
+      await page.getByRole("menu").waitFor({ state: "visible" });
       await page.screenshot({ path: `${root}/new-session-picker-${viewport.width}.png` });
       await page.keyboard.press("Escape");
+    }
+  }, 60_000);
+
+  test("settings share white popovers with Back, outside dismissal and a single voice picker", async () => {
+    for (const newSession of [false, true]) {
+      await page.setViewportSize({ width: 1000, height: 900 });
+      await page.goto(`${page.url().split("?")[0]}${newSession ? "?new-session" : ""}`, {
+        waitUntil: "networkidle",
+      });
+      await page.evaluate(() => document.documentElement.setAttribute("data-og-theme", "light"));
+      const plus = page.getByRole("button", { name: "More composer actions" });
+      await plus.click();
+      const menu = page.getByRole("menu");
+      const white = await menu.evaluate((node) => getComputedStyle(node).backgroundColor);
+      expect(await page.getByRole("menuitem", { name: /Voice model/ }).count()).toBe(0);
+      await page.getByRole("menuitem", { name: "Chat settings", exact: true }).click();
+      await page.getByLabel("Knowledge", { exact: true }).waitFor();
+      expect(await page.getByRole("dialog").count()).toBe(0);
+      expect(await page.getByRole("button", { name: /close/i }).count()).toBe(0);
+      expect(await menu.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe(white);
+      await page.getByLabel("Knowledge", { exact: true }).selectOption("off");
+      await page.screenshot({
+        path: `${root}/composer-settings-${newSession ? "new" : "existing"}.png`,
+      });
+      await page.getByRole("button", { name: "Back", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Chat settings", exact: true }).click();
+      expect(await page.getByLabel("Knowledge", { exact: true }).inputValue()).toBe("off");
+      await page.keyboard.press("Escape");
+      await menu.waitFor({ state: "hidden" });
+      await plus.click();
+      await page.mouse.click(950, 20);
+      await menu.waitFor({ state: "hidden" });
+      await page.setViewportSize({ width: 390, height: 800 });
+      await page.locator("main").evaluate((node) => (node.style.width = "calc(100vw - 48px)"));
+      expect(await page.getByRole("button", { name: /choose voice model/i }).count()).toBe(1);
     }
   }, 60_000);
 });

@@ -181,6 +181,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/chat-media-entry.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts": [
     "@opengeni/artifact-tool",
     "@opengeni/react",
@@ -245,6 +251,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/composer-pane.browser.e2e.ts": ["opengeni-web", "@opengeni/react", "@opengeni/testing"],
+  "test/e2e/compact-session-view.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/queue-surface.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/user-message-disclosure.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/realtime-demo.browser.e2e.ts": [
@@ -253,6 +260,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/react-compiled-css.browser.e2e.ts": ["@opengeni/react"],
+  "test/e2e/preview-loading.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/restored-attachment-preview.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -320,6 +328,8 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/browser-account-request-observation.browser.e2e.ts": [],
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/appearance.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/capability-catalog.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/plugin-discovery.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/capability-details.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/workspace-switcher-trigger.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-rail-row-metadata.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],

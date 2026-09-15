@@ -36,6 +36,22 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+After execution ends, every physical finalization stage has a five-minute
+containment deadline, including normally completed turns. This is not a
+run-length limit. Heartbeats report `finalizing` and the current bounded
+`finalizationStage`; Grafana exposes stage occupancy and thirty-second slow-stage observations;
+the bounded containment log and worker restarts identify actual exits.
+A stuck writer drain is never detached to release a successor: the worker exits,
+and normal heartbeat recovery and durable retained-process proofs govern
+admission. The deadline resets only when cleanup advances to another stage and
+is disarmed when the finalizer exits, including exceptional exits. Publishing a
+quiescence receipt does not disable containment for later housekeeping.
+Closed attempts with unsettled workspace mutations or active, unadopted retained
+processes also block admission, even when their logical outcome is `completed`.
+The work peeker exposes the existing previous-attempt wait, and the final writer's
+settlement re-arms the workflow wake. Independently adopted background commands
+retain their own lifetime and do not hold this turn-cleanup gate.
+
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its
 own batch's durable history-item receipt; a turn-wide update query can therefore
@@ -298,9 +314,11 @@ schedules, goal continuation, compaction, and coalesced internal batches use
 explicit service principals. An Agent Steer remains the causal initiator when
 authority-neutral ordinary machine notices coalesce into its inference; those
 notices cannot erase the steering subject merely because they arrived in the
-same batch. Child lifecycle and goal-continuation updates freeze their exact
-target causal turn and claim separately from a Steer or a different target
-turn. A malformed historical authority-bearing update also receives an
+same batch. Child lifecycle, command and goal-continuation updates retain their
+exact target causal turn. Different originating turns may coalesce only when
+they resolve to the same receiving-session human and their frozen execution
+permissions match. Unresolved origins keep exact-turn isolation; Agent Steer
+keeps its exact caller attempt. A malformed historical authority-bearing update also receives an
 isolated claim instead of borrowing a coalesced principal; Agent Steer lineage
 is complete only when the caller session, turn, attempt, and execution
 generation all validate. The session creator is stored separately and is
@@ -344,6 +362,14 @@ model, reasoning effort, and latency mode. Explicit child values may override
 them. A Codex-subscription manager therefore keeps its external billing path for
 workers by default instead of falling back to the deployment's OpenGeni-credit
 model.
+
+Session detail reads expose `dispatchWait` for active-control queued sessions
+without an active turn. It projects the existing workflow-wake ledger's pending
+revision, attempt count, retry time and last error; it is not an execution
+receipt. Acknowledged or unavailable delivery evidence never implies running.
+The visible queued session refreshes this non-event evidence while waiting.
+Sidebar queued/capacity counts use a clock and remain distinct from working
+counts; deliberate session waits retain their reason and recheck presentation.
 
 The prompt queue is not worker backlog. `session_turns.status = 'queued'` means
 the worker has not claimed the physical row; it does not decide whether the user
@@ -497,6 +523,10 @@ the owner layer, effective Knowledge/instruction/Skill modes, and the accepted
 chat or scheduled-run context. Child work and replacement attempts reuse their
 producer's accepted policy. Legacy `memoryEnabled` opt-outs are converted to the
 Knowledge setting; the old setting cannot be changed after 0461.
+
+Ordinary turn acceptance does not parse or publish chat attachments into Knowledge.
+Original attachments keep their existing exact-turn resource lifecycle. Agents
+explicitly select useful findings and retain supporting sources when needed.
 
 Retained Knowledge is retrieval context. It is not ambient conversation memory
 or behavioral authority. Explicit `view: "needs_review"` lets agents inspect and correct unapproved proposals without activating them. Normal search excludes pending revisions; source ACLs,
@@ -902,6 +932,20 @@ turn that attached them; historical attachment ids do not cause sandbox work.
 Active model-history images are independently read from object storage. This-turn generated-video files may still copy onto the
 box before dispatch; a copy miss is deferred like generated images (the
 durable File remains) and does not fail the turn.
+
+Modal materialization verification uses a fixed read-only provider probe inside
+the original routed operation and capture gate. It starts once and advances its
+own ephemeral output cursor until both streams are terminal; an initial output
+page is not completion. It never borrows the parent workspace mutation's retained
+command handle, weakens command persistence, or retries the clone/check/turn.
+Success requires exit zero and the exact visibility marker. A 30-second
+observation deadline and turn cancellation abort outstanding provider RPCs;
+if either probe output stream fails, its sibling is aborted and both reads drain
+before the provider-operation gate is released. The original error is preserved.
+Aborting observation does not prove process termination. Deadline failures stay
+unconfirmed and preserve the known provider execution identity in authenticated
+materialization diagnostics. Other providers retain their existing verification
+contract, and Connected Machine materialization remains a no-op.
 Source-bearing `generate_video` calls join that same single-flight provisioner
 immediately before inspecting their `/workspace` references and use the active
 routed session. Text-to-video requests do not acquire a sandbox.
@@ -1550,8 +1594,15 @@ physical proof and cannot license replay or rebinding.
 The exact terminal transition is also the fallback agent-input boundary: changing the
 command to `exited|lost` and appending `session.command.finished` commit
 together. For a nonterminal session, one dedupe-keyed
-`background_command_result`, `system.update.pending`, and any idle workflow
-wake join that transaction unless command completion was already observed.
+`background_command_result` and `system.update.pending` join that transaction
+unless command completion was already observed. A command completion registers
+a workflow wake only for a current explicit session input wait. Otherwise the
+result stays available without starting a model turn, including failures and
+results queued before the preceding turn finished. Eligible new input can carry
+compatible pending command results. Claim selects non-command input before
+command notices and before the batch read limit, so command backlogs cannot
+block later messages. Incompatible command notices remain pending. Human pause,
+execution-authority boundaries and the batch size/byte limits still apply.
 A successful agent-facing command read that reports `exited|lost` records
 completion observation and suppresses a still-pending completion notification.
 A running read does not observe future completion. Observation concerns terminal

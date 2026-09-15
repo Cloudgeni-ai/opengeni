@@ -45,6 +45,27 @@ describe("session tool policy resolution", () => {
     });
   });
 
+  test("connector exclusions survive reconnection while new connections remain default-on", () => {
+    const policy = {
+      mode: "workspace_default" as const,
+      inheritedFromSessionId: null,
+      excludedMcpServerIds: ["slack", "opengeni"],
+    };
+    for (const connectedIds of [["linear"], ["linear", "slack"], ["linear", "slack", "new-app"]]) {
+      const result = resolve({
+        toolPolicy: policy,
+        sessionTools: [mcp("slack", true)],
+        availableMcpServerIds: ["opengeni", ...connectedIds],
+        defaultMcpServerIds: connectedIds,
+      });
+      expect(result.effectivePolicy.effectiveIds).toEqual(
+        [...connectedIds.filter((id) => id !== "slack"), "opengeni"].sort(),
+      );
+      expect(result.toolRefs.some((tool) => tool.id === "slack")).toBe(false);
+      expect(result.effectivePolicy.droppedIds).toEqual([]);
+    }
+  });
+
   test("defaults every configured server except the mandatory carrier", () => {
     expect(
       defaultSessionMcpServerIds([

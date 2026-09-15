@@ -50,6 +50,7 @@ import {
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
 type OrganizationAdminSection =
+  | "integrations"
   | "overview"
   | "knowledge"
   | "models"
@@ -62,7 +63,6 @@ type WorkspaceSettingsSection =
   | "learning"
   | "general"
   | "members"
-  | "tools"
   | "plugins"
   | "models"
   | "api-keys"
@@ -415,14 +415,13 @@ const workspaceSettingsRoute = createRoute({
       search.section === "general" ||
       search.section === "learning" ||
       search.section === "members" ||
-      search.section === "tools" ||
       search.section === "plugins" ||
       search.section === "models" ||
       search.section === "api-keys" ||
       search.section === "danger"
         ? search.section
-        : search.section === "capabilities" || search.section === "permissions"
-          ? "tools"
+        : search.section === "capabilities"
+          ? "plugins"
           : undefined;
     return section ? { section } : {};
   },
@@ -481,6 +480,7 @@ const workspaceOrganizationRoute = createRoute({
       search.section === "people" ||
       search.section === "recovery" ||
       search.section === "retention" ||
+      search.section === "integrations" ||
       search.section === "developer" ||
       search.section === "billing"
         ? search.section

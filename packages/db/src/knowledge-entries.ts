@@ -644,12 +644,19 @@ export async function inspectKnowledgeFilePreparation(
 export async function completeKnowledgeFilePreparation(
   db: Database,
   context: KnowledgeContext,
-  input: { fileId: string; title: string; content: string; sourceVersion?: string },
+  input: {
+    fileId: string;
+    title: string;
+    content: string;
+    sourceVersion?: string;
+    purpose?: "evidence" | "reference";
+  },
 ) {
   return KnowledgeFilePreparationResult.parse(
     await knowledgeFilePreparationOperation(db, context, {
       operation: "complete",
       fileId: z.uuid().parse(input.fileId),
+      purpose: z.enum(["evidence", "reference"]).parse(input.purpose ?? "evidence"),
       ...(input.sourceVersion
         ? {
             sourceVersion: z

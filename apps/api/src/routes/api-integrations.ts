@@ -7,6 +7,7 @@ import {
 } from "@opengeni/capabilities";
 import {
   ApiIntegrationPreview,
+  OrganizationIntegrationDeniedError,
   ListIntegrationDefinitionsResponse,
   ApiIntegrationUninstallPreview,
   InstallApiIntegrationRequest,
@@ -17,12 +18,18 @@ import {
   UninstallApiIntegrationResult,
   type AccessGrant,
 } from "@opengeni/contracts";
-import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  integrationSourceForOrganizationPolicy,
+  type ApiRouteDeps,
+} from "@opengeni/core";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import {
   ApiIntegrationInstallationVersionConflictError,
   buildConnectionTokenResolver,
   getApiIntegrationUninstallPreview,
   getConnectionMetadata,
+  getApiIntegrationReconciliationSnapshot,
   installApiIntegration,
   IntegrationFacetBindingOwnershipConflictError,
   IntegrationFacetBindingVersionConflictError,
@@ -209,6 +216,7 @@ export function registerApiIntegrationRoutes(
     const resolved = await resolveForRoute({
       deps,
       transport,
+      accountId: grant.accountId,
       workspaceId,
       subjectId: grant.subjectId,
       payload,
@@ -223,6 +231,7 @@ export function registerApiIntegrationRoutes(
     const resolved = await resolveForRoute({
       deps,
       transport,
+      accountId: grant.accountId,
       workspaceId,
       subjectId: grant.subjectId,
       payload,
@@ -308,21 +317,45 @@ export function registerApiIntegrationRoutes(
 export async function resolveForRoute(input: {
   deps: ApiRouteDeps;
   transport: ReturnType<typeof createPinnedIntegrationTransport>;
+  accountId: string;
   workspaceId: string;
   subjectId: string;
   payload: PreviewApiIntegrationRequest | InstallApiIntegrationRequest;
 }): ReturnType<typeof resolveApiIntegrationPreview> {
+  const payload = structuredClone(input.payload);
+  const preparation = await withOrganizationIntegrationPolicyFence(
+    input.deps.db,
+    input,
+    async (tx, policy) => {
+      try {
+        return { source: integrationSourceForOrganizationPolicy(policy, payload.source) };
+      } catch (error) {
+        if (!(error instanceof OrganizationIntegrationDeniedError)) throw error;
+        const install = InstallApiIntegrationRequest.safeParse(payload);
+        if (install.success) {
+          const resolved = await storedReconciliationPreview(
+            { ...input, deps: { ...input.deps, db: tx } },
+            install.data,
+          );
+          if (resolved) return { resolved };
+        }
+        throw error;
+      }
+    },
+  );
+  if (preparation.resolved) return preparation.resolved;
+  const source = preparation.source!;
   try {
-    const connection = input.payload.connectionId
+    const connection = payload.connectionId
       ? await requireVisibleConnection(
           input.deps,
           input.workspaceId,
           input.subjectId,
-          input.payload.connectionId,
+          payload.connectionId,
         )
       : null;
     return await resolveApiIntegrationPreview({
-      source: input.payload.source,
+      source,
       connection: connectionDescriptor(connection),
       transport: input.transport,
       authority: {
@@ -351,6 +384,85 @@ export async function resolveForRoute(input: {
           : "The Integration source could not be detected safely",
     });
   }
+}
+
+async function storedReconciliationPreview(
+  input: { deps: ApiRouteDeps; accountId: string; workspaceId: string; subjectId: string },
+  payload: InstallApiIntegrationRequest,
+): Promise<ResolvedApiIntegrationPreview | null> {
+  const snapshot = await getApiIntegrationReconciliationSnapshot(input.deps.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    source: payload.source,
+    expectedRevisionId: payload.expectedRevisionId,
+    expectedContentSha256: payload.expectedContentSha256,
+    ...(payload.connectionId !== undefined ? { connectionId: payload.connectionId } : {}),
+    ...(payload.instanceKey !== undefined ? { instanceKey: payload.instanceKey } : {}),
+    ...(payload.allowedTools !== undefined ? { allowedTools: payload.allowedTools } : {}),
+  });
+  if (!snapshot) return null;
+  const { runtime, baseServerId, name, provider, requiredScopes } = snapshot;
+  const connection = payload.connectionId
+    ? await requireVisibleConnection(
+        input.deps,
+        input.workspaceId,
+        input.subjectId,
+        payload.connectionId,
+      )
+    : null;
+  const scheme = runtime.authScheme;
+  const auth = !apiIntegrationRequiresConnection(scheme)
+    ? { kind: "none" }
+    : scheme.kind === "oauth2"
+      ? { kind: "oauth2", providerDomain: runtime.providerDomain, scopes: requiredScopes }
+      : scheme.kind === "api_key"
+        ? {
+            kind: "api_key",
+            providerDomain: runtime.providerDomain,
+            carrier: scheme.carrier,
+            name: scheme.name,
+          }
+        : scheme.kind === "http"
+          ? { kind: "http", providerDomain: runtime.providerDomain, scheme: scheme.scheme }
+          : null;
+  if (!auth) return null;
+  return {
+    preview: ApiIntegrationPreview.parse({
+      source: payload.source,
+      definitionId: runtime.definitionId,
+      definitionProvenance: runtime.definitionProvenance,
+      protocol: runtime.protocol,
+      capabilityId: runtime.capabilityId,
+      pluginKey: runtime.pluginKey,
+      serverId: baseServerId,
+      name,
+      description: runtime.description,
+      provider,
+      providerDomain: runtime.providerDomain,
+      baseUrl: runtime.baseUrl,
+      sourceUrl: runtime.sourceUrl,
+      revisionId: runtime.revision.id,
+      contentSha256: runtime.revision.contentSha256,
+      auth,
+      connectionId: connection?.id ?? null,
+      connectionOwnership: connection ? (connection.subjectId ? "personal" : "workspace") : null,
+      tools: runtime.revision.tools.map((tool) => ({
+        id: tool.id,
+        operationKey: tool.operationKey,
+        name: tool.name,
+        description: tool.description,
+        safety: tool.safety,
+        approvalMode: tool.approvalMode,
+        deprecated: tool.deprecated,
+      })),
+      warnings: [],
+    }),
+    revision: runtime.revision,
+    provider,
+    requiredScopes,
+    authScheme: runtime.authScheme,
+  };
 }
 
 async function requireVisibleConnection(

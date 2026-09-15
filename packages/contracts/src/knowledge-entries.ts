@@ -66,6 +66,8 @@ export const KnowledgeEntrySource = z
     version: z.string().min(1).max(2048).optional(),
     capturedAt: z.string().datetime({ offset: true }).optional(),
     retention: z.enum(["full_text", "passages", "reference"]).optional(),
+    /** Supporting evidence stays retrievable by ID without entering default discovery. */
+    purpose: z.enum(["evidence", "reference"]).optional(),
   })
   .strict();
 export type KnowledgeEntrySource = z.infer<typeof KnowledgeEntrySource>;
@@ -252,6 +254,8 @@ export const KnowledgeEntryListRequest = z
     /** Top-level entries with no visible collection in the selected scope. */
     rootOnly: z.boolean().optional(),
     fileId: z.uuid().optional(),
+    /** Include supporting sources in published discovery; never changes access. */
+    includeEvidence: z.boolean().optional(),
     kind: KnowledgeEntryKind.optional(),
     view: z.enum(["published", "needs_review", "archived", "rejected"]).default("published"),
     sessionId: z.uuid().optional(),

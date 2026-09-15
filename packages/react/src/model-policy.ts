@@ -274,9 +274,11 @@ export function findPickerRow<TCatalog extends ClientModel>(
 
 export function groupPickerRowsByBillingClass(
   rows: PickerModelRow[],
+  options?: { codexOnly?: boolean },
 ): Array<{ billingClass: PickerBillingClass; label: string; rows: PickerModelRow[] }>;
 export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
   rows: PickerModelRow<TCatalog>[],
+  options?: { codexOnly?: boolean },
 ): Array<{
   billingClass: PickerBillingClass;
   label: string;
@@ -284,6 +286,7 @@ export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
 }>;
 export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
   rows: PickerModelRow<TCatalog>[],
+  options?: { codexOnly?: boolean },
 ): Array<{
   billingClass: PickerBillingClass;
   label: string;
@@ -306,6 +309,24 @@ export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
       label: row.billingClassLabel,
       rows: [row],
     });
+  }
+  const codexIndex = groups.findIndex((group) => group.billingClass === "codex_subscription");
+  const codex = groups[codexIndex];
+  const selectableOpenGeni = groups
+    .find((group) => group.billingClass === "opengeni_credits")
+    ?.rows.filter((row) => row.selectable);
+  // Presentation only: never change the catalog/default model ordering or selection.
+  const onlyFreeOpenGeni =
+    selectableOpenGeni !== undefined &&
+    selectableOpenGeni.length > 0 &&
+    selectableOpenGeni.every((row) => row.catalog.cost === "free");
+  if (
+    codex &&
+    codex.rows.some((row) => row.selectable) &&
+    (options?.codexOnly || onlyFreeOpenGeni)
+  ) {
+    groups.splice(codexIndex, 1);
+    groups.unshift(codex);
   }
   return groups;
 }

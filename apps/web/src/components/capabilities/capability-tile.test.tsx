@@ -99,14 +99,15 @@ async function render(node: React.ReactNode) {
 }
 
 describe("CapabilityTile", () => {
-  test("only a not-connected tile exposes an interactive quick-connect indicator", async () => {
+  test("the name and plus use the same full-row setup action", async () => {
     const onQuickConnect = mock(() => {});
+    const onOpen = mock(() => {});
     const rendered = await render(
       <>
         <CapabilityTile
           item={item()}
           logoSrc={null}
-          onOpen={() => {}}
+          onOpen={onOpen}
           onQuickConnect={onQuickConnect}
         />
         <CapabilityTile
@@ -121,18 +122,19 @@ describe("CapabilityTile", () => {
     try {
       const tiles = [...rendered.container.querySelectorAll("[data-capability-catalog-tile]")];
       expect(tiles).toHaveLength(2);
-      expect(tiles[0]!.className).toContain("hover:bg-accent");
-      expect(tiles[0]!.querySelector("button")!.className).not.toContain("hover:bg-");
-      // Not connected: two buttons (open + connect).
-      expect(tiles[0]!.querySelectorAll("button")).toHaveLength(2);
-      const connect = [...tiles[0]!.querySelectorAll("button")].find(
-        (node) => node.getAttribute("aria-label") === "Connect",
+      expect(rendered.container.querySelectorAll("button")).toHaveLength(2);
+      expect(tiles[0]!.tagName).toBe("BUTTON");
+      expect(tiles[0]!.querySelector("button")).toBeNull();
+      expect(tiles[0]!.querySelector(".lucide-plus")).not.toBeNull();
+      await act(async () => (tiles[0] as HTMLButtonElement).click());
+      await act(async () =>
+        tiles[0]!
+          .querySelector(".lucide-plus")!
+          .dispatchEvent(new MouseEvent("click", { bubbles: true })),
       );
-      expect(connect).toBeDefined();
-      await act(async () => connect!.click());
-      expect(onQuickConnect).toHaveBeenCalledTimes(1);
-      // Connected: the indicator is decorative, never a dead click target.
-      expect(tiles[1]!.querySelectorAll("button")).toHaveLength(1);
+      expect(onOpen).toHaveBeenCalledTimes(2);
+      expect(onQuickConnect).not.toHaveBeenCalled();
+      expect(tiles[1]!.querySelector(".lucide-check")).not.toBeNull();
     } finally {
       await rendered.unmount();
     }
@@ -157,13 +159,13 @@ describe("CapabilityTile", () => {
     );
     try {
       const tiles = [...rendered.container.querySelectorAll("[data-capability-catalog-tile]")];
-      expect(tiles[0]!.querySelector("button")?.getAttribute("aria-label")).toBe(
-        "Notion. Connected",
+      expect(tiles[0]!.querySelector(".og-capability-catalog-sr-only")?.textContent).toBe(
+        "Connected",
       );
       expect(tiles[0]!.textContent).toContain("Connected");
       // An enabled-but-broken connector must never read as a plain green check.
-      expect(tiles[1]!.querySelector("button")?.getAttribute("aria-label")).toBe(
-        "Sentry. Needs attention",
+      expect(tiles[1]!.querySelector(".og-capability-catalog-notice")?.textContent).toBe(
+        "Needs attention",
       );
       expect(tiles[1]!.textContent).toContain("Needs attention");
     } finally {
@@ -173,7 +175,7 @@ describe("CapabilityTile", () => {
 });
 
 describe("FeaturedConnectorTile", () => {
-  test("only a not-connected tile exposes an interactive quick-connect indicator", async () => {
+  test("featured tiles reuse the same single-action catalog row", async () => {
     const onQuickConnect = mock(() => {});
     const rendered = await render(
       <>
@@ -195,13 +197,10 @@ describe("FeaturedConnectorTile", () => {
     try {
       const tiles = [...rendered.container.querySelectorAll("[data-featured-connector]")];
       expect(tiles).toHaveLength(2);
-      expect(tiles[0]!.className).toContain("hover:bg-accent");
-      expect(tiles[0]!.querySelector("button")!.className).not.toContain("hover:bg-");
-      expect(tiles[0]!.querySelectorAll("button")).toHaveLength(2);
+      expect(tiles[0]!.querySelector("button")!.className).toContain("og-capability-catalog-row");
+      expect(tiles[0]!.querySelectorAll("button")).toHaveLength(1);
       expect(tiles[1]!.querySelectorAll("button")).toHaveLength(1);
-      expect(tiles[1]!.querySelector("button")?.getAttribute("aria-label")).toBe(
-        "Notion. Connected",
-      );
+      expect(tiles[1]!.querySelector(".lucide-check")).not.toBeNull();
       expect(tiles[1]!.textContent).toContain("Connected");
     } finally {
       await rendered.unmount();

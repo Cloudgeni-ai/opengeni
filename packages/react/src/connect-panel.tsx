@@ -1,10 +1,12 @@
 import { ConnectAccounts } from "./connect-accounts";
 import { ConnectChooser } from "./connect-chooser";
 import { ConnectSetup, type ConnectSetupProps } from "./connect-setup";
+import { useConnect } from "./connect";
 
 export type ConnectPanelProps = ConnectSetupProps & {
   returnUrl: string;
-  title?: string;
+  /** Null omits the heading when the host already supplies one. */
+  title?: string | null;
   showAccounts?: boolean;
   presentation?: "select" | "catalog";
 };
@@ -20,16 +22,25 @@ export function ConnectPanel({
   className,
   ...setup
 }: ConnectPanelProps) {
+  const { attempt } = useConnect(setup.controller);
+  // Unknown/failed outcomes still need reconciliation or cancellation, not a
+  // competing new acquisition. Unmounting observers never cancels controller work.
+  const activeSetup =
+    attempt !== null && !["complete", "cancelled", "expired"].includes(attempt.state);
   return (
     <div className={["og-connect", className].filter(Boolean).join(" ")}>
-      <h2>{title}</h2>
-      <ConnectChooser
-        presentation={presentation}
-        controller={setup.controller}
-        returnUrl={returnUrl}
-      />
+      {title !== null && <h2>{title}</h2>}
+      {!activeSetup && (
+        <ConnectChooser
+          presentation={presentation}
+          controller={setup.controller}
+          returnUrl={returnUrl}
+        />
+      )}
       <ConnectSetup {...setup} />
-      {showAccounts && <ConnectAccounts controller={setup.controller} returnUrl={returnUrl} />}
+      {showAccounts && !activeSetup && (
+        <ConnectAccounts controller={setup.controller} returnUrl={returnUrl} />
+      )}
     </div>
   );
 }

@@ -172,7 +172,19 @@ type IntegrationInstanceContext = {
   integrationFacetId: string;
   providerDomain: string;
   connectionId: string | null;
+  apiProtocol: string | null;
+  definitionId: string | null;
+  definitionProvenance: string | null;
 };
+
+/** Trusted server callback, never part of a serialized mutation request. The
+ * caller must acquire its policy fence before invoking the facet operation.
+ * IDs/domains in this context identify installed records, not curated provenance.
+ */
+export type IntegrationFacetAcquisitionAuthorizer = (
+  tx: Database,
+  context: Readonly<IntegrationInstanceContext>,
+) => Promise<void>;
 
 export async function listIntegrationInstanceFacets(
   db: Database,
@@ -290,6 +302,7 @@ export async function configureIntegrationFacet(
     config: Record<string, unknown>;
     expectedVersion?: number;
     idempotencyKey: string;
+    beforeAcquire?: IntegrationFacetAcquisitionAuthorizer;
   },
 ): Promise<IntegrationFacetMutationResult> {
   const requestDigest = integrationFacetConfigureRequestDigest(input);
@@ -298,6 +311,26 @@ export async function configureIntegrationFacet(
     const definition = await requireFacetDefinition(tx, context, input.facetKey);
     assertFacetConfig(input.config, definition.configSchema);
     await requireFacetConnection(tx, input, context, definition.capabilities);
+    if (input.beforeAcquire) {
+      // Match upsertIntegrationFacetBinding's advisory -> row prefix before
+      // deciding whether this request adds authority. The upsert reuses both
+      // transaction locks, including the absent-row insertion fence.
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`integration-binding:${input.workspaceId}:${definition.id}:${input.instanceKey}`}, 0))`,
+      );
+      const existing = await loadFacetBinding(tx, context, input.instanceKey, definition.id, true);
+      const owner = facetOwner(input.capabilityId, input.instanceKey, input.facetKey);
+      const owners = existing ? await listIntegrationFacetBindingOwners(tx, existing.id) : [];
+      if (
+        !existing ||
+        existing.status !== "active" ||
+        existing.connectionId !== context.connectionId ||
+        stableJson(existing.config) !== stableJson(input.config) ||
+        !owners.some((current) => current.kind === owner.kind && current.id === owner.id)
+      ) {
+        await input.beforeAcquire(tx, context);
+      }
+    }
     const result = await upsertIntegrationFacetBinding(tx, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -343,6 +376,7 @@ export async function setIntegrationFacetLifecycle(
     action: "pause" | "resume";
     expectedVersion: number;
     idempotencyKey: string;
+    beforeAcquire?: IntegrationFacetAcquisitionAuthorizer;
   },
 ): Promise<IntegrationFacetMutationResult> {
   const requestDigest = sha256(
@@ -352,6 +386,7 @@ export async function setIntegrationFacetLifecycle(
       workspaceId: undefined,
       subjectId: undefined,
       idempotencyKey: undefined,
+      beforeAcquire: undefined,
     }),
   );
   return await withFacetOperation(db, input, requestDigest, "update", async (tx) => {
@@ -370,6 +405,9 @@ export async function setIntegrationFacetLifecycle(
     }
     await assertDirectFacetOwnership(tx, binding.id, input);
     const targetStatus = input.action === "pause" ? "paused" : "active";
+    if (input.action === "resume" && binding.status !== "active") {
+      await input.beforeAcquire?.(tx, context);
+    }
     let row = binding;
     if (binding.status !== targetStatus) {
       const [updated] = await tx
@@ -709,6 +747,13 @@ async function loadIntegrationInstanceContext(
       integrationFacetId: schema.integrationFacetDefinitions.integrationFacetId,
       providerDomain: schema.capabilityIntegrationFacets.providerDomain,
       connectionId: schema.integrationFacetBindings.connectionId,
+      apiProtocol: schema.capabilityApiFacets.protocol,
+      definitionId: sql<
+        string | null
+      >`${schema.capabilityPluginVersions.manifest} ->> 'definitionId'`,
+      definitionProvenance: sql<
+        string | null
+      >`${schema.capabilityPluginVersions.manifest} ->> 'definitionProvenance'`,
     })
     .from(schema.integrationFacetBindings)
     .innerJoin(
@@ -740,6 +785,21 @@ async function loadIntegrationInstanceContext(
       schema.capabilityPluginVersions,
       eq(schema.capabilityPluginVersions.id, schema.capabilityPluginInstallations.pluginVersionId),
     )
+    .leftJoin(
+      schema.capabilityApiFacets,
+      and(
+        eq(
+          schema.capabilityApiFacets.integrationFacetId,
+          schema.capabilityIntegrationFacets.facetId,
+        ),
+        sql`exists (
+          select 1 from ${schema.capabilityFacetInstallations} api_installation
+          where api_installation.plugin_installation_id = ${schema.capabilityPluginInstallations.id}
+            and api_installation.facet_id = ${schema.capabilityApiFacets.facetId}
+            and api_installation.status = 'active'
+        )`,
+      ),
+    )
     .where(
       and(
         eq(schema.integrationFacetBindings.workspaceId, workspaceId),
@@ -759,7 +819,17 @@ async function loadIntegrationInstanceContext(
       ),
     )
     .limit(2);
-  if (lock) query = query.for("update") as typeof query;
+  if (lock)
+    query = query.for("update", {
+      of: [
+        schema.integrationFacetBindings,
+        schema.integrationFacetDefinitions,
+        schema.capabilityIntegrationFacets,
+        schema.capabilityFacetInstallations,
+        schema.capabilityPluginInstallations,
+        schema.capabilityPluginVersions,
+      ],
+    }) as typeof query;
   const rows = await query;
   if (rows.length === 0) return null;
   if (rows.length !== 1) throw new Error(`API Integration ${capabilityId} instance is ambiguous`);

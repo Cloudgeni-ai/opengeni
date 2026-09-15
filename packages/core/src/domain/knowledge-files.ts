@@ -12,6 +12,7 @@ export async function prepareKnowledgeFile(
   deps: Pick<ApiRouteDeps, "db" | "objectStorage" | "getDocumentServices">,
   context: KnowledgeContext,
   fileId: string,
+  purpose: "evidence" | "reference" = "evidence",
 ) {
   const inspected = await inspectKnowledgeFilePreparation(deps.db, context, fileId);
   if (inspected.status !== "prepare") return inspected;
@@ -27,13 +28,19 @@ export async function prepareKnowledgeFile(
   ) {
     throw new Error("The original file no longer matches its retained metadata");
   }
-  const parsed = await deps.getDocumentServices().parser.parse(object.bytes, inspected.file);
-  // Empty extraction is a visible failure, not a searchable-ready receipt.
-  if (!parsed.text.trim()) throw new Error("No searchable text could be extracted from this file");
+  // A screenshot/diagram can support a visual finding without containing text.
+  // Keep its exact original; OCR is neither required evidence nor the finding.
+  const originalOnly = purpose === "evidence" && inspected.file.contentType.startsWith("image/");
+  const parsed = originalOnly
+    ? { text: "" }
+    : await deps.getDocumentServices().parser.parse(object.bytes, inspected.file);
+  if (!originalOnly && !parsed.text.trim())
+    throw new Error("No searchable text could be extracted from this file");
   return completeKnowledgeFilePreparation(deps.db, context, {
     fileId,
     title: inspected.file.filename,
     sourceVersion,
     content: parsed.text,
+    purpose,
   });
 }

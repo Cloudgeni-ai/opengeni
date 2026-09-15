@@ -66,11 +66,11 @@ describe("bundle rows", () => {
       "installed_from_source",
       "built_in",
     ]);
-    // Every provenance is named on the row itself, never left implicit.
-    expect(rows[0]!.description).toContain("Pack · Registered in this workspace");
-    expect(rows[1]!.description).toContain("Plugin · Imported from source");
-    expect(rows[2]!.description).toContain("Skill · Imported from source");
-    expect(rows[3]!.description).toContain("Skill · Curated by OpenGeni");
+    // Keep provenance as structured metadata and in details, not catalog copy.
+    for (const row of rows) {
+      expect(row.description).not.toMatch(/^(Pack|Plugin|Skill) ·/);
+      expect(row.accessibleDetail).toBeTruthy();
+    }
   });
 
   test("Skills and Plugins open the sheet while Packs open the Pack dialog", () => {
@@ -190,7 +190,7 @@ describe("bundle rows", () => {
 
   test("an unknown provenance is omitted from the row rather than claimed", () => {
     const row = packBundleRow(pack(), { installation: null, provenance: null, busy: false });
-    expect(row.description).toBe("Pack · Pinned infrastructure automation capabilities.");
+    expect(row.description).toBe("Pinned infrastructure automation capabilities.");
     expect(row.description).not.toContain("Curated by OpenGeni");
     expect(row.accessibleDetail).toBe("Pack");
   });
@@ -296,8 +296,8 @@ describe("bundle monogram", () => {
     expect(bundleMonogram("   ")).toBe("?");
   });
 
-  test("a bundle with no description still gets a truthful row line", () => {
-    expect(bundleRowDescription("pack", "built_in", "  ")).toBe("Pack · Curated by OpenGeni");
+  test("a bundle with no description does not invent a metadata line", () => {
+    expect(bundleRowDescription("pack", "built_in", "  ")).toBe("");
   });
 });
 

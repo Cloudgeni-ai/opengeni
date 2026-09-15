@@ -52,7 +52,8 @@ export function sessionBranchSummaryKey(session: Session, readRevision = 0): str
 
 /**
  * Persist a route/lineage child in its already-loaded parent branch. The route
- * owns current lifecycle/content while a prior list row may own treeStats.
+ * owns current lifecycle/content while the cached row retains rail ordering
+ * timestamps and may own treeStats.
  */
 export function upsertSessionBranchChild(
   pages: ReadonlyMap<string, SessionBranchPage>,
@@ -68,7 +69,13 @@ export function upsertSessionBranchChild(
     nextSessions.push(child);
   } else {
     const cached = sessions[index]!;
-    const merged = mergeSessionForRail(cached, child);
+    const merged = {
+      ...mergeSessionForRail(cached, child),
+      // Route/detail timestamps can be millisecond-truncated or ahead of the
+      // list activity clock. Only a branch-page commit replaces rail ordering.
+      createdAt: cached.createdAt,
+      updatedAt: cached.updatedAt,
+    };
     nextSessions[index] = page?.channelGenerations.has(child.id)
       ? { ...merged, channelId: cached.channelId ?? null }
       : merged;

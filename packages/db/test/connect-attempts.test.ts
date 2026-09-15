@@ -19,6 +19,7 @@ import { verifyExternalLifecycle } from "../../core/test/external-lifecycle-fixt
 import { verifyExternalPersonal } from "../../core/test/external-personal-fixture";
 import {
   beginConnectAttempt,
+  getConnectBeginReplay,
   claimConnectOperation,
   finishConnectOperation,
   getConnectAttempt,
@@ -373,6 +374,70 @@ async function begin(value = attempt()) {
 }
 
 describe("durable Connect attempts", () => {
+  test("organization policy fences new effects and late commits without hiding exact receipts", async () => {
+    const value = await begin({ ...attempt(), providerId: "gmail" });
+    const setAllowed = async (allowed: boolean) => {
+      await shared.admin`insert into organization_integration_policies (account_id, mode, allowed_integration_keys, revision)
+        values (${scope.accountId}, 'restricted', ${shared.admin.json(allowed ? ["gmail"] : [])}::jsonb, 1)
+        on conflict (account_id) do update set allowed_integration_keys = excluded.allowed_integration_keys`;
+    };
+    let effects = 0;
+    const operation = {
+      db: client.db,
+      scope,
+      attemptId: value.id,
+      expectedRevision: 1,
+      operationId: crypto.randomUUID(),
+      inputDigest: digest,
+      authorize: async () => {},
+      execute: async () => {
+        effects++;
+        return {
+          commit: async (_tx: unknown, current: ConnectAttempt) => ({
+            ...current,
+            revision: current.revision + 1,
+          }),
+        };
+      },
+    };
+    try {
+      await setAllowed(false);
+      await expect(executeConnectOperation(operation)).rejects.toThrow("organization policy");
+      expect(effects).toBe(0);
+      expect((await getConnectAttempt(client.db, scope, value.id)).operationInFlight).toBe(false);
+      await setAllowed(true);
+      const result = await executeConnectOperation(operation);
+      await setAllowed(false);
+      expect(await executeConnectOperation(operation)).toEqual(result);
+      expect(effects).toBe(1);
+
+      const late = await begin({ ...attempt(), providerId: "gmail" });
+      await setAllowed(true);
+      await expect(
+        executeConnectOperation({
+          ...operation,
+          attemptId: late.id,
+          operationId: crypto.randomUUID(),
+          execute: async () => {
+            effects++;
+            await setAllowed(false);
+            return {
+              commit: async (_tx: unknown, current: ConnectAttempt) => ({
+                ...current,
+                revision: current.revision + 1,
+              }),
+            };
+          },
+        }),
+      ).rejects.toThrow("organization policy");
+      expect(effects).toBe(2);
+      const retained = await getConnectAttempt(client.db, scope, late.id);
+      expect(retained.operationInFlight).toBe(true);
+      expect(retained.attempt.revision).toBe(1);
+    } finally {
+      await shared.admin`delete from organization_integration_policies where account_id = ${scope.accountId}`;
+    }
+  });
   test("a claimed operation cannot retarget its named installation or rewrite origin fields", async () => {
     const value = await begin({
       ...attempt(),
@@ -546,7 +611,26 @@ describe("durable Connect attempts", () => {
   });
   test("concurrent creation replays one ID and preserves exact return URL", async () => {
     const value = attempt();
-    const values = await Promise.all(Array.from({ length: 8 }, () => begin(value)));
+    const request = {
+      idempotencyKey: value.id,
+      requestDigest: digest,
+      returnUrl: "https://host.example.com/callback?opaque=%2f#original",
+      attempt: value,
+    };
+    expect(await getConnectBeginReplay(client.db, scope, request)).toBeNull();
+    let acquisitions = 0;
+    const values = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        beginConnectAttempt(client.db, scope, {
+          ...request,
+          authorizeAcquisition: async () => {
+            acquisitions++;
+            if (acquisitions > 1) throw new Error("New acquisition no longer allowed");
+          },
+        }),
+      ),
+    );
+    expect(acquisitions).toBe(1);
     expect(new Set(values.map((item) => item.id)).size).toBe(1);
     const stored = await getConnectAttempt(client.db, scope, value.id);
     expect(stored.returnUrl).toBe("https://host.example.com/callback?opaque=%2f#original");

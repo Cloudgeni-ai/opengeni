@@ -4,9 +4,11 @@ import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config"
 import { CapabilityCatalogItem, type AccessGrant } from "@opengeni/contracts";
 import {
   createConnection,
+  beginConnectAttempt,
   createDb,
   createSocialConnection,
   enableCapabilityInstallation,
+  disableCapabilityInstallation,
   encryptEnvironmentValue,
   getCapabilityInstallation,
   listEnabledMcpCapabilityServers,
@@ -28,6 +30,7 @@ import {
   codexAppsCatalogItem,
   enableCapability,
   prepareCapabilityEnable,
+  executeConnectOperation,
 } from "../src";
 
 let available = true;
@@ -129,6 +132,196 @@ async function createMcpCapability(
 }
 
 describe("subject-owned capability connection references", () => {
+  test("Connect completion composes MCP persistence and receipt replay under the policy fence", async () => {
+    if (!available) throw new Error("Real PostgreSQL fixture required");
+    const workspace = await freshWorkspace();
+    const scope = { ...workspace, subjectId: "subject-alice" };
+    const capabilityId = `mcp:connect-policy-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://public.example.test/mcp",
+      authModel: null,
+    });
+    const attemptId = crypto.randomUUID();
+    await beginConnectAttempt(db, scope, {
+      idempotencyKey: attemptId,
+      requestDigest: "a".repeat(64),
+      returnUrl: "https://host.example.test/return",
+      attempt: {
+        id: attemptId,
+        workspaceId: workspace.workspaceId,
+        providerId: "mcp-install",
+        ownership: "workspace",
+        revision: 1,
+        state: "requires_user_action",
+        credentialsCommitted: false,
+        integrationInstalled: false,
+        completionRequirement: "integration",
+        nextAction: { type: "authorize", url: "https://host.example.test/authorize" },
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      },
+    });
+    let probes = 0;
+    const operation = {
+      db,
+      scope,
+      attemptId,
+      expectedRevision: 1,
+      operationId: crypto.randomUUID(),
+      inputDigest: "b".repeat(64),
+      authorize: async () => {},
+      execute: async () => {
+        const prepared = await prepareCapabilityEnable({
+          db,
+          ...workspace,
+          settings,
+          capabilityId,
+          grant: grant(workspace, scope.subjectId),
+          payload: { config: {}, metadata: {}, headers: {} },
+          probeMcpServer: async () => {
+            probes++;
+            return { toolCount: 1 };
+          },
+        });
+        return {
+          commit: async (
+            tx: Database,
+            current: import("@opengeni/contracts/connect").ConnectAttempt,
+          ) => {
+            await prepared.commit(tx);
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete" as const,
+              integrationInstalled: true,
+              nextAction: { type: "none" as const },
+            };
+          },
+        };
+      },
+    };
+    const completed = await executeConnectOperation(operation);
+    expect(completed.state).toBe("complete");
+    expect((await getCapabilityInstallation(db, workspace.workspaceId, capabilityId))?.status).toBe(
+      "active",
+    );
+    await shared!.admin`insert into organization_integration_policies
+      (account_id, mode, allowed_integration_keys, revision)
+      values (${workspace.accountId}, 'restricted', ${shared!.admin.json([])}, 1)`;
+    expect(await executeConnectOperation(operation)).toEqual(completed);
+    expect(probes).toBe(1);
+  });
+  test("organization policy denies MCP probes and late enable commits without hiding installed results", async () => {
+    if (!available) throw new Error("Real PostgreSQL fixture required");
+    const workspace = await freshWorkspace();
+    const capabilityId = `mcp:policy-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://public.example.test/mcp",
+      authModel: null,
+    });
+    const setAllowed = async (allowed: boolean) => {
+      await shared!.admin`insert into organization_integration_policies
+        (account_id, mode, allowed_integration_keys, revision)
+        values (${workspace.accountId}, 'restricted', ${shared!.admin.json(allowed ? ["custom:mcp"] : [])}, 1)
+        on conflict (account_id) do update set allowed_integration_keys = excluded.allowed_integration_keys`;
+    };
+    let probes = 0;
+    const input = {
+      db,
+      ...workspace,
+      settings,
+      capabilityId,
+      grant: grant(workspace, "subject-alice"),
+      payload: { config: {}, metadata: {}, headers: {} },
+      probeMcpServer: async () => {
+        probes++;
+        return { toolCount: 1 };
+      },
+    };
+    await setAllowed(false);
+    await expect(prepareCapabilityEnable(input)).rejects.toMatchObject({
+      name: "OrganizationIntegrationDeniedError",
+    });
+    expect(probes).toBe(0);
+    await setAllowed(true);
+    const prepared = await prepareCapabilityEnable(input);
+    expect(probes).toBe(1);
+    await setAllowed(false);
+    await expect(prepared.commit(db)).rejects.toMatchObject({
+      name: "OrganizationIntegrationDeniedError",
+    });
+    expect(await getCapabilityInstallation(db, workspace.workspaceId, capabilityId)).toBeNull();
+    await setAllowed(true);
+    const installed = await enableCapability(input);
+    await setAllowed(false);
+    const probesBeforeReplay = probes;
+    expect(await enableCapability(input)).toEqual(installed);
+    expect(probes).toBe(probesBeforeReplay);
+    await expect(
+      enableCapability({
+        ...input,
+        payload: { ...input.payload, config: { allowedTools: ["new-tool"] } },
+      }),
+    ).rejects.toMatchObject({ name: "OrganizationIntegrationDeniedError" });
+    expect((await getCapabilityInstallation(db, workspace.workspaceId, capabilityId))?.id).toBe(
+      installed.id,
+    );
+    const unchanged = await prepareCapabilityEnable(input);
+    await disableCapabilityInstallation(db, workspace.workspaceId, capabilityId);
+    await expect(unchanged.commit(db)).rejects.toMatchObject({ status: 409 });
+    expect((await getCapabilityInstallation(db, workspace.workspaceId, capabilityId))?.status).toBe(
+      "disabled",
+    );
+    await expect(enableCapability(input)).rejects.toMatchObject({
+      name: "OrganizationIntegrationDeniedError",
+    });
+  });
+  test("restricted reconciliation compares explicit credentials and remains no-effect across a catalog edit", async () => {
+    if (!available) throw new Error("Real PostgreSQL fixture required");
+    const workspace = await freshWorkspace();
+    const capabilityId = `mcp:reconcile-headers-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://public.example.test/mcp",
+      authModel: null,
+    });
+    let probes = 0;
+    const input = {
+      db,
+      ...workspace,
+      settings,
+      capabilityId,
+      grant: grant(workspace, "subject-alice"),
+      payload: {
+        config: {},
+        metadata: {},
+        headers: { Authorization: "Bearer synthetic-original" },
+      },
+      probeMcpServer: async () => {
+        probes++;
+        return { toolCount: 1 };
+      },
+    };
+    const installed = await enableCapability(input);
+    await shared!.admin`insert into organization_integration_policies
+      (account_id, mode, allowed_integration_keys, revision)
+      values (${workspace.accountId}, 'restricted', ${shared!.admin.json([])}, 1)`;
+    expect(await enableCapability(input)).toEqual(installed);
+    await expect(
+      enableCapability({
+        ...input,
+        payload: { ...input.payload, headers: { Authorization: "Bearer synthetic-changed" } },
+      }),
+    ).rejects.toMatchObject({ name: "OrganizationIntegrationDeniedError" });
+    const prepared = await prepareCapabilityEnable(input);
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://changed.example.test/mcp",
+      authModel: null,
+    });
+    expect(await prepared.commit(db)).toEqual(installed);
+    expect(await getCapabilityInstallation(db, workspace.workspaceId, capabilityId)).toEqual(
+      installed,
+    );
+    expect(probes).toBe(1);
+  });
   test("MCP preparation probes without publishing and commits without creating a credential", async () => {
     if (!available) throw new Error("Real PostgreSQL fixture required");
     const workspace = await freshWorkspace();

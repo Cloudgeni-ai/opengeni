@@ -166,6 +166,11 @@ artifact services, Connected Machines relay, and web app. With
 reachable and otherwise starts PostgreSQL, NATS, Temporal, and MinIO as native
 processes. Set the backend explicitly to `docker` or `native` when required.
 
+The development web server forwards `/v1` requests to `VITE_API_BASE_URL`
+(the API port selected by the launcher), matching production ingress routing.
+OAuth callbacks can therefore return to the public web origin without landing
+on the application's “Page not found” screen.
+
 The native infrastructure path is intended for Linux sandboxes and other hosts
 without Docker. It changes a copied `OPENGENI_SANDBOX_BACKEND=docker` default to
 the in-process `local` sandbox provider, while preserving explicit remote

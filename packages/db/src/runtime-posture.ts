@@ -888,6 +888,8 @@ export const FORCE_RLS_TABLES = [
   "organization_codex_rotation_settings",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
+  "organization_integration_policies",
+  "organization_integration_policy_operations",
   "organization_invitation_binding_events",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
@@ -1300,6 +1302,8 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "knowledge_memory_lifecycle_events",
   "knowledge_memory_relationships",
   "nested_agent_depth_configuration",
+  "organization_integration_policies",
+  "organization_integration_policy_operations",
   "preference_registry_events",
   "preference_registry_snapshots",
   "session_tenancy_activations",
@@ -1959,6 +1963,7 @@ export async function inspectRuntimeDatabasePosture(
               ${SCOPED_COMPUTE_CAPABILITY_TABLE},
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
+              'organization_usage_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE}
             )
         `),
@@ -2166,6 +2171,35 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
+  if (tableByName.has("organization_integration_policies")) {
+    for (const name of [
+      "update_organization_integration_policy(uuid, text, jsonb)",
+      "assert_organization_integration_policy_administrator(uuid, text)",
+    ]) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+      const searchPaths = new Set([
+        `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+        `search_path=pg_catalog, ${targetSchema}, pg_temp`,
+      ]);
+      const routine = routines[0];
+      if (
+        routines.length !== 1 ||
+        !routine?.execute ||
+        routine.publicExecute ||
+        !routine.securityDefiner ||
+        !routine.configuration?.some((configuration) => searchPaths.has(configuration)) ||
+        [
+          "organization_integration_policies",
+          "organization_integration_policy_operations",
+          "organization_memberships",
+          "api_keys",
+        ].some((table) => tableByName.get(table)?.owner !== routine.owner)
+      ) {
+        violations.push("organization integration policy mutation capability is missing or unsafe");
+      }
+    }
+  }
   const actualRlsTables = new Set(
     posture.tables.filter((table) => table.rlsEnabled).map((table) => table.name),
   );
@@ -3559,6 +3593,39 @@ export function evaluateRuntimeDatabasePosture(
       ) {
         violations.push(`sandbox file publication capability ${name} is missing or unsafe`);
       }
+    }
+  }
+
+  const organizationUsageCapability = posture.privateTables.find(
+    (table) => table.name === "organization_usage_read_capabilities",
+  );
+  if (organizationUsageCapability) {
+    const capability = organizationUsageCapability;
+    if (
+      capability.owner === expectedRole ||
+      capability.owner !== tableByName.get("usage_events")?.owner ||
+      capability.select ||
+      capability.insert ||
+      capability.update ||
+      capability.delete
+    ) {
+      violations.push(
+        "organization usage capability has unsafe owner or direct runtime privileges",
+      );
+    }
+    const aggregateRoutine = posture.privateRoutines.find(
+      (routine) =>
+        routine.name ===
+        "organization_usage_summary(uuid, timestamp with time zone, timestamp with time zone, text, uuid, boolean)",
+    );
+    if (
+      !aggregateRoutine ||
+      !aggregateRoutine.securityDefiner ||
+      !aggregateRoutine.execute ||
+      aggregateRoutine.publicExecute ||
+      aggregateRoutine.owner !== capability.owner
+    ) {
+      violations.push("organization usage aggregate capability is missing or unsafe");
     }
   }
 

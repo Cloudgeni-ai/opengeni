@@ -106,6 +106,46 @@ export const managedAccounts = pgTable(
   }),
 );
 
+export const organizationIntegrationPolicies = pgTable(
+  "organization_integration_policies",
+  {
+    accountId: uuid("account_id")
+      .primaryKey()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    mode: text("mode").$type<"unrestricted" | "restricted">().notNull(),
+    allowedIntegrationKeys: jsonb("allowed_integration_keys").$type<string[]>().notNull(),
+    revision: bigint("revision", { mode: "number" }).notNull(),
+  },
+  (table) => ({
+    modeCheck: check(
+      "organization_integration_policies_mode_check",
+      sql`${table.mode} in ('unrestricted', 'restricted')`,
+    ),
+    keysCheck: check(
+      "organization_integration_policies_allowed_integration_keys_check",
+      sql`jsonb_typeof(${table.allowedIntegrationKeys}) = 'array'`,
+    ),
+    revisionCheck: check(
+      "organization_integration_policies_revision_check",
+      sql`${table.revision} between 1 and 9007199254740991`,
+    ),
+  }),
+);
+
+export const organizationIntegrationPolicyOperations = pgTable(
+  "organization_integration_policy_operations",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    operationId: uuid("operation_id").notNull(),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    request: jsonb("request").notNull(),
+    result: jsonb("result").notNull(),
+  },
+  (table) => ({ identity: primaryKey({ columns: [table.accountId, table.operationId] }) }),
+);
+
 export const workspaces = pgTable(
   "workspaces",
   {
@@ -11728,6 +11768,17 @@ export const usageEvents = pgTable(
       table.accountId,
       table.eventType,
       table.occurredAt,
+    ),
+    accountRecent: index("usage_events_account_recent_idx").on(
+      table.accountId,
+      table.occurredAt.desc(),
+      table.recordedAt.desc(),
+    ),
+    workspaceRecent: index("usage_events_workspace_recent_idx").on(
+      table.accountId,
+      table.workspaceId,
+      table.occurredAt.desc(),
+      table.recordedAt.desc(),
     ),
     workspaceSession: index("usage_events_workspace_session_idx").on(
       table.workspaceId,

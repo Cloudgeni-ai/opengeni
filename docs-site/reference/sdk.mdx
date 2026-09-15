@@ -5,8 +5,8 @@ icon: "code"
 ---
 
 <Note>
-  The SDK surface is changing quickly. This page describes the shape; the package READMEs in the
-  repository are the authority for exact method signatures and the current version.
+  Check your installed package exports, types, and README for exact signatures and version
+  compatibility. The documentation may describe features newer than your deployment.
 </Note>
 
 ## Choose an entry point
@@ -20,7 +20,7 @@ For a product adding chat, start with [Integrate your product](/guides/integrate
 
 ## Chat API
 
-Use the repository workspace packages and a compatible server deployment for these examples. Follow the [source quickstart and deployment setup](/guides/integrate-your-product#connect-your-backend) before using the backend chat handler. It has no dedicated React frontend.
+Use a compatible SDK release and server deployment for these examples. Follow the [package and deployment setup](/guides/integrate-your-product#connect-your-backend) before using the backend chat handler. Repository access is optional.
 
 ```ts
 import { OpenGeni } from "@opengeni/sdk/chat";
@@ -43,7 +43,7 @@ const reply = await chat.send("What did we decide last time?");
 console.log(reply.text);
 ```
 
-In an authenticated product, resolve `tenant` and `user` on your server. The session is created on first send, and the same product, tenant, user, and conversation IDs reopen it. `agentAccess` defaults to `"session"`, with omitted `memory` defaulting to `false`. For user or workspace agent access, omitted `memory` follows that scope. This compatibility option selects personal or workspace Knowledge; `false` initializes Knowledge authoring to Off and leaves authorized retrieval available. Both settings apply at creation, not when reopening an existing session.
+In an authenticated product, resolve `tenant` and `user` on your server and complete [external-user onboarding](/reference/authentication#external-user-onboarding). The session is created on first send. Conversation identity is independent of the acting user, whose authority is checked separately; different user IDs do not isolate a shared conversation ID. `agentAccess` defaults to `"session"`, with omitted `memory` defaulting to `false`. For user or workspace agent access, omitted `memory` follows that scope. This compatibility option selects personal or workspace Knowledge; `false` initializes Knowledge authoring to Off and leaves authorized retrieval available. Both settings apply at creation, not when reopening an existing session.
 
 | API                                          | Purpose                                                                    |
 | -------------------------------------------- | -------------------------------------------------------------------------- |
@@ -55,6 +55,16 @@ In an authenticated product, resolve `tenant` and `user` on your server. The ses
 | `og.client`                                  | Use the full SDK on the same session                                       |
 
 A reply can be `completed`, `pending`, or `cancelled`. Present pending requests to the user before calling `respond`; a text reply alone does not imply that the turn completed. The handler supports native, Vercel UI message stream, OpenAI Chat Completions, and OpenAI Responses text-chat formats. Its history and decision endpoints remain native. See the [handler setup and protocol choices](/guides/integrate-your-product#mount-the-handler) for route registration and history ownership.
+
+For embedded agents, use `create: { bundledSkillIds: [] }` in chat options to
+exclude bundled product guidance, or list the individual capability guides the
+product supports. Workspace and inline Skills and tool permissions remain
+separate. See [Product guidance in embedded agents](/guides/integrate-your-product#product-guidance-in-embedded-agents).
+
+Chat replies and the Vercel/OpenAI formatters currently have no first-class
+monetary cost field. The separate permissioned `getBillingUsage` method returns
+bounded accounting data, not an AI SDK response extension. See
+[Request cost and verification](/guides/integrate-your-product#request-cost-and-verification).
 
 ## Full TypeScript client
 

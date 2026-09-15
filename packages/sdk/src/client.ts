@@ -181,6 +181,8 @@ import type {
   BeginSessionRealtimeRequest,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
+  ConnectorToolPermissionsResponse,
+  UpdateConnectorToolPermissionsRequest,
   CapabilityInstallation,
   ApiIntegrationPreview,
   ApiIntegrationOAuthStartRequest,
@@ -644,6 +646,8 @@ export type SessionListPageOptions = {
   pinsOnly?: boolean;
   /** Return archived root chats instead of the active session list. */
   archivedOnly?: boolean;
+  sortBy?: "updatedAt" | "createdAt" | "name";
+  archiveStatus?: "active" | "archived" | "all";
   /** Stop this caller's finite page read when its owning route is abandoned. */
   signal?: AbortSignal | undefined;
 };
@@ -1397,6 +1401,8 @@ export class OpenGeniClient {
           ...(options.createdBefore ? { createdBefore: options.createdBefore } : {}),
           ...(options.pinsOnly ? { pinsOnly: "true" } : {}),
           ...(options.archivedOnly ? { archivedOnly: "true" } : {}),
+          ...(options.sortBy ? { sortBy: options.sortBy } : {}),
+          ...(options.archiveStatus ? { archiveStatus: options.archiveStatus } : {}),
         },
         { signal: options.signal },
       );
@@ -1411,6 +1417,16 @@ export class OpenGeniClient {
         });
       }
       throw error;
+    }
+    if (
+      (options.sortBy !== undefined &&
+        (Array.isArray(response) || response.sortBy !== options.sortBy)) ||
+      (options.archiveStatus !== undefined &&
+        (Array.isArray(response) || response.archiveStatus !== options.archiveStatus))
+    ) {
+      throw new Error(
+        "The connected OpenGeni API does not support the requested session sorting/archive filter",
+      );
     }
     if (Array.isArray(response)) {
       // Rolling/same-major compatibility: an older API ignores `view=page` and
@@ -6808,6 +6824,35 @@ export class OpenGeniClient {
     );
   }
 
+  async getConnectorToolPermissions(
+    workspaceId: string,
+    capabilityId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ConnectorToolPermissionsResponse> {
+    return await this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async updateConnectorToolPermissions(
+    workspaceId: string,
+    capabilityId: string,
+    request: UpdateConnectorToolPermissionsRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ saved: boolean }> {
+    return await this.requestJson(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions`,
+      request,
+      {},
+      options,
+    );
+  }
+
   async enableCapability(
     workspaceId: string,
     capabilityId: string,
@@ -7866,6 +7911,48 @@ export class OpenGeniClient {
     });
   }
 
+  async getOrganizationUsageSummary(
+    options: {
+      accountId: string;
+      period?: import("@opengeni/contracts").OrganizationUsagePeriod;
+    },
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<import("@opengeni/contracts").OrganizationUsageSummary> {
+    return await this.requestJson(
+      "GET",
+      "/v1/billing/usage-summary",
+      undefined,
+      {
+        accountId: options.accountId,
+        period: options.period ?? "month",
+      },
+      requestOptions,
+    );
+  }
+
+  async getOrganizationUsageWorkspacePage(
+    options: {
+      accountId: string;
+      period?: import("@opengeni/contracts").OrganizationUsagePeriod;
+      until: string;
+      afterWorkspaceId?: string;
+    },
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<import("@opengeni/contracts").OrganizationUsageWorkspacePage> {
+    return await this.requestJson(
+      "GET",
+      "/v1/billing/usage-workspaces",
+      undefined,
+      {
+        accountId: options.accountId,
+        period: options.period ?? "month",
+        until: options.until,
+        ...(options.afterWorkspaceId ? { afterWorkspaceId: options.afterWorkspaceId } : {}),
+      },
+      requestOptions,
+    );
+  }
+
   async getBillingUsage(
     options: { accountId?: string; workspaceId?: string } = {},
   ): Promise<BillingUsageResponse> {
@@ -7881,6 +7968,7 @@ export class OpenGeniClient {
       range?: InsightsRange;
       provider?: string;
       model?: string;
+      signal?: AbortSignal;
     } = {},
   ): Promise<WorkspaceInsightsResponse> {
     return await this.requestJson<WorkspaceInsightsResponse>(
@@ -7892,6 +7980,7 @@ export class OpenGeniClient {
         ...(options.provider !== undefined ? { provider: options.provider } : {}),
         ...(options.model !== undefined ? { model: options.model } : {}),
       },
+      { signal: options.signal },
     );
   }
 

@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { getConnectBeginReplay } from "@opengeni/db/connect-attempts";
 import {
   AdvanceConnectRequest,
   BeginConnectRequest,
@@ -12,6 +13,7 @@ import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
   InstallApiIntegrationRequest,
   stableJson,
+  assertOrganizationIntegrationAllowed,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
   OPENGENI_PR_REVIEW_PACK_ID,
 } from "@opengeni/contracts";
@@ -20,7 +22,7 @@ import {
   createPinnedIntegrationTransport,
 } from "@opengeni/capabilities";
 import {
-  beginConnectAttempt,
+  beginConnectAttempt as persistConnectAttempt,
   getConnectAttempt,
   listPendingConnectAttempts,
   withWorkspaceSubjectRls,
@@ -46,6 +48,7 @@ import {
   isOpenGeniSlackBotConnection,
   prepareCapabilityEnable,
   buildCapabilityCatalog,
+  integrationKeyForConnectProvider,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
@@ -74,6 +77,7 @@ import {
 } from "../integrations/provider-oauth";
 import { resolveForRoute, validatedIntegrationInstallInput } from "./api-integrations";
 import { executeConnectOperation } from "@opengeni/core";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import { startMcpOAuth, requireIntegrationsStateSecret } from "../integrations/oauth-client";
 import { OFFICIAL_GMAIL_MCP_URL } from "../integrations/oauth-profiles";
 import { z } from "zod";
@@ -101,6 +105,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       "workspace:read",
     );
     const external = authorization.contextIntegrity;
+    const policy = await withOrganizationIntegrationPolicyFence(
+      deps.db,
+      authorization.grant,
+      async (_tx, current) => current,
+    );
     const canWrite = hasPermission(authorization.grant.permissions, "connections:write");
     const personal = isPersonalConnectionOwnerPrincipal(authorization);
     const lensPack = await getPackInstallation(
@@ -118,7 +127,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch {
       /* Missing operator configuration is catalog readiness, not actor authority. */
     }
-    return c.json([
+    const providers = [
       ...(["x", "reddit"] as const).map((providerId) => {
         let configured = mcpConfigured;
         try {
@@ -391,7 +400,16 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         ownership: personal ? ["workspace", "personal"] : ["workspace"],
         setup: ["credentials"],
       }),
-    ]);
+    ];
+    return c.json(
+      providers.filter(
+        (provider) =>
+          policy.mode === "unrestricted" ||
+          policy.allowedIntegrationKeys.includes(
+            integrationKeyForConnectProvider(provider.id) ?? "",
+          ),
+      ),
+    );
   });
   app.get("/v1/workspaces/:workspaceId/connect/accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -754,6 +772,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             const resolved = await resolveForRoute({
               deps,
               transport,
+              accountId: scope.accountId,
               workspaceId,
               subjectId: scope.subjectId,
               payload: {
@@ -1052,6 +1071,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               throw new HTTPException(409, { message: "Reload the current connection setup" });
             const started = await startMcpOAuth(deps, {
               ...scope,
+              ...(before.providerId === "gmail" || before.providerId === "slack-personal"
+                ? { integrationKey: before.providerId }
+                : {}),
               ...(continuation ? { externalContinuation: continuation } : {}),
               connectAttemptId: attempt.id,
               personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
@@ -1144,6 +1166,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           const resolved = await resolveForRoute({
             deps,
             transport,
+            accountId: scope.accountId,
             workspaceId,
             subjectId: scope.subjectId,
             payload: previewRequest,
@@ -1237,6 +1260,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         inputDigest: createHash("sha256")
           .update(stableJson({ ...input, action: "cancel" }))
           .digest("hex"),
+        purpose: "cancellation",
         authorize: async (tx, attempt, origin) => {
           const permission =
             attempt.providerId === "mcp-install"
@@ -1320,8 +1344,59 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(continuation ? { externalContinuation: continuation } : {}),
     };
     return c.json(
-      await withWorkspaceSubjectRls(deps.db, workspaceId, scope.subjectId, async (tx) => {
-        await requireConnectOwnerAuthority(tx, scope, setupPermission);
+      await (async () => {
+        // Remote setup preparation stays outside the policy and actor transactions.
+        // Repeat both admissions when persisting the resulting attempt.
+        const tx = deps.db;
+        const admit = () =>
+          withOrganizationIntegrationPolicyFence(deps.db, scope, async (policyTx, policy) => {
+            return withWorkspaceSubjectRls(
+              policyTx,
+              workspaceId,
+              scope.subjectId,
+              async (actorTx) => {
+                await requireConnectOwnerAuthority(actorTx, scope, setupPermission);
+                const replay = await getConnectBeginReplay(actorTx, scope, {
+                  idempotencyKey: input.idempotencyKey,
+                  requestDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
+                  returnUrl: input.returnUrl,
+                  ...(continuation ? { externalContinuation: continuation } : {}),
+                });
+                if (replay) return replay;
+                assertOrganizationIntegrationAllowed(
+                  policy,
+                  integrationKeyForConnectProvider(input.providerId),
+                );
+                return null;
+              },
+            );
+          });
+        const replay = await admit();
+        if (replay) return replay;
+        const beginConnectAttempt = async (
+          _db: Parameters<typeof persistConnectAttempt>[0],
+          _scope: Parameters<typeof persistConnectAttempt>[1],
+          attemptInput: Parameters<typeof persistConnectAttempt>[2],
+        ) =>
+          withOrganizationIntegrationPolicyFence(deps.db, scope, async (policyTx, policy) => {
+            return withWorkspaceSubjectRls(
+              policyTx,
+              workspaceId,
+              scope.subjectId,
+              async (actorTx) => {
+                await requireConnectOwnerAuthority(actorTx, scope, setupPermission);
+                return persistConnectAttempt(actorTx, scope, {
+                  ...attemptInput,
+                  authorizeAcquisition: async () => {
+                    assertOrganizationIntegrationAllowed(
+                      policy,
+                      integrationKeyForConnectProvider(input.providerId),
+                    );
+                  },
+                });
+              },
+            );
+          });
         const id = randomUUID();
         if (input.providerId === "mcp-install") {
           if (
@@ -1867,7 +1942,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             expiresAt: started.expiresAt,
           },
         });
-      }),
+      })(),
     );
   });
   app.get("/v1/workspaces/:workspaceId/connect/attempts", async (c) => {

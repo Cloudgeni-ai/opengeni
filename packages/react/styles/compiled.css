@@ -1623,6 +1623,9 @@
 :where(.og-root).min-h-14,:where(.og-root) .min-h-14 {
     min-height: calc(var(--spacing) * 14);
   }
+:where(.og-root).min-h-32,:where(.og-root) .min-h-32 {
+    min-height: calc(var(--spacing) * 32);
+  }
 :where(.og-root).min-h-56,:where(.og-root) .min-h-56 {
     min-height: calc(var(--spacing) * 56);
   }
@@ -1784,6 +1787,9 @@
   }
 :where(.og-root).max-w-md,:where(.og-root) .max-w-md {
     max-width: var(--container-md);
+  }
+:where(.og-root).max-w-prose,:where(.og-root) .max-w-prose {
+    max-width: 65ch;
   }
 :where(.og-root).max-w-sm,:where(.og-root) .max-w-sm {
     max-width: var(--container-sm);
@@ -4173,6 +4179,11 @@
       padding-top: calc(var(--spacing) * 0);
     }
   }
+:where(.og-root).first\:pt-1,:where(.og-root) .first\:pt-1 {
+    &:first-child {
+      padding-top: calc(var(--spacing) * 1);
+    }
+  }
 :where(.og-root).first\:pl-0,:where(.og-root) .first\:pl-0 {
     &:first-child {
       padding-left: calc(var(--spacing) * 0);
@@ -5020,6 +5031,11 @@
       }
     }
   }
+:where(.og-root).motion-safe\:animate-spin,:where(.og-root) .motion-safe\:animate-spin {
+    @media (prefers-reduced-motion: no-preference) {
+      animation: og-spin 1s linear infinite;
+    }
+  }
 :where(.og-root).motion-reduce\:animate-none,:where(.og-root) .motion-reduce\:animate-none {
     @media (prefers-reduced-motion: reduce) {
       animation: none;
@@ -5542,6 +5558,17 @@
 :where(.og-root).\[\&_svg\:not\(\[class\*\=\'text-\'\]\)\]\:text-muted-foreground,:where(.og-root) .\[\&_svg\:not\(\[class\*\=\'text-\'\]\)\]\:text-muted-foreground {
     & svg:not([class*='text-']) {
       color: var(--color-fg-muted);
+    }
+  }
+:where(.og-root).\[\&\+section\]\:border-t,:where(.og-root) .\[\&\+section\]\:border-t {
+    &+section {
+      border-top-style: var(--tw-border-style);
+      border-top-width: 1px;
+    }
+  }
+:where(.og-root).\[\&\+section\]\:border-og-border,:where(.og-root) .\[\&\+section\]\:border-og-border {
+    &+section {
+      border-color: var(--og-color-border);
     }
   }
 :where(.og-root).\[\&\:\:-webkit-details-marker\]\:hidden,:where(.og-root) .\[\&\:\:-webkit-details-marker\]\:hidden {

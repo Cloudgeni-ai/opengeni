@@ -60,6 +60,7 @@ describe("OpenGeni Product Integration Pack", () => {
       "SKILL.md",
       "agents/openai.yaml",
       "references/api-workflows.md",
+      "references/compatibility-and-troubleshooting.md",
       "references/customer-skill-template.md",
       "references/data-tools-and-credentials.md",
       "references/discovery-and-autonomy.md",

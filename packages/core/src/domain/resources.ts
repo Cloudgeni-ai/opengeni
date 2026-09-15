@@ -108,7 +108,14 @@ export function withWorkspaceDefaultMcpTools(
   return mergeToolRefs(
     tools,
     validateToolRefs(
-      defaults.mcpServerIds.map((id) => ({ kind: "mcp" as const, id, optional: true as const })),
+      [
+        ...defaults.mcpServerIds,
+        ...(defaults.inheritConnectedMcpServers
+          ? runtimeSettings.mcpServers
+              .filter((server) => !["opengeni", "files", "docs"].includes(server.id))
+              .map((server) => server.id)
+          : []),
+      ].map((id) => ({ kind: "mcp" as const, id, optional: true as const })),
       runtimeSettings,
     ),
   );

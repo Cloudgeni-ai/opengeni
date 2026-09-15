@@ -1,7 +1,17 @@
 import {
+  withOrganizationIntegrationAcquisition,
+  withOrganizationIntegrationPolicyFence,
+} from "@opengeni/db/organization-integration-policy";
+import {
+  claimOAuthAcquisition,
+  finishOAuthAcquisition,
+  integrationSourceSelectionRequiresAcquisition,
+} from "./oauth-client";
+import {
   scheduledTaskKnowledgeSource,
   requireScheduledTaskKnowledgeSource,
   knowledgeSourceAgentConfig,
+  assertOrganizationIntegrationAllowed,
 } from "@opengeni/contracts";
 import { createHash, randomBytes } from "node:crypto";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
@@ -48,6 +58,7 @@ import {
 } from "@opengeni/contracts";
 import {
   GOOGLE_DRIVE_INTEGRATION_DEFINITION,
+  CORE_INTEGRATION_DEFINITIONS,
   integrationDefinitionProviderDomain,
 } from "@opengeni/capabilities";
 import {
@@ -68,10 +79,10 @@ import {
   ConnectionDisconnectGenerationError,
   ConnectionDisconnectIdempotencyError,
   consumeIntegrationOAuthStateNonce,
-  claimConnectOperation,
   finishConnectOperation,
   getConnectAttempt,
   type Database,
+  listInstalledApiIntegrations,
   createConnection,
   decryptEnvironmentValue,
   disconnectConnectionIdempotently,
@@ -254,6 +265,7 @@ export async function startGoogleDriveOAuth(
     externalContinuation?: ExternalActorContinuation;
   },
 ): Promise<GoogleDriveOAuthStartResponse> {
+  await withOrganizationIntegrationAcquisition(deps.db, input, ["google-drive"], async () => {});
   const google = requireGoogleDriveSettings(deps.settings);
   const existing = input.payload.connectionId
     ? await getConnectionMetadata(
@@ -364,12 +376,18 @@ export async function completeGoogleDriveOAuthCallback(
         operationId: `oauth:${state.nonce}`,
         inputDigest: createHash("sha256").update(input.state!).digest("hex"),
       };
-      const claim = await claimConnectOperation(deps.db, state, {
-        ...operation,
-        expectedRevision: stored.attempt.revision,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
-      });
+      const claim = await claimOAuthAcquisition(
+        deps.db,
+        state,
+        {
+          ...operation,
+          expectedRevision: stored.attempt.revision,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        },
+        "google-drive",
+        Boolean(input.code && !input.error),
+      );
       if (claim.status === "replayed") return { redirectTo: exactReturnUrl, exactReturn: true };
     }
     await requireGoogleDriveCallbackGrant(deps, state);
@@ -409,6 +427,7 @@ export async function completeGoogleDriveOAuthCallback(
     if (!input.code) {
       throw new GoogleDriveCallbackError("missing_code");
     }
+    await withOrganizationIntegrationAcquisition(deps.db, state, ["google-drive"], async () => {});
 
     const google = requireGoogleDriveSettings(deps.settings);
     const key = requireEnvironmentEncryption(deps.settings);
@@ -562,36 +581,46 @@ export async function completeGoogleDriveOAuthCallback(
           });
     };
     if (operation) {
-      await finishConnectOperation(deps.db, acceptedState, {
-        ...operation,
-        authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
-        commit: async (tx, current) => {
-          const connection = await persist(tx);
-          if (!connection) throw new GoogleDriveCallbackError("connection_conflict");
-          return {
-            ...current,
-            revision: current.revision + 1,
-            state: "complete",
-            credentialsCommitted: true,
-            nextAction: { type: "none" },
-            account: {
-              id: connection.id,
-              version: connection.version,
-              providerId: current.providerId,
-              label: identity.emailAddress ?? identity.displayName,
-              ownership: "personal",
-              status: "connected",
-            },
-          };
+      await finishOAuthAcquisition(
+        deps.db,
+        acceptedState,
+        {
+          ...operation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+          commit: async (tx, current) => {
+            const connection = await persist(tx);
+            if (!connection) throw new GoogleDriveCallbackError("connection_conflict");
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete",
+              credentialsCommitted: true,
+              nextAction: { type: "none" },
+              account: {
+                id: connection.id,
+                version: connection.version,
+                providerId: current.providerId,
+                label: identity.emailAddress ?? identity.displayName,
+                ownership: "personal",
+                status: "connected",
+              },
+            };
+          },
         },
-      });
+        "google-drive",
+      );
       return { redirectTo: exactReturnUrl!, exactReturn: true };
     }
-    const connection = await deps.db.transaction(async (tx) => {
-      await requireGoogleDriveCallbackGrant({ ...deps, db: tx }, acceptedState);
-      return persist(tx);
-    });
+    const connection = await withOrganizationIntegrationAcquisition(
+      deps.db,
+      acceptedState,
+      ["google-drive"],
+      async (tx) => {
+        await requireGoogleDriveCallbackGrant({ ...deps, db: tx }, acceptedState);
+        return persist(tx);
+      },
+    );
     if (!connection) {
       throw new GoogleDriveCallbackError("connection_conflict");
     }
@@ -682,19 +711,45 @@ export async function transitionGoogleDriveLifecycle(
     );
   }
 
-  const updated = await transitionConnectionState(deps.db, {
-    workspaceId: input.workspaceId,
-    connectionId: existing.id,
-    visibleToSubjectId: input.subjectId,
-    expectedVersion: existing.version,
-    status: "active",
-    metadata: GoogleDriveConnectionMetadata.parse({
-      ...metadata,
-      lifecycle: googleDriveLifecycle(targetState),
-    }),
-    lastError: null,
-    updatedBySubjectId: input.subjectId,
-  });
+  const persist = (tx: Database) =>
+    transitionConnectionState(tx, {
+      workspaceId: input.workspaceId,
+      connectionId: existing.id,
+      visibleToSubjectId: input.subjectId,
+      expectedVersion: existing.version,
+      status: "active",
+      metadata: GoogleDriveConnectionMetadata.parse({
+        ...metadata,
+        lifecycle: googleDriveLifecycle(targetState),
+      }),
+      lastError: null,
+      updatedBySubjectId: input.subjectId,
+    });
+  const updated =
+    input.payload.action === "resume"
+      ? await withOrganizationIntegrationPolicyFence(
+          deps.db,
+          { accountId: existing.accountId, workspaceId: input.workspaceId },
+          async (tx, policy) => {
+            const current = await getConnectionMetadata(
+              tx,
+              input.workspaceId,
+              input.connectionId,
+              input.subjectId,
+            );
+            if (
+              current?.status === "active" &&
+              effectiveGoogleDriveLifecycle(
+                current,
+                requireGoogleDriveConnection(current, input.subjectId),
+              ).state === "active"
+            )
+              return current;
+            assertOrganizationIntegrationAllowed(policy, "google-drive");
+            return persist(tx);
+          },
+        )
+      : await persist(deps.db);
   if (!updated) {
     const converged = await getConnectionMetadata(
       deps.db,
@@ -972,58 +1027,141 @@ export async function saveGoogleDriveFacetSource(
   }
   const requestedDestination = bindGoogleDriveDocumentDestination(input, payload);
   const requestedConfig = googleDriveFacetConfig(requestedSources, requestedDestination, payload);
-  const replayed = await replayCompletedIntegrationFacetOperation<IntegrationFacetMutationResult>(
+  const admitted = await withOrganizationIntegrationPolicyFence(
     deps.db,
-    {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: input.subjectId,
-      capabilityId: input.capabilityId,
-      instanceKey: input.instanceKey,
-      facetKey: input.facetKey,
-      idempotencyKey: payload.idempotencyKey,
-      kind: "configure",
-      expectedRequestDigest: (result) => {
-        const displayName = integrationFacetReceiptDisplayName(result);
-        if (displayName === null) return "invalid-integration-facet-receipt";
-        return integrationFacetConfigureRequestDigest({
+    input,
+    async (tx, policy) => {
+      const replayed =
+        await replayCompletedIntegrationFacetOperation<IntegrationFacetMutationResult>(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
           capabilityId: input.capabilityId,
           instanceKey: input.instanceKey,
           facetKey: input.facetKey,
-          displayName,
-          config: requestedConfig,
-          ...(payload.expectedVersion !== undefined
-            ? { expectedVersion: payload.expectedVersion }
-            : {}),
+          idempotencyKey: payload.idempotencyKey,
+          kind: "configure",
+          expectedRequestDigest: (result) => {
+            const displayName = integrationFacetReceiptDisplayName(result);
+            if (displayName === null) return "invalid-integration-facet-receipt";
+            return integrationFacetConfigureRequestDigest({
+              capabilityId: input.capabilityId,
+              instanceKey: input.instanceKey,
+              facetKey: input.facetKey,
+              displayName,
+              config: requestedConfig,
+              ...(payload.expectedVersion !== undefined
+                ? { expectedVersion: payload.expectedVersion }
+                : {}),
+            });
+          },
         });
-      },
+      if (replayed) return { replayed: IntegrationFacetMutationResult.parse(replayed) };
+      const context = await requireGoogleDriveIntegrationFacet({ ...deps, db: tx }, input);
+      googleDriveDocumentDestination(input, payload);
+      const acquiring = googleDriveFacetSelectionRequiresAcquisition(context, requestedConfig);
+      if (acquiring) {
+        const installed = (
+          await listInstalledApiIntegrations(tx, input.workspaceId, input.subjectId)
+        ).find(
+          (candidate) =>
+            candidate.capabilityId === input.capabilityId &&
+            candidate.instanceKey === input.instanceKey,
+        );
+        assertOrganizationIntegrationAllowed(
+          policy,
+          installed
+            ? installedGoogleDriveFacetKey({
+                apiProtocol: installed.protocol,
+                definitionId: installed.definitionId,
+                definitionProvenance: installed.definitionProvenance,
+              })
+            : null,
+        );
+      }
+      return { context, acquiring };
     },
   );
-  if (replayed) return IntegrationFacetMutationResult.parse(replayed);
-  const context = await requireGoogleDriveIntegrationFacet(deps, input);
-  googleDriveDocumentDestination(input, payload);
-  await verifyGoogleDriveSources(deps, {
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
-    connectionId: context.connection.id,
-    sources: requestedSources,
-  });
-  return IntegrationFacetMutationResult.parse(
-    await configureIntegrationFacet(deps.db, {
-      accountId: input.accountId,
+  if (admitted.replayed) return admitted.replayed;
+  const context = admitted.context!;
+  if (admitted.acquiring)
+    await verifyGoogleDriveSources(deps, {
       workspaceId: input.workspaceId,
       subjectId: input.subjectId,
-      capabilityId: input.capabilityId,
-      instanceKey: input.instanceKey,
-      facetKey: input.facetKey,
-      displayName:
-        context.facet.binding?.displayName ?? `${input.instanceKey} — Google Drive content`,
-      config: requestedConfig,
-      ...(payload.expectedVersion !== undefined
-        ? { expectedVersion: payload.expectedVersion }
-        : {}),
-      idempotencyKey: payload.idempotencyKey,
-    }),
+      connectionId: context.connection.id,
+      sources: requestedSources,
+    });
+  return IntegrationFacetMutationResult.parse(
+    await withOrganizationIntegrationPolicyFence(deps.db, input, (tx, policy) =>
+      configureIntegrationFacet(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        capabilityId: input.capabilityId,
+        instanceKey: input.instanceKey,
+        facetKey: input.facetKey,
+        displayName:
+          context.facet.binding?.displayName ?? `${input.instanceKey} — Google Drive content`,
+        config: requestedConfig,
+        ...(payload.expectedVersion !== undefined
+          ? { expectedVersion: payload.expectedVersion }
+          : {}),
+        idempotencyKey: payload.idempotencyKey,
+        beforeAcquire: async (locked, installed) => {
+          const current = await requireGoogleDriveIntegrationFacet({ ...deps, db: locked }, input);
+          if (googleDriveFacetSelectionRequiresAcquisition(current, requestedConfig)) {
+            assertOrganizationIntegrationAllowed(policy, installedGoogleDriveFacetKey(installed));
+            if (!admitted.acquiring)
+              throw new HTTPException(409, {
+                message: "Google Drive source binding changed; verify the selection again",
+              });
+          }
+        },
+      }),
+    ),
+  );
+}
+
+/** This is installed server-authored version provenance, not a facet's mutable
+ * capabilities.provider, URL, domain, or client-authored credential metadata. */
+function installedGoogleDriveFacetKey(context: {
+  apiProtocol: string | null;
+  definitionId: string | null;
+  definitionProvenance: string | null;
+}): string | null {
+  if (context.apiProtocol !== "openapi" && context.apiProtocol !== "graphql") return null;
+  if (context.definitionProvenance === "workspace") return `custom:${context.apiProtocol}`;
+  return context.definitionProvenance === "curated" &&
+    CORE_INTEGRATION_DEFINITIONS.some((definition) => definition.id === context.definitionId)
+    ? context.definitionId
+    : null;
+}
+
+function googleDriveFacetSelectionRequiresAcquisition(
+  context: Awaited<ReturnType<typeof requireGoogleDriveIntegrationFacet>>,
+  requested: ReturnType<typeof googleDriveFacetConfig>,
+): boolean {
+  const binding = context.facet.binding;
+  if (
+    !binding ||
+    binding.status !== "active" ||
+    !binding.directlyOwned ||
+    binding.connectionId !== context.connection.id
+  )
+    return true;
+  const previous = GoogleDriveKnowledgeSourceConfig.safeParse(binding.config);
+  if (!previous.success) return true;
+  const selection = (config: ReturnType<typeof googleDriveFacetConfig>) =>
+    config.sources.map((source) => ({
+      ...source,
+      destination: config.destination,
+      syncCadence: config.syncCadence,
+      syncEnabled: true,
+      readPolicy: config.readPolicy,
+    }));
+  return integrationSourceSelectionRequiresAcquisition(
+    selection(previous.data),
+    selection(requested),
   );
 }
 
@@ -1065,14 +1203,34 @@ export async function saveGoogleDriveSource(
   if (existing.accountId !== input.accountId || existing.workspaceId !== input.workspaceId) {
     throw new HTTPException(403, { message: "Google Drive connection authority mismatch" });
   }
-  await requireGoogleDriveSourceConnection(deps, existing, input.subjectId);
+  const existingMetadata = await requireGoogleDriveSourceConnection(
+    deps,
+    existing,
+    input.subjectId,
+  );
   const documentDestination = googleDriveDocumentDestination(input, payload);
-  const verifiedSources = await verifyGoogleDriveSources(deps, {
-    workspaceId: input.workspaceId,
-    subjectId: input.subjectId,
-    connectionId: input.connectionId,
-    sources: payload.sources,
-  });
+  const requestedSelection = payload.sources.map((source) => ({
+    ...source,
+    destination: documentDestination,
+    syncCadence: payload.syncCadence,
+    syncEnabled: payload.syncEnabled,
+    readPolicy: payload.readPolicy,
+  }));
+  const acquiring = integrationSourceSelectionRequiresAcquisition(
+    existingMetadata.selectedSources ??
+      (existingMetadata.selectedSource ? [existingMetadata.selectedSource] : []),
+    requestedSelection,
+  );
+  if (acquiring)
+    await withOrganizationIntegrationAcquisition(deps.db, input, ["google-drive"], async () => {});
+  const verifiedSources = acquiring
+    ? await verifyGoogleDriveSources(deps, {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        connectionId: input.connectionId,
+        sources: payload.sources,
+      })
+    : payload.sources;
   const latest =
     (await getConnectionMetadata(
       deps.db,
@@ -1084,33 +1242,46 @@ export async function saveGoogleDriveSource(
   const previousSources =
     latestMetadata.selectedSources ??
     (latestMetadata.selectedSource ? [latestMetadata.selectedSource] : []);
-  const updated = await transitionConnectionState(deps.db, {
-    workspaceId: input.workspaceId,
-    connectionId: latest.id,
-    visibleToSubjectId: input.subjectId,
-    expectedVersion: latest.version,
-    metadata: GoogleDriveConnectionMetadata.parse({
-      ...latestMetadata,
-      documentDestination,
-      selectedSource: null,
-      selectedSources: verifiedSources.map((verified) => {
-        const previous = previousSources.find((source) => source.id === verified.id);
-        return {
-          id: verified.id,
-          name: verified.name,
-          mimeType: verified.mimeType,
-          driveId: verified.driveId,
-          destination: documentDestination,
-          syncCadence: payload.syncCadence,
-          syncEnabled: payload.syncEnabled,
-          configGeneration: (previous?.configGeneration ?? 0) + 1,
-          readPolicy: payload.readPolicy,
-          selectedAt: new Date().toISOString(),
-        };
-      }),
-    }),
-    updatedBySubjectId: input.subjectId,
-  });
+  const updated = await withOrganizationIntegrationPolicyFence(
+    deps.db,
+    input,
+    async (tx, policy) => {
+      if (integrationSourceSelectionRequiresAcquisition(previousSources, requestedSelection)) {
+        assertOrganizationIntegrationAllowed(policy, "google-drive");
+        if (!acquiring)
+          throw new HTTPException(409, {
+            message: "Google Drive sources changed; verify the selection again",
+          });
+      }
+      return transitionConnectionState(tx, {
+        workspaceId: input.workspaceId,
+        connectionId: latest.id,
+        visibleToSubjectId: input.subjectId,
+        expectedVersion: latest.version,
+        metadata: GoogleDriveConnectionMetadata.parse({
+          ...latestMetadata,
+          documentDestination,
+          selectedSource: null,
+          selectedSources: verifiedSources.map((verified) => {
+            const previous = previousSources.find((source) => source.id === verified.id);
+            return {
+              id: verified.id,
+              name: verified.name,
+              mimeType: verified.mimeType,
+              driveId: verified.driveId,
+              destination: documentDestination,
+              syncCadence: payload.syncCadence,
+              syncEnabled: payload.syncEnabled,
+              configGeneration: (previous?.configGeneration ?? 0) + 1,
+              readPolicy: payload.readPolicy,
+              selectedAt: new Date().toISOString(),
+            };
+          }),
+        }),
+        updatedBySubjectId: input.subjectId,
+      });
+    },
+  );
   if (!updated) {
     throw new HTTPException(409, { message: "Google Drive connection changed; try again" });
   }

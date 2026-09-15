@@ -540,20 +540,32 @@ export async function readWorkspaceInsightsModelBundle(
         from current_visible fact
       ), contribution_source_rows as (
         select
-          fact.id,
-          contribution->>'source' as source,
-          (contribution->>'items')::bigint as items,
-          (contribution->>'utf8Bytes')::bigint as utf8_bytes,
-          (contribution->>'estimatedTokens')::bigint as estimated_tokens
+          contribution.entry->>'source' as source,
+          (contribution.entry->>'items')::bigint as items,
+          (contribution.entry->>'utf8Bytes')::bigint as utf8_bytes,
+          (contribution.entry->>'estimatedTokens')::bigint as estimated_tokens,
+          -- The validated CHECK rejects duplicate named sources. Its SQL NULL
+          -- semantics still permit repeated null sources; count those only once
+          -- per fact without sorting all contribution rows by raw fact ID.
+          case when contribution.entry->>'source' is not null then true
+            else not exists (
+              select 1
+              from jsonb_array_elements(fact.context_contributions)
+                with ordinality earlier(entry, ordinal)
+              where earlier.ordinal < contribution.ordinal
+                and earlier.entry->>'source' is null
+            )
+          end as first_source
         from current_visible fact
-        cross join lateral jsonb_array_elements(fact.context_contributions) contribution
+        cross join lateral jsonb_array_elements(fact.context_contributions)
+          with ordinality contribution(entry, ordinal)
       ), contribution_rows as (
         select
           source,
           sum(items)::bigint as items,
           sum(utf8_bytes)::bigint as utf8_bytes,
           sum(estimated_tokens)::bigint as estimated_tokens,
-          count(distinct id)::bigint as calls
+          count(*) filter (where first_source)::bigint as calls
         from contribution_source_rows
         group by source
       )

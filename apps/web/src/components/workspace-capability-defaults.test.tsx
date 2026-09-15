@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, type ComponentProps } from "react";
 import { createRoot } from "react-dom/client";
 
 mock.module("@/context", () => ({ useAppContext: () => ({}) }));
@@ -17,6 +17,7 @@ async function mount(
   custom: boolean,
   kind: "permissions" | "plugins" = "permissions",
   canManage = true,
+  overrides: Partial<ComponentProps<typeof WorkspaceCapabilityDefaultsView>> = {},
 ) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -36,6 +37,7 @@ async function mount(
         kind={kind}
         canManage={canManage}
         onSave={save}
+        {...overrides}
       />,
     ),
   );
@@ -57,7 +59,7 @@ test("inherited defaults never save on mount, customization or cancel", async ()
     expect(view.host.textContent).toContain("Using deployment defaults");
     expect(view.save).not.toHaveBeenCalled();
     await view.click("Customize");
-    expect(view.host.textContent).toContain("Future tools will not be added automatically");
+    expect(view.host.textContent).toContain("Nothing changes until you save");
     expect(view.save).not.toHaveBeenCalled();
     await view.click("Cancel");
     expect(view.save).not.toHaveBeenCalled();
@@ -103,7 +105,10 @@ test("saving plugin defaults does not write a built-in tools override", async ()
   try {
     await view.click("Customize");
     await view.click("Save custom selection");
-    expect(view.save).toHaveBeenCalledWith({ mcpServerIds: ["files"] });
+    expect(view.save).toHaveBeenCalledWith({
+      mcpServerIds: ["files"],
+      inheritConnectedMcpServers: false,
+    });
   } finally {
     await view.cleanup();
   }
@@ -116,6 +121,86 @@ test("workspace readers cannot customize or reset", async () => {
     await view.click("Edit selection");
     expect(view.save).not.toHaveBeenCalled();
     expect(view.host.textContent).not.toContain("Remove this override?");
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("built-in controls preserve hidden connector selections and automatic inheritance", async () => {
+  const view = await mount(false, "permissions", true, {
+    servers: [
+      { id: "files", name: "Files" },
+      { id: "slack", name: "Slack connection" },
+    ],
+    firstPartyTools: [
+      { id: "command_read", name: "Read command" },
+      { id: "slack_bot_search", name: "Slack search" },
+    ],
+    defaults: {
+      mcpServerIds: ["files", "slack", "temporarily-unavailable"],
+      firstPartyMcpTools: ["command_read", "slack_bot_search"],
+      inheritConnectedMcpServers: true,
+    },
+  });
+  try {
+    expect(view.host.textContent).not.toContain("Slack");
+    expect(view.host.textContent).toContain("Command output");
+    await view.click("Customize");
+    const files = [...view.host.querySelectorAll("label")]
+      .find((label) => label.textContent === "Files")!
+      .querySelector<HTMLInputElement>("input")!;
+    await act(async () => files.click());
+    await view.click("Save custom selection");
+    expect(view.save).toHaveBeenCalledWith({
+      firstPartyMcpTools: ["command_read", "slack_bot_search"],
+      mcpServerIds: ["slack", "temporarily-unavailable"],
+      inheritConnectedMcpServers: true,
+    });
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("switching to an exact connector list starts from current apps without touching native tools", async () => {
+  const view = await mount(true, "plugins", true, {
+    servers: [
+      { id: "files", name: "Files" },
+      { id: "slack", name: "Slack connection" },
+      { id: "linear", name: "New Linear connection" },
+    ],
+    defaults: {
+      mcpServerIds: ["files", "slack"],
+      firstPartyMcpTools: ["command_read"],
+      inheritConnectedMcpServers: true,
+    },
+  });
+  try {
+    expect(view.host.textContent).not.toContain("Command output");
+    expect(view.host.textContent).not.toContain("Slack connection");
+    await view.click("Edit selection");
+    const automatic = [...view.host.querySelectorAll("label")]
+      .find((label) => label.textContent === "Use connected apps automatically")!
+      .querySelector<HTMLInputElement>("input")!;
+    await act(async () => automatic.click());
+    expect(view.host.textContent).toContain("New Linear connection");
+    await view.click("Save custom selection");
+    expect(view.save).toHaveBeenCalledWith({
+      mcpServerIds: ["files", "linear", "slack"],
+      inheritConnectedMcpServers: false,
+    });
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("resetting built-in tools re-enables native carriers without widening an exact connector list", async () => {
+  const view = await mount(true, "permissions", true, {
+    defaults: { mcpServerIds: [], firstPartyMcpTools: ["command_read"] },
+  });
+  try {
+    await view.click("Use deployment defaults");
+    await view.click("Use deployment defaults");
+    expect(view.save).toHaveBeenCalledWith({ firstPartyMcpTools: null, mcpServerIds: ["files"] });
   } finally {
     await view.cleanup();
   }

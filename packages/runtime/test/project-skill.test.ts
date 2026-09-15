@@ -18,6 +18,7 @@ test("Projects guidance is a canonical packaged artifact, not sandbox materializ
   });
   expect(artifacts.map((artifact) => artifact.name)).toEqual([
     "document-parsing",
+    "opengeni-help",
     "opengeni-visualize",
     "opengeni-projects",
   ]);
@@ -29,10 +30,12 @@ test("Projects guidance is a canonical packaged artifact, not sandbox materializ
   expect(composition.configuredNames).toEqual([]);
   expect(composition.selections.map((selection) => selection.name)).toEqual([
     "document-parsing",
+    "opengeni-help",
     "opengeni-visualize",
   ]);
   expect(composition.index.map((entry) => entry.name)).toEqual([
     "document-parsing",
+    "opengeni-help",
     "opengeni-visualize",
   ]);
 });

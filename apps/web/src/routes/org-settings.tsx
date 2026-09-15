@@ -1,15 +1,8 @@
 import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
 // Organization settings (formerly "Account"): identity, organization API
 // keys, account-wide billing usage, plan entitlements, and members.
-import { useBillingUsage } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
-import {
-  ActivityIcon,
-  ArrowUpRightIcon,
-  GaugeIcon,
-  Loader2Icon,
-  RefreshCwIcon,
-} from "lucide-react";
+import { ArrowUpRightIcon, GaugeIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -23,16 +16,13 @@ import {
 import { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
 import { OrganizationModelProviderConnection } from "@/components/organization-model-provider-connection";
 import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
+import { OrganizationUsageDashboard } from "@/components/organization-usage-dashboard";
 import { OrganizationRecoverySection } from "@/components/organization-recovery";
+import { OrganizationIntegrationsSection } from "@/components/organization-integrations-section";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
-import {
-  entitlementEntries,
-  formatMoneyMicros,
-  formatTimestamp,
-  validTopupAmount,
-} from "@/lib/format";
+import { entitlementEntries, formatMoneyMicros, validTopupAmount } from "@/lib/format";
 import { orgLabel } from "@/lib/org";
 import {
   beginOrganizationAdminOperation,
@@ -52,7 +42,6 @@ import type {
   CompanyProfileAgentPolicy,
   CompanyProfileAgentPolicyMode,
   OrganizationMembershipRole,
-  UsageEvent,
 } from "@/types";
 import { OrganizationKnowledgePrompt } from "./organization-knowledge-prompt";
 import { useCompanyProfileInventory } from "./workspace-state-loader";
@@ -717,6 +706,15 @@ export function OrgSettingsRoute({
             managedSession={organizationAdministratorSession}
           />
         ) : null}
+        {section === "integrations" ? (
+          <OrganizationIntegrationsSection
+            key={`${identityKey}:integrations`}
+            client={client}
+            identity={adminIdentity}
+            actorRole={actorRole}
+            managedSession={organizationAdministratorSession}
+          />
+        ) : null}
 
         {section === "recovery" ? (
           singleUser ? (
@@ -867,7 +865,7 @@ export function OrgSettingsRoute({
         ) : null}
 
         {section === "billing" ? (
-          <BillingUsageSection
+          <OrganizationUsageDashboard
             key={identityKey}
             accountId={accountId}
             enabled={canReadBilling && Boolean(accountId)}
@@ -875,31 +873,6 @@ export function OrgSettingsRoute({
         ) : null}
       </section>
     </OrganizationSettingsShell>
-  );
-}
-
-/** Aggregate usage events by type for the honest at-a-glance summary. */
-export function aggregateUsage(
-  events: UsageEvent[],
-): Array<{ eventType: string; unit: string; total: number; count: number }> {
-  const byKey = new Map<
-    string,
-    { eventType: string; unit: string; total: number; count: number }
-  >();
-  for (const event of events) {
-    const key = `${event.eventType}\u0000${event.unit}`;
-    const entry = byKey.get(key) ?? {
-      eventType: event.eventType,
-      unit: event.unit,
-      total: 0,
-      count: 0,
-    };
-    entry.total += event.quantity;
-    entry.count += 1;
-    byKey.set(key, entry);
-  }
-  return [...byKey.values()].sort(
-    (a, b) => b.count - a.count || a.eventType.localeCompare(b.eventType),
   );
 }
 
@@ -959,120 +932,5 @@ function EntitlementsSection(props: {
         </div>
       )}
     </section>
-  );
-}
-
-function UsageSection(props: {
-  enabled: boolean;
-  loading: boolean;
-  error: Error | null;
-  usage: UsageEvent[];
-  onRefresh: () => void;
-}) {
-  const summary = useMemo(() => aggregateUsage(props.usage), [props.usage]);
-  return (
-    <section className="grid gap-4 border-b border-border pb-6">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <h2 className="flex items-center gap-1.5 text-sm font-medium">
-            <ActivityIcon className="size-3.5 text-brand" />
-            Usage
-          </h2>
-          <p className="mt-1 text-xs text-fg-muted">Recent metered usage for this organization.</p>
-        </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          disabled={!props.enabled || props.loading}
-          onClick={props.onRefresh}
-        >
-          <RefreshCwIcon className={props.loading ? "size-3.5 animate-spin" : "size-3.5"} />
-          Refresh
-        </Button>
-      </div>
-
-      {!props.enabled ? (
-        <p className="text-xs text-fg-subtle">You don't have permission to view usage.</p>
-      ) : props.error && props.usage.length === 0 ? (
-        // Honest failed-load state: a failed usage read must never render as
-        // "No usage recorded yet." (usage already on screen keeps rendering).
-        <LoadErrorState title="Couldn't load usage" error={props.error} onRetry={props.onRefresh} />
-      ) : props.loading && props.usage.length === 0 ? (
-        <div className="flex items-center gap-2 text-xs text-fg-muted">
-          <Loader2Icon className="size-3.5 animate-spin" />
-          Loading usage
-        </div>
-      ) : props.usage.length === 0 ? (
-        <p className="text-xs text-fg-subtle">No usage recorded yet</p>
-      ) : (
-        <>
-          <div className="flex flex-wrap gap-2">
-            {summary.map((entry) => (
-              <span
-                key={`${entry.eventType}:${entry.unit}`}
-                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg/35 px-2 py-1 text-xs"
-              >
-                <span className="font-medium">{entry.eventType}</span>
-                <span className="font-mono text-2xs text-fg-muted">
-                  {Number.isInteger(entry.total) ? entry.total : entry.total.toFixed(4)}{" "}
-                  {entry.unit}
-                </span>
-              </span>
-            ))}
-          </div>
-          <div className="overflow-x-auto">
-            <table className="min-w-full border-collapse text-left text-xs">
-              <thead className="border-b border-border text-fg">
-                <tr>
-                  <th className="whitespace-nowrap px-2 py-1.5 font-medium">Event</th>
-                  <th className="whitespace-nowrap px-2 py-1.5 font-medium">Quantity</th>
-                  <th className="whitespace-nowrap px-2 py-1.5 font-medium">Source</th>
-                  <th className="whitespace-nowrap px-2 py-1.5 font-medium">Occurred</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border/70">
-                {props.usage.slice(0, 30).map((event) => (
-                  <tr key={event.id}>
-                    <td className="px-2 py-1.5 text-fg-muted">{event.eventType}</td>
-                    <td className="whitespace-nowrap px-2 py-1.5 font-mono text-fg-muted">
-                      {Number.isInteger(event.quantity)
-                        ? event.quantity
-                        : event.quantity.toFixed(6)}{" "}
-                      {event.unit}
-                    </td>
-                    <td className="max-w-44 truncate px-2 py-1.5 font-mono text-2xs text-fg-subtle">
-                      {event.sourceResourceType
-                        ? `${event.sourceResourceType}:${event.sourceResourceId ?? ""}`
-                        : "—"}
-                    </td>
-                    <td className="whitespace-nowrap px-2 py-1.5 text-fg-subtle">
-                      {formatTimestamp(event.occurredAt)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
-    </section>
-  );
-}
-
-/** Remounted at route identity boundaries; the usage request itself stays account-wide. */
-function BillingUsageSection(props: { accountId: string; enabled: boolean }) {
-  const usage = useBillingUsage({
-    ...(props.accountId ? { accountId: props.accountId } : {}),
-    enabled: props.enabled,
-  });
-  return (
-    <UsageSection
-      enabled={props.enabled}
-      loading={usage.loading}
-      error={usage.error}
-      usage={usage.usage}
-      onRefresh={() => void usage.refresh()}
-    />
   );
 }

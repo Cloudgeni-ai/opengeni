@@ -507,6 +507,10 @@ idempotent `OpCancel`, and only a typed terminal exit/loss is checkpointed as
 proof before settlement. Offline, timeout, malformed, or still-running results
 are deferred. Claim expiry recovers coordination only and never implies process
 death; a successor connection is never queried on the predecessor's behalf.
+Completed operations may need multiple retained-output batches. Reconciliation
+keeps one reader and its integrity checkpoint while captured sequence progress
+continues, and settles only after the terminal output frontier is verified.
+Empty or repeated batches defer recovery; they never license a success result.
 Adoption takes the canonical workspace-control and exact turn-attempt fence, so
 it has a total order with Steer, Pause, terminal Cancel, and session deletion.
 Before that transaction starts, the op-stream yield path takes exact

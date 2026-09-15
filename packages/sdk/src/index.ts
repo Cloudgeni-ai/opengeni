@@ -1250,3 +1250,9 @@ export type {
   FeedbackSubmissionResponse,
 } from "./feedback";
 export type * from "./knowledge";
+export type {
+  ConnectorToolPermission,
+  ConnectorToolPermissionEntry,
+  ConnectorToolPermissionsResponse,
+  UpdateConnectorToolPermissionsRequest,
+} from "./types";

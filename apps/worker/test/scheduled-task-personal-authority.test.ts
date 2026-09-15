@@ -1228,7 +1228,9 @@ describe("scheduled task personal MCP authority", () => {
       // 0461 deliberately extends this function for ordinary private source
       // tasks. 0414 replay is a pre-cutover contract, never a downgrade path.
       await historicalAdmin`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
-      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES('0461_unified_knowledge.sql')`;
+      // 0468/0469 depend on Knowledge withheld with 0461.
+      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
+        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql')`;
       await migrate(historical.databaseUrl);
       const migration = await readFile(
         new URL(

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "@opengeni/sdk";
 
 import type { Session } from "@/types";
-import { compareSessionActivity } from "./sessions-group";
+import { compareSessionActivity, compareSessionBrowse } from "./sessions-group";
 import * as sessionChannelMove from "./session-channel-move";
 import {
   applySessionChannelProjection,
@@ -955,6 +955,24 @@ describe("session pin reconciliation", () => {
 
     const refreshed = { ...listed, updatedAt: "2026-07-10T00:04:00.000Z" };
     expect(order(applySessionRailProjection(listed, refreshed))).toEqual([listed.id, peer.id]);
+  });
+
+  test("selection and deselection preserve exact list creation ordering within one millisecond", () => {
+    const listed = { ...session, createdAt: "2026-07-10T00:00:00.123456Z" };
+    const peer = { ...listed, id: "peer", createdAt: "2026-07-10T00:00:00.123455Z" };
+    const order = (row: Session) =>
+      [peer, row].sort((a, b) => compareSessionBrowse(a, b, "createdAt")).map((item) => item.id);
+    const detail = {
+      ...listed,
+      createdAt: "2026-07-10T00:00:00.123Z",
+      initialMessage: "Fresh route content",
+    };
+    const selected = applySessionRailProjection(detail, listed);
+    expect(selected.createdAt).toBe(listed.createdAt);
+    expect(selected.initialMessage).toBe(detail.initialMessage);
+    expect(order(listed)).toEqual([listed.id, peer.id]);
+    expect(order(selected)).toEqual(order(listed));
+    expect(order(listed)).toEqual(order(selected));
   });
 
   test("retains display-only list fields without copying an expired channel projection", () => {

@@ -59,7 +59,14 @@ function providerGroups(models: ClientModel[], codexOnly: boolean) {
       optionDisabled: codexOnly && !isCodexClientModel(model),
     });
   }
-  return [...byProvider.values()];
+  const groups = [...byProvider.values()];
+  if (codexOnly) {
+    const codexIndex = groups.findIndex((group) =>
+      group.models.some((model) => !model.optionDisabled && isCodexClientModel(model)),
+    );
+    if (codexIndex > 0) groups.unshift(...groups.splice(codexIndex, 1));
+  }
+  return groups;
 }
 
 export function ModelPicker({
@@ -78,8 +85,9 @@ export function ModelPicker({
     [rows, codexOnly],
   );
   const billingGroups = useMemo(
-    () => (effectiveRows.length > 0 ? groupPickerRowsByBillingClass(effectiveRows) : []),
-    [effectiveRows],
+    () =>
+      effectiveRows.length > 0 ? groupPickerRowsByBillingClass(effectiveRows, { codexOnly }) : [],
+    [effectiveRows, codexOnly],
   );
   const providerGroupList = useMemo(() => providerGroups(models, codexOnly), [models, codexOnly]);
   const useBillingGroups = Boolean(effectiveRows.length);

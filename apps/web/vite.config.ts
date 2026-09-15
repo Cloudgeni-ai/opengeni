@@ -240,6 +240,15 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: 3000,
+    // OAuth providers return to the public web origin. Match production's /v1
+    // ingress routing so these callbacks reach the API instead of the SPA.
+    proxy: {
+      "/v1": {
+        target:
+          process.env.VITE_API_BASE_URL ||
+          `http://127.0.0.1:${process.env.OPENGENI_API_PORT || 8000}`,
+      },
+    },
     ...(allowedHosts?.length ? { allowedHosts } : {}),
   },
   preview: {

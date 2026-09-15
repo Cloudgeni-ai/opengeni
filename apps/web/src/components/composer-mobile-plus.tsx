@@ -4,6 +4,7 @@ import {
   AudioLinesIcon,
   BoxIcon,
   ChevronLeftIcon,
+  ChevronRightIcon,
   GitBranchIcon,
   PaperclipIcon,
   PlugIcon,
@@ -24,7 +25,6 @@ import {
 
 import {
   SessionToolsMenuBody,
-  sessionToolSelectionSummary,
   SESSION_TOOLS_PANEL_CLASS,
   type SessionToolSelection,
 } from "@/components/pickers";
@@ -39,13 +39,7 @@ const AgentLearningDraftEditor = lazy(() =>
     default: module.AgentLearningDraftEditor,
   })),
 );
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -55,14 +49,26 @@ import {
 import { repoCountLabel } from "@/lib/format";
 import type { McpServerOption } from "@/lib/session-tools";
 
-type Panel = "root" | "tools" | "repos" | "voice" | "variables";
+import {
+  isComposerConnector,
+  type SessionConnectorsMenuProps,
+} from "@/components/session-connectors-menu-body";
+
+type Panel = "root" | "tools" | "repos" | "voice" | "variables" | "settings";
 
 /**
  * Shared composer actions at every width; model and voice stay in the bar.
  */
-export function ComposerMobilePlus(props: {
+export type ComposerPlusProps = {
+  connectorActions?: Pick<
+    SessionConnectorsMenuProps,
+    "onReconnect" | "loading" | "error" | "busyId"
+  >;
+  onOpenConnectors?: () => void;
   /** Centered composers need viewport-sized panels rather than trigger-side space. */
   expandedPanelPresentation?: "menu" | "dialog";
+  /** Anchor below a centered new-chat composer and above a docked composer. */
+  menuSide?: "top" | "bottom";
   draftChatSettings?: {
     workspaceId: string;
     scope: "workspace" | "personal";
@@ -101,16 +107,24 @@ export function ComposerMobilePlus(props: {
     /** Panel element; receives `leading` (back control) via clone. */
     panel: ReactElement<{ leading?: ReactNode }>;
   };
-}) {
+};
+
+export function ComposerMobilePlus(props: ComposerPlusProps) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [panel, setPanel] = useState<Panel>("root");
-  const toolSummary = sessionToolSelectionSummary(props);
-  const toolsAvailable = toolSummary.total > 0;
+  const connectors = props.servers.filter(isComposerConnector);
+  const toolsSelected = connectors.filter((server) =>
+    props.selection.mcpServerIds.has(server.id),
+  ).length;
   const repositories = props.repositories;
   const voiceModel = props.voiceModel;
-  const dialogOpen = open && panel !== "root" && props.expandedPanelPresentation === "dialog";
+  const dialogOpen =
+    open &&
+    panel !== "root" &&
+    panel !== "tools" &&
+    panel !== "settings" &&
+    props.expandedPanelPresentation === "dialog";
 
   const backButton = (
     <button
@@ -162,16 +176,19 @@ export function ComposerMobilePlus(props: {
             dialog={dialogOpen}
             panel={panel}
             triggerRef={triggerRef}
+            side={
+              props.menuSide ?? (props.expandedPanelPresentation === "dialog" ? "bottom" : "top")
+            }
             className={
               panel === "tools"
                 ? SESSION_TOOLS_PANEL_CLASS
                 : panel === "variables"
                   ? "flex w-[min(24rem,calc(100vw-1.5rem))] max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-2 shadow-xl"
-                  : panel === "voice"
-                    ? "flex w-[min(20rem,calc(100vw-1.5rem))] max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl p-2"
+                  : panel === "voice" || panel === "settings"
+                    ? "flex w-[min(24rem,calc(100vw-1.5rem))] max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl bg-surface p-2"
                     : panel === "repos"
                       ? REPOSITORY_PANEL_CLASS
-                      : "min-w-52 rounded-xl"
+                      : "min-w-52 rounded-xl bg-surface"
             }
           >
             {panel === "root" ? (
@@ -192,22 +209,24 @@ export function ComposerMobilePlus(props: {
                     Add photos & files
                   </DropdownMenuItem>
                 ) : null}
-                {toolsAvailable ? (
+                {
                   <DropdownMenuItem
                     className="pointer-coarse:min-h-11"
                     disabled={props.disabled || props.toolsDisabled}
                     onSelect={(event) => {
                       event.preventDefault();
                       setPanel("tools");
+                      props.onOpenConnectors?.();
                     }}
                   >
                     <PlugIcon className="size-4" />
-                    Tools
+                    Connectors
                     <span className="ml-auto text-2xs text-fg-subtle">
-                      {props.toolsSaving ? "Saving…" : toolSummary.label}
+                      {props.toolsSaving ? "Saving…" : toolsSelected || ""}
+                      <ChevronRightIcon className="ml-1 inline size-3.5" />
                     </span>
                   </DropdownMenuItem>
-                ) : null}
+                }
                 {repositories ? (
                   <DropdownMenuItem
                     className="pointer-coarse:min-h-11"
@@ -262,9 +281,9 @@ export function ComposerMobilePlus(props: {
                 ) : null}
                 {props.chatSettings || props.draftChatSettings ? (
                   <DropdownMenuItem
-                    onSelect={() => {
-                      setOpen(false);
-                      setSettingsOpen(true);
+                    onSelect={(event) => {
+                      event.preventDefault();
+                      setPanel("settings");
                     }}
                   >
                     <SettingsIcon className="size-4" />
@@ -274,6 +293,7 @@ export function ComposerMobilePlus(props: {
               </>
             ) : panel === "tools" ? (
               <SessionToolsMenuBody
+                {...props.connectorActions}
                 presentation={dialogOpen ? "dialog" : "menu"}
                 servers={props.servers}
                 firstPartyTools={props.firstPartyTools}
@@ -293,47 +313,51 @@ export function ComposerMobilePlus(props: {
               })
             ) : panel === "voice" && voiceModel ? (
               withLeading(voiceModel.panel, backButton)
+            ) : panel === "settings" ? (
+              <>
+                <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 pb-2">
+                  {backButton}
+                  <h2 className="text-sm font-medium">Chat settings</h2>
+                </div>
+                <div className="min-h-0 overflow-y-auto overscroll-contain p-2">
+                  <p className="mb-3 text-xs text-fg-muted">
+                    Agent learning for this chat. Unchanged choices follow your defaults.
+                  </p>
+                  <Suspense
+                    fallback={
+                      <p role="status" className="text-sm text-fg-muted">
+                        Loading settings…
+                      </p>
+                    }
+                  >
+                    {props.chatSettings ? (
+                      <AgentLearningSettingsEditor
+                        key={props.chatSettings.sessionId}
+                        workspaceId={props.chatSettings.workspaceId}
+                        scope={props.chatSettings.scope}
+                        source={{ kind: "chat", id: props.chatSettings.sessionId }}
+                        canEdit={props.chatSettings.canEdit}
+                      />
+                    ) : props.draftChatSettings ? (
+                      <AgentLearningDraftEditor
+                        {...props.draftChatSettings}
+                        disabled={props.disabled}
+                      />
+                    ) : null}
+                  </Suspense>
+                </div>
+              </>
             ) : null}
           </ComposerPanelContent>
         </DropdownMenu>
       </Dialog>
-      {props.chatSettings || props.draftChatSettings ? (
-        <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>Chat settings</DialogTitle>
-              <DialogDescription>
-                Agent learning for this chat. Unchanged choices follow your defaults.
-              </DialogDescription>
-            </DialogHeader>
-            <Suspense
-              fallback={
-                <p role="status" className="text-sm text-fg-muted">
-                  Loading settings…
-                </p>
-              }
-            >
-              {props.chatSettings ? (
-                <AgentLearningSettingsEditor
-                  key={props.chatSettings.sessionId}
-                  workspaceId={props.chatSettings.workspaceId}
-                  scope={props.chatSettings.scope}
-                  source={{ kind: "chat", id: props.chatSettings.sessionId }}
-                  canEdit={props.chatSettings.canEdit}
-                />
-              ) : props.draftChatSettings ? (
-                <AgentLearningDraftEditor {...props.draftChatSettings} disabled={props.disabled} />
-              ) : null}
-            </Suspense>
-          </DialogContent>
-        </Dialog>
-      ) : null}
     </>
   );
 }
 
 function ComposerPanelContent(props: {
   dialog: boolean;
+  side: "top" | "bottom";
   panel: Panel;
   triggerRef: { current: HTMLButtonElement | null };
   className: string;
@@ -367,7 +391,7 @@ function ComposerPanelContent(props: {
           {props.panel === "repos"
             ? "Repositories"
             : props.panel === "tools"
-              ? "Tools"
+              ? "Connectors"
               : props.panel === "variables"
                 ? "Variable sets"
                 : "Voice model"}
@@ -380,7 +404,7 @@ function ComposerPanelContent(props: {
   return (
     <DropdownMenuContent
       align="start"
-      side="top"
+      side={props.side}
       sideOffset={8}
       collisionPadding={12}
       className={props.className}

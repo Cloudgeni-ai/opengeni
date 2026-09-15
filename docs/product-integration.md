@@ -389,6 +389,11 @@ operation.
 
 ## Skills are external product data
 
+Ordinary OpenGeni sessions include the `builtin:opengeni-help` descriptor by
+default. Its guide can be read without a sandbox or Pack installation and points
+to the official documentation at https://docs.opengeni.ai/llms.txt. It covers
+product questions; the larger implementation Pack remains session-selected.
+
 Control OpenGeni's bundled guidance separately from your product Skills with
 `CreateSessionRequest.bundledSkillIds`. Omit it for the default bundles; pass
 `[]` for none, or explicit IDs such as `"builtin:opengeni-documents"`. Selection
@@ -401,6 +406,13 @@ This does not disable workspace-authored/installed Skills or your inline
 `skills`. Those keep their own ownership and sharing rules. The eager
 `skill_read` tool remains available even with no bundled guidance. Bundle
 selection does not wait for lazy tool discovery or sandbox startup.
+
+For an embedded support bot, put `bundledSkillIds: []` in the raw create request
+or `create: { bundledSkillIds: [] }` in the chat facade's resolved options. Select
+only the product's own inline Skills and intended tools, and use a workspace
+whose shared Skills match that product. For example, a documents-capable bot
+can select only `builtin:opengeni-documents`. Removing bundled guides does not
+remove mandatory runtime rules or independently authorized Skill/tool surfaces.
 
 The external backend owns its reusable Skills. Store and version them with the
 product's integration code or in the product's own Skill store, then pass the
@@ -544,6 +556,11 @@ not attach implementation guidance about integrating OpenGeni to the end-user
 runtime agent.
 
 ## Browser and React integration
+
+For organization-wide server-enforced Connect acquisition choices, use the
+[organization integration policy](organization-integration-policy.md). Its
+catalog exposes named stable keys, and its revisioned update API is administered
+with the backend's organization key rather than a browser-only filter.
 
 Use `SessionConversation` for a packaged existing-session experience, or
 compose the timeline and composer. These use the normal SDK, not the

@@ -75,7 +75,7 @@ Then open the smallest source files that answer the question:
 - Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
-- Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`.
+- Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
 - Runtime/sandbox/tools: `packages/runtime/src/index.ts` is the public agent-loop facade;
   `skill-catalog.ts` renders Skill descriptors into the turn-attempt instruction
   layer; the worker's `skill-read.ts` exposes eager text reads and `skill-checkout.ts`
@@ -86,7 +86,7 @@ Then open the smallest source files that answer the question:
   `packages/runtime/src/run-events.ts` owns SDK stream/usage/interruption normalization.
 - Files/object storage: `apps/api/src/routes/files.ts`, `packages/storage/src/index.ts`.
 - Deployment/operator sources: `packages/deployment`, `docs/deployment.md`, `deploy/helm/opengeni`, `deploy/terraform/`, and `deploy/stacks/`.
-- Knowledge, source preparation, retrieval and learning policy: read `docs/knowledge.md`, then `apps/api/src/routes/knowledge.ts`, `packages/core/src/domain/knowledge*.ts`, and `packages/db/src/knowledge-entries.ts`. Old Memory and reviewed-Knowledge authoring are retired; conversation history and temporary task notes remain separate.
+- Knowledge, selective source retention, collection/duplicate discovery (`knowledge_prepare_save`), retrieval and learning policy: read `docs/knowledge.md`, then `apps/api/src/routes/knowledge.ts`, `packages/core/src/domain/knowledge*.ts`, and `packages/db/src/knowledge-entries.ts`. Old Memory and reviewed-Knowledge authoring are retired; conversation history and temporary task notes remain separate.
 - GitHub integration: `apps/api/src/routes/github.ts`, shared workspace filtering in `apps/api/src/github-access.ts`, `packages/github/src/index.ts`, and the binding/allowlist helpers plus tables in `packages/db/src/index.ts` / `schema.ts`. The separately configured OpenGeni Lens GitHub App reuses the same owner-proof primitives through `apps/api/src/routes/pr-review-github.ts`; its shared webhook still enters the generic PR-review automation source.
 - Connected Machine (bring-your-own-compute / the `selfhosted` backend): API routes `apps/api/src/routes/machines.ts` and `apps/api/src/routes/enrollments.ts`; services `apps/api/src/sandbox/machines.ts` and `apps/api/src/sandbox/enrollment.ts`; the machine-primary turn branch in `apps/worker/src/activities/agent-turn/sandbox-establish.ts` and the clone-guard in `packages/runtime/src/index.ts`; the runtime session at `packages/runtime/src/sandbox/selfhosted/`; the on-machine agent + relay in the `agent/` Rust crate; public behavior in `docs/connected-machines.md`; opt-in UI at the `@opengeni/react/machines` subpath.
 - Web usage examples: `apps/web/src/api.ts`, `apps/web/src/types.ts`, relevant UI components.

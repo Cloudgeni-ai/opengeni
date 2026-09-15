@@ -27,6 +27,13 @@ Postgres is the source of truth. The realtime bus only fans out what was already
 
 ## Sending input
 
+**Queued** means the next agent turn has not started. The sidebar uses a clock
+for work waiting to run. Inside the session, the start status shows automatic
+retry timing and recorded errors when available. A start request being accepted
+does not mean a worker is executing it. Deliberate agent waits separately show
+their reason and next recheck; running turns and background commands retain
+their own activity indicators.
+
 - **Send** appends a prompt. If a turn is running, the message queues behind it. Queued messages stay visible, editable, and reorderable until the worker claims them.
 - **Steer** delivers now: it moves your message to the front and interrupts the running turn.
 - **Pause** and **Resume** hold and release the workstream without creating queue items.

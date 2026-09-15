@@ -387,6 +387,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     turnId: attempt.turnId,
     opAcks: {},
   };
+  eventing.heartbeatDetails = heartbeatDetails;
   const opJournal = makeTurnOpJournal(activityContext, heartbeatDetails);
   eventing.heartbeatTimer = startActivityHeartbeat(activityContext, heartbeatDetails);
   let producerSeq = 0;

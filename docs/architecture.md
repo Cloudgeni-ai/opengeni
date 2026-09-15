@@ -1,24 +1,24 @@
 # OpenGeni architecture reference
 
-> Whole-system orientation; code and focused docs own exact behavior.
+> Orientation; code and focused docs define behavior.
 > Setup: [`../AGENTS.md`](../AGENTS.md). Documentation index: [`README.md`](README.md).
 
 ## Navigation
 
-1. **New here?** Read §2–4; skim §6.
+1. Read §2–4; skim §6.
 2. **Subsystem changes:** §13 links canonical sources.
-3. **Exact behavior:** follow source links.
+3. **Behavior:** follow source links.
 4. **Stale boundaries:** update per §14.
 
 ---
 
 ## 1. Scope
 
-Product shape, invariants, execution, and ownership.
+Product, invariants, execution, ownership.
 
 ---
 
-## 2. What OpenGeni is
+## 2. OpenGeni
 
 OpenGeni is a self-hostable, session-based agent runtime. Postgres owns durable
 truth; Temporal coordinates execution; NATS transports reconstructible events.
@@ -44,7 +44,7 @@ See [product integration](product-integration.md),
 
 ## 3. Core invariants
 
-Cross-package invariants.
+Invariants.
 
 ### 3.1 Postgres is durable truth; NATS is transport
 
@@ -87,25 +87,26 @@ Canonical: `apps/worker/src/workflows/session.ts` and
 
 ### 3.3 Logical turns and physical attempts are different
 
-A **turn** is accepted work; an **attempt**, physical execution. Recovery,
-interruption or capacity waiting may replace attempts without duplicating turns/effects.
+A **turn** is accepted work; an **attempt**, replaceable execution without duplicate
+effects. Updates form atomic batches; resumed attempts append batches, preserving
+ordered, exactly-once history.
 
-Internal-update delivery is atomic per batch, not unique per logical turn:
-resumed attempts may append a new batch while retaining earlier receipts.
-Canonical model history owns their ordered, exactly-once inclusion.
-
-Successful `wait_for_input` ends model execution after tool-batch settlement;
-trusted runtime state and immutable same-turn deadlines preserve wait/wake authority.
+`wait_for_input` ends execution after tool-batch settlement, preserving trusted
+wait authority and immutable same-turn deadlines. Command results remain durable;
+alone, they wake only explicit waits. Notices cannot block other inbox input.
+Different causal turns may coalesce only with equivalent human/execution authority,
+preserving lineage. See [`run-lifecycle.md`](run-lifecycle.md).
 
 `runAgentTurn` is non-retryable by default: model/tool/sandbox/Git/connector/cloud
 operations have external effects. Recovery is explicit and attempt-fenced.
 Provider work stays outside database retries; only idempotent settlement
 transactions may retry.
 
-Active-run writes must prove the exact current attempt/execution generation.
-Stale workers may retain compute/network activity, but cannot append authoritative
-events or settle replacements. Temporal cancellation delivers intent, not proof
-of stopped tools/sandbox work; durable quiescence evidence gates replacement admission.
+Active-run writes prove the exact current attempt/generation. Stale workers may
+remain alive but cannot authoritatively write or settle replacements. Temporal
+cancellation is intent; durable quiescence gates replacements, including closed
+attempts' unresolved writers. After execution, finalization has per-stage
+containment and heartbeat/metric evidence (`agent-turn/finalization-monitor.ts`).
 
 A recoverable activity shutdown creates a transactional workflow-wake
 obligation in Postgres. Delivery remains unacknowledged until the exact closed
@@ -176,12 +177,12 @@ Stores are not interchangeable:
 
 [Chat delivery](run-lifecycle.md): lossless content, windowed history.
 
-Knowledge is the canonical retrieval system after maintenance migration 0461.
-Original file bytes stay in object storage; exact source/finding/group revisions,
-pinned evidence, relationships, publication decisions and review receipts live
-in Postgres. Keyword and embedding indexes are rebuildable. The same schema
-serves personal, workspace and organization scopes; access precedes ranking and
-relationships never grant access. Conversation history and task notes are separate.
+Knowledge stores exact revisions, evidence and publication receipts in Postgres;
+original files stay in object storage. Scoped access precedes search ranking.
+Chat attachments remain conversation resources. Agents select lasting findings
+and reference sources; supporting evidence is excluded from default discovery.
+Read-only save preparation fetches collections and published/pending matches on
+demand. See [`knowledge.md`](knowledge.md).
 
 Agent learning centralizes Knowledge, instructions and Skills in Automatic,
 Review first and Off settings, with sparse chat/task overrides and immutable
@@ -850,8 +851,8 @@ Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
 managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
 
 Repository `.agents/skills` holds maintainer and integration guidance. Runtime skills
-ship directly from `packages/runtime/src/bundled_*_skills`. Worker defaults include
-`opengeni-visualize` and `document-parsing`, unless overridden by explicit host selection.
+ship from `packages/runtime/src/bundled_*_skills`. Worker defaults include
+`opengeni-help`, `opengeni-visualize`, and `document-parsing`, unless overridden by explicit host selection.
 
 Sandbox-free reading, lazy management, and host selection: [Skill design](design/skills-system.md).
 
@@ -1127,6 +1128,9 @@ Projects uses the shared catalog/reader; hosts can exclude `builtin:opengeni-pro
 Capabilities define integration/tool shapes. Connections bind credentials and
 ownership. Session policy selects authorized tools.
 MCP/Codemode execute tools; neither grants authority.
+
+Connector permission management: `packages/core/src/domain/connector-tool-permissions.ts`.
+See [`session-mcp-servers.md`](session-mcp-servers.md).
 
 [MCP recovery](mcp-operation-recovery.md) observes outcomes without mutation replay.
 
@@ -1584,6 +1588,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Organization recovery custody or workspace ownership | `packages/contracts/src/organization-recovery.ts`, `packages/db/src/organization-recovery.ts`, `apps/api/src/routes/organization-recovery.ts` | [`organization-recovery.md`](organization-recovery.md), [`organization-tenancy.md`](organization-tenancy.md) |
 | Variable Sets, ordered session attachment, or secret reads | `packages/core/src/`, `packages/db/src/`, `apps/api/src/routes/` | [`variable-sets.md`](variable-sets.md) |
 | Connections and credential ownership | `apps/api/src/routes/connections.ts`, `packages/db/src/connection-token-resolver.ts` | [`credentials.md`](credentials.md) |
+| Integration policy | `packages/db/src/organization-integration-policy.ts`, `apps/api/src/routes/organization-integration-policy.ts` | [`organization-integration-policy.md`](organization-integration-policy.md) |
 
 ### Models, tools, and compute
 

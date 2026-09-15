@@ -198,7 +198,11 @@ export type BuildCreateSessionRequestInput = {
   omitWorkspaceResources?: boolean;
   selectedTools: ToolRef[];
   /** Exact policy acknowledged by the revision-fenced new-session draft. */
-  newSessionDraftToolPolicy?: { tools: ToolRef[]; toolsProvided: boolean };
+  newSessionDraftToolPolicy?: {
+    tools: ToolRef[];
+    toolsProvided: boolean;
+    excludedMcpServerIds?: string[];
+  };
   defaultModel: string;
   defaultReasoningEffort: ReasoningEffort;
   defaultLatencyMode: LatencyMode;
@@ -294,6 +298,9 @@ export function buildCreateSessionRequest(
     ...(input.installedSkillIds?.length ? { installedSkillIds: input.installedSkillIds } : {}),
     resources,
     ...(tools === undefined ? {} : { tools }),
+    ...(input.newSessionDraftToolPolicy?.excludedMcpServerIds !== undefined
+      ? { excludedMcpServerIds: input.newSessionDraftToolPolicy.excludedMcpServerIds }
+      : {}),
     model: input.submission.model ?? input.defaultModel,
     reasoningEffort: input.submission.reasoningEffort ?? input.defaultReasoningEffort,
     latencyMode: input.submission.latencyMode ?? input.defaultLatencyMode,
