@@ -1,0 +1,99 @@
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useAppContext } from "@/context";
+import { Button } from "@/components/ui/button";
+import { VariableSetShortlistEditor } from "./variable-set-shortlist-editor";
+import {
+  readVariableSetShortlist,
+  reconcileVariableSetShortlist,
+  variableSetRuntimeIds,
+  variableSetShortlistKey,
+  writeVariableSetShortlist,
+} from "@/lib/variable-set-shortlist";
+
+export function NewSessionVariableSetPicker(props: {
+  workspaceId: string;
+  runtimeIds: string[];
+  variableSets: { id: string; name: string; scope?: string }[];
+  disabled: boolean;
+  leading?: ReactNode;
+  onClose?: () => void;
+  onChange: (runtimeIds: string[]) => void;
+}) {
+  const context = useAppContext();
+  const key = variableSetShortlistKey(
+    context.accessContext.subjectId,
+    props.workspaceId,
+    "new-chat",
+  );
+  return <DraftPicker key={key} {...props} preferenceKey={key} />;
+}
+
+function DraftPicker(
+  props: Parameters<typeof NewSessionVariableSetPicker>[0] & { preferenceKey: string },
+) {
+  const runtimeKey = props.runtimeIds.join("\u0000");
+  const load = useCallback(
+    () =>
+      reconcileVariableSetShortlist(
+        runtimeKey ? runtimeKey.split("\u0000") : [],
+        readVariableSetShortlist(props.preferenceKey),
+      ),
+    [runtimeKey, props.preferenceKey],
+  );
+  const [saved, setSaved] = useState(load);
+  const [rows, setRows] = useState(load);
+  useEffect(() => {
+    const next = load();
+    setSaved(next);
+    setRows(next);
+  }, [load]);
+  const changed = JSON.stringify(rows) !== JSON.stringify(saved);
+  return (
+    <div className="flex min-h-0 flex-col gap-2">
+      <VariableSetShortlistEditor
+        rows={rows}
+        variableSets={props.variableSets}
+        disabled={props.disabled}
+        canAdd={!props.disabled}
+        leading={props.leading}
+        onChange={setRows}
+      />
+      <div className="flex justify-end gap-2 border-t border-border pt-2">
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          disabled={props.disabled || !changed}
+          onClick={() => setRows(saved)}
+        >
+          Undo
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          disabled={props.disabled}
+          onClick={() => {
+            setRows(saved);
+            props.onClose?.();
+          }}
+        >
+          Cancel
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          disabled={props.disabled || !changed}
+          onClick={() => {
+            writeVariableSetShortlist(props.preferenceKey, rows);
+            setSaved(rows);
+            props.onChange(variableSetRuntimeIds(rows));
+            props.onClose?.();
+          }}
+        >
+          Save
+        </Button>
+      </div>
+    </div>
+  );
+}
