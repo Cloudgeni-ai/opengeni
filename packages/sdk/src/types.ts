@@ -1427,6 +1427,13 @@ export type Session = {
   metadata: Record<string, unknown>;
   /** Present only when session-tenancy product activation is enabled for the organization. */
   tenancy?: SessionTenancyPublicProjection | undefined;
+  /** Personal-connection consent context; not an authorization or private-session capability. */
+  connectionContext?:
+    | {
+        visibility: "private" | "workspace";
+        authorityEpoch: number;
+      }
+    | undefined;
   /** Frozen creator fact; later turns carry their own independent initiator. */
   createdBy: TurnInitiator;
   createdByContext: Record<string, unknown>;

@@ -262,10 +262,9 @@ Organization recovery custody is a separate quorum and actor-fenced authority;
 ordinary organization administration cannot transfer immutable workspace
 ownership or bypass recovery settlement.
 
-Personal connections and resources require the exact human authority that made
-them executable. Workspace-owned credentials remain workspace-scoped and are
-revalidated at use. An embedding host may narrow access through an explicit
-port; it cannot grant access that OpenGeni denied.
+Personal resources require exact human authority. Workspace credentials remain
+workspace-scoped and revalidated at use. Embedding hosts may narrow OpenGeni
+access, never widen it.
 
 The managed personal-workspace owner receives a closed permission projection
 that includes `capabilities:manage`, so they can configure their own Plugins,
@@ -1652,14 +1651,16 @@ Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 
 ### In-conversation connection setup
 
-`SessionCapabilityCard` uses `MessageTimeline.renderAuthNeeded`; hosts retain
-authorization. Forms share `performCapabilityAction` and human-authorized
-Connection API. OAuth never replays tools; `attachSessionCapability` preserves
-selection through CAS. Skills retain workspace scope and reviewed hashes.
-Gmail startup failures remain diagnostic; discovery checks tools and requests consent.
-Personal MCP use requires an owner-issued exact-session grant, with shared-results
-acknowledgement for shared conversations. The composer restores only active grants
-matching visibility and authority epoch; credentials alone grant no use.
+`SessionCapabilityCard` uses `MessageTimeline.renderAuthNeeded`, shared
+`performCapabilityAction` forms, and human-authorized Connection APIs; hosts
+retain authorization. OAuth never replays tools; `attachSessionCapability`
+preserves selection through CAS. Skills retain workspace scope and reviewed
+hashes. Gmail startup failures remain diagnostic; discovery requests consent.
+Personal MCP requires owner-issued exact-session grants and shared-results
+acknowledgement. The composer restores only active grants matching visibility
+and epoch. Migration 0478 separates session Connection consent from
+private-session activation: subject-scoped reads project `connectionContext`
+independently of gated `tenancy`. Standing grants and other resources stay gated.
 
 Host-owned shared MCP servers may explicitly select `hostBinding.selection:
 "accepted_turn"` instead of a fixed binding. The configuration fixes the entire

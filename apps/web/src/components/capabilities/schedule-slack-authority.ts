@@ -42,14 +42,14 @@ export async function authorizeScheduledSlack(
     check();
     const session = await client.getSession(workspaceId, form.targetSessionId);
     check();
-    if (!session.tenancy)
+    if (!session.connectionContext)
       throw new Error("Conversation authority is unavailable. Reload and retry.");
     await authorizeSessionPersonalConnection(
       client,
       workspaceId,
       session.id,
       item,
-      session.tenancy.visibility,
+      session.connectionContext.visibility,
       form.personalSlackAcknowledged,
       stillCurrent,
     );

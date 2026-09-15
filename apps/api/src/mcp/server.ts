@@ -1,4 +1,5 @@
 import { prepareSlackMessage, getPreparedSlackMessage } from "@opengeni/db";
+import { capabilityUsageGuidance } from "./capability-usage-guidance";
 import {
   getAttemptToolCatalog,
   createChannel,
@@ -1372,7 +1373,7 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_create",
       {
         description:
-          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog.",
+          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog. For shared Slack notifications, verify channel access and a supported server-owned bot delivery path before scheduling; generic slack_bot_post_message is deliberately unavailable. Do not substitute personal Slack OAuth or assume an interactive personal grant authorizes unattended runs.",
         inputSchema: {
           name: z4.string(),
           schedule: z4.unknown(),
@@ -5881,7 +5882,7 @@ function registerCapabilityDiscoveryTools(
     "capability_catalog_search",
     {
       description:
-        "Search OpenGeni's reviewed workspace capability catalog when the user asks to add an integration or the task needs a capability that is not currently usable. Search by the outcome needed (for example `GitHub repositories`, `product analytics`, or `Slack notifications`), compare the returned candidates, and prefer a ready or verified exact match. This only reads secret-free metadata; it never installs, connects, or authorizes anything.",
+        "Search OpenGeni's reviewed workspace capability catalog when the user asks to add an integration or the task needs a capability that is not currently usable. Search by the outcome needed (for example `GitHub repositories`, `product analytics`, or `Slack notifications`), compare identity and usage guidance as well as readiness. For shared Slack notifications or schedules, first look for slack_bot tools; the hosted Slack MCP is personal user authority, not a bot replacement. This only reads secret-free metadata; it never installs, connects, or authorizes anything.",
       inputSchema: {
         query: z4.string().min(1).max(500),
         limit: z4.number().int().min(1).max(20).optional(),
@@ -5933,6 +5934,7 @@ function registerCapabilityDiscoveryTools(
         tier: item.tier,
         matchedOn,
         ...(item.id === "api:slack-bot" ? { connection: workspaceBot } : {}),
+        usage: capabilityUsageGuidance(item),
         setup: {
           ...setups[index]!,
           requiredVariables: capabilityRequiredVariables(item),
@@ -5946,7 +5948,7 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "After capability_catalog_search and after explaining one chosen recommendation to the user, post exactly one in-session human authorization card for that catalog capability. This tool never grants access, enables a capability, reads a secret, or mints provider credentials; the authenticated user must click and confirm the provider/domain flow. Do not call it for a candidate reported ready or unavailable.",
+        "After capability_catalog_search and after explaining one chosen recommendation to the user, post exactly one in-session human authorization card for that catalog capability. This tool never grants access, enables a capability, reads a secret, or mints provider credentials; the authenticated user must click and confirm the provider/domain flow. Do not call it for a candidate reported ready or unavailable. Honor the candidate usage guidance: a personal Slack authorization card is not setup for workspace bot notifications.",
       inputSchema: {
         capabilityId: z4.string().min(1).max(512),
         rationale: z4.string().min(1).max(2000),

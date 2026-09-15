@@ -236,6 +236,8 @@ describe("release schema contract", () => {
     const sessionEventHistoryPolicyPlanning = completeSourceContract.migrations.some(
       (migration) => migration.path === "0476_session_event_history_policy_planning.sql",
     );
+    const slackPreparedMessages = completeSourceContract.migrations.some((migration) => migration.path === "0477_slack_prepared_messages.sql");
+    const personalConnectionConsent = completeSourceContract.migrations.some((migration) => migration.path === "0478_personal_connection_standing_consent.sql");
     const knowledgeSourceDiscovery = completeSourceContract.migrations.some(
       (migration) => migration.path === "0469_knowledge_source_discovery.sql",
     );
@@ -285,6 +287,8 @@ describe("release schema contract", () => {
       fileCount:
         (sessionEventHistoryStatistics ? 1 : 0) +
         (sessionEventHistoryPolicyPlanning ? 1 : 0) +
+        (slackPreparedMessages ? 1 : 0) +
+        (personalConnectionConsent ? 1 : 0) +
         (goalReportRequirements ? 1 : 0) +
         (organizationIntegrationPolicy ? 1 : 0) +
         (organizationUsageAnalyticalCapability ? 1 : 0) +
@@ -440,9 +444,11 @@ describe("release schema contract", () => {
       ...(sessionEventHistoryPolicyPlanning
         ? { latestMigration: "0476_session_event_history_policy_planning.sql" }
         : {}),
+      ...(slackPreparedMessages ? { latestMigration: "0477_slack_prepared_messages.sql" } : {}),
+      ...(personalConnectionConsent ? { latestMigration: "0478_personal_connection_standing_consent.sql" } : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: sessionEventHistoryPolicyPlanning
+      path: personalConnectionConsent ? "0478_personal_connection_standing_consent.sql" : slackPreparedMessages ? "0477_slack_prepared_messages.sql" : sessionEventHistoryPolicyPlanning
         ? "0476_session_event_history_policy_planning.sql"
         : sessionEventHistoryStatistics
           ? "0475_session_event_history_statistics.sql"
@@ -1565,6 +1571,8 @@ describe("release schema contract", () => {
     const sessionEventHistoryPolicyPlanning = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0476_session_event_history_policy_planning.sql",
     );
+    const slackPreparedMessages = unfilteredSourceContract.migrations.some((migration) => migration.path === "0477_slack_prepared_messages.sql");
+    const personalConnectionConsent = unfilteredSourceContract.migrations.some((migration) => migration.path === "0478_personal_connection_standing_consent.sql");
     const knowledgeSourceDiscovery = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0469_knowledge_source_discovery.sql",
     );
@@ -2044,6 +2052,8 @@ describe("release schema contract", () => {
       "0474_goal_report_requirements.sql",
       "0475_session_event_history_statistics.sql",
       "0476_session_event_history_policy_planning.sql",
+      "0477_slack_prepared_messages.sql",
+      "0478_personal_connection_standing_consent.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2447,10 +2457,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0476_session_event_history_policy_planning.sql",
       };
+    if (slackPreparedMessages) completeSourceContract = { ...completeSourceContract, latestMigration: "0477_slack_prepared_messages.sql" };
+    if (personalConnectionConsent) completeSourceContract = { ...completeSourceContract, latestMigration: "0478_personal_connection_standing_consent.sql" };
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (sessionEventHistoryStatistics ? 1 : 0) +
         (sessionEventHistoryPolicyPlanning ? 1 : 0) +
+        (slackPreparedMessages ? 1 : 0) +
+        (personalConnectionConsent ? 1 : 0) +
         (goalReportRequirements ? 1 : 0) +
         (organizationIntegrationPolicy ? 1 : 0) +
         (organizationUsageAnalyticalCapability ? 1 : 0) +
@@ -2807,6 +2821,8 @@ describe("release schema contract", () => {
       ...(sessionEventHistoryPolicyPlanning
         ? { latestMigration: "0476_session_event_history_policy_planning.sql" }
         : {}),
+      ...(slackPreparedMessages ? { latestMigration: "0477_slack_prepared_messages.sql" } : {}),
+      ...(personalConnectionConsent ? { latestMigration: "0478_personal_connection_standing_consent.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport

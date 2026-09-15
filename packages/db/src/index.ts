@@ -11425,7 +11425,8 @@ export type SlackInteraction = {
    */
   firstTaskHint: boolean | null;
   /**
-   * The routed workspace's name, frozen when the interaction bound.
+   * The routed workspace's presentation label, frozen when the interaction bound.
+   * New values may contain a complete Slack workspace link; legacy names stay exact.
    *
    * Null means "do not say where this went": either routing is off, or the
    * person had exactly one workspace to begin with, and a constant footer on
@@ -77869,6 +77870,16 @@ function mapSession(
     metadata: row.metadata,
     ...(tenancyViewer?.activated
       ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) }
+      : {}),
+    ...(tenancyViewer
+      ? {
+          connectionContext: {
+            visibility: sessionVisibilityToPublic(
+              row.visibility as "user_private" | "workspace_shared",
+            ),
+            authorityEpoch: Number(row.authorityEpoch),
+          },
+        }
       : {}),
     createdBy: initiatorFromStorage(
       row.createdByKind,

@@ -27,7 +27,7 @@ const slack = {
   connectionRef: { providerDomain: "slack.com", kind: "oauth2" as const, subjectScope: "subject" as const },
 };
 const tools = [{ kind: "mcp" as const, id: "slack" }];
-const firstPartyMcpTools = ["scheduled_tasks_create", "sessions_get"] as const;
+const firstPartyMcpTools = ["scheduled_tasks_create", "session_get"] as const;
 const firstPartyMcpPermissions = ["scheduled_tasks:manage", "sessions:read", "sessions:control", "connections:read"] as const;
 const settings = testSettings({ mcpServers: [slack], sandboxBackend: "none" });
 let shared: SharedTestDatabase | null = null;
@@ -131,7 +131,9 @@ test("a live agent carries its human's standing Slack consent into a generated s
   expect(snapshots[0]).toMatchObject({ owner_subject_id: f.subjectId, grant_id: f.issued.grantId, grant_mode: "always" });
   await revokeManagedHumanUserResourceGrant({ db: client.db }, f.authorization, f.grant.workspaceId, f.issued.grantId);
   await expect(f.createTask()).rejects.toThrow();
-  await expect(createOccurrence(task, f.subjectId)).rejects.toThrow();
+  const revokedRun = await createOccurrence(task, f.subjectId);
+  expect(revokedRun.status).toBe("failed");
+  expect(revokedRun.error).toContain("authority");
 }, 180_000);
 
 test("a live agent retains exact-session Slack consent only for that same scheduled destination", async () => {

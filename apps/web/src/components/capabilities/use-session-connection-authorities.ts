@@ -11,7 +11,8 @@ export function useSessionConnectionAuthorities(
   session: Session,
   catalog: CapabilityCatalogItem[],
 ) {
-  const identity = `${session.workspaceId}:${session.id}:${session.tenancy?.visibility}:${session.tenancy?.authorityEpoch}`;
+  const context = session.connectionContext ?? session.tenancy;
+  const identity = `${session.workspaceId}:${session.id}:${context?.visibility}:${context?.authorityEpoch}`;
   const selectedIds =
     session.effectiveToolPolicy?.selectedIds ?? session.tools.map((tool) => tool.id);
   const selectedKey = selectedIds.join("\u0000");
@@ -81,6 +82,20 @@ export function useSessionConnectionAuthorities(
   );
   return {
     selections: matches ? result.selections : [],
+    needsReview:
+      matches && !result.error && context
+        ? catalog.filter(
+            (item) =>
+              item.enabled &&
+              item.connectionRef?.subjectScope === "subject" &&
+              item.connectionRef.authoritySource !== "host" &&
+              item.runtime.mcpServerId &&
+              selectedIds.includes(item.runtime.mcpServerId) &&
+              !result.selections.some(
+                (selection) => selection.serverId === item.runtime.mcpServerId,
+              ),
+          )
+        : [],
     error: matches ? result.error : null,
     loading: hasPersonal && !matches,
     refresh,

@@ -2945,7 +2945,8 @@ export const slackInteractions = pgTable(
     // Frozen once: whether this interaction's acknowledgement renders the
     // one-time onboarding hint. NULL means the decision has not been resolved.
     firstTaskHint: boolean("first_task_hint"),
-    // The routed workspace's display name, frozen when the interaction binds.
+    // The routed workspace's presentation label, frozen when the interaction binds.
+    // New values may include a complete Slack link; legacy display names stay exact.
     // A live lookup at post time would be wrong: a workspace rename between the
     // original post and a reconciliation makes `reconcilePostMessage`'s
     // byte-compare raise `post_reconciliation_mismatch`. NULL means no

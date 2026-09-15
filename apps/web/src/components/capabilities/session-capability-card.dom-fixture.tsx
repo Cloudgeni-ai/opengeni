@@ -88,6 +88,7 @@ GlobalRegistrator.register();
 const { buildTimeline } = await import("@opengeni/react");
 const { createRoot } = await import("react-dom/client");
 const { SessionCapabilityCard } = await import("./session-capability-card");
+const { SessionPersonalConnectionNotice } = await import("./session-personal-connection-notice");
 const item = {
   id: "notice",
   kind: "auth-needed",
@@ -116,6 +117,7 @@ async function render(
   cachedCatalogItem = catalogItem,
   missingGrant = false,
   visibility: "private" | "workspace" = "workspace",
+  composerNotice = false,
 ) {
   personal = personalAccount;
   liveCatalogItem = currentCatalogItem;
@@ -185,12 +187,23 @@ async function render(
   }
   await act(async () =>
     root.render(
-      <SessionCapabilityCard
-        item={notice}
-        workspaceId="workspace"
-        sessionId="session"
-        visibility={visibility}
-      />,
+      composerNotice ? (
+        <SessionPersonalConnectionNotice
+          items={(await context.client.listCapabilities()).items as CapabilityCatalogItem[]}
+          workspaceId="workspace"
+          sessionId="session"
+          visibility={visibility}
+          authorityEpoch={4}
+          onConfigured={async () => {}}
+        />
+      ) : (
+        <SessionCapabilityCard
+          item={notice}
+          workspaceId="workspace"
+          sessionId="session"
+          visibility={visibility}
+        />
+      ),
     ),
   );
   return {
@@ -308,6 +321,35 @@ describe("conversation connection card", () => {
     expect(h.container.querySelector("button")).toBeNull();
     expect(h.container.textContent).not.toContain("secret-for-provider-only");
     await h.close();
+  });
+  test("the composer offers missing chat consent without an agent request or another reconnect", async () => {
+    const h = await render(true, catalogItem, catalogItem, false, "workspace", true);
+    try {
+      expect(h.container.textContent).toContain("Review personal account access");
+      expect(h.container.textContent).toContain("needs permission for this chat");
+      expect(issueUserResourceGrant).not.toHaveBeenCalled();
+      await act(async () => button(h.container, "Review personal account access").click());
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      });
+      await act(async () => button(h.container, "Add API key").click());
+      const use = button(h.container, "Use in this");
+      expect(use.disabled).toBe(true);
+      await act(async () =>
+        (h.container.querySelector('input[type="checkbox"]') as HTMLInputElement).click(),
+      );
+      await act(async () => use.click());
+      expect(issueUserResourceGrant.mock.calls[0]?.[2]).toMatchObject({
+        mode: "session",
+        sessionId: "session",
+        workspaceSharedAcknowledged: true,
+      });
+      expect(createConnection).not.toHaveBeenCalled();
+      expect(updateConnection).not.toHaveBeenCalled();
+      expect(h.container.textContent).toContain("Available in this conversation");
+    } finally {
+      await h.close();
+    }
   });
   test("a personal account requires explicit shared-results consent before completion", async () => {
     const h = await render(true, catalogItem, catalogItem, true);

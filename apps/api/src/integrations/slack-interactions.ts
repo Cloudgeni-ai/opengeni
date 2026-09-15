@@ -1698,8 +1698,31 @@ async function routedWorkspaceLabelFor(
   if (!SLACK_ROUTE_SOURCES_WORTH_NAMING.has(resolution.source)) return null;
   const label = resolution.label ?? (await getWorkspace(deps.db, resolution.workspaceId))?.name;
   if (!label) return null;
-  const bounded = boundedSlackRouteLabel(label);
+  const bounded = slackWorkspaceDestinationLabel(
+    label,
+    slackWorkspaceUrl(deps, resolution.workspaceId),
+  );
   return bounded.length > 0 ? bounded : null;
+}
+
+/** Freeze the complete link so retries never depend on a renamed workspace or base URL. */
+export function slackWorkspaceDestinationLabel(label: string, url: string | null): string {
+  const bounded = (maxBytes: number): string => {
+    const characters = Array.from(label.replaceAll("|", "¦"));
+    let clipped = false;
+    while (characters.length > 0) {
+      const value = escapeSlackMrkdwn(characters.join("") + (clipped ? "..." : ""));
+      if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+      characters.pop();
+      clipped = true;
+    }
+    return "...";
+  };
+  if (url && !/[<>|\s]/u.test(url) && /^https?:\/\//u.test(url)) {
+    const available = 128 - Buffer.byteLength(`<${url}|>`, "utf8");
+    if (available >= 8) return `<${url}|${bounded(available)}>`;
+  }
+  return bounded(72);
 }
 
 /** How long a first-use picker stays answerable. */

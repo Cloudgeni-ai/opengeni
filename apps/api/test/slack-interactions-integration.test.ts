@@ -161,6 +161,7 @@ function fakeSlack(
   } = {},
 ) {
   const posts: SlackPost[] = [];
+  const postAttempts: SlackPost[] = [];
   const homePublications: SlackHomePublication[] = [];
   const homeViewHashes = new Map<string, string>();
   const calls: SlackCall[] = [];
@@ -538,6 +539,15 @@ function fakeSlack(
         clientMessageId,
         timestamp,
       };
+      postAttempts.push(post);
+      for (const block of post.blocks ?? []) {
+        const value = block as { type: string; elements?: { action_id?: string }[] };
+        if (value.type !== "actions") continue;
+        const ids = (value.elements ?? []).map((element) => element.action_id).filter(Boolean);
+        if (new Set(ids).size !== ids.length) {
+          return Response.json({ ok: false, error: "invalid_blocks" });
+        }
+      }
       const paused = [...postPauses.entries()].find(([fragment]) => post.text.includes(fragment));
       if (paused) {
         const [fragment, gate] = paused;
@@ -589,6 +599,7 @@ function fakeSlack(
   return {
     fetch: fetch as typeof globalThis.fetch,
     posts,
+    postAttempts,
     homePublications,
     calls,
     reactionContexts,
@@ -1339,6 +1350,85 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(refusal?.text).toContain("No session was created.");
   });
 
+  test("a rejected workspace picker retries the original request and post receipt", async () => {
+    if (!available) return;
+    const value = await fixture({ slackWorkspaceRouting: true, routedWorkspaceName: "Platform" });
+    const event = {
+      teamId: value.teamId,
+      eventId: `E_REJECTED_PICKER_${crypto.randomUUID()}`,
+      event: {
+        type: "app_mention",
+        user: value.ownerSlackUserId,
+        channel: "C_REJECTED_PICKER",
+        ts: "1700000690.0001",
+        text: "the original request",
+      },
+    };
+    value.slack.failuresByText.set("more than one workspace", { error: "invalid_blocks" });
+    expect((await postEvent(value.app, event)).status).toBe(200);
+    await drainAll(value.deps);
+    const [before] = await shared!.admin<
+      { message_operation_id: string; request_digest: string; request_text: string }[]
+    >`
+      select p.message_operation_id, o.request_digest, p.request_text
+      from slack_route_prompts p join slack_bot_post_operations o
+        on o.connection_id=p.connection_id and o.operation_id=p.message_operation_id
+      where p.connection_id=${value.connectionId}`;
+    expect(before?.request_text).toBe("the original request");
+    expect(value.slack.posts).toHaveLength(0);
+    // Seed the receipt written by the old release: one actions block containing
+    // every option, before the provider-only split. Never hash the wire blocks.
+    const attempted = value.slack.postAttempts.at(-1)!;
+    const wireBlocks = attempted.blocks as Array<Record<string, unknown>>;
+    const legacyBlocks = [
+      wireBlocks[0],
+      {
+        type: "actions",
+        block_id: "opengeni-route-choice",
+        elements: wireBlocks
+          .filter((block) => block.type === "actions")
+          .flatMap((block) => block.elements as unknown[]),
+      },
+      wireBlocks.at(-1),
+    ];
+    const legacyDigest = createHmac("sha256", environmentsEncryptionKeyBytes(value.deps.settings)!)
+      .update(
+        JSON.stringify({
+          operationId: before!.message_operation_id,
+          connectionId: value.connectionId,
+          targetKind: "user",
+          targetId: value.ownerSlackUserId,
+          threadTimestamp: null,
+          text: attempted.text,
+          blocks: legacyBlocks,
+        }),
+      )
+      .digest("hex");
+    expect(before!.request_digest).toBe(legacyDigest);
+    await shared!.admin`
+      update slack_bot_post_operations set request_digest=${legacyDigest}
+      where connection_id=${value.connectionId} and operation_id=${before!.message_operation_id}`;
+    value.slack.failuresByText.clear();
+    expect(
+      (
+        await postEvent(value.app, {
+          ...event,
+          eventId: `E_RETRY_PICKER_${crypto.randomUUID()}`,
+          event: { ...event.event, ts: "1700000690.0002", text: "retry" },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    expect(value.slack.posts).toHaveLength(1);
+    expect(value.slack.posts[0]!.clientMessageId).toBe(before!.message_operation_id);
+    const [after] = await shared!.admin<{ request_digest: string; status: string }[]>`
+      select request_digest,status from slack_bot_post_operations
+      where connection_id=${value.connectionId} and operation_id=${before!.message_operation_id}`;
+    expect(after).toMatchObject({ request_digest: before!.request_digest, status: "completed" });
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    expect(await interactions(value.routed!.workspaceId)).toHaveLength(0);
+  });
+
   test("asks once, remembers the answer, and never asks that channel again", async () => {
     if (!available) return;
     const value = await fixture({
@@ -1662,12 +1752,12 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     await drainAll(value.deps);
 
     const routedAck = value.slack.posts.at(-1)!;
-    expect(routedAck.text).toContain("-> Platform");
-    expect(JSON.stringify(routedAck.blocks)).toContain("-> Platform");
+    expect(routedAck.text).toContain(`|Platform>`);
+    expect(JSON.stringify(routedAck.blocks)).toContain(`|Platform>`);
     const [label] = await shared!.admin<{ routed_workspace_label: string | null }[]>`
       select routed_workspace_label from slack_interactions
       where workspace_id = ${routed.workspaceId}`;
-    expect(label?.routed_workspace_label).toBe("Platform");
+    expect(label?.routed_workspace_label).toContain(`/workspaces/${routed.workspaceId}|Platform>`);
 
     // An install where the person has exactly one workspace made no choice, so
     // a constant footer on every message would be noise rather than
