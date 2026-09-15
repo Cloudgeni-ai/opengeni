@@ -453,4 +453,54 @@ describe("SessionEditableArtifactsWorkspace empty states", () => {
       container.remove();
     }
   });
+
+  test("dock All artifacts browse link preserves fromSession", async () => {
+    const workspaceId = "5d929faa-c755-4146-9d60-e55f42251f0d";
+    const sessionId = "cf39f8d3-673f-43c0-9f98-c2787fdcf84e";
+    const documentId = "d10307ab68064d36855af499c9e3ccc7";
+    const catalogItem = {
+      id: documentId,
+      kind: "document" as const,
+      title: "Alpha document",
+      status: "active" as const,
+      createdAt: "2026-09-15T00:00:00Z",
+      updatedAt: "2026-09-15T00:00:00Z",
+    };
+    const { container, root } = mount();
+    const route = createRootRoute({
+      component: () => (
+        <SessionEditableArtifactsWorkspace
+          workspaceId={workspaceId}
+          sessionId={sessionId}
+          artifacts={[
+            {
+              id: documentId,
+              title: catalogItem.title,
+              modality: "document",
+              catalogItem,
+            },
+          ]}
+          status="ready"
+          onRetry={() => {}}
+        />
+      ),
+    });
+    const router = createRouter({
+      routeTree: route,
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    try {
+      await act(async () => {
+        await router.load();
+        root.render(<RouterProvider router={router} />);
+      });
+      const href =
+        [...container.querySelectorAll("a")].find((link) => link.textContent === "All artifacts")
+          ?.getAttribute("href") ?? "";
+      expect(href).toBe(`/workspaces/${workspaceId}/artifacts?fromSession=${sessionId}`);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 });
