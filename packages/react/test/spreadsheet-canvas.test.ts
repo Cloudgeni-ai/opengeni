@@ -37,10 +37,13 @@ function fakeContext(): FakeContext {
   } as unknown as FakeContext;
 }
 
-function fakeCanvas(): HTMLCanvasElement & { context: FakeContext } {
+function fakeCanvas(
+  fillText?: FakeContext["fillText"],
+): HTMLCanvasElement & { context: FakeContext } {
   const context = fakeContext();
+  if (fillText) context.fillText = fillText;
   const ownerDocument = {
-    createElement: () => fakeCanvas(),
+    createElement: () => fakeCanvas(fillText),
   } as unknown as Document;
   return {
     width: 0,
@@ -178,6 +181,56 @@ describe("spreadsheet retained canvas", () => {
     expect(renderer.paint({ ...input, projection: completeProjection(input) })!.reusedTiles).toBe(
       complete!.cacheSize,
     );
+  });
+
+  test("paints General display text without IEEE residue on ordinary-size cells", () => {
+    const painted: string[] = [];
+    const canvas = fakeCanvas((text: string) => {
+      painted.push(text);
+    });
+    const renderer = new SpreadsheetCanvasRenderer();
+    const cells = new SparseSpreadsheetCellIndex([
+      { row: 0, col: 0, value: 110.00000000000001, formula: null, format: {} },
+      { row: 0, col: 1, value: 220.00000000000003, formula: null, format: {} },
+      { row: 0, col: 2, value: 0.1 + 0.2, formula: "=0.1+0.2", format: {} },
+      { row: 1, col: 0, value: 1e-20, formula: null, format: {} },
+      { row: 1, col: 1, value: 1e21, formula: null, format: {} },
+      { row: 1, col: 2, value: -110.00000000000001, formula: null, format: {} },
+      { row: 2, col: 0, value: -0, formula: null, format: {} },
+      { row: 2, col: 1, value: 42, formula: null, format: {} },
+      { row: 2, col: 2, value: true, formula: null, format: {} },
+      { row: 3, col: 0, value: "#DIV/0!", formula: null, format: {} },
+      { row: 3, col: 1, value: 1.23456789012345, formula: null, format: {} },
+    ]);
+    const stats = renderer.paint({
+      ...paintInput(canvas),
+      projection: {
+        sheetId: "sheet/1",
+        generationId: "generation/1",
+        revision: 1,
+        cells,
+        valueAt: (cell) => cell.value,
+      },
+      rows: uniformAxis(8, 24),
+      // 200px columns keep 15-significant-digit General text inside the
+      // existing ellipsize budget (96px columns paint "1.234567890…").
+      columns: uniformAxis(8, 200),
+    });
+    expect(stats?.paintedTiles).toBeGreaterThan(0);
+    expect(painted).toContain("110");
+    expect(painted).toContain("220");
+    expect(painted).toContain("0.3");
+    expect(painted).toContain("1e-20");
+    expect(painted).toContain("1e+21");
+    expect(painted).toContain("-110");
+    expect(painted).toContain("0");
+    expect(painted).toContain("42");
+    expect(painted).toContain("TRUE");
+    expect(painted).toContain("#DIV/0!");
+    expect(painted).toContain("1.23456789012345");
+    expect(painted).not.toContain("110.00000000000001");
+    expect(painted).not.toContain("220.00000000000003");
+    expect(painted).not.toContain("0.30000000000000004");
   });
 
   test("bounds abusive DPR while preserving ordinary Retina density", () => {
