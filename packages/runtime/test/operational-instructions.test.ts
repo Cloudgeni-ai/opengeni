@@ -43,7 +43,7 @@ describe("provider-neutral operational instructions", () => {
   test("teaches OpenGeni sandbox file links with optional line numbers", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](sandbox:/workspace/app.py:12)");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "[My Report.md](<sandbox:/workspace/My Project/My Report.md:3>)",
+      "[My Component.ts](<sandbox:/workspace/My Project/My Component.ts:3>)",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "a Connected Machine instead uses its host-native workspace root",
@@ -70,6 +70,45 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("a host path");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("host-absolute paths");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not provide ranges of lines.");
+  });
+
+  test("routes direct and secondary reports before local-file formatting guidance", () => {
+    const reportRouting = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
+      "User-facing reports are durable document Artifacts by default",
+    );
+    const localLinks = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
+      "When referencing a real local source file",
+    );
+    expect(reportRouting).toBeGreaterThan(-1);
+    expect(localLinks).toBeGreaterThan(reportRouting);
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "including audit or summary reports produced while doing another task",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Read the opengeni-documents Skill and create the native document artifact before authoring",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "including reports discovered after a goal was created",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Inspect the relevant final artifact head after the last edit",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("artifact reference returned by the tools");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("My Report.md");
+  });
+
+  test("keeps failed report delivery incomplete without banning legitimate local links", () => {
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "If artifact creation, inspection, access, or delivery tooling is unavailable or fails",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("leave report delivery incomplete");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Do not silently fall back to a sandbox link",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "Ordinary in-chat answers, brief progress updates, internal worker findings, source-code navigation, and explicitly requested local-file workflows do not become report deliverables",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](sandbox:/workspace/app.py:12)");
   });
 
   test("is non-configurable and precedes every workspace persona", () => {

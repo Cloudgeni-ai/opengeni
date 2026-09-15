@@ -30,6 +30,8 @@ export type CodemodeArtifactModality = "spreadsheet" | "document" | "presentatio
 export type CodemodeArtifactFormat = "xlsx" | "pptx" | "docx" | "pdf" | "png" | "webp";
 export type CodemodeArtifactMetadata = Readonly<{
   id: string;
+  /** Server-authored handoff reference; absent on older servers. */
+  artifactReference?: string;
   modality: CodemodeArtifactModality;
   title: string;
   lifecycle: "active" | "archived";
@@ -226,11 +228,19 @@ export class CodemodeArtifact {
   async inspect<T = unknown>(
     query: CodemodeArtifactQuery,
     callOptions: CodemodeCallOptions = {},
-  ): Promise<Readonly<{ artifact: CodemodeArtifactMetadata; projection: T }>> {
+  ): Promise<
+    Readonly<{
+      artifact: CodemodeArtifactMetadata;
+      projection: T;
+      /** Server-authored proof of native document inspection, when available. */
+      inspectionReceiptId?: string;
+    }>
+  > {
     const modality = (await this.currentMetadata(callOptions)).modality;
     const result = await callStructured<{
       artifact: CodemodeArtifactMetadata;
       projection: T;
+      inspectionReceiptId?: string;
     }>(this.client, PATH.inspect, { artifactId: this.id, modality, request: query }, callOptions);
     this.metadata = result.artifact;
     return result;

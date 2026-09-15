@@ -38,6 +38,7 @@ const ArtifactCommand = z
 const ArtifactMetadata = z
   .object({
     id: ArtifactId,
+    artifactReference: z.string(),
     modality: Modality,
     title: z.string(),
     lifecycle: z.enum(["active", "archived"]),
@@ -203,13 +204,17 @@ export function registerEditableArtifactAgentTools(
     {
       title: "Inspect editable artifact",
       description:
-        "Query the artifact's current canonical head through the same native kernel used by the browser. Use bounded modality queries; results are current, not a sandbox-file snapshot.",
+        "Query the artifact's current canonical head through the same native kernel used by the browser. Use bounded modality queries; results are current, not a sandbox-file snapshot. Native document queries return a server-issued inspectionReceiptId; use a post-edit body inspection receipt for declared report completion. If the document changes during inspection, retry against its current head.",
       inputSchema: {
         artifactId: ArtifactId,
         modality: Modality,
         request: EditableArtifactQueryRequestSchema,
       },
-      outputSchema: { artifact: ArtifactMetadata, projection: z.unknown() },
+      outputSchema: {
+        artifact: ArtifactMetadata,
+        projection: z.unknown(),
+        inspectionReceiptId: z.string().uuid().optional(),
+      },
       annotations: readOnlyAnnotations("Inspect editable artifact"),
     },
     async ({ artifactId, modality, request }, extra) =>

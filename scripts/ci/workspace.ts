@@ -30,6 +30,8 @@ export type ShardWeightResolution = {
 };
 
 export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
+  "apps/api/test/native-report-delivery.test.ts":
+    "requires a verified native runtime and real PostgreSQL and is owned by the required package-contracts gate",
   "test/integration/workspace-capture.integration.ts":
     "requires an already-running real dev stack and is owned by the live workspace-capture gate",
   "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts":
@@ -206,7 +208,7 @@ export function discoverTestFiles(root = process.cwd()): {
     walkFiles(root, join(root, directory), files);
   }
   return {
-    unit: files.filter((path) => UNIT_TEST_PATTERN.test(path)).sort(),
+    unit: files.filter((path) => UNIT_TEST_PATTERN.test(path) && !OPT_IN_TESTS[path]).sort(),
     integration: files
       .filter((path) => INTEGRATION_TEST_PATTERN.test(path) && !OPT_IN_TESTS[path])
       .sort(),
@@ -223,12 +225,15 @@ export function assertTestTierMapComplete(root = process.cwd()): void {
     if (!files.includes(path)) throw new Error(`stale opt-in test mapping: ${path}`);
   }
   const discovered = discoverTestFiles(root);
-  const selected = new Set([...discovered.integration, ...discovered.e2e]);
+  const selected = new Set([...discovered.unit, ...discovered.integration, ...discovered.e2e]);
   for (const path of files.filter(
-    (candidate) => INTEGRATION_TEST_PATTERN.test(candidate) || E2E_TEST_PATTERN.test(candidate),
+    (candidate) =>
+      UNIT_TEST_PATTERN.test(candidate) ||
+      INTEGRATION_TEST_PATTERN.test(candidate) ||
+      E2E_TEST_PATTERN.test(candidate),
   )) {
     if (!selected.has(path) && !OPT_IN_TESTS[path]) {
-      throw new Error(`unmapped integration/e2e test: ${path}`);
+      throw new Error(`unmapped unit/integration/e2e test: ${path}`);
     }
   }
 }

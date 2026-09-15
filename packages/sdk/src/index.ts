@@ -791,6 +791,8 @@ export type {
   GitHubRepository,
   GitHubRepositoryScope,
   GoalSpec,
+  SessionGoalReportRequirement,
+  SessionGoalReportDelivery,
   IntegrationClientMetadata,
   KnownPermission,
   KnownSessionEventType,

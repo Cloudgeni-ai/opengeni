@@ -1017,6 +1017,23 @@ jobs:
           OPENGENI_ARTIFACT_KERNEL_NATIVE_PATH="$ARTIFACT_NATIVE_TEST_ROOT/native/linux-x64-gnu/opengeni_artifact_kernel.node" \
             bun run --cwd packages/artifact-tool test:production-native
 
+      - name: Native report delivery contracts
+        # Dedicated-lane discovery keeps the Rust/runtime prerequisite out of
+        # ordinary hermetic unit shards. The API's publishable dependency graph
+        # selects this required job for report/backend/native source changes.
+        env:
+          NODE_ENV: development
+          OPENGENI_REQUIRE_REAL_DB: "1"
+          OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES: opengeni_app
+          OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST: ${{ github.workspace }}/.opengeni/artifact-runtime-report-ci/installation.development.json
+          OPENGENI_ARTIFACT_TOOL_ENTRY: ${{ github.workspace }}/.opengeni/artifact-runtime-report-ci/skill-facade-entry.mjs
+        run: |
+          set -euo pipefail
+          bun scripts/prepare-development-artifact-runtime.ts \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --output "$GITHUB_WORKSPACE/.opengeni/artifact-runtime-report-ci"
+          bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts
+
       - name: Build client packages (contracts + SDK + React)
         timeout-minutes: 21
         env:

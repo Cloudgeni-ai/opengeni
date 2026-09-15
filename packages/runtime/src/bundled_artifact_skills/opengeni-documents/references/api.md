@@ -17,6 +17,28 @@ automatically.
 For a direct `opengeni__editable_artifact_inspect` call, pass the query below as
 `request`, alongside `artifactId` and `modality: "document"`.
 
+## Report requirements and inspection evidence
+
+For a report deliverable, declare `reportRequirements: [{ id: "audit", title:
+"Knowledge organization audit" }]` through `goal_set` when creating a goal, or
+through `goal_progress` alongside its progress note and idempotency key for an
+existing active goal. Keep requirement IDs stable; do not replace the objective
+merely to add a report. Ordinary answers and internal worker findings need no
+report requirement.
+
+After the final edit, inspect the relevant document body using a `body` query;
+a `summary` query alone does not satisfy report completion. Inspect additional
+pages and annotations as needed—the receipt proves only the bounded query, not
+exhaustive review or content quality. The direct result
+and `document.inspect(...)` return `inspectionReceiptId` when the server records
+verified document inspection. Pass `reportDeliveries: [{ requirementId: "audit",
+artifactId: document.id, inspectionReceiptId }]` with the completion evidence to
+`goal_complete`. Missing proof is not a successful delivery; never fabricate it.
+If the document changes, inspect it again and use the new receipt. Include the
+returned artifact reference in the user handoff.
+
+## Authoring example
+
 ```js
 import { openGeni } from "@opengeni/codemode";
 

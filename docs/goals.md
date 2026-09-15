@@ -32,6 +32,70 @@ updates coalesced into that turn are attached as ordinary message context. It ne
 agent-instruction prefix or exists only in activity memory, so later requests
 extend the same prompt-cache prefix and recovery replays identical authority.
 
+## Report delivery
+
+A user-facing report is a native document Artifact by default. This includes a
+secondary output such as an audit produced while organizing Knowledge. Routing
+lives in the provider-neutral operational instructions; the bundled
+`opengeni-documents` Skill owns the authoring procedure. The artifact is the
+working document from the start, not a published copy of a sandbox Markdown or
+DOCX report.
+
+Report requirements are explicit, typed declarations, not a heuristic scan of
+goal text, conversation content or local links. Declare them before authoring:
+initial reports belong in `goal_set` / `GoalSpec.reportRequirements`; reports
+discovered during an active goal are appended through `goal_progress` without
+replacing the objective. Each requirement has a stable `id` and `title`.
+
+Completion must match every persisted requirement to a native document and a
+server-authored inspection receipt. The receipt identifies the exact inspected
+head; a caller-supplied head hash or `inspected: true` alone is not proof. Inspect
+the relevant final body content after the last edit; a summary query alone does
+not qualify. Missing delivery, a wrong
+artifact, stale inspection, or denied access leaves the goal incomplete. Supply
+the returned artifact reference in the user handoff so the user can continue
+from the same document in Artifacts.
+
+When artifact tooling is unavailable, do not invent a receipt or silently
+substitute a sandbox link. Explain the concrete blocker and retain the unfinished
+deliverable. Ordinary in-chat answers, brief status updates, internal worker
+findings, source-code navigation, and explicitly requested local-file workflows
+are outside this report contract. Without goal tools, the artifact-first
+authoring and handoff procedure still applies, but no goal-completion guard can
+run.
+
+The guard proves delivery of **declared** reports, not the semantic quality or
+completeness of arbitrary prose. Routing instructions make declaration part of
+report authoring; the server does not infer undeclared reports from text. Current
+inspection proof establishes the document head at completion, not permanent
+immutability of the editable document afterward.
+
+The trusted application records inspection receipts only after a successful
+native query and current-head recheck; agent-facing APIs accept receipt identity,
+not caller-authored receipt contents. This is a server-verification boundary,
+not cryptographic attestation against a compromised application or arbitrary
+runtime-role SQL writer. Those actors already hold database-write authority and
+can manufacture inspection-shaped records; do not describe these receipts as
+unforgeable database proof. Storage fences prevent supported writers from
+silently dropping declared requirements, but do not replace application trust.
+Receipt updates and direct deletion are rejected while the owning session
+exists; normal session-retention cascades still remove its receipts. Database
+administrators and arbitrary application-role SQL remain trusted.
+
+Proof certifies a successful bounded native `body` query, not exhaustive
+inspection of every page or annotation. Receiving-human access is independently
+verified from the turn's frozen initiating-human identity. Existing Personal
+workspace artifact-authorization gaps and service-only turns without that human
+fail closed; the report guard does not widen artifact permissions.
+
+Migration `0468_goal_report_requirements.sql` adds rolling-compatible requirement,
+completion, inspection-receipt and cancellation fences without a new table.
+Pending requirements are append-only through semantic rewrites. Explicit
+human/API cancellation remains supported; agents cannot clear them to bypass
+delivery. An older application cannot complete a report-bearing goal without
+stored proof. Artifact contention aborts the transaction through `NOWAIT`;
+retry only after rollback, never with an unlocked validation fallback.
+
 ## Migration 0257 deployment boundary
 
 Migration `0257_goal_revision_decisions_and_root_constraints.sql` is a one-way

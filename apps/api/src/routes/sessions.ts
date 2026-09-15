@@ -2569,10 +2569,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const { event } = await clearSessionGoal(db, workspaceId, sessionId);
+    const { event } = await clearSessionGoal(db, workspaceId, sessionId, {
+      actor: grant.principalKind === "agent_attempt" ? "agent" : "api",
+    }).catch((error: unknown) => {
+      if (error instanceof SessionControlConflictError) {
+        throw new HTTPException(409, { message: error.message, cause: error });
+      }
+      throw error;
+    });
     if (event) {
       try {
         await bus.publish(workspaceId, sessionId, [event]);

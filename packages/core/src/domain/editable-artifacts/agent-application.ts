@@ -76,6 +76,7 @@ export type EditableArtifactAgentContext = Readonly<{
 
 export type EditableArtifactAgentMetadata = Readonly<{
   id: string;
+  artifactReference: string;
   modality: EditableArtifactModality;
   title: string;
   lifecycle: EditableArtifact["lifecycle"];
@@ -174,6 +175,14 @@ export type EditableArtifactAgentApplicationDependencies = Readonly<{
   exports: EditableArtifactDurableExportService;
   associations: EditableArtifactAgentAssociationPort;
   inspector: EditableArtifactAgentInspectionKernelPort;
+  /** Production persists proof only after a successful native query. */
+  recordInspection?: (
+    input: EditableArtifactAgentContext & {
+      artifact: EditableArtifactAgentMetadata;
+      queryHash: string;
+      queryKind: string;
+    },
+  ) => Promise<string>;
   officeImports: EditableArtifactOfficeImportPort;
   workspaceFiles: EditableArtifactAgentWorkspaceFilePort;
 }>;
@@ -291,7 +300,13 @@ export class EditableArtifactAgentApplication {
   async inspect(
     input: EditableArtifactAgentContext &
       Readonly<{ artifactId: EditableArtifactId; request: EditableArtifactAgentQuery }>,
-  ): Promise<Readonly<{ artifact: EditableArtifactAgentMetadata; projection: unknown }>> {
+  ): Promise<
+    Readonly<{
+      artifact: EditableArtifactAgentMetadata;
+      projection: unknown;
+      inspectionReceiptId?: string;
+    }>
+  > {
     const context = agentContext(input);
     const artifactId = editableArtifactId(input.artifactId);
     const state = await this.dependencies.domain.readCurrentKernelState({
@@ -304,8 +319,21 @@ export class EditableArtifactAgentApplication {
     const queryBytes = encodeQuery(input.request);
     const responseBytes = await this.dependencies.inspector.query({ state, queryBytes });
     const projection = decodeQueryResponse(input.request.modality, responseBytes);
+    const inspectionReceiptId =
+      state.modality === "document"
+        ? await this.dependencies.recordInspection?.({
+            ...context,
+            artifact: projectArtifact(state.artifact),
+            queryHash: createHash("sha256").update(queryBytes).digest("hex"),
+            queryKind: input.request.query.kind,
+          })
+        : undefined;
     await this.touch(context, artifactId);
-    return Object.freeze({ artifact: projectArtifact(state.artifact), projection });
+    return Object.freeze({
+      artifact: projectArtifact(state.artifact),
+      projection,
+      ...(inspectionReceiptId ? { inspectionReceiptId } : {}),
+    });
   }
 
   async apply(
@@ -603,6 +631,7 @@ function commandProtocolVersion(modality: EditableArtifactModality): number {
 function projectArtifact(artifact: EditableArtifact): EditableArtifactAgentMetadata {
   return Object.freeze({
     id: artifact.id,
+    artifactReference: `[Open report](/workspaces/${artifact.scope.workspaceId}/artifacts/editable/${artifact.id})`,
     modality: artifact.modality,
     title: artifact.title,
     lifecycle: artifact.lifecycle,
