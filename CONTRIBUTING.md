@@ -86,6 +86,12 @@ Release and publishing guidance starts here; executable truth lives in [`package
 
 **Canary npm:** dispatch `publish-canary.yml` to publish `{version}-canary.N` with dist-tag `canary`. This does not consume changeset files or move `latest`.
 
+In GitHub Actions, `N` has a floor derived from the workflow run ID and attempt
+(`run ID * 1000 + attempt`), so retries do not reuse versions hidden by stale
+registry tags or staged publication. Visible higher versions still advance;
+fixed package groups remain aligned. A retry publishes a fresh set rather than
+overwriting or removing any partially published versions.
+
 Two publish-coherence rules learned the hard way (all versions are 0.x):
 
 - **A minor bump of a package must cascade to its dependents.** Published manifests carry caret ranges (`^0.3.0`), and under 0.x caret semantics a minor bump (0.3.0 → 0.4.0) leaves every dependent's range. Add a patch changeset covering the dependent closure in the same release, or external consumers nest a stale copy of the bumped package.

@@ -10,23 +10,51 @@ import {
   type WorkspacePackage,
 } from "./publishable-workspaces";
 
-export function nextCanaryVersion(baseVersion: string, lastCanary: string | null): string {
+export function workflowCanarySequence(runId?: string, runAttempt?: string): number {
+  if (runId === undefined && runAttempt === undefined) return 0;
+  if (!runId || !runAttempt || !/^[1-9]\d*$/.test(runId) || !/^[1-9]\d*$/.test(runAttempt)) {
+    throw new Error("Canary workflow run identity is invalid");
+  }
+  const attempt = Number(runAttempt);
+  const sequence = Number(runId) * 1000 + attempt;
+  if (attempt >= 1000 || !Number.isSafeInteger(sequence)) {
+    throw new Error("Canary workflow run identity exceeds the safe sequence range");
+  }
+  return sequence;
+}
+
+export function nextCanaryVersion(
+  baseVersion: string,
+  lastCanary: string | null,
+  minimumSequence = 0,
+): string {
+  if (!Number.isSafeInteger(minimumSequence) || minimumSequence < 0) {
+    throw new Error("Canary minimum sequence is invalid");
+  }
   const base = baseVersion.replace(/-canary\.\d+$/, "");
   const prefix = `${base}-canary.`;
   if (lastCanary && lastCanary.startsWith(prefix)) {
     const n = Number(lastCanary.slice(prefix.length));
-    if (Number.isInteger(n) && n >= 0) return `${prefix}${n + 1}`;
+    if (Number.isSafeInteger(n) && n >= 0) {
+      const next = Math.max(n + 1, minimumSequence);
+      if (!Number.isSafeInteger(next)) throw new Error("Canary sequence exhausted");
+      return `${prefix}${next}`;
+    }
   }
-  return `${prefix}0`;
+  return `${prefix}${minimumSequence}`;
 }
 
 export function planCanaryVersions(
   packages: readonly { name: string; version: string }[],
   tags: ReadonlyMap<string, string | null>,
   fixedGroups: readonly (readonly string[])[],
+  minimumSequence = 0,
 ): Map<string, string> {
   const versions = new Map(
-    packages.map((pkg) => [pkg.name, nextCanaryVersion(pkg.version, tags.get(pkg.name) ?? null)]),
+    packages.map((pkg) => [
+      pkg.name,
+      nextCanaryVersion(pkg.version, tags.get(pkg.name) ?? null, minimumSequence),
+    ]),
   );
   for (const group of fixedGroups) {
     if (group.length === 0) continue;
@@ -83,6 +111,9 @@ export function main(): void {
     packages,
     new Map(packages.map((pkg) => [pkg.name, npmCanaryTag(pkg.name)])),
     config.fixed ?? [],
+    // Registry tags can lag reserved/staged versions. Each workflow attempt
+    // therefore starts in a fresh range without guessing or overwriting them.
+    workflowCanarySequence(process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT),
   );
   for (const pkg of packages) {
     const next = versions.get(pkg.name)!;
