@@ -350,13 +350,37 @@ describe("artifact spreadsheet retained canvas", () => {
         expect(afterType).toBe("hello\nx");
         if (engineName === "Chromium") {
           await page.screenshot({
-            path: "/opt/cursor/artifacts/ope-516-chromium-type-after-enter.png",
+            path: "test-results/artifacts/document-chromium-type-after-enter.png",
             fullPage: true,
           });
         }
 
         await remountDocumentNewlineFixture(page, baseUrl);
         expect(await readMountedDocumentText(page)).toBe("hello\nx");
+
+        // Exercise ordinary native typing at each boundary without resetting
+        // the selection or editing DOM after Enter.
+        for (const scenario of [
+          { text: "", keys: ["Enter", "Enter"], expected: "\n\nx" },
+          {
+            text: "hello",
+            keys: ["Home", "ArrowRight", "ArrowRight", "Enter"],
+            expected: "he\nxllo",
+          },
+          { text: "hello", keys: ["Home", "Shift+End", "Enter"], expected: "\nx" },
+          { text: "hello", keys: ["End", "Enter", "Enter"], expected: "hello\n\nx" },
+        ]) {
+          const boundaryEditor = await mountDocumentNewlineFixture(page, baseUrl, scenario.text);
+          await boundaryEditor.click();
+          for (const key of scenario.keys) await page.keyboard.press(key);
+          await page.keyboard.type("x");
+          expect(await readMountedDocumentText(page)).toBe(scenario.expected);
+          await boundaryEditor.press("Tab");
+          expect(await readMountedDocumentText(page)).toBe(scenario.expected);
+          await remountDocumentNewlineFixture(page, baseUrl);
+          expect(await readMountedDocumentText(page)).toBe(scenario.expected);
+          expect(await page.locator("br[data-og-trailing-break]").count()).toBe(0);
+        }
 
         const pasteDocument = await mountDocumentNewlineFixture(page, baseUrl, "hello");
         await pasteDocument.click();
@@ -370,7 +394,7 @@ describe("artifact spreadsheet retained canvas", () => {
         ).toBeNull();
         if (engineName === "Chromium") {
           await page.screenshot({
-            path: `/opt/cursor/artifacts/ope-516-chromium-paste-${pastePath}.png`,
+            path: `test-results/artifacts/document-chromium-paste-${pastePath}.png`,
             fullPage: true,
           });
         }
@@ -469,7 +493,7 @@ describe("artifact spreadsheet retained canvas", () => {
         expect(await formulaBar.inputValue()).toBe("=0.1+0.2");
         if (engineName === "Chromium") {
           await page.screenshot({
-            path: "/opt/cursor/artifacts/ope-517-chromium-general-display.png",
+            path: "test-results/artifacts/spreadsheet-chromium-general-display.png",
             fullPage: true,
           });
         }

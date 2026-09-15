@@ -26,7 +26,10 @@ export function formatSpreadsheetGeneralDisplay(value: unknown): string {
   if (typeof value === "number") {
     if (Object.is(value, -0) || value === 0) return "0";
     if (!Number.isFinite(value)) return String(value);
-    return String(Number(value.toPrecision(15)));
+    const rounded = Number(value.toPrecision(15));
+    // Rounding at the finite IEEE-754 boundary can overflow. A display policy
+    // must not turn a finite source into an infinity label.
+    return String(Number.isFinite(rounded) ? rounded : value);
   }
   return String(value);
 }

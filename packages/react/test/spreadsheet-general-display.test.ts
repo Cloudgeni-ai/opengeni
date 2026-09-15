@@ -68,4 +68,20 @@ describe("spreadsheet General display (display-only)", () => {
     expect(formatSpreadsheetGeneralDisplay(Number.NaN)).toBe("NaN");
     expect(formatSpreadsheetGeneralDisplay(Number.POSITIVE_INFINITY)).toBe("Infinity");
   });
+
+  test("keeps finite extremes finite and retains exact sources beyond display precision", () => {
+    for (const value of [
+      Number.MAX_VALUE,
+      -Number.MAX_VALUE,
+      Number.MIN_VALUE,
+      -Number.MIN_VALUE,
+    ]) {
+      expect(formatSpreadsheetGeneralDisplay(value)).toBe(String(value));
+      expect(spreadsheetCellEditSource(value)).toBe(String(value));
+    }
+    expect(formatSpreadsheetGeneralDisplay(Number.MAX_SAFE_INTEGER)).toBe("9007199254740990");
+    expect(spreadsheetCellEditSource(Number.MAX_SAFE_INTEGER)).toBe("9007199254740991");
+    expect(formatSpreadsheetGeneralDisplay(1.2345678901234567)).toBe("1.23456789012346");
+    expect(spreadsheetCellEditSource(1.2345678901234567)).toBe("1.2345678901234567");
+  });
 });
