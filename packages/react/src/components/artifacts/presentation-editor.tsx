@@ -1561,6 +1561,7 @@ function PresentationEditorCore({
           <div
             ref={mobileSelectorPanelRef}
             className="absolute left-2 top-2 z-40 max-w-56 overflow-hidden rounded-og-md border border-og-border bg-og-surface-1 shadow-og-md sm:hidden"
+            style={{ width: "calc(100% - 1rem)" }}
           >
             <div
               ref={mobileRailRef}
