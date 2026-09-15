@@ -29,6 +29,14 @@ let installed = true;
 let attempts = 0;
 const requests: unknown[] = [];
 Object.assign(window, { removalRequests: requests });
+const refreshGate = new Promise<void>((resolve) => {
+  Object.assign(window, { releaseRemovalRefresh: resolve });
+});
+async function beforeList(kind: "skill" | "plugin") {
+  if (installed) return;
+  if (params.has("delayed-refresh")) await refreshGate;
+  if (params.has(`${kind}-list-error`)) throw new Error(`${kind} list unavailable`);
+}
 function preview(): PluginUninstallPreview {
   const component = (
     capabilityId: string,
@@ -93,8 +101,14 @@ function preview(): PluginUninstallPreview {
   };
 }
 const client = {
-  listInstalledSkills: async () => ({ skills: [] }),
-  listInstalledPlugins: async () => ({ plugins: installed ? [plugin] : [] }),
+  listInstalledSkills: async () => {
+    await beforeList("skill");
+    return { skills: [] };
+  },
+  listInstalledPlugins: async () => {
+    await beforeList("plugin");
+    return { plugins: installed ? [plugin] : [] };
+  },
   previewPluginUninstall: async () => preview(),
   uninstallPlugin: async (_workspaceId: string, _pluginKey: string, request: unknown) => {
     attempts++;
@@ -104,6 +118,8 @@ const client = {
     if (params.has("stale") && attempts === 1)
       throw new OpenGeniApiError(409, "Removal details changed");
     installed = false;
+    if (params.has("already-removed-refresh-error"))
+      throw new OpenGeniApiError(409, "This plugin was removed elsewhere");
     return {
       pluginKey: plugin.pluginKey,
       status: "uninstalled",
@@ -135,7 +151,8 @@ function Fixture() {
     restoreFocusRef: trigger,
     restoreFocusFallbackRef: fallback,
     onChanged: () => {
-      if (params.has("refresh-error")) throw new Error("Refresh unavailable");
+      if (params.has("refresh-error") || params.has("already-removed-refresh-error"))
+        throw new Error("Refresh unavailable");
       setRefreshed(true);
     },
   });

@@ -122,8 +122,10 @@ export function useSourcePackages({
       setInstalledSkills(skillResponse.skills);
       setPlugins(pluginResponse.plugins);
       setLoadError(null);
+      return true;
     } catch (error) {
       setLoadError(error instanceof Error ? error : new Error(String(error)));
+      return false;
     } finally {
       setLoading(false);
     }
@@ -284,6 +286,24 @@ export function useSourcePackages({
     }
   }
 
+  async function refreshAfterRemoval() {
+    const [inventory, parent] = await Promise.allSettled([
+      load(),
+      Promise.resolve().then(onChanged),
+    ]);
+    if (inventory.status === "rejected" || !inventory.value || parent.status === "rejected") {
+      toast.warning("Removed, but the page couldn’t refresh", {
+        description: "Refresh the page to see the updated skills and tools.",
+      });
+    }
+  }
+
+  function forgetRemovedPlugin(pluginKey: string) {
+    // Commit is authoritative even while refresh is slow or unavailable. Remove
+    // the opener before closing so focus restores to the persistent fallback.
+    setPlugins((previous) => previous.filter((plugin) => plugin.pluginKey !== pluginKey));
+  }
+
   async function removeSource(): Promise<boolean> {
     if (!removeTarget || removeTarget.preview.installationVersion === null) return false;
     const key =
@@ -310,6 +330,7 @@ export function useSourcePackages({
           expectedPreviewToken: removeTarget.preview.previewToken,
           idempotencyKey: removeTarget.operationId,
         });
+        forgetRemovedPlugin(removeTarget.plugin.pluginKey);
         toast.success(`${removeTarget.plugin.name} removed`, {
           description: pluginRemovalMessage(result, removeTarget.preview),
           ...(onManageSkills &&
@@ -321,13 +342,7 @@ export function useSourcePackages({
       setRemoveTarget(null);
       // Removal already committed. A refresh failure must not be reported as
       // failed deletion or invite another destructive request.
-      try {
-        await Promise.all([load(), Promise.resolve().then(onChanged)]);
-      } catch {
-        toast.warning("Removed, but the page couldn’t refresh", {
-          description: "Refresh the page to see the updated skills and tools.",
-        });
-      }
+      await refreshAfterRemoval();
       return true;
     } catch (error) {
       if (
@@ -342,10 +357,10 @@ export function useSourcePackages({
             removeTarget.plugin.pluginKey,
           );
           if (!preview.installed) {
+            forgetRemovedPlugin(removeTarget.plugin.pluginKey);
             setRemoveTarget(null);
-            await load();
-            await Promise.resolve().then(onChanged);
             toast.info("This plugin is already removed");
+            await refreshAfterRemoval();
             return true;
           }
           if (!preview.previewToken)
