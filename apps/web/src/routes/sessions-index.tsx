@@ -1409,6 +1409,8 @@ function SessionsIndexRouteContent({
                           <ManagedSandboxFields
                             variableSetsOnly
                             variableSetWorkspaceId={workspaceId}
+                            canAttachVariableSets={canAttachVariableSets}
+                            canUseVariableSets={canUseVariableSets}
                             draft={draft}
                             onChange={setDraft}
                             disabled={busy || newSessionDraft.loading}
@@ -2347,6 +2349,8 @@ function ComputeKindButton(props: {
 function ManagedSandboxFields(props: {
   variableSetsOnly?: boolean;
   variableSetWorkspaceId?: string;
+  canAttachVariableSets?: boolean;
+  canUseVariableSets?: boolean;
   onClose?: () => void;
   leading?: ReactNode;
   draft: SessionDraft;
@@ -2455,6 +2459,8 @@ function ManagedSandboxFields(props: {
       {showVariableSets && props.variableSetWorkspaceId ? (
         <NewSessionVariableSetPicker
           workspaceId={props.variableSetWorkspaceId}
+          canAttach={props.canAttachVariableSets === true}
+          canUse={props.canUseVariableSets === true}
           runtimeIds={draft.variableSetIds}
           variableSets={props.variableSets}
           disabled={props.disabled}
