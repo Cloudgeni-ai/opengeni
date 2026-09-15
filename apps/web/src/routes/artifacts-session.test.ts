@@ -13,6 +13,7 @@ function handler(name: string) {
     "workspaceId",
     "detail",
     "filters = { kind: 'all' }",
+    "canPublish = true",
     `${source.slice(start, end + 5)}; return ${name}();`,
   );
 }
@@ -59,6 +60,20 @@ describe("Site session shortcuts", () => {
     const startSession = mock(async () => null);
     await handler("startEditSession")({ startSession }, mock(), "workspace-1", null);
     expect(startSession).not.toHaveBeenCalled();
+  });
+  test("read-only viewers cannot start edit sessions", async () => {
+    const startSession = mock(async () => null);
+    const navigate = mock();
+    await handler("startEditSession")(
+      { startSession },
+      navigate,
+      "workspace-1",
+      { artifact: { id: "artifact-1", title: "Status board" } },
+      undefined,
+      false,
+    );
+    expect(startSession).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
   });
   test("creation follows the selected artifact type without inventing its contents", async () => {
     const startSession = mock(async (..._args: unknown[]) => null);
