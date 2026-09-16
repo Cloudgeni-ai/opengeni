@@ -1137,18 +1137,10 @@ Capabilities define integration/tool shapes. Connections bind credentials and
 ownership. Session policy selects authorized tools.
 MCP/Codemode execute tools; neither grants authority.
 
-The web composer restores an owner's exact personal connection from an active
-session grant or an existing `always` grant for the same workspace and sharing
-context. A session grant takes precedence for the same account; multiple
-authorized accounts remain ambiguous. Restoration does not issue a new grant.
-Canonical: `apps/web/src/components/capabilities/session-connection-authority.ts`.
-
-Server admission also restores existing `always` grants when connection selections
-are omitted, using the authenticated actor and server-derived sharing context.
-It only considers the selected MCP servers and that owner's workspace-local
-connections. Explicit selections (including an empty list) remain authoritative;
-children inherit captured parent authority instead of resolving another user.
-Canonical: `packages/core/src/domain/personal-connection-delegations.ts`.
+Omitted personal selections restore existing exact-owner grants; explicit empty
+selections suppress restoration. Children inherit captured authority. Canonical:
+`packages/core/src/domain/personal-connection-delegations.ts` and
+[shared connection presentation](connection-presentation.md).
 
 Connector permission management: `packages/core/src/domain/connector-tool-permissions.ts`.
 See [`session-mcp-servers.md`](session-mcp-servers.md).
@@ -1320,73 +1312,21 @@ Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.m
 `@opengeni/sdk` owns client contracts; `@opengeni/react` owns hooks/UI.
 `apps/web` consumes them, never owns hidden domain semantics.
 
-`ConnectPanel` composes native account inventory, acquisition and setup recovery.
-Account management precedes discovery; terminal attempts leave setup rather than
-showing reconnect actions after success. Its optional SDK client resolves service
-names and authenticated marks by exact catalogue connection ID. Generic MCP/API
-mechanisms stay in one secondary custom-connection picker. Unavailable providers
-and providers with no supported ownership are excluded from the chooser inventory,
-including search and select options; deployment readiness diagnostics are not a
-customer discovery surface. Connected accounts are directly expandable rows,
-without a separate Manage step; disconnect retains versioned confirmation. This
-panel uses `ConnectionDiscovery` for native OAuth MCP service discovery, including
-authenticated catalogue marks and exact active-account status. Other provider
-adapters remain separately available through the native Connect chooser. Hosts
-can compose connections alongside other capability categories; the console's
-broader page composition is intentionally not imposed on embeds.
-
-Hosts may disable custom acquisition with `ConnectPanel.showCustomConnections`
-and include ready native provider adapters with `showProviderConnections`.
-These are presentation switches, not authorization: a product backend must
-admit its chosen acquisition surface and supply the matching filtered catalogue.
-The generic SDK does not encode a product-specific service list.
-
-`McpConnectionCard` owns the shared OAuth detail flow. Without a session ID it
-only configures a connection; it never reads a session, selects its tools, or
-creates personal session grants. `SessionMcpCapabilityCard` supplies an explicit
-session target to the same implementation. New OAuth MCP connections in the
-console and service discovery in embeds use the same detail implementation;
-existing console management and non-OAuth adapters remain distinct surfaces.
-Initial detail reads are effect-lifetime fenced independently of the user-action
-lock so a development remount cannot suppress replacement initialization.
+`ConnectPanel`, `ConnectionDiscovery` and `McpConnectionCard` share connection
+inventory and OAuth setup across console and embeds. Host presentation filters
+never authorize acquisition. Session-targeted setup preserves exact personal
+consent and tool selection; connection-only setup never mutates a session.
+Canonical mechanics: [shared connection presentation](connection-presentation.md).
 
 `SessionConversation` includes feed, queue/actions, durable composer, model policy,
 human-input forms and history. `ChatComposer` is input-only. Sites supply their
 Site-bound client. Foreground/background share tokens; light embeds set
 `data-og-theme="light"` inside the iframe.
 
-`conversationTimeline` owns queue/optimistic-message reconciliation for the web
-console and embedding hosts. `SessionChrome` has one presentation: queue and goal
-signals with grouped activity. `ChatComposer.footer` replaces only normal controls,
-inside the native controller context; annotations, draft recovery, attachments,
-keyboard delivery and confirmation remain shared. Host translations remain message
-overrides, not a separate locale subsystem.
-
-`SessionCommands` supplies the shared background-command controller and panel for
-the console and embeds. Mount it only in the open activity drawer; it accepts the
-same explicit client/workspace override as the hook and does not fetch history.
-
-`SessionCapabilityFrame` is the shared in-chat recommendation presentation.
-`SessionMcpCapabilityCard` resolves OAuth MCP recommendations against the current
-catalog and uses the native Connect controller, exact host return URL and
-backend-verified completion. Session capability selection and personal-account
-setup use one reviewed action: reserve an isolated provider window before discovery,
-authorize, then attach the capability and close on success. Personal-account use
-in shared conversations retains explicit shared-output acknowledgment. The card's
-completed state is restored from live credentials, grants and tool selection, not
-a browser success flag. Session capability selection and personal-account
-grants live in `packages/react/src/session-capability-policy.ts` and
-`session-connection-authority.ts`; the console consumes those same helpers.
-`sessionAuthRecommendation` matches recovery notices by exact native server or
-connection identity; `SessionConnectionRequest` exposes that resolution to embeds.
-Missing or ambiguous matches do not select another account by provider domain.
-At native turn admission, omitted connection selections restore existing owner
-grants only: workspace/context-wide grants, or grants bound to the exact target
-session and its current server-read authority epoch. An explicit empty selection
-still suppresses restoration. A session grant never carries into another session
-through this default lookup; background inheritance remains the captured-turn path.
-Catalog marks can use `client.downloadCatalogAsset` through authenticated embeds;
-the passive image download is bounded and never accepts an arbitrary URL.
+`conversationTimeline`, `SessionChrome`, `SessionCommands` and `ChatComposer`
+share reconciliation and controls. Commands mount only in the open activity drawer.
+`SessionConnectionRequest` resolves exact native identities; missing or ambiguous
+matches fail closed. Selection/grant helpers live in `packages/react/src`.
 
 Sites install exact SDK/React/Codemode/CLI versions from virtual skill file
 `package-versions.json`: source-manifest defaults or canary

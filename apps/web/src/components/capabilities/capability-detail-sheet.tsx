@@ -1430,7 +1430,7 @@ function ConnectionActions({
 }) {
   if (!onCancel) return children;
   return (
-    <div className="flex items-center justify-end gap-2 [&>button]:w-auto">
+    <div className="flex flex-wrap items-center justify-end gap-2 [&>button]:w-auto">
       <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={onCancel}>
         Cancel
       </Button>
