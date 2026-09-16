@@ -1,7 +1,7 @@
 import { ConnectAccounts } from "./connect-accounts";
 import { ConnectChooser } from "./connect-chooser";
 import { ConnectSetup, type ConnectSetupProps } from "./connect-setup";
-import { useConnect } from "./connect";
+import { useConnect } from "./hooks/use-connect";
 import type { OpenGeniClient } from "@opengeni/sdk";
 import { useState } from "react";
 import { ConnectionDiscovery } from "./connection-discovery";

@@ -67,7 +67,7 @@ export function SessionCapabilityFrame({
     <>
       <Mark src={logo} name={name} />
       <div className="og-session-capability-identity">
-        <strong>{name}</strong>
+        <h3>{name}</h3>
         <span>{subtitle}</span>
       </div>
       <span className="og-session-capability-type">{typeLabel}</span>

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ConnectAccount, ConnectController } from "@opengeni/connect";
-import { useConnect } from "./connect";
+import { useConnect } from "./hooks/use-connect";
 import { ConnectAccountIdentity } from "./connect-account-identity";
 import { ConnectionSkeleton } from "./connection-skeleton";
 import type { CapabilityCatalogItem, OpenGeniClient } from "@opengeni/sdk";

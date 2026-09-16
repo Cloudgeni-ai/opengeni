@@ -1,7 +1,7 @@
 // Optional, unstyled React adapter over the shared headless controller.
 // The host owns controller lifetime; unmounting one observer does not cancel an
 // attempt another observer is displaying or a durable backend operation.
-import { useMemo, useSyncExternalStore } from "react";
+export { useConnect } from "./hooks/use-connect";
 export {
   CapabilityCatalogRow,
   CapabilityCatalogIndicator,
@@ -15,7 +15,6 @@ export {
   type SkillDiscoveryItem,
   type SkillDiscoveryPage,
 } from "./skill-discovery";
-import type { ConnectController } from "@opengeni/connect";
 export { ConnectSetup, type ConnectSetupProps } from "./connect-setup";
 export { ConnectChooser, type ConnectChooserProps } from "./connect-chooser";
 export { ConnectAccounts, type ConnectAccountsProps } from "./connect-accounts";
@@ -44,26 +43,6 @@ export type {
   ConnectResource,
   ConnectTransport,
 } from "@opengeni/connect";
-
-export function useConnect(controller: ConnectController) {
-  const snapshot = useSyncExternalStore(
-    controller.subscribe,
-    controller.getSnapshot,
-    controller.getSnapshot,
-  );
-  const actions = useMemo(
-    () => ({
-      begin: controller.begin.bind(controller),
-      recover: controller.recover.bind(controller),
-      refresh: controller.refresh.bind(controller),
-      waitForAction: controller.waitForAction.bind(controller),
-      advance: controller.advance.bind(controller),
-      cancel: controller.cancel.bind(controller),
-    }),
-    [controller],
-  );
-  return useMemo(() => ({ ...snapshot, ...actions }), [snapshot, actions]);
-}
 
 export {
   ConnectionCatalog,

@@ -2,7 +2,7 @@ import { ConnectionCatalog } from "./connection-catalog";
 import { ConnectionLogo } from "./connection-logo";
 import { useEffect, useState, type FormEvent } from "react";
 import type { ConnectAccount, ConnectController, ConnectProvider } from "@opengeni/connect";
-import { useConnect } from "./connect";
+import { useConnect } from "./hooks/use-connect";
 
 export type ConnectChooserProps = {
   controller: ConnectController;

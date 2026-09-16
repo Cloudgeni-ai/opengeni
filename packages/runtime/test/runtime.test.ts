@@ -2155,12 +2155,19 @@ describe("runtime event normalization", () => {
         const agent = buildOpenGeniAgent(
           testSettings({
             sandboxBackend: "none",
-            mcpServers: [{
-              ...serverConfig,
-              ...(connectionBacked
-                ? { connectionRef: { connectionId: "connection-1", providerDomain: "example.test" } }
-                : {}),
-            }],
+            mcpServers: [
+              {
+                ...serverConfig,
+                ...(connectionBacked
+                  ? {
+                      connectionRef: {
+                        connectionId: "connection-1",
+                        providerDomain: "example.test",
+                      },
+                    }
+                  : {}),
+              },
+            ],
           }),
           [],
           { mcpServers: prepared.mcpServers },

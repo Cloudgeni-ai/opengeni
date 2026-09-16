@@ -10,7 +10,7 @@ import {
 import type { CapabilityCatalogItem } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
-import { useConnect } from "../connect";
+import { useConnect } from "../hooks/use-connect";
 import { attachSessionCapability, sessionCapabilityTools } from "../session-capability-policy";
 import {
   authorizeSessionPersonalConnection,

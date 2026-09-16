@@ -10221,7 +10221,10 @@ export async function createConnectionIdempotently(
           createRequestDigest: operation.requestDigest,
         })
         .where(
-          and(eq(schema.connections.workspaceId, input.workspaceId), eq(schema.connections.id, connection.id)),
+          and(
+            eq(schema.connections.workspaceId, input.workspaceId),
+            eq(schema.connections.id, connection.id),
+          ),
         )
         .returning({ id: schema.connections.id });
       if (!receipt) throw new Error("Connection creation receipt was not persisted");

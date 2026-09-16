@@ -4,7 +4,7 @@
 .og-session-capability-logo { display:flex; align-items:center; justify-content:center; width:41px; height:41px; flex-shrink:0; border:1px solid var(--og-color-border); border-radius:10px; background:var(--og-color-surface-2); font-size:13px; font-weight:600; overflow:hidden; }
 .og-session-capability-logo img { width:100%; height:100%; object-fit:contain; padding:6px; box-sizing:border-box; }
 .og-session-capability-identity { flex:1; min-width:0; display:grid; gap:4px; overflow-wrap:anywhere; }
-.og-session-capability-identity strong { font-size:14px; font-weight:600; }
+.og-session-capability-identity h3 { margin:0; font-size:14px; font-weight:600; }
 .og-session-capability-identity span { font-size:11px; color:var(--og-color-fg-muted); }
 .og-session-capability-type { flex-shrink:0; padding:4px 7px; border-radius:5px; background:var(--og-color-surface-2); font-size:10px; }
 .og-session-capability-copy { margin:0; padding:0 19px 12px; font-size:12px; line-height:1.7; color:var(--og-color-fg-muted); overflow-wrap:anywhere; }
