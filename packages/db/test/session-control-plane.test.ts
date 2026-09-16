@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
@@ -7497,6 +7498,56 @@ describe("clean session control plane", () => {
       executionAttemptId: resumedAttemptId,
       outcome: "retry_after_execution_started",
     });
+  });
+
+  // The `session-mcp:` prefix is the store's guarantee that a session-MCP approval
+  // never carries a connector connection row's id. A host that registers a local
+  // MCP server with its own connection identity used to hand that identity through
+  // verbatim and hit this refusal at the pause (a hyphenated-id host measured the
+  // turn failing instead of pausing); the runtime now hashes the host identity into
+  // the synthetic form. The store's invariant stays exactly as strict.
+  test("session MCP approval refuses a bare host connection identity and accepts the synthetic form", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run one host-registered MCP action");
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error(`claim failed: ${claim.reason}`);
+    const identity = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: claim.turn.id,
+      attemptId,
+      executionGeneration: claim.turn.executionGeneration,
+      initiator: claim.turn.initiator,
+    };
+    const hostIdentity = `cendra-attempt:${attemptId}`;
+    const call = {
+      approvalId: "host-registered-mcp-call",
+      serverId: "cendra-pms",
+      toolName: "task_create",
+      arguments: { title: "exactly once" },
+      approvalMode: "session_mcp" as const,
+    };
+    await expect(
+      prepareConnectorActionApproval(client.db, identity, { ...call, connectionId: hostIdentity }),
+    ).rejects.toThrow("session MCP approval is missing its synthetic connection identity");
+    const synthetic = `session-mcp:cendra-pms:${createHash("sha256")
+      .update(hostIdentity, "utf8")
+      .digest("hex")}`;
+    expect(
+      await prepareConnectorActionApproval(client.db, identity, {
+        ...call,
+        connectionId: synthetic,
+      }),
+    ).toMatchObject({ managed: true, decision: "ask" });
   });
 
   test("a committed session control command replays before its stale control fence is checked", async () => {
