@@ -111,8 +111,15 @@ service_start_time() {
 
 process_start_time() {
   local pid="$1"
-  [ -r "/proc/$pid/stat" ] || return 1
-  awk '{print $22}' "/proc/$pid/stat"
+  if [ -r "/proc/$pid/stat" ]; then
+    awk '{print $22}' "/proc/$pid/stat"
+  elif [ "$(uname -s)" = "Darwin" ]; then
+    # macOS has no procfs. Keep the process birth time alongside the PID so
+    # cleanup still refuses an unrelated process that reused that PID.
+    LC_ALL=C ps -p "$pid" -o lstart=
+  else
+    return 1
+  fi
 }
 
 service_running() {
@@ -281,7 +288,6 @@ start_stack() {
       --ui-ip 127.0.0.1 \
       --ui-port "$OPENGENI_TEMPORAL_UI_HOST_PORT" \
       --db-filename "$TEMPORAL_DATA/temporal.db" \
-      --ui-disable-news-fetch \
       --log-level warn
   start_service minio \
     env MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
