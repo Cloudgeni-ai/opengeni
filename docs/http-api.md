@@ -1,6 +1,6 @@
 # HTTP API overview
 
-OpenGeni's public contract is the workspace-scoped HTTP API served by
+Opengeni's public contract is the workspace-scoped HTTP API served by
 `apps/api`. Canonical protected routes include the workspace id in the URL, and
 every request resolves to an internal access grant before route code touches
 workspace-owned data. Most clients should use the typed

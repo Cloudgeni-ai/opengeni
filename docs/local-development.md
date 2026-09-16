@@ -1,6 +1,6 @@
 # Local development
 
-How to run OpenGeni from a checkout, configure it, and verify a change. For
+How to run Opengeni from a checkout, configure it, and verify a change. For
 production deployment see [`deployment.md`](deployment.md); for the launcher's
 internals (worktree isolation, port selection, native infrastructure, artifact
 kernel) see [`deployment.md` § Local Development Stack](deployment.md#local-development-stack).
@@ -40,7 +40,7 @@ infrastructure; `bun run dev:clean -- --yes` also removes its data and
 `.env.runtime` without touching another worktree or unrelated Docker state.
 
 The first development start also prepares the current-host editable-artifact
-kernel. OpenGeni reads `packages/artifact-tool/kernel/rust-toolchain.toml` and
+kernel. Opengeni reads `packages/artifact-tool/kernel/rust-toolchain.toml` and
 invokes Cargo and rustc through `rustup run <exact-pin>`; unrelated Homebrew or
 system Rust binaries earlier on `PATH` are ignored. Cargo is also bound to the
 pinned toolchain's absolute compiler path, so ambient compiler/wrapper variables
@@ -101,7 +101,7 @@ Copy `.env.example` to `.env` and configure at least:
 - `OPENGENI_SANDBOX_BACKEND`
 - `OPENGENI_SANDBOX_PREPARATION_PROFILES` when sandbox credentials or lifecycle hooks are needed
 
-If you are migrating from the pre-OpenGeni codebase, move the old `.env` aside
+If you are migrating from the pre-Opengeni codebase, move the old `.env` aside
 and create a fresh one from `.env.example`; old `INFRA_AGENT_*` names are no
 longer read.
 
@@ -116,7 +116,7 @@ There are three product access modes, selected by `OPENGENI_PRODUCT_ACCESS_MODE`
 
 - `local`: local development bootstrap account/workspace, subject `dev`, broad permissions.
 - `configured`: self-hosted or embedded deployments using configured deployment keys or delegated bearer tokens from a parent product.
-- `managed`: OpenGeni owns email/password sign-up through Better Auth, workspaces, organization and workspace API keys, prepaid Stripe credits, usage, and limits.
+- `managed`: Opengeni owns email/password sign-up through Better Auth, workspaces, organization and workspace API keys, prepaid Stripe credits, usage, and limits.
 
 The optional deployment shared-key boundary is still available for infra smoke
 tests and simple self-hosting. Ordinary clients send it as
@@ -164,7 +164,7 @@ AWS S3 uses `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus
 `OPENGENI_OBJECT_STORAGE_REGION`; prefer IRSA/EKS Pod Identity over static keys.
 GCS uses `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus
 `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over
-service-account JSON. For AWS S3 and GCS file resources, OpenGeni materializes
+service-account JSON. For AWS S3 and GCS file resources, Opengeni materializes
 attached files in sandboxes through short-lived signed downloads.
 
 Docker sandbox file resources from local S3-compatible storage are materialized
@@ -243,7 +243,7 @@ replays event history from Postgres and reconnects to live events.
 When Connected Machines are enabled, connect one from the workspace **Machines**
 dashboard (or from the composer's machine picker):
 
-1. Click **Connect a machine** and run the printed one-liner on the computer you want to connect. The same command installs or updates the agent and adds this workspace without replacing any existing OpenGeni connections on that computer.
+1. Click **Connect a machine** and run the printed one-liner on the computer you want to connect. The same command installs or updates the agent and adds this workspace without replacing any existing Opengeni connections on that computer.
 2. Approve the machine. Two paths exist:
    - **Device flow (consent):** the agent prints a short code and a verification link; you open it and click **Grant** in the workspace to approve that specific machine. Approval is the loud, explicit consent step, and it records who approved.
    - **Zero-click enroll token:** mint a short-lived enroll token in the workspace ahead of time; the agent redeems it headlessly (the token is the grant, no per-machine click) — the path for scripted or fleet enrollment.

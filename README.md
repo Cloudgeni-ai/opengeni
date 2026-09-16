@@ -2,7 +2,7 @@
   <a href="https://opengeni.ai">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="docs-site/logo/dark.svg">
-      <img src="docs-site/logo/light.svg" alt="OpenGeni" width="320">
+      <img src="docs-site/logo/light.svg" alt="Opengeni" width="320">
     </picture>
   </a>
 </p>
@@ -29,9 +29,9 @@
 
 ---
 
-OpenGeni is the platform layer that makes AI agents safe to trust with real work. It runs agents for hours or days, records every step in a replayable event log, pauses for human approval when it matters, and lets each session run either in a managed sandbox or directly on a machine you own.
+Opengeni is the platform layer that makes AI agents safe to trust with real work. It runs agents for hours or days, records every step in a replayable event log, pauses for human approval when it matters, and lets each session run either in a managed sandbox or directly on a machine you own.
 
-OpenGeni is the runtime, not the agent. Use the included web app to give agents work and follow along, or call the same session API from your own product and let OpenGeni own durable state, history, approvals, and outputs. It comes out of two years of running agents against production cloud infrastructure at [CloudGeni](https://cloudgeni.ai).
+Opengeni is the runtime, not the agent. Use the included web app to give agents work and follow along, or call the same session API from your own product and let Opengeni own durable state, history, approvals, and outputs. It comes out of two years of running agents against production cloud infrastructure at [CloudGeni](https://cloudgeni.ai).
 
 ## Features
 
@@ -83,7 +83,7 @@ Public clients talk only to the API. Postgres is the source of truth, Temporal c
 flowchart LR
   Client["Web app, SDK, or your product"]
 
-  subgraph OpenGeni
+  subgraph Opengeni
     API["API"]
     DB["Postgres<br/>sessions, events, history"]
     Temporal["Temporal<br/>orchestration"]
@@ -131,7 +131,7 @@ Bun · Hono · React and Vite · Temporal · Postgres with pgvector · NATS · O
 
 ## Security
 
-OpenGeni's API is workspace-scoped and every request resolves to an access grant before touching data. Do not expose a production deployment without a deliberate access mode, tested database role posture, rate limits, and a reviewed sandbox credential policy. See the [security boundary](docs/deployment.md#security-boundary) and report vulnerabilities through [SECURITY.md](SECURITY.md).
+Opengeni's API is workspace-scoped and every request resolves to an access grant before touching data. Do not expose a production deployment without a deliberate access mode, tested database role posture, rate limits, and a reviewed sandbox credential policy. See the [security boundary](docs/deployment.md#security-boundary) and report vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## Contributing
 
