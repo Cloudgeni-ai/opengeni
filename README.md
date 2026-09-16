@@ -88,7 +88,7 @@ Start with the [product integration guide](docs/product-integration.md), then th
 
 "Agent" is one word for at least ten different jobs. A model is a function from tokens to tokens: it forgets everything between calls, has no idea what it is allowed to do, and has no obligation to keep working until the job is done. Everything above it exists to turn that into work that finishes, can be trusted with real systems, and can be explained afterwards.
 
-Opengeni is built as those layers, kept deliberately separate so you can swap one without rebuilding the rest.
+Opengeni is built as those layers.
 
 ```text
   ┌───────────────┐   ┌───────────────────────────────────────────────────────┐
@@ -120,8 +120,6 @@ Opengeni is built as those layers, kept deliberately separate so you can swap on
 
 **Rent the edges, own the middle.** Models, provider APIs, and the raw compute box change too fast to own, so every one of them is a swappable boundary. Durable state, governance, and knowledge are where your workflows, permissions, audit record, and institutional memory actually live, so they sit in a Postgres database you operate, export, and can leave with.
 
-### Three systems, three jobs
-
 ```mermaid
 flowchart LR
   Client["Console · SDK · your product · Slack · voice"]
@@ -149,25 +147,15 @@ flowchart LR
   Machine -. dials out, no platform credentials .-> Worker
 ```
 
-Postgres holds the truth and is written first. Temporal coordinates the work. NATS delivers live updates, and if a client misses one, the API backfills from Postgres by sequence. Token streams and tool output never pass through workflow history.
-
 ### A session that can run for days
 
 The backbone is **session → turn → attempt**. A session is the durable conversation, policy, and compute context. A turn is one accepted unit of work: a human message, a goal continuation, a schedule, an approval, a child result. An attempt is one physical try at running it, fenced by a UUID and generation. If a worker dies mid-turn, the platform checkpoints the exact conversation truth and claims the same turn with a new attempt. A new attempt never means a new prompt, and a turn is never blindly re-run against a provider when nobody knows whether the first run went through.
 
-Long runs are bounded by budget, capacity, humans, and goals, never by a cap on how many steps a loop may take. A goal is a row in the database that keeps waking the session until the agent completes it with evidence or pauses it with a reason. The longest goal-driven session so far ran 18 days.
-
-### The parts that survive a security review
-
-- **One tool gateway, several ways in.** The model, generated code, a human in the console, and an outside MCP client all pass the same tool definitions, the same permission checks, and the same execution code. Tools you are not allowed to use simply do not appear.
-- **Credentials never enter the prompt.** Secrets are encrypted at rest and scoped to an organization, workspace, or person, with an audit trail that never contains the values.
-- **Humans approve, agents cannot.** When a tool requires approval, only a human can grant it. An agent cannot approve its own call, or a child session's.
-- **Tenancy is checked twice.** Identity and permissions are resolved before any application code touches workspace data, and Postgres row-level security checks again inside every transaction. Knowing a record's ID never gets you access to it.
-- **Three memories, never mixed.** The exact history the model sees, the platform's control state for pauses and approvals, and an append-only audit timeline for humans. Knowledge sits above them and is retrieved when relevant, never replayed as history.
+Long runs are bounded by budget, capacity, humans, and goals, never by a cap on how many steps a loop may take. The longest goal-driven session so far ran 18 days.
 
 > Any SDK gives you the loop. The platform is everything around the loop that survives a security review.
 
-The full map, including every app, package, and invariant, is in [docs/architecture.md](docs/architecture.md). The thinking behind the layers is on the [Opengeni blog](https://opengeni.substack.com/).
+The full map is in [docs/architecture.md](docs/architecture.md); the thinking behind the layers is on the [Opengeni blog](https://opengeni.substack.com/).
 
 ## Documentation
 
@@ -193,7 +181,7 @@ Bun · Hono · React and Vite · Temporal · Postgres with pgvector · NATS · O
 
 ## Security
 
-Opengeni's API is workspace-scoped and every request resolves to an access grant before touching data. Do not expose a production deployment without a deliberate access mode, tested database role posture, rate limits, and a reviewed sandbox credential policy. See the [security boundary](docs/deployment.md#security-boundary) and report vulnerabilities through [SECURITY.md](SECURITY.md).
+Do not expose a production deployment without a deliberate access mode, tested database role posture, rate limits, and a reviewed sandbox credential policy. See the [security boundary](docs/deployment.md#security-boundary) and report vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## Contributing
 
