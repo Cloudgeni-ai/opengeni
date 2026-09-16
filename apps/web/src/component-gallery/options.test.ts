@@ -12,9 +12,9 @@ test("selection summary does not infer approval or choose unselected categories"
     { rows: "comfortable", multiple: "disclosed" },
     "Keep Insights unchanged",
   );
-  expect(result).toContain("Settings rows: Comfortable rows");
-  expect(result).toContain("Resource lists: Not selected");
-  expect(result).toContain("Multiple selection: Expandable checklist");
+  expect(result).toContain("Preference layouts: Quiet form");
+  expect(result).toContain("Connector layouts: Not selected");
+  expect(result).toContain("Multiple selection: Chip composer");
   expect(result).toContain("not implementation approval");
   expect(result).toContain("Keep Insights unchanged");
 });

@@ -384,7 +384,7 @@ export function ConnectionDetailsForm({
       </FormField>
       <div>
         <p id={id} className="text-xs leading-5 text-fg-muted">
-          GitHub · Workspace connection. Authorization and provider setup are outside this component
+          Linear · Workspace connection. Authorization and provider setup are outside this component
           comparison.
         </p>
       </div>

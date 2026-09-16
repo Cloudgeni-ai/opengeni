@@ -16,6 +16,7 @@ import {
   RotateCcwIcon,
   SlidersHorizontalIcon,
   LayersIcon,
+  PlusIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
@@ -27,20 +28,18 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { categories, selectionText, type CategoryId, type Favorites } from "./options";
+import { DetailSurface, ConnectionDetailsForm, SingleChoice, type RowItem } from "./candidates";
 import {
-  PreferenceRows,
-  ResourceList,
-  ViewTabs,
-  SearchToolbar,
-  DetailSurface,
-  ConnectionDetailsForm,
-  SingleChoice,
-  MultipleChoice,
-  connectionSamples,
-  type RowItem,
-} from "./candidates";
+  ConnectorCollection,
+  ConnectorMark,
+  PreferenceDirections,
+  NavigationDirections,
+  SearchDirections,
+  ChoiceTiles,
+  ConnectionSelection,
+  visualConnections,
+} from "./visual-directions";
 import { cn } from "@/lib/utils";
 
 const icons = {
@@ -77,26 +76,30 @@ const initialRows: RowItem[] = [
 ];
 
 export function ComponentGallery() {
-  const [categoryId, setCategoryId] = useState<CategoryId>("rows");
+  const [categoryId, setCategoryId] = useState<CategoryId>("lists");
   const category = categories.find((item) => item.id === categoryId)!;
   const [favorites, setFavorites] = useState<Favorites>({});
   const [theme, setTheme] = useState("dark");
   const [layout, setLayout] = useState("compare");
-  const [focused, setFocused] = useState<string>("compact");
+  const [focused, setFocused] = useState<string>("simple");
   const [rows, setRows] = useState(initialRows);
   const [disabled, setDisabled] = useState(false);
   const [view, setView] = useState("all");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
   const [sort, setSort] = useState("recent");
-  const [selected, setSelected] = useState(["github"]);
-  const [name, setName] = useState("Engineering GitHub");
+  const [selected, setSelected] = useState(["linear"]);
+  const [connectedIds, setConnectedIds] = useState(["linear", "slack"]);
+  const connectionSamples = visualConnections.map((item) => ({
+    ...item,
+    status: connectedIds.includes(item.id) ? "Connected" : "Not connected",
+  }));
+  const [name, setName] = useState("Engineering Linear");
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [detail, setDetail] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [message, setMessage] = useState("");
   const summaryRef = useRef<HTMLTextAreaElement>(null);
-  const [expanded, setExpanded] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     document.documentElement.dataset.ogTheme = theme;
@@ -120,7 +123,7 @@ export function ComponentGallery() {
   const example = (option: string) => {
     if (categoryId === "rows")
       return (
-        <PreferenceRows
+        <PreferenceDirections
           variant={option as "compact" | "comfortable" | "grouped"}
           items={rows}
           disabled={disabled}
@@ -133,37 +136,51 @@ export function ComponentGallery() {
       );
     if (categoryId === "lists")
       return (
-        <ResourceList
+        <ConnectorCollection
           variant={option as "simple" | "metadata" | "table"}
           items={connectionSamples}
-          onDetails={setDetail}
+          onOpen={setDetail}
         />
       );
     if (categoryId === "tabs")
       return (
-        <ViewTabs variant={option as "line" | "segmented"} value={view} onChange={setView}>
-          <ResourceList variant="simple" items={results} onDetails={setDetail} />
-        </ViewTabs>
+        <NavigationDirections
+          variant={option as "line" | "segmented"}
+          value={view}
+          onChange={setView}
+        >
+          <ConnectorCollection variant="metadata" items={results} onOpen={setDetail} />
+        </NavigationDirections>
       );
     if (categoryId === "search") {
-      const toolbar = (
-        <SearchToolbar query={query} onQuery={setQuery} status={status} onStatus={setStatus} />
-      );
       return (
-        <>
-          {option === "above" && toolbar}
-          <ViewTabs variant="line" value={view} onChange={setView}>
-            {option === "below" && toolbar}
-            <ResourceList variant="simple" items={results} onDetails={setDetail} />
-          </ViewTabs>
-        </>
+        <SearchDirections
+          variant={option as "above" | "below"}
+          query={query}
+          onQuery={setQuery}
+          view={view}
+          onView={setView}
+          status={status}
+          onStatus={setStatus}
+        >
+          <ConnectorCollection
+            variant={option === "above" ? "simple" : "metadata"}
+            items={results}
+            onOpen={setDetail}
+          />
+        </SearchDirections>
       );
     }
     if (categoryId === "details")
       return (
         <>
-          <p className="mb-1 text-sm font-medium">{name}</p>
-          <p className="mb-5 text-xs text-fg-muted">GitHub · Workspace connection</p>
+          <div className="mb-5 flex items-center gap-3">
+            <ConnectorMark item={visualConnections[0]!} />
+            <div>
+              <p className="mb-1 text-sm font-medium">{name}</p>
+              <p className="text-xs text-fg-muted">Linear · Workspace connection</p>
+            </div>
+          </div>
           <DetailSurface
             variant={option as "inline" | "sheet" | "dialog"}
             title="Connection details"
@@ -185,30 +202,17 @@ export function ComponentGallery() {
         </>
       );
     if (categoryId === "selection")
-      return (
-        <SingleChoice variant={option as "select" | "radio"} value={sort} onChange={setSort} />
+      return option === "radio" ? (
+        <ChoiceTiles value={sort} onChange={setSort} />
+      ) : (
+        <SingleChoice variant="select" value={sort} onChange={setSort} />
       );
-    if (option === "visible") return <MultipleChoice selected={selected} onChange={setSelected} />;
     return (
-      <Collapsible open={expanded} onOpenChange={setExpanded}>
-        <CollapsibleTrigger asChild>
-          <Button variant="outline" className="w-full justify-between">
-            Include connections
-            <span className="text-xs text-fg-muted">{selected.length} selected</span>
-          </Button>
-        </CollapsibleTrigger>
-        <p className="my-3 text-xs leading-5 text-fg-muted">
-          {connectionSamples
-            .filter((item) => selected.includes(item.id))
-            .map((item) => item.name)
-            .join(", ") || "None selected"}
-        </p>
-        <CollapsibleContent>
-          <div className="mt-4 border-t border-border pt-4">
-            <MultipleChoice selected={selected} onChange={setSelected} />
-          </div>
-        </CollapsibleContent>
-      </Collapsible>
+      <ConnectionSelection
+        variant={option as "visible" | "disclosed"}
+        selected={selected}
+        onChange={setSelected}
+      />
     );
   };
   const summary = selectionText(favorites, notes);
@@ -394,8 +398,9 @@ export function ComponentGallery() {
                   setQuery("");
                   setStatus("all");
                   setSort("recent");
-                  setSelected(["github"]);
-                  setName("Engineering GitHub");
+                  setSelected(["linear"]);
+                  setConnectedIds(["linear", "slack"]);
+                  setName("Engineering Linear");
                   setMessage("Examples reset. Your favorites are unchanged.");
                 }}
               >
@@ -435,7 +440,9 @@ export function ComponentGallery() {
                         </span>
                         <h2 className="text-sm font-semibold">{option.title}</h2>
                       </div>
-                      <div className="min-w-0 px-5 py-5 sm:px-6">{example(option.id)}</div>
+                      <div className="gallery-option-preview min-w-0 px-4 py-5">
+                        {example(option.id)}
+                      </div>
                       <div className="border-t border-border px-5 py-4">
                         <p className="text-xs leading-5">
                           <span className="font-medium">Best for </span>
@@ -561,6 +568,18 @@ export function ComponentGallery() {
           <p className="text-sm">
             Status: {connectionSamples.find((item) => item.id === detail)?.status}
           </p>
+          {detail && !connectedIds.includes(detail) && (
+            <Button
+              onClick={() => {
+                setConnectedIds((ids) => [...ids, detail]);
+                setDetail(null);
+                setMessage("Added to examples only. No provider authorization was performed.");
+              }}
+            >
+              <PlusIcon />
+              Add to examples
+            </Button>
+          )}
           <Button
             variant="outline"
             onClick={() => {

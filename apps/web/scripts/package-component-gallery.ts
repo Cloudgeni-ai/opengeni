@@ -30,6 +30,7 @@ if (html.includes('src="/assets/') || html.includes('href="/assets/'))
   throw new Error("Runtime not self-contained");
 await Bun.write(resolve(output, "index.html"), html);
 const paths = [
+  "packages/react/src/capability-catalog-row.tsx",
   "apps/web/component-gallery.html",
   "apps/web/vite.component-gallery.config.ts",
   "apps/web/scripts/package-component-gallery.ts",
@@ -37,7 +38,7 @@ const paths = [
   "apps/web/src/lib/utils.ts",
 ];
 for (const pattern of [
-  "apps/web/src/component-gallery/*.{ts,tsx}",
+  "apps/web/src/component-gallery/*.{ts,tsx,css}",
   "apps/web/src/components/ui/*.{ts,tsx}",
   "packages/react/styles/*.css",
 ])
