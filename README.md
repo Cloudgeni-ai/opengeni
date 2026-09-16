@@ -7,7 +7,7 @@
   </a>
 </p>
 
-<h3 align="center">A production-ready agentic service for long-running AI agents you can trust with real work.</h3>
+<h3 align="center">Production-ready agentic service.</h3>
 
 <p align="center">
   Durable sessions · human approvals · governed memory · your choice of compute
