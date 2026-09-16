@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { ScheduledTask, ScheduledTaskRun } from "@/types";
 import {
   agentConfigFromFormState,
+  scheduledSlackDestination,
   applyScheduledTaskCadence,
   formStateFromScheduledTask,
   groupScheduledTasksForList,
@@ -764,4 +765,39 @@ test("editing an ordinary source task preserves its source binding and private l
     active: false,
     reason: "connection_paused",
   });
+});
+
+test("adding bot access preserves unrelated tools and personal access disclosures", () => {
+  const task = scheduledTask();
+  task.agentConfig.tools.push({ kind: "mcp", id: "personal-slack" });
+  task.agentConfig.additionalFirstPartyMcpTools = ["sessions_list"];
+  task.personalConnections = [{ serverId: "personal-slack", providerDomain: "slack.com" }];
+  const form = formStateFromScheduledTask(task);
+  expect(form.existingPersonalConnections).toEqual(task.personalConnections);
+  const config = agentConfigFromFormState(form, task);
+  expect(config.tools).toContainEqual({ kind: "mcp", id: "personal-slack" });
+  expect(config.additionalFirstPartyMcpTools).toContain("sessions_list");
+  expect(config.additionalFirstPartyMcpTools).toContain("slack_bot_send_prepared_message");
+});
+
+test("existing chat selection reflects its binding and resets destination consent", () => {
+  const form = {
+    ...newScheduledTaskFormState(true, []),
+    runMode: "existing_session" as const,
+    slackBotConnectionId: connectionId,
+    personalSlackAcknowledged: true,
+  };
+  expect(scheduledSlackDestination(form, { metadata: {} })).toMatchObject({
+    slackBotConnectionId: "",
+    personalSlackAcknowledged: false,
+  });
+  expect(
+    scheduledSlackDestination(form, { metadata: { opengeniSlackBotConnectionId: connectionId } })
+      .slackBotConnectionId,
+  ).toBe(connectionId);
+});
+
+test("selecting a bot also selects its first-party MCP server", () => {
+  const form = { ...newScheduledTaskFormState(false, []), slackBotConnectionId: connectionId };
+  expect(agentConfigFromFormState(form).tools).toContainEqual({ kind: "mcp", id: "opengeni" });
 });

@@ -461,9 +461,18 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // deployment ceiling. A human/API-created task (null policy) keeps the
       // deployment default exactly as before.
       const creatorPolicy = await getScheduledTaskCreatorPolicy(db, task.workspaceId, task.id);
-      const firstPartyMcpTools = creatorPolicy?.firstPartyMcpTools
+      const inheritedTools = creatorPolicy?.firstPartyMcpTools
         ? allowedFirstPartyMcpToolsForSession(settings, creatorPolicy.firstPartyMcpTools)
-        : resolveFirstPartyMcpToolPolicy(settings).default;
+        : null;
+      const requestedTools = task.agentConfig.additionalFirstPartyMcpTools;
+      const firstPartyMcpTools = [
+        ...new Set([
+          ...(inheritedTools ?? resolveFirstPartyMcpToolPolicy(settings).default),
+          ...allowedFirstPartyMcpToolsForSession(settings, requestedTools ?? []).filter(
+            (name) => !inheritedTools || inheritedTools.includes(name),
+          ),
+        ]),
+      ];
       const firstPartyMcpPermissions = creatorPolicy?.firstPartyMcpPermissions
         ? [...creatorPolicy.firstPartyMcpPermissions]
         : [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS];

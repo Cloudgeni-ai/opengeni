@@ -66,6 +66,8 @@ import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runti
 import { listCapabilityPacks, listWorkspaceCapabilityPacks } from "./packs";
 import { assertHostMcpAuthoritySourceAdmissionEnabled } from "./host-mcp-authority-source-admission";
 
+import { withCapabilityDescription } from "./capability-descriptions";
+
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
 const mcpRegistryFetchTimeoutMs = 15000;
@@ -159,7 +161,7 @@ export async function buildCapabilityCatalog(input: {
         item.kind === "skill"
           ? applyInstalledSkillEnablement(item, installedSkillById.get(item.id))
           : applyCapabilityEnablement(item, capabilityInstallationById.get(item.id), activePackIds);
-      return applyCapabilityLifecycle(projected);
+      return withCapabilityDescription(applyCapabilityLifecycle(projected));
     })
     .sort(compareCatalogItems);
   return {
@@ -1420,6 +1422,35 @@ function providerIntegrationCatalogItems(
  */
 export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogItem[] {
   return [
+    CapabilityCatalogItem.parse({
+      id: "api:slack-bot",
+      kind: "api",
+      source: "built_in",
+      name: "OpenGeni Slack bot",
+      description:
+        "Read channels the OpenGeni bot can access and send messages to channels or DMs as OpenGeni. Uses a workspace bot installation. Supports scheduled tasks with a selected bot connection.",
+      category: "communication",
+      tags: ["slack", "bot", "notifications", "scheduled", "workspace"],
+      homepageUrl: "https://slack.com",
+      providerDomain: "slack.com",
+      authModel: "workspace_bot_installation",
+      authKind: "oauth2",
+      surfaceType: "first_party_slack_bot",
+      tools: [{ kind: "mcp", id: "opengeni" }],
+      runtime: {
+        available: true,
+        notes:
+          "Install the workspace bot in Capabilities and select its tools or schedule binding.",
+      },
+      lifecycle: {
+        status: "available",
+        readiness: "setup_required",
+        detail: "Workspace bot setup is separate from personal Slack OAuth.",
+        managedBy: "platform",
+      },
+      actions: ["inspect"],
+      metadata: { recommendationOnly: true },
+    }),
     CapabilityCatalogItem.parse({
       id: "api:github-app",
       kind: "api",

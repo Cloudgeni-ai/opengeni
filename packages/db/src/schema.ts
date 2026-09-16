@@ -2945,7 +2945,8 @@ export const slackInteractions = pgTable(
     // Frozen once: whether this interaction's acknowledgement renders the
     // one-time onboarding hint. NULL means the decision has not been resolved.
     firstTaskHint: boolean("first_task_hint"),
-    // The routed workspace's display name, frozen when the interaction binds.
+    // The routed workspace's presentation label, frozen when the interaction binds.
+    // New values may include a complete Slack link; legacy display names stay exact.
     // A live lookup at post time would be wrong: a workspace rename between the
     // original post and a reconciliation makes `reconcilePostMessage`'s
     // byte-compare raise `post_reconciliation_mismatch`. NULL means no
@@ -3521,6 +3522,52 @@ export const memorySlackPublicationReceipts = pgTable(
           or octet_length(${table.slackChannelId}) between 1 and 64)
         and (${table.slackMessageTimestamp} is null
           or octet_length(${table.slackMessageTimestamp}) between 1 and 64)`,
+    ),
+  }),
+);
+
+// Immutable session-visible outbound bot intent. Sending reuses this identity
+// through the separate provider-operation ledger.
+export const slackPreparedMessages = pgTable(
+  "slack_prepared_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    connectionVersion: integer("connection_version").notNull(),
+    targetKind: text("target_kind").$type<"channel" | "user">().notNull(),
+    targetId: text("target_id").notNull(),
+    threadTimestamp: text("thread_timestamp"),
+    messageText: text("message_text").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => ({
+    session: index("slack_prepared_messages_session").on(table.workspaceId, table.sessionId),
+    version: check(
+      "slack_prepared_messages_connection_version_check",
+      sql`${table.connectionVersion} > 0`,
+    ),
+    target: check(
+      "slack_prepared_messages_target_kind_check",
+      sql`${table.targetKind} in ('channel', 'user')`,
+    ),
+    targetLength: check(
+      "slack_prepared_messages_target_id_check",
+      sql`length(${table.targetId}) between 1 and 128`,
+    ),
+    textLength: check(
+      "slack_prepared_messages_message_text_check",
+      sql`length(${table.messageText}) between 1 and 40000`,
     ),
   }),
 );

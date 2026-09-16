@@ -16,6 +16,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 
+import { SlackLinkCompletionNotice } from "@/components/slack-link-completion-notice";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { RailProvider } from "@/components/rail/rail-context";
 import { RailShell } from "@/components/rail/rail-shell";
@@ -118,6 +119,13 @@ export function WorkspaceShellRouteContent({
   const [ownedSlackAccess, setOwnedSlackAccess] = useState<WorkspaceOwnedState<SlackAccessState>>(
     () => ({ workspaceId, value: emptySlackAccessState() }),
   );
+  // Only the access refresh initiated by successful linking may retain its notice.
+  // All other credential/workspace/principal transitions still clear this state.
+  const slackCompletionRefresh = useRef<{
+    workspaceId: string;
+    subjectId: string;
+    accessKeyVersion: number;
+  } | null>(null);
   const slackOperationSequence = useRef(0);
   const activeSlackOperation = useRef<WorkspaceOperationIdentity | null>(null);
   const slackMutationBusy = useRef(false);
@@ -172,8 +180,18 @@ export function WorkspaceShellRouteContent({
   useEffect(() => {
     activeSlackOperation.current = null;
     slackMutationBusy.current = false;
-    setOwnedSlackAccess({ workspaceId, value: emptySlackAccessState() });
-  }, [context.accessKeyVersion, workspaceId]);
+    const completion = slackCompletionRefresh.current;
+    slackCompletionRefresh.current = null;
+    setOwnedSlackAccess((current) =>
+      completion?.workspaceId === workspaceId &&
+      completion.subjectId === context.accessContext.subjectId &&
+      completion.accessKeyVersion === context.accessKeyVersion &&
+      current.workspaceId === workspaceId &&
+      current.value.request?.status === "completed"
+        ? current
+        : { workspaceId, value: emptySlackAccessState() },
+    );
+  }, [context.accessKeyVersion, context.accessContext.subjectId, workspaceId]);
 
   const completeSlackAccess = useCallback(
     (operation: WorkspaceOperationIdentity): boolean => {
@@ -181,11 +199,23 @@ export function WorkspaceShellRouteContent({
       toast.success("Slack identity linked", {
         description: "You can return to Slack and invoke OpenGeni again.",
       });
+      slackCompletionRefresh.current = {
+        workspaceId,
+        subjectId: context.accessContext.subjectId,
+        accessKeyVersion: context.accessKeyVersion + 1,
+      };
       clearSlackLinkContinuation();
       revalidatePrincipalAccess();
       return true;
     },
-    [clearSlackLinkContinuation, ownsSlackOperation, revalidatePrincipalAccess],
+    [
+      clearSlackLinkContinuation,
+      context.accessContext.subjectId,
+      context.accessKeyVersion,
+      ownsSlackOperation,
+      revalidatePrincipalAccess,
+      workspaceId,
+    ],
   );
 
   const refreshSlackAccess = useCallback(
@@ -509,6 +539,11 @@ export function WorkspaceShellRouteContent({
       workspaceId={workspaceId}
       onMount={onAuthorizedShellMount}
     >
+      {slackAccessRequest?.status === "completed" ? (
+        <SlackLinkCompletionNotice
+          onDismiss={() => updateSlackAccess(workspaceId, () => emptySlackAccessState())}
+        />
+      ) : null}
       <Outlet />
     </AuthorizedWorkspaceShell>
   );

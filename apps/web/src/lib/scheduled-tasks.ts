@@ -89,6 +89,9 @@ export type ScheduledTaskFormState = {
   overlapPolicy: ScheduledTask["overlapPolicy"];
   includeOpenGeniTool: boolean;
   slackBotConnectionId: string;
+  personalSlackCapabilityId?: string;
+  personalSlackAcknowledged?: boolean;
+  existingPersonalConnections?: ScheduledTask["personalConnections"];
   resources: ResourceRef[];
 };
 
@@ -244,6 +247,7 @@ export function formStateFromScheduledTask(
     workingDir: task.agentConfig.machineTarget?.workingDir ?? "",
     overlapPolicy: task.overlapPolicy,
     slackBotConnectionId: task.agentConfig.slackBotConnectionId ?? "",
+    existingPersonalConnections: task.personalConnections,
   };
 }
 
@@ -340,6 +344,33 @@ export function scheduleFromFormState(form: ScheduledTaskFormState): ScheduledTa
   };
 }
 
+const SCHEDULE_SLACK_BOT_TOOLS = [
+  "slack_bot_list_channels",
+  "slack_bot_channel_history",
+  "slack_bot_thread_replies",
+  "slack_bot_list_users",
+  "slack_bot_prepare_message",
+  "slack_bot_send_prepared_message",
+] as const;
+
+/** Reflect an existing chat's server-owned binding; this projection grants no access. */
+export function scheduledSlackDestination(
+  form: ScheduledTaskFormState,
+  session?: { metadata: Record<string, unknown> },
+): ScheduledTaskFormState {
+  if (form.runMode !== "existing_session") return form;
+  const binding = session?.metadata.opengeniSlackBotConnectionId;
+  return {
+    ...form,
+    slackBotConnectionId:
+      typeof binding === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(binding)
+        ? binding
+        : "",
+    personalSlackAcknowledged: false,
+  };
+}
+
 export function agentConfigFromFormState(
   form: ScheduledTaskFormState,
   existingTask?: ScheduledTask,
@@ -347,7 +378,7 @@ export function agentConfigFromFormState(
   const tools = (existingTask?.agentConfig.tools ?? []).filter(
     (tool) => !(tool.kind === "mcp" && tool.id === "opengeni"),
   );
-  if (form.includeOpenGeniTool) {
+  if (form.includeOpenGeniTool || form.slackBotConnectionId) {
     tools.push({ kind: "mcp", id: "opengeni" });
   }
   return {
@@ -359,6 +390,12 @@ export function agentConfigFromFormState(
     tools,
     metadata: existingTask?.agentConfig.metadata ?? {},
     ...(form.slackBotConnectionId ? { slackBotConnectionId: form.slackBotConnectionId } : {}),
+    additionalFirstPartyMcpTools: [
+      ...new Set([
+        ...(existingTask?.agentConfig.additionalFirstPartyMcpTools ?? []),
+        ...(form.slackBotConnectionId ? SCHEDULE_SLACK_BOT_TOOLS : []),
+      ]),
+    ],
     ...(form.model ? { model: form.model } : {}),
     reasoningEffort: form.reasoningEffort,
     ...(form.runMode !== "existing_session" &&
@@ -742,7 +779,11 @@ export async function loadSessionSchedules(
   const limit = 100;
   let offset = 0;
   while (true) {
-    const page = await client.listScheduledTasks(workspaceId, { sessionId, limit, offset });
+    const page = await client.listScheduledTasks(workspaceId, {
+      sessionId,
+      limit,
+      offset,
+    });
     for (const task of page) tasks.set(task.id, task);
     if (page.length < limit) return [...tasks.values()];
     offset += page.length;
