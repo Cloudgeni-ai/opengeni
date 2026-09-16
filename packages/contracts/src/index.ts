@@ -4266,9 +4266,9 @@ export const McpPersonalConnectionDelegation = z
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
     connectionType: z.enum(["mcp", "social", "atlassian", "github_personal"]).optional(),
     /**
-     * Explicit common-authority grant selected by the owning human. Omission is
-     * retained only for legacy_user connections that cannot yet participate in
-     * the organization-user authority lifecycle.
+     * Historical receipt data only. This schema also reads persisted work from
+     * before the sender-owned cutover. Current admission rejects this field;
+     * provider execution requires the canonical sender snapshot, never this grant.
      */
     userDelegation: UserResourceDelegation.optional(),
     /**
@@ -4378,7 +4378,7 @@ export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnecti
 
 /**
  * Exact personal MCP authority frozen on one causal turn or scheduled task.
- * One server can have at most one grant; bounded validation keeps corrupt JSON
+ * One server can have at most one account; bounded validation keeps corrupt JSON
  * from becoming executable credential authority at a DB read boundary.
  */
 export const McpPersonalConnectionDelegations = z
