@@ -7,7 +7,7 @@
   </a>
 </p>
 
-<h3 align="center">Long-running AI agents you can trust with real work. Open source, self-hostable.</h3>
+<h3 align="center">A ready agentic service for long-running AI agents you can trust with real work.</h3>
 
 <p align="center">
   Durable sessions · human approvals · governed memory · your choice of compute
@@ -32,7 +32,7 @@
 
 ---
 
-Opengeni runs AI agents that do real work. It keeps a session going for hours or days, records every step in a replayable event log, stops for a human when an action needs approval, and puts each session either in a managed sandbox or directly on a machine you own.
+Opengeni is a ready agentic service: it runs AI agents that do real work, keeps a session going for hours or days, records every step in a replayable event log, stops for a human when an action needs approval, and puts each session either in a managed sandbox or directly on a machine you own.
 
 Opengeni is not the agent; it is everything the agent needs around it. Give agents work from the web app and follow along, or call the same session API from your own product and let Opengeni hold the state, history, approvals, and outputs. It grew out of two years of running agents against production cloud infrastructure at [Cloudgeni](https://cloudgeni.ai).
 
