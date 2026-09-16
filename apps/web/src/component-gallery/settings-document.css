@@ -1,0 +1,6 @@
+/* The production shell owns a viewport scroller; the standalone Site owns the document. */
+html:has(.settings-studio), body:has(.settings-studio) {
+  height: auto;
+  min-height: 100%;
+  overflow: auto;
+}

@@ -30,6 +30,13 @@ if (html.includes('src="/assets/') || html.includes('href="/assets/'))
   throw new Error("Runtime not self-contained");
 await Bun.write(resolve(output, "index.html"), html);
 const paths = [
+  "apps/web/src/components/codex-source-settings.tsx",
+  "apps/web/src/components/subscription-account-row.tsx",
+  "apps/web/src/components/subscription-device-code-panel.tsx",
+  "apps/web/src/components/permission-picker.tsx",
+  "packages/react/src/device-authorization.tsx",
+  "packages/react/src/clipboard.ts",
+  "packages/react/src/lib/clipboard.ts",
   "packages/react/src/capability-catalog-row.tsx",
   "apps/web/component-gallery.html",
   "apps/web/vite.component-gallery.config.ts",

@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client";
-import { ComponentGallery } from "./app";
+import { SettingsStudio } from "./settings-studio";
 import "../styles.css";
 import "../../../../packages/react/styles/connect.css";
 import "./visual-directions.css";
-createRoot(document.getElementById("root")!).render(<ComponentGallery />);
+import "./settings-document.css";
+createRoot(document.getElementById("root")!).render(<SettingsStudio />);
