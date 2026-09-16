@@ -2613,6 +2613,15 @@ $function$
 
 
 -- No callable native consent or task-head connection-grant compatibility lane.
+-- Preserve the hardened search path of the surviving general resource-grant
+-- overloads, including installations in a dedicated schema.
+DO $resource_grant_path$
+BEGIN
+  EXECUTE format('ALTER FUNCTION issue_self_user_resource_grant(uuid,uuid,uuid,text,text,text,uuid,boolean) SET search_path = pg_catalog, %I, pg_temp', current_schema());
+  EXECUTE format('ALTER FUNCTION issue_self_user_resource_grant(uuid,uuid,uuid,text,text,text,uuid,integer,boolean) SET search_path = pg_catalog, %I, pg_temp', current_schema());
+END
+$resource_grant_path$;
+
 DROP FUNCTION issue_self_local_connection_use_grant(uuid,uuid,uuid,text,boolean);
 DROP FUNCTION list_self_connection_authorities(uuid);
 DROP FUNCTION issue_self_connection_use_grant(uuid,uuid,uuid,text,text,uuid,boolean);
