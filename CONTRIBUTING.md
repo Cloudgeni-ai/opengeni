@@ -13,6 +13,9 @@ Thanks for considering a contribution.
 bun run dev
 ```
 
+[`docs/local-development.md`](docs/local-development.md) covers manual startup,
+configuration, the native (no Docker) path, and the web-app walkthrough.
+
 ## Toolchain
 
 Package manager is Bun everywhere (one intentional npm exception for release publishing).
