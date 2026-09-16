@@ -1827,7 +1827,7 @@ export type SkillReviewReference = {
 };
 
 export type HumanInputQuestion = {
-  skillReview?: SkillReviewReference | undefined;
+  skillReview?: SkillReviewReference | null | undefined;
   id: string;
   kind: HumanInputQuestionKind;
   prompt: string;
