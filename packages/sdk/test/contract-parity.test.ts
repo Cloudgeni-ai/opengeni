@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  HumanInputQuestion as ContractHumanInputQuestion,
   AcknowledgeStreamRequest as ContractAcknowledgeStreamRequest,
   AgentTopologyPageResponse as ContractAgentTopologyPageResponse,
   ActivateCodexRealtimeConnectionRequest as ContractActivateCodexRealtimeConnectionRequest,
@@ -297,6 +298,37 @@ import type { TranscriptionEvent, WorkspaceTranscriptionPolicy } from "../src/tr
 // if the public contracts move, these checks fail the gate.
 
 describe("SDK / contracts parity", () => {
+  test("human-input questions preserve omitted, null, and populated skill reviews", () => {
+    const question = {
+      id: "question",
+      kind: "text" as const,
+      prompt: "What should happen next?",
+      options: [],
+      required: true,
+      allowOther: false,
+    };
+    const questions: SessionHumanInputRequest["questions"] = [
+      question,
+      { ...question, skillReview: null },
+      {
+        ...question,
+        skillReview: {
+          sourceOperationId: "33333333-3333-4333-8333-333333333333",
+          skillId: "11111111-1111-4111-8111-111111111111",
+          revisionId: "22222222-2222-4222-8222-222222222222",
+          expectedRevisionId: null,
+          expectedScopeVersion: 1,
+        },
+      },
+    ];
+
+    for (const input of questions) {
+      const parsed: SessionHumanInputRequest["questions"][number] =
+        ContractHumanInputQuestion.parse(input);
+      expect(parsed).toEqual(input);
+    }
+  });
+
   test("Stripe billing portal shapes stay in parity", () => {
     const sdkRequestAcceptsContract = (
       value: z.infer<typeof ContractCreateBillingPortalRequest>,
