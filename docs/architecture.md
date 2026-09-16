@@ -28,9 +28,8 @@ clients and bounded browser access to storage, sandboxes, relays, Codex WebRTC,
 and Gateway realtime WebSockets. Workers run agents in provisioned sandboxes or
 Connected Machines.
 
-The main surfaces are sessions and goals; tools and connections; Knowledge,
-instructions and Skills; files and editable artifacts; and SDK, React and web
-clients. The focused ownership map in §13 gives each area's canonical sources.
+The ownership map in §13 links canonical sources for sessions, tools, Knowledge,
+Skills, artifacts and clients.
 
 External users require explicit live membership. `asUser()` supplies canonical
 identity; an end-user label does not. Private/shared visibility differs from

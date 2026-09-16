@@ -256,31 +256,25 @@ describe("personal MCP connection delegation", () => {
         source: { kind: "subject" as const, subjectId, accountId: account!.id },
         visibility: "workspace_shared" as const,
       };
-      // The server restores only a pre-existing native grant, with the same
-      // capture as an explicit selection. An explicit empty list suppresses it.
-      expect(await freezePersonalConnectionDelegations(defaultInput)).toEqual([]);
-      await sql`
-        insert into session_tenancy_activations (
-          account_id, activation_version, inventory_digest, parity_digest, activated_by
-        ) values (${account!.id}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'connection-default-test')
-      `;
+      // A sole owned account is selected without conversation grants, in either
+      // visibility. An empty preference list does not remove sender authority.
       expect(await freezePersonalConnectionDelegations(defaultInput)).toEqual(personalFrozen);
       expect(
         await freezePersonalConnectionDelegations({
           ...defaultInput,
           authoritySelections: [],
         }),
-      ).toEqual([]);
+      ).toEqual(personalFrozen);
       expect(
         await freezePersonalConnectionDelegations({
           ...defaultInput,
           visibility: "user_private",
         }),
-      ).toEqual([]);
+      ).toEqual(personalFrozen);
       const scopedSession = await createSession(client.db, {
         accountId: account!.id,
         workspaceId: origin!.id,
-        initialMessage: "conversation grant capture",
+        initialMessage: "sender account capture",
         resources: [],
         tools: [{ kind: "mcp", id: "linear" }],
         metadata: {},
@@ -294,33 +288,6 @@ describe("personal MCP connection delegation", () => {
       const [scopedAuthority] = await sql<
         Array<{ visibility: "user_private" | "workspace_shared"; epoch: number }>
       >`select visibility, authority_epoch::int as epoch from sessions where id = ${scopedSession.id}`;
-      const scopedGrant = await sql.begin(async (tx) => {
-        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
-        await tx`select set_config('opengeni.workspace_id', ${origin!.id}, true)`;
-        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
-        const [row] = await tx<Array<{ id: string; generation: number }>>`
-          select grant_id as id, grant_generation::int as generation
-          from issue_self_connection_use_grant(
-            ${account!.id}::uuid, ${connection.authorityId}::uuid, ${origin!.id}::uuid,
-            'session', ${scopedAuthority!.visibility}, ${scopedSession.id}::uuid,
-            ${scopedAuthority!.visibility === "workspace_shared"}
-          )
-        `;
-        return row!;
-      });
-      const scopedSelection = {
-        ...selection,
-        userDelegation: {
-          ...selection.userDelegation,
-          workspaceId: origin!.id,
-          sessionId: scopedSession.id,
-          mode: "session" as const,
-          context: scopedAuthority!.visibility,
-          authorityEpoch: scopedAuthority!.epoch,
-          grantId: scopedGrant.id,
-          grantGeneration: scopedGrant.generation,
-        },
-      };
       const scopedInput = {
         ...defaultInput,
         targetSessionId: scopedSession.id,
@@ -330,13 +297,13 @@ describe("personal MCP connection delegation", () => {
       expect(automaticallyFrozen).toEqual(
         await freezePersonalConnectionDelegations({
           ...scopedInput,
-          authoritySelections: [scopedSelection],
+          authoritySelections: [selection],
         }),
       );
-      expect(automaticallyFrozen[0]?.userDelegation?.grantId).toBe(scopedGrant.id);
+      expect(automaticallyFrozen).toEqual(personalFrozen);
       expect(
         await freezePersonalConnectionDelegations({ ...scopedInput, authoritySelections: [] }),
-      ).toEqual([]);
+      ).toEqual(personalFrozen);
       const acceptedScoped = await withWorkspaceSubjectSessionActivityRls(
         client.db,
         origin!.id,
@@ -350,7 +317,7 @@ describe("personal MCP connection delegation", () => {
             actor: { type: "human", subjectId },
             operationKey: crypto.randomUUID(),
             delivery: "send",
-            text: "use the existing conversation grant",
+            text: "use the sender account",
             resources: [],
             model: "test-model",
             reasoningEffort: "low",

@@ -29,7 +29,6 @@ import { createScheduledTaskActivities } from "../../worker/src/activities/sched
 import type { ActivityServices } from "../../worker/src/activities/types";
 import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerConnectionRoutes } from "../src/routes/connections";
-import { registerUserResourceAuthorityRoutes } from "../src/routes/user-resource-authorities";
 import { registerScheduledTaskRoutes } from "../src/routes/scheduled-tasks";
 import { organizationApiKeyPermissionsForAccess } from "../src/routes/api-keys";
 
@@ -119,7 +118,6 @@ test.each(["configured", "session-local", "durable"] as const)(
     });
     registerSessionRoutes(app, deps);
     registerConnectionRoutes(app, deps);
-    registerUserResourceAuthorityRoutes(app, deps);
     registerScheduledTaskRoutes(app, deps);
     const service = new OpenGeniClient({
       baseUrl: "http://fixture",
@@ -140,24 +138,9 @@ test.each(["configured", "session-local", "durable"] as const)(
         const connection = await actor.createConnection(workspace.id, input);
         expect(connection.subjectId).toBe(identities[i]!.subjectId);
         expect((await actor.createConnection(workspace.id, input)).id).toBe(connection.id);
-        const page = await actor.listUserResourceAuthorities(workspace.id, {
-          resourceKind: "connection",
-        });
-        const authority = page.authorities.find((row) => row.resourceId === connection.id);
-        if (!authority) throw new Error("Native connection authority missing");
-        const { grant } = await actor.issueUserResourceGrant(workspace.id, authority.authorityId, {
-          scope: "user",
-          resourceKind: "connection",
-          mode: "always",
-          context: "workspace_shared",
-          workspaceSharedAcknowledged: true,
-        });
         return {
           connection,
-          grant,
-          selection: [
-            { serverId: server.id, connectionId: connection.id, userDelegation: grant.delegation },
-          ],
+          selection: [{ serverId: server.id, connectionId: connection.id }],
         };
       }),
     );
@@ -192,21 +175,19 @@ test.each(["configured", "session-local", "durable"] as const)(
             prompt: "Read my account",
             tools: target ? [] : [{ kind: "mcp", id: server.id }],
           },
-          connectionAuthorities: selections[i]!.selection,
+          connectionAccounts: selections[i]!.selection,
         });
         if (target) {
           const updated = await actors[i]!.updateScheduledTask(workspace.id, task.id, {
             agentConfig: { prompt: "Read my account after updating the schedule", tools: [] },
-            connectionAuthorities: selections[i]!.selection,
+            connectionAccounts: selections[i]!.selection,
           });
           expect(updated.id).toBe(task.id);
           expect(updated.agentConfig.tools).toEqual([]);
         }
         const [stored] =
-          await shared.admin`select personal_connection_delegations from scheduled_tasks where id = ${task.id}`;
-        expect(stored!.personal_connection_delegations).toMatchObject([
-          { connectionId: selections[i]!.connection.id, ownerSubjectId: identities[i]!.subjectId },
-        ]);
+          await shared.admin`select owner_subject_id from scheduled_tasks where id = ${task.id}`;
+        expect(stored!.owner_subject_id).toBe(identities[i]!.subjectId);
         const dispatch = {
           workspaceId: workspace.id,
           taskId: task.id,
@@ -286,7 +267,7 @@ test.each(["configured", "session-local", "durable"] as const)(
         draft = {
           ...saved,
           annotations: [],
-          connectionAuthorities: message.connectionAuthorities ?? [],
+          connectionAccounts: message.connectionAccounts ?? [],
           expectedDraftRevision: saved.revision,
           clientEventId,
           delivery: "send",
@@ -303,14 +284,14 @@ test.each(["configured", "session-local", "durable"] as const)(
     const first = {
       text: "First text from non-creator",
       clientEventId: crypto.randomUUID(),
-      connectionAuthorities: selections[1]!.selection,
+      connectionAccounts: selections[1]!.selection,
     };
     const event = await send(bob, first);
     expect((await send(bob, first)).id).toBe(event.id);
     await send(actors[0]!, {
       text: "Other participant",
       clientEventId: crypto.randomUUID(),
-      connectionAuthorities: selections[0]!.selection,
+      connectionAccounts: selections[0]!.selection,
     });
     const captured = await snapshots();
     expect(captured).toHaveLength(2);
@@ -321,8 +302,8 @@ test.each(["configured", "session-local", "durable"] as const)(
       ]);
     }
     await expect(
-      send(bob, { text: "Cannot borrow", connectionAuthorities: selections[0]!.selection }),
-    ).rejects.toMatchObject({ status: 403 });
+      send(bob, { text: "Cannot borrow", connectionAccounts: selections[0]!.selection }),
+    ).rejects.toMatchObject({ status: 422, retryable: false, outcomeUnknown: false });
     expect(await snapshots()).toHaveLength(2);
     const attemptId = crypto.randomUUID();
     const claim = await claimSessionWorkForAttempt(db.db, workspace.id, {
@@ -404,13 +385,13 @@ test.each(["configured", "session-local", "durable"] as const)(
       turn: childClaim.turn,
     });
     expect((await childResolver(request)).status).toBe("ok");
-    await bob.revokeUserResourceGrant(workspace.id, selections[1]!.grant.grantId);
+    await bob.deleteConnection(workspace.id, selections[1]!.connection.id);
     for (const use of scheduledUses) expect(await use.authorize()).toBe(use.actorIndex === 0);
     expect(await resolved.authorizeProviderRequest?.()).toBe(false);
     expect((await childResolver(request)).status).toBe("auth_needed");
     await expect(
-      send(bob, { text: "Revoked selection", connectionAuthorities: selections[1]!.selection }),
-    ).rejects.toMatchObject({ status: 403 });
+      send(bob, { text: "Revoked selection", connectionAccounts: selections[1]!.selection }),
+    ).rejects.toMatchObject({ status: 422, retryable: false, outcomeUnknown: false });
   },
   90_000,
 );
