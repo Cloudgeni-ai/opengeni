@@ -24,8 +24,7 @@ export const McpOAuthClientRegistrationRequest = z
       })
       .default(["authorization_code", "refresh_token"]),
     response_types: z.array(z.literal("code")).min(1).max(1).default(["code"]),
-  })
-  .strict();
+  });
 export type McpOAuthClientRegistrationRequest = z.infer<typeof McpOAuthClientRegistrationRequest>;
 
 export const McpOAuthClientRegistrationResponse = McpOAuthClientRegistrationRequest.extend({

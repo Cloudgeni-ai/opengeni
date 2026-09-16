@@ -177,7 +177,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     c.header(
       "content-security-policy",
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+      "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
     );
     c.header("cache-control", "no-store");
     return c.html(consentHtml(client.clientName ?? client.clientId, resource, requestToken));
@@ -187,9 +187,19 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     requireMcpOAuthEnabled(deps);
     const form = new URLSearchParams(await c.req.text());
     const requestToken = form.get("request") ?? "";
-    if (!requestToken.startsWith(REQUEST_PREFIX)) return oauthError(c, "invalid_request", 400);
+    if (!requestToken.startsWith(REQUEST_PREFIX)) {
+      return oauthAuthorizeBrowserError(
+        c,
+        "This authorization request is missing or already used.",
+      );
+    }
     const request = await getMcpOAuthAuthorizationRequest(deps.db, tokenHash(requestToken));
-    if (!request) return oauthError(c, "invalid_request", 400);
+    if (!request) {
+      return oauthAuthorizeBrowserError(
+        c,
+        "This authorization request expired or was already approved.",
+      );
+    }
     const authorization = await requireAccessGrantAuthorization(
       c,
       deps,
@@ -204,7 +214,8 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     if (form.get("decision") !== "approve") {
       await deleteMcpOAuthAuthorizationRequest(deps.db, request.requestHash);
-      return c.redirect(
+      return completeAuthorizationRedirect(
+        c,
         authorizationRedirect(request.redirectUri, {
           error: "access_denied",
           iss: mcpOAuthIssuer(deps),
@@ -219,8 +230,14 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
       codeHash: tokenHash(code),
       codeExpiresAt: expiresIn(MCP_OAUTH_AUTHORIZATION_CODE_TTL_SECONDS),
     });
-    if (!consumed) return oauthError(c, "invalid_request", 400);
-    return c.redirect(
+    if (!consumed) {
+      return oauthAuthorizeBrowserError(
+        c,
+        "This authorization request expired or was already approved.",
+      );
+    }
+    return completeAuthorizationRedirect(
+      c,
       authorizationRedirect(consumed.redirectUri, {
         code,
         iss: mcpOAuthIssuer(deps),
@@ -474,11 +491,37 @@ async function rotateRefreshToken(
   });
 }
 
+const BLOCKED_REDIRECT_PROTOCOLS = new Set([
+  "javascript:",
+  "data:",
+  "file:",
+  "about:",
+  "blob:",
+  "vbscript:",
+]);
+
+function isNativeAppRedirect(url: URL): boolean {
+  return (
+    /^[a-z][a-z0-9+.-]*:$/u.test(url.protocol) &&
+    !BLOCKED_REDIRECT_PROTOCOLS.has(url.protocol) &&
+    url.protocol !== "http:" &&
+    url.protocol !== "https:" &&
+    Boolean(url.hostname) &&
+    url.pathname.startsWith("/") &&
+    url.pathname !== "/"
+  );
+}
+
 function validateRedirectUri(value: string): string {
   const url = new URL(value);
   const loopback =
     url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-  if (url.username || url.password || url.hash || (url.protocol !== "https:" && !loopback)) {
+  if (
+    url.username ||
+    url.password ||
+    url.hash ||
+    (url.protocol !== "https:" && !loopback && !isNativeAppRedirect(url))
+  ) {
     throw new HTTPException(400, {
       message: "invalid public OAuth redirect URI",
     });
@@ -520,8 +563,39 @@ function authorizationRedirect(redirectUri: string, params: Record<string, strin
   return url.toString();
 }
 
+function completeAuthorizationRedirect(c: Context, redirectTo: string) {
+  c.header("cache-control", "no-store");
+  const url = new URL(redirectTo);
+  if (url.protocol === "http:" || url.protocol === "https:") {
+    return c.redirect(redirectTo);
+  }
+  c.header(
+    "content-security-policy",
+    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'",
+  );
+  return c.html(oauthContinueHtml(redirectTo));
+}
+
+function oauthContinueHtml(redirectTo: string): string {
+  const safeHref = escapeHtml(redirectTo);
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Continue authorization</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1.5rem;color:#18181b}main{border:1px solid #e4e4e7;border-radius:16px;padding:2rem}a{color:#18181b}</style></head><body><main><h1>Continue authorization</h1><p>Authorization succeeded. Continue to finish connecting this client.</p><p><a href="${safeHref}">Continue</a></p><script>location.replace(${JSON.stringify(redirectTo)})</script></main></body></html>`;
+}
+
+function oauthAuthorizeBrowserError(c: Context, message: string) {
+  c.header("cache-control", "no-store");
+  c.header("pragma", "no-cache");
+  c.header(
+    "content-security-policy",
+    "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+  );
+  return c.html(
+    `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorization expired</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1.5rem;color:#18181b}main{border:1px solid #e4e4e7;border-radius:16px;padding:2rem}</style></head><body><main><h1>Authorization expired</h1><p>${escapeHtml(message)}</p><p>Close this tab and start authorization again from the client.</p></main></body></html>`,
+    400,
+  );
+}
+
 function consentHtml(clientName: string, resource: McpOAuthResource, requestToken: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize OpenGeni tools</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1.5rem;color:#18181b}main{border:1px solid #e4e4e7;border-radius:16px;padding:2rem}code{word-break:break-all;background:#f4f4f5;padding:.15rem .35rem;border-radius:4px}.actions{display:flex;gap:.75rem;margin-top:1.5rem}button{border:0;border-radius:8px;padding:.7rem 1rem;font:inherit;cursor:pointer}.approve{background:#18181b;color:white}.deny{background:#e4e4e7}</style></head><body><main><h1>Authorize workspace tools</h1><p><strong>${escapeHtml(clientName)}</strong> is requesting MCP access to this workspace.</p><p>Resource: <code>${escapeHtml(resource.resource)}</code></p><p>The grant is limited to the tools and permissions available now. OpenGeni rechecks live workspace authority on every request.</p><form method="post" action="/oauth/authorize"><input type="hidden" name="request" value="${escapeHtml(requestToken)}"><div class="actions"><button class="approve" name="decision" value="approve">Authorize</button><button class="deny" name="decision" value="deny">Deny</button></div></form></main></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize OpenGeni tools</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1.5rem;color:#18181b}main{border:1px solid #e4e4e7;border-radius:16px;padding:2rem}code{word-break:break-all;background:#f4f4f5;padding:.15rem .35rem;border-radius:4px}.actions{display:flex;gap:.75rem;margin-top:1.5rem}button{border:0;border-radius:8px;padding:.7rem 1rem;font:inherit;cursor:pointer}.approve{background:#18181b;color:white}.deny{background:#e4e4e7}</style></head><body><main><h1>Authorize workspace tools</h1><p><strong>${escapeHtml(clientName)}</strong> is requesting MCP access to this workspace.</p><p>Resource: <code>${escapeHtml(resource.resource)}</code></p><p>The grant is limited to the tools and permissions available now. OpenGeni rechecks live workspace authority on every request.</p><form method="post" action="/oauth/authorize" onsubmit="this.querySelectorAll('button').forEach(function(button){button.disabled=true})"><input type="hidden" name="request" value="${escapeHtml(requestToken)}"><div class="actions"><button class="approve" name="decision" value="approve">Authorize</button><button class="deny" name="decision" value="deny">Deny</button></div></form></main></body></html>`;
 }
 
 function escapeHtml(value: string): string {
