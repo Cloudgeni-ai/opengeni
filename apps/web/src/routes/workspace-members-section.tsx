@@ -12,6 +12,7 @@ import { toast } from "sonner";
 
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import { Button } from "@/components/ui/button";
+import { SettingsResourceList, SettingsResourceRow } from "@/components/ui/settings-patterns";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   Dialog,
@@ -379,7 +380,7 @@ function MembersSectionContent({
       ) : null}
 
       {members.length > 0 ? (
-        <div className="divide-y divide-border/70 rounded-lg border border-border bg-surface/40">
+        <SettingsResourceList>
           {members.map((member) => {
             const label = memberLabel(member);
             const currentLevel = workspaceAccessLevels.find(
@@ -391,9 +392,9 @@ function MembersSectionContent({
             const roleValue = currentLevel?.role ?? "custom";
             const isSelf = member.subjectId === context.accessContext.subjectId;
             return (
-              <div
+              <SettingsResourceRow
                 key={member.subjectId}
-                className="grid gap-3 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,auto)_auto] sm:items-center"
+                className="grid gap-3 px-4 py-4 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,auto)_auto] sm:items-center sm:px-5"
               >
                 <div className="flex min-w-0 items-center gap-3">
                   <div className="flex size-9 shrink-0 items-center justify-center rounded-full border border-brand/25 bg-brand/10 text-xs font-semibold text-brand">
@@ -471,10 +472,10 @@ function MembersSectionContent({
                     </Button>
                   ) : null}
                 </div>
-              </div>
+              </SettingsResourceRow>
             );
           })}
-        </div>
+        </SettingsResourceList>
       ) : null}
 
       {membersError ? (

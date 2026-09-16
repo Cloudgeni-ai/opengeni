@@ -1,0 +1,38 @@
+/* The subscription row/indicator are the exact Capabilities implementation.
+   Keep ordinary form controls in B's continuous list; use surfaces for resources. */
+.settings-studio .settings-subscription-card {
+  min-height: 96px;
+  padding: 20px;
+  border-radius: var(--og-radius-lg, 14px);
+  background: var(--og-color-surface-1);
+  border: 1px solid var(--og-color-border);
+}
+.settings-studio .settings-subscription-card:hover:not(:disabled) {
+  background: var(--og-color-surface-2);
+  border-color: var(--og-color-border-strong);
+}
+.settings-studio .tiles .setting-item {
+  background: var(--og-color-surface-1);
+  border-radius: var(--og-radius-lg, 14px);
+  border-color: var(--og-color-border);
+}
+/* A quiet accent wash is for actions and selection, not a featured-card glow. */
+body:has(.settings-studio) [data-slot="button"][data-variant="default"] {
+  background: var(--og-color-accent-deep);
+  color: var(--og-color-accent-fg);
+}
+body:has(.settings-studio) [data-slot="button"][data-variant="default"]:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--og-color-accent-deep) 88%, var(--og-color-fg));
+}
+body:has(.settings-studio) [data-slot="button"]:is([data-variant="secondary"], [data-variant="ghost"], [data-variant="outline"]):hover:not(:disabled) {
+  background: var(--og-color-accent-soft);
+  color: var(--og-color-accent-strong);
+}
+.settings-studio .settings-shell nav button[aria-current="page"] {
+  background: var(--og-color-accent-soft);
+  color: var(--og-color-accent-strong);
+}
+.settings-studio .settings-subscription-card:focus-visible {
+  outline: 2px solid var(--og-color-accent);
+  outline-offset: 3px;
+}

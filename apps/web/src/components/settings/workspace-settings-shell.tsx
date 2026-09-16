@@ -316,7 +316,7 @@ export function WorkspaceSettingsContent({
   return (
     <ContentPage width="standard">
       <PageHeader title={copy.title} description={copy.description} />
-      <div className="py-6">{children}</div>
+      <div className="settings-content py-6">{children}</div>
     </ContentPage>
   );
 }
