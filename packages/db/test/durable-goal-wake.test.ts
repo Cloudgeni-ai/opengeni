@@ -95,6 +95,27 @@ async function runningGoalFixture(
     typeof options.personalConnectionDelegations === "function"
       ? options.personalConnectionDelegations(grant.subjectId)
       : (options.personalConnectionDelegations ?? []);
+  if (personalConnectionDelegations.length) {
+    await shared.admin`insert into organization_memberships
+      (account_id, subject_id, status, personal_workspace_id)
+      values (${grant.accountId}, ${grant.subjectId}, 'active', ${grant.workspaceId!})
+      on conflict (account_id, subject_id) do nothing`;
+    await shared.admin`insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${grant.accountId}, ${grant.workspaceId!}, ${grant.subjectId})
+      on conflict (workspace_id, subject_id) do nothing`;
+    for (const connection of personalConnectionDelegations) {
+      connection.originWorkspaceId = grant.workspaceId!;
+      await shared.admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${grant.accountId}, true),
+          set_config('opengeni.workspace_id', ${grant.workspaceId!}, true),
+          set_config('opengeni.subject_id', ${grant.subjectId}, true)`;
+        await tx`insert into connections
+          (id, account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+          values (${connection.connectionId}, ${grant.accountId}, ${grant.workspaceId!},
+            ${grant.subjectId}, ${connection.providerDomain}, ${connection.kind!}, 'fixture-ciphertext')`;
+      });
+    }
+  }
   const ancestor = options.withAncestor
     ? await createSession(client.db, {
         accountId: grant.accountId,
@@ -962,6 +983,15 @@ describe("durable active-goal wake", () => {
         connectionId: crypto.randomUUID(),
       },
     ];
+    await shared.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${ctx.grant.accountId}, true),
+        set_config('opengeni.workspace_id', ${ctx.grant.workspaceId!}, true),
+        set_config('opengeni.subject_id', ${ctx.grant.subjectId}, true)`;
+      await tx`insert into connections
+        (id, account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+        values (${replacementDelegations[0]!.connectionId}, ${ctx.grant.accountId},
+          ${ctx.grant.workspaceId!}, ${ctx.grant.subjectId}, 'linear.app', 'oauth2', 'fixture-ciphertext')`;
+    });
     await withWorkspaceSubjectRls(client.db, ctx.grant.workspaceId!, ctx.grant.subjectId, (db) =>
       db.transaction((tx) =>
         submitHumanPromptInTransaction(tx as unknown as typeof db, {

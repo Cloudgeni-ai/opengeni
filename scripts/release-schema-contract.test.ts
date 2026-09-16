@@ -227,6 +227,9 @@ describe("release schema contract", () => {
     const hostResolverFullOrganizationKeys = completeSourceContract.migrations.some(
       (migration) => migration.path === "0467_host_resolver_full_organization_keys.sql",
     );
+    const senderOwnedConnections = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0478_sender_owned_connections.sql",
+    );
     const managedSignInMethods = completeSourceContract.migrations.some(
       (migration) => migration.path === "0477_managed_sign_in_methods.sql",
     );
@@ -286,6 +289,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (senderOwnedConnections ? 1 : 0) +
         (managedSignInMethods ? 1 : 0) +
         (sessionEventHistoryStatistics ? 1 : 0) +
         (sessionEventHistoryPolicyPlanning ? 1 : 0) +
@@ -445,20 +449,23 @@ describe("release schema contract", () => {
         ? { latestMigration: "0476_session_event_history_policy_planning.sql" }
         : {}),
       ...(managedSignInMethods ? { latestMigration: "0477_managed_sign_in_methods.sql" } : {}),
+      ...(senderOwnedConnections ? { latestMigration: "0478_sender_owned_connections.sql" } : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: managedSignInMethods
-        ? "0477_managed_sign_in_methods.sql"
-        : sessionEventHistoryPolicyPlanning
-          ? "0476_session_event_history_policy_planning.sql"
-          : sessionEventHistoryStatistics
-            ? "0475_session_event_history_statistics.sql"
-            : goalReportRequirements
-              ? "0474_goal_report_requirements.sql"
-              : organizationUsageAnalyticalCapability
-                ? "0473_organization_usage_analytical_capability.sql"
-                : "0472_usage_events_workspace_recent_index.sql",
-      deploymentMode: managedSignInMethods ? "maintenance" : "rolling",
+      path: senderOwnedConnections
+        ? "0478_sender_owned_connections.sql"
+        : managedSignInMethods
+          ? "0477_managed_sign_in_methods.sql"
+          : sessionEventHistoryPolicyPlanning
+            ? "0476_session_event_history_policy_planning.sql"
+            : sessionEventHistoryStatistics
+              ? "0475_session_event_history_statistics.sql"
+              : goalReportRequirements
+                ? "0474_goal_report_requirements.sql"
+                : organizationUsageAnalyticalCapability
+                  ? "0473_organization_usage_analytical_capability.sql"
+                  : "0472_usage_events_workspace_recent_index.sql",
+      deploymentMode: senderOwnedConnections || managedSignInMethods ? "maintenance" : "rolling",
     });
     expect(
       completeSourceContract.migrations.find(
@@ -1563,6 +1570,9 @@ describe("release schema contract", () => {
     const hostResolverFullOrganizationKeys = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0467_host_resolver_full_organization_keys.sql",
     );
+    const senderOwnedConnections = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0478_sender_owned_connections.sql",
+    );
     const managedSignInMethods = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0477_managed_sign_in_methods.sql",
     );
@@ -2055,6 +2065,7 @@ describe("release schema contract", () => {
       "0475_session_event_history_statistics.sql",
       "0476_session_event_history_policy_planning.sql",
       "0477_managed_sign_in_methods.sql",
+      "0478_sender_owned_connections.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2463,8 +2474,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0477_managed_sign_in_methods.sql",
       };
+    if (senderOwnedConnections)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0478_sender_owned_connections.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (senderOwnedConnections ? 1 : 0) +
         (managedSignInMethods ? 1 : 0) +
         (sessionEventHistoryStatistics ? 1 : 0) +
         (sessionEventHistoryPolicyPlanning ? 1 : 0) +
@@ -2825,6 +2842,7 @@ describe("release schema contract", () => {
         ? { latestMigration: "0476_session_event_history_policy_planning.sql" }
         : {}),
       ...(managedSignInMethods ? { latestMigration: "0477_managed_sign_in_methods.sql" } : {}),
+      ...(senderOwnedConnections ? { latestMigration: "0478_sender_owned_connections.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport

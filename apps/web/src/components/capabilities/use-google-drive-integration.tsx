@@ -151,6 +151,7 @@ export function useGoogleDriveIntegration({
   // Extra Drive accounts beyond the primary knowledge connection, folded into
   // this one row instead of a separate row per account.
   const extraAccounts = useApiIntegrationAccounts({
+    ownership: "personal",
     workspaceId,
     definitionId: GOOGLE_DRIVE_DEFINITION_ID,
     definitions,

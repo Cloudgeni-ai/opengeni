@@ -109,7 +109,7 @@ export type CatalogIntegrationRow = {
   scopesHint: string[];
   allowedTools?: string[];
   requireApproval?: boolean | string[];
-  connectionOwnership?: "personal_only";
+  defaultConnectionOwnership?: "personal" | "workspace";
   oauthProfile?: Record<string, unknown>;
   presentation?: Record<string, unknown>;
   credentialFacts: Array<Record<string, unknown>>;
@@ -366,8 +366,8 @@ export function normalizeCatalogSnapshot(
                 : [...official.requireApproval],
           }
         : {}),
-      ...(official?.connectionOwnership
-        ? { connectionOwnership: official.connectionOwnership }
+      ...(official?.defaultConnectionOwnership
+        ? { defaultConnectionOwnership: official.defaultConnectionOwnership }
         : {}),
       ...(official?.oauthProfile
         ? { oauthProfile: official.oauthProfile as Record<string, unknown> }
@@ -660,7 +660,9 @@ export function catalogRowToDbInput(
         : {}),
       ...(row.allowedTools ? { allowedTools: row.allowedTools } : {}),
       ...(row.requireApproval !== undefined ? { requireApproval: row.requireApproval } : {}),
-      ...(row.connectionOwnership ? { connectionOwnership: row.connectionOwnership } : {}),
+      ...(row.defaultConnectionOwnership
+        ? { defaultConnectionOwnership: row.defaultConnectionOwnership }
+        : {}),
       ...(row.oauthProfile ? { oauthProfile: row.oauthProfile } : {}),
       ...(row.presentation ? { presentation: row.presentation } : {}),
       ...(row.documentationUrl ? { documentationUrl: row.documentationUrl } : {}),

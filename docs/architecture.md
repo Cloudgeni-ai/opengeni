@@ -1656,10 +1656,24 @@ Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 authorization. Forms share `performCapabilityAction` and human-authorized
 Connection API. OAuth never replays tools; `attachSessionCapability` preserves
 selection through CAS. Skills retain workspace scope and reviewed hashes.
-Gmail startup failures remain diagnostic; discovery checks tools and requests consent.
-Personal MCP use requires an owner-issued exact-session grant, with shared-results
-acknowledgement for shared conversations. The composer restores only active grants
-matching visibility and authority epoch; credentials alone grant no use.
+Gmail startup failures remain diagnostic; discovery checks tool availability.
+Connection setup defaults to workspace ownership, except mail, calendar, contacts
+and drive integrations, which suggest personal ownership. Both ownership choices
+remain available; defaults never override an explicit choice or a reconnect.
+
+Sending a message accepts the authenticated sender's own eligible accounts for
+that turn. Multiple matching accounts require a choice; no participant can borrow
+another participant's personal connections. Queued messages, steering, retries
+and child work retain their causal sender and exact accepted account selection.
+Personal connection use is independent of private-conversation activation and
+has no separate session consent grant. Each provider request revalidates the
+accepted account, membership and credential generation.
+
+Schedules have an immutable execution owner. Only that owner can edit, delete or
+manually run them. A fresh occurrence resolves the owner's current accounts;
+retries keep the occurrence's accepted snapshot. Other personal-resource
+permissions and host-managed MCP delegation remain separate. The composer and
+schedule editor share account selection. See [sender-owned connections](design/sender-owned-connections.md).
 
 Host-owned shared MCP servers may explicitly select `hostBinding.selection:
 "accepted_turn"` instead of a fixed binding. The configuration fixes the entire

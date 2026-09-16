@@ -1251,7 +1251,7 @@ export const UserResourceAuthoritySummary = z.object({
 });
 export const ListUserResourceAuthoritiesQuery = z.object({
   scope: UserResourceAuthorityScope,
-  resourceKind: UserResourceKind,
+  resourceKind: UserResourceKind.exclude(["connection"]),
   cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
@@ -1263,7 +1263,7 @@ export const ListUserResourceAuthoritiesResponse = z.object({
 export const IssueUserResourceGrantRequest = z
   .object({
     scope: UserResourceAuthorityScope,
-    resourceKind: UserResourceKind,
+    resourceKind: UserResourceKind.exclude(["connection"]),
     mode: ManagedUserResourceGrantMode,
     context: SessionTenancyVisibility,
     sessionId: z.string().uuid().nullable().optional(),
@@ -4334,8 +4334,7 @@ export const McpPersonalConnectionDelegation = z
       delegation.serverId !== "github:personal" ||
       delegation.providerDomain !== "github.com" ||
       delegation.kind !== "oauth2" ||
-      !delegation.originWorkspaceId ||
-      !delegation.userDelegation
+      !delegation.originWorkspaceId
     ) {
       context.addIssue({
         code: "custom",
@@ -4408,20 +4407,19 @@ export const McpPersonalConnectionSummary = z
 export type McpPersonalConnectionSummary = z.infer<typeof McpPersonalConnectionSummary>;
 
 /**
- * Public, credential-free selection of one exact personal connection grant for
- * one selected MCP/first-party server. The owner is always derived server-side.
+ * Account choice only. The authenticated sender supplies authority; selecting
+ * an account never delegates it to another participant or conversation.
  */
-export const McpConnectionAuthoritySelection = z
+export const McpConnectionAccountSelection = z
   .object({
     serverId: z.string().min(1).max(256),
     connectionId: z.string().uuid(),
-    userDelegation: UserResourceDelegation,
   })
   .strict();
-export type McpConnectionAuthoritySelection = z.infer<typeof McpConnectionAuthoritySelection>;
+export type McpConnectionAccountSelection = z.infer<typeof McpConnectionAccountSelection>;
 
-export const McpConnectionAuthoritySelections = z
-  .array(McpConnectionAuthoritySelection)
+export const McpConnectionAccountSelections = z
+  .array(McpConnectionAccountSelection)
   .max(128)
   .superRefine((selections, context) => {
     const seen = new Set<string>();
@@ -7598,7 +7596,8 @@ export const SubmitComposerDraftRequest = ComposerDraft.pick({
     controlEtag: z.string().min(1).optional(),
     modelContext: z.string().trim().min(1).max(32768).optional(),
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-    connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    connectionAuthorities: z.never().optional(),
+    connectionAccounts: McpConnectionAccountSelections.default([]),
     selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
@@ -9310,6 +9309,10 @@ function refineScheduledTaskAgentConfig(
 /** Storage/projection shape. Deliberately unbounded so stored rows always parse. */
 export const ScheduledTaskAgentConfig = /* @__PURE__ */ z
   .object(scheduledTaskAgentConfigShape(false))
+  .extend({
+    /** Account choices narrow the owner's current connections on each occurrence. */
+    connectionAccounts: McpConnectionAccountSelections.optional(),
+  })
   .superRefine(refineScheduledTaskAgentConfig);
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
 
@@ -9389,6 +9392,8 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   name: z.string(),
+  /** Immutable execution owner; null for workspace/service tasks. */
+  ownerSubjectId: z.string().min(1).nullable(),
   status: ScheduledTaskStatus,
   schedule: ScheduledTaskScheduleSpec,
   temporalScheduleId: z.string(),
@@ -9401,7 +9406,6 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
     subjectId: "unattributed-legacy",
   }),
   createdByContext: TurnInitiatorContext.default({}),
-  personalConnections: z.array(McpPersonalConnectionSummary).default([]),
   authorityRevision: z.number().int().positive().default(1),
   executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
   reusableSessionId: z.string().uuid().nullable(),
@@ -9666,7 +9670,8 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
   runMode: ScheduledTaskRunMode.default("new_session_per_run"),
   overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
   targetSessionId: z.string().uuid().nullable().optional(),
-  connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+  connectionAuthorities: z.never().optional(),
+  connectionAccounts: McpConnectionAccountSelections.default([]),
   selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
   agentConfig: ScheduledTaskAgentConfigInput,
   status: ScheduledTaskStatus.default("active"),
@@ -9725,7 +9730,7 @@ const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ z
     variableSetId: null,
     environmentId: null,
     rigId: null,
-    connectionAuthorities: [],
+    connectionAccounts: [],
   }));
 
 export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
@@ -9752,7 +9757,8 @@ export const UpdateScheduledTaskRequest =
     overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
     action: ScheduledTaskAction.optional(),
     targetSessionId: z.string().uuid().nullable().optional(),
-    connectionAuthorities: McpConnectionAuthoritySelections.optional(),
+    connectionAuthorities: z.never().optional(),
+    connectionAccounts: McpConnectionAccountSelections.optional(),
     selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     agentConfig: ScheduledTaskAgentConfigInput.optional(),
     status: ScheduledTaskStatus.optional(),
@@ -15306,8 +15312,9 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // permission. Credential headers are write-only: create responses and events
       // expose only SessionMcpServerMetadata.
       mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
-      /** Explicit personal-connection grants for the initial accepted turn. */
-      connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+      /** Optional account choices among the authenticated sender’s own connections. */
+      connectionAuthorities: z.never().optional(),
+      connectionAccounts: McpConnectionAccountSelections.default([]),
       /** Atomic owner issuance for the selected personal Variable Set/Rig closure. */
       personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
       // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
@@ -15363,12 +15370,12 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         message: "modelContext requires an initialMessage; attach it to a realtime entry instead",
       });
     }
-    if (value.startMode === "realtime" && value.connectionAuthorities.length > 0) {
+    if (value.startMode === "realtime" && value.connectionAccounts.length > 0) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["connectionAuthorities"],
+        path: ["connectionAccounts"],
         message:
-          "connectionAuthorities require an accepted initial turn and are not supported by realtime session staging",
+          "connectionAccounts require an accepted initial turn and are not supported by realtime session staging",
       });
     }
     if (value.startMode === "realtime" && value.personalResourceAttachment !== undefined) {
@@ -15635,8 +15642,9 @@ export const SessionUserMessagePayload = z
     // Header-value rotation only. URL/name/tool settings are immutable after
     // session create; persisted events expose metadata, never header values.
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-    /** Explicit personal-connection grants for this exact logical turn. */
-    connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    /** Optional choices among the authenticated sender’s own accounts. */
+    connectionAuthorities: z.never().optional(),
+    connectionAccounts: McpConnectionAccountSelections.default([]),
     selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
@@ -15685,8 +15693,9 @@ export const SteerSessionMessageRequest = z
     controlEtag: z.string().min(1).optional(),
     expectedDraftRevision: z.number().int().nonnegative().optional(),
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-    /** Explicit personal-connection grants for this exact steered turn. */
-    connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    /** Optional choices among the authenticated sender’s own accounts. */
+    connectionAuthorities: z.never().optional(),
+    connectionAccounts: McpConnectionAccountSelections.default([]),
     selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })

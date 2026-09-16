@@ -530,6 +530,32 @@ describe("Gmail REST MCP adapter", () => {
     expect(requests).toBe(0);
   });
 
+  test.each(["subject", "workspace"] as const)(
+    "passes %s ownership unchanged to the credential resolver",
+    async (subjectScope) => {
+      const selected = { ...connectionRef, subjectScope };
+      const resolved: unknown[] = [];
+      const gmail = new GmailRestMcpServer({
+        workspaceId: "ws_1",
+        subjectId: "subject-a",
+        serverId: "gmail",
+        connectionRef: selected,
+        resolveCredential: async (input) => {
+          resolved.push(input.connectionRef);
+          return {
+            status: "ok",
+            headers: { authorization: "Bearer fixture" },
+            connectionId: "conn_1",
+          };
+        },
+        fetchImpl: async () => Response.json({ labels: [] }),
+      });
+      await gmail.callToolResult("list_labels", {});
+      expect(resolved.length).toBeGreaterThan(0);
+      expect(resolved.every((ref) => JSON.stringify(ref) === JSON.stringify(selected))).toBe(true);
+    },
+  );
+
   test("retains the hosted MCP URL as the OAuth resource identity", () => {
     expect(isOfficialGmailMcpConfig(OFFICIAL_GMAIL_MCP_URL, connectionRef)).toBe(true);
     expect(
@@ -537,6 +563,6 @@ describe("Gmail REST MCP adapter", () => {
         ...connectionRef,
         subjectScope: "workspace",
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 });

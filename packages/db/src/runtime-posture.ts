@@ -72,6 +72,7 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "read_sender_connection(uuid, uuid, uuid, text)",
   "guard_mcp_operation_immutable()",
   "mcp_operation_command_scoped(jsonb, text, jsonb)",
   "guard_workspace_owned_skill_head_delete()",
@@ -252,10 +253,10 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
 const PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE =
   "resolve_session_attempt_personal_resources(uuid, uuid, uuid)";
 const USER_RESOURCE_LIFECYCLE_ROUTINES = [
+  "list_owned_connection_accounts(uuid, uuid)",
   "accept_turn_personal_resource_attachment(uuid, uuid, uuid, uuid, text, integer, boolean, integer)",
   "list_self_user_resource_authorities(uuid, uuid, text, uuid, integer)",
   "issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, integer, boolean)",
-  "issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean)",
   "revoke_self_user_resource_grant(uuid, uuid, uuid)",
   "authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid)",
 ] as const;
@@ -263,9 +264,7 @@ const CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE =
   "connection_authority_convergence_audit_capability_active(uuid)";
 const CONNECTION_AUTHORITY_ROUTINES = [
   CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE,
-  "resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb)",
   "resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text)",
-  "resolve_connection_use_authority(uuid, uuid, uuid, jsonb)",
   "inspect_organization_connection_authority_convergence(uuid, integer, uuid)",
 ] as const;
 const PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES = [
@@ -280,7 +279,6 @@ const PERSONAL_GITHUB_REPOSITORY_AUTHORITY_TABLES = [
 const SCHEDULED_PERSONAL_RESOURCE_ROUTINES = [
   "freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint)",
   "clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint)",
-  "refresh_scheduled_task_personal_resources_clone_connections(uuid, uuid, uuid, bigint, bigint)",
   "create_scheduled_agent_run_with_admission(uuid, uuid, uuid, uuid, bigint, text, text, text, timestamp with time zone, timestamp with time zone, jsonb)",
   "materialize_scheduled_task_reusable_session_from_run(uuid, uuid, uuid, uuid, uuid, bigint, text)",
   "scheduled_task_run_personal_resource_authority(uuid, uuid, uuid)",
@@ -3641,6 +3639,12 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
     const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
+    if (
+      routine.name === "read_sender_connection(uuid, uuid, uuid, text)" &&
+      (routine.execute || routine.publicExecute)
+    ) {
+      violations.push("runtime or PUBLIC can call the internal sender connection reader");
+    }
     if (
       [
         "guard_mcp_operation_immutable()",

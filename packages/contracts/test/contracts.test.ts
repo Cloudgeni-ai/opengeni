@@ -963,7 +963,7 @@ describe("contracts", () => {
     expect(
       CreateSessionRequest.safeParse({
         startMode: "realtime",
-        connectionAuthorities: [
+        connectionAccounts: [
           {
             serverId: "example",
             connectionId: "00000000-0000-4000-8000-000000000001",

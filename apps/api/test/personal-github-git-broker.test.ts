@@ -785,19 +785,6 @@ describe("personal GitHub Git broker", () => {
         },
       ],
     });
-    const targetGrant = await shared.admin.begin(async (tx) => {
-      await tx`select set_config('opengeni.account_id', ${originGrant.accountId}, true)`;
-      await tx`select set_config('opengeni.workspace_id', ${target!.id}, true)`;
-      await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
-      const [row] = await tx<Array<{ id: string; generation: number }>>`
-          select grant_id as id, grant_generation::int as generation
-          from issue_self_connection_use_grant(
-            ${originGrant.accountId}::uuid, ${connection.authorityId}::uuid,
-            ${target!.id}::uuid, 'always', 'workspace_shared', null::uuid, true
-          )
-        `;
-      return row!;
-    });
     const frozenRepository = {
       ...repository,
       selectionGeneration: selected.selectionGeneration,
@@ -811,19 +798,6 @@ describe("personal GitHub Git broker", () => {
         providerDomain: "github.com",
         kind: "oauth2" as const,
         connectionType: "github_personal" as const,
-        userDelegation: {
-          organizationId: originGrant.accountId,
-          authorityId: connection.authorityId,
-          authorityGeneration: emptySelection.connectionAuthorityGeneration,
-          workspaceId: target!.id,
-          sessionId: null,
-          action: "connection.use" as const,
-          mode: "always" as const,
-          context: "workspace_shared" as const,
-          authorityEpoch: null,
-          grantId: targetGrant.id,
-          grantGeneration: targetGrant.generation,
-        },
         personalGitHubRepositorySelection: {
           credentialBindingId,
           connectionAuthorityGeneration: emptySelection.connectionAuthorityGeneration,

@@ -223,7 +223,7 @@ test.each(["configured", "session-local", "native", "durable"] as const)(
         draftInput = {
           ...saved,
           annotations: [],
-          connectionAuthorities: [],
+          connectionAccounts: [],
           expectedDraftRevision: saved.revision,
           clientEventId,
           delivery: "send",

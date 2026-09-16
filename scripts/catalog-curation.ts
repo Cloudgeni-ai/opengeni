@@ -33,7 +33,7 @@ export type CuratedCatalogEntry = {
   readonly scopesHint?: readonly string[];
   readonly allowedTools?: readonly string[];
   readonly requireApproval?: boolean | readonly string[];
-  readonly connectionOwnership?: "personal_only";
+  readonly defaultConnectionOwnership?: "personal" | "workspace";
   /**
    * Declarative OAuth quirks for the row, applied by the API's OAuth client as
    * a narrowing constraint over its defaults (never a loosening one). Shape is
@@ -69,7 +69,7 @@ export type CuratedOAuthProfile = {
   readonly pinnedIssuerOrigins?: readonly string[];
   readonly pinnedEndpointOrigins?: readonly string[];
   readonly sendResourceParameter?: boolean;
-  readonly allowedOwnership?: readonly ("personal" | "workspace")[];
+  readonly defaultOwnership?: "personal" | "workspace";
   readonly requestedScopes?: readonly string[];
   readonly extraAuthorizeParams?: Readonly<Record<string, string>>;
 };
@@ -180,7 +180,7 @@ const KNOWN_KEYS: ReadonlySet<string> = new Set<string>([
   ...STRING_ARRAY_FIELDS,
   "authKind",
   "tier",
-  "connectionOwnership",
+  "defaultConnectionOwnership",
   "oauthProfile",
   "presentation",
   "logoSourceUrl",
@@ -316,7 +316,7 @@ const OAUTH_PROFILE_KEYS: ReadonlySet<string> = new Set([
   "pinnedIssuerOrigins",
   "pinnedEndpointOrigins",
   "sendResourceParameter",
-  "allowedOwnership",
+  "defaultOwnership",
   "requestedScopes",
   "extraAuthorizeParams",
 ]);
@@ -390,18 +390,14 @@ function parseOAuthProfile(raw: unknown, where: string): CuratedOAuthProfile {
     }
     profile.sendResourceParameter = record.sendResourceParameter;
   }
-  if (record.allowedOwnership !== undefined) {
-    const value = record.allowedOwnership;
-    if (
-      !Array.isArray(value) ||
-      value.length === 0 ||
-      value.some((item) => typeof item !== "string" || !OAUTH_OWNERSHIPS.has(item))
-    ) {
+  if (record.defaultOwnership !== undefined) {
+    const value = record.defaultOwnership;
+    if (typeof value !== "string" || !OAUTH_OWNERSHIPS.has(value)) {
       throw new CuratedCatalogError(
-        `${where}: oauthProfile.allowedOwnership must be a non-empty array of "personal" | "workspace"`,
+        `${where}: oauthProfile.defaultOwnership must be "personal" or "workspace"`,
       );
     }
-    profile.allowedOwnership = value as ("personal" | "workspace")[];
+    profile.defaultOwnership = value as "personal" | "workspace";
   }
   if (record.extraAuthorizeParams !== undefined) {
     const value = record.extraAuthorizeParams;
@@ -512,12 +508,14 @@ function parseEntry(value: unknown, index: number): CuratedCatalogEntry {
     entry.tier = tier as CuratedTier;
   }
 
-  const connectionOwnership = optionalString(record, "connectionOwnership", where);
-  if (connectionOwnership !== undefined) {
-    if (connectionOwnership !== "personal_only") {
-      throw new CuratedCatalogError(`${where}: connectionOwnership must be "personal_only"`);
+  const defaultConnectionOwnership = optionalString(record, "defaultConnectionOwnership", where);
+  if (defaultConnectionOwnership !== undefined) {
+    if (defaultConnectionOwnership !== "personal" && defaultConnectionOwnership !== "workspace") {
+      throw new CuratedCatalogError(
+        `${where}: defaultConnectionOwnership must be "personal" or "workspace"`,
+      );
     }
-    entry.connectionOwnership = connectionOwnership;
+    entry.defaultConnectionOwnership = defaultConnectionOwnership;
   }
 
   if ("oauthProfile" in record) {

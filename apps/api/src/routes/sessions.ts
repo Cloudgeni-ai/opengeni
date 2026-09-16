@@ -3130,7 +3130,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         reasoningEffort: payload.reasoningEffort ?? null,
         latencyMode: payload.latencyMode ?? null,
         mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
-        connectionAuthorities: payload.connectionAuthorities,
+        connectionAccounts: payload.connectionAccounts,
         ...(payload.selectedHostMcpDelegations
           ? { selectedHostMcpDelegations: payload.selectedHostMcpDelegations }
           : {}),
@@ -3215,7 +3215,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           reasoningEffort: event.payload.reasoningEffort ?? null,
           latencyMode: event.payload.latencyMode ?? null,
           mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
-          connectionAuthorities: event.payload.connectionAuthorities,
+          connectionAccounts: event.payload.connectionAccounts,
           ...(event.payload.selectedHostMcpDelegations
             ? { selectedHostMcpDelegations: event.payload.selectedHostMcpDelegations }
             : {}),

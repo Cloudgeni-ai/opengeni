@@ -11118,6 +11118,7 @@ export const scheduledTasks = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
+    ownerSubjectId: text("owner_subject_id"),
     status: text("status").notNull().default("active"),
     schedule: jsonb("schedule").$type<unknown>().notNull(),
     temporalScheduleId: text("temporal_schedule_id").notNull(),

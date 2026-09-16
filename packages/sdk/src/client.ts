@@ -7424,6 +7424,15 @@ export class OpenGeniClient {
 
   // --- Connections -------------------------------------------------------------------------------
 
+  /** The authenticated user's active accounts across this organization. */
+  async listOwnConnectionAccounts(workspaceId: string): Promise<ConnectionMetadata[]> {
+    const response = await this.requestJson<ListConnectionsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/connections/accounts`,
+    );
+    return response.connections;
+  }
+
   async listConnections(workspaceId: string): Promise<ConnectionMetadata[]> {
     const response = await this.requestJson<ListConnectionsResponse>(
       "GET",

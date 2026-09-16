@@ -37,7 +37,6 @@ import {
   getScheduledTask,
   getNestedAgentDepthDeploymentPolicy,
   getScheduledTaskRevisionAuthority,
-  getScheduledTaskPersonalConnectionDelegations,
   listSessionSystemUpdatesForTurn,
   listScheduledTaskRuns,
   nestedPostgresSqlState,
@@ -101,6 +100,8 @@ async function workspaceFixture() {
     ) values (
       ${fixture.accountId}, ${fixture.subjectId}, 'active', ${fixture.workspaceId}
     )`;
+  await admin`insert into workspace_memberships (account_id, workspace_id, subject_id)
+    values (${fixture.accountId}, ${fixture.workspaceId}, ${fixture.subjectId})`;
   return fixture;
 }
 
@@ -128,22 +129,8 @@ async function commonConnectionDelegationFixture(
     `;
     return row!;
   });
-  const grant = await admin.begin(async (tx) => {
-    await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
-    await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
-    await tx`select set_config('opengeni.subject_id', ${workspace.subjectId}, true)`;
-    const [row] = await tx<Array<{ id: string; generation: number }>>`
-      select grant_id as id, grant_generation::int as generation
-      from issue_self_connection_use_grant(
-        ${workspace.accountId}::uuid, ${connection.authorityId}::uuid,
-        ${workspace.workspaceId}::uuid, 'always', 'workspace_shared', null, true
-      )
-    `;
-    return row!;
-  });
   return {
     connection,
-    grant,
     membershipId: membership!.id,
     delegation: {
       serverId: "scheduled-common",
@@ -152,21 +139,7 @@ async function commonConnectionDelegationFixture(
       ownerSubjectId: workspace.subjectId,
       providerDomain: "scheduled-common.example.com",
       kind: "oauth2" as const,
-      connectionType: "mcp" as const,
-      userDelegation: {
-        authorityId: connection.authorityId,
-        grantId: grant.id,
-        organizationId: workspace.accountId,
-        workspaceId: workspace.workspaceId,
-        sessionId: null,
-        action: "connection.use" as const,
-        mode: "always" as const,
-        context: "workspace_shared" as const,
-        authorityEpoch: null,
-        authorityGeneration: connection.authorityGeneration,
-        grantGeneration: grant.generation,
-      },
-    } satisfies McpPersonalConnectionDelegation,
+    },
   };
 }
 
@@ -221,6 +194,19 @@ function activities(
         settings: testSettings({
           databaseUrl: shared!.appUrl,
           sandboxBackend: "none",
+          mcpServers: [
+            {
+              id: "scheduled-common",
+              url: "https://scheduled-common.example.com/mcp",
+              cacheToolsList: false,
+              defaultEnabled: false,
+              connectionRef: {
+                providerDomain: "scheduled-common.example.com",
+                kind: "oauth2",
+                subjectScope: "subject",
+              },
+            },
+          ],
           ...overrides,
         }),
         db: client.db,
@@ -321,6 +307,122 @@ async function claimedCommonVariableSetRun(
 }
 
 describe("scheduled task personal MCP authority", () => {
+  test("fresh occurrences resolve current owner accounts while retries retain the accepted account", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const task = await createScheduledTask(client.db, {
+      ...workspace,
+      name: "Current owner mail",
+      status: "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      createdBy: { kind: "subject", subjectId: workspace.subjectId },
+      agentConfig: {
+        prompt: "Check mail",
+        resources: [],
+        tools: [{ kind: "mcp", id: "mail" }],
+        metadata: {},
+        connectionAccounts: [],
+      },
+      metadata: {},
+    });
+    const connect = () =>
+      admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true),
+        set_config('opengeni.workspace_id', ${workspace.workspaceId}, true),
+        set_config('opengeni.subject_id', ${workspace.subjectId}, true)`;
+        const [row] = await tx<{ id: string }[]>`insert into connections
+        (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+        values (${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId},
+          'mail.example.test', 'oauth2', 'fixture-ciphertext') returning id`;
+        return row!.id;
+      });
+    const firstAccount = await connect();
+    const scheduler = activities({
+      mcpServers: [
+        {
+          id: "mail",
+          url: "https://mail.example.test/mcp",
+          cacheToolsList: false,
+          connectionRef: {
+            providerDomain: "mail.example.test",
+            kind: "oauth2",
+            subjectScope: "subject",
+          },
+        },
+      ],
+    });
+    const firstInput = {
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled" as const,
+      producerKey: crypto.randomUUID(),
+    };
+    const first = await scheduler.dispatchScheduledTaskRun(firstInput);
+    expect(first.action).toBe("start");
+    const [firstRun] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    const firstAccepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: workspace.workspaceId,
+      runId: firstRun!.id,
+    });
+    expect(firstAccepted?.personalConnectionDelegations).toMatchObject([
+      {
+        connectionId: firstAccount,
+        ownerSubjectId: workspace.subjectId,
+      },
+    ]);
+    await admin`update connections set status = 'revoked' where id = ${firstAccount}`;
+    const secondAccount = await connect();
+    expect(await scheduler.dispatchScheduledTaskRun(firstInput)).toMatchObject({
+      action: first.action,
+      sessionId: first.sessionId,
+    });
+    const second = await scheduler.dispatchScheduledTaskRun({
+      ...firstInput,
+      producerKey: crypto.randomUUID(),
+    });
+    expect(second.action).toBe("start");
+    expect(second.sessionId).not.toBe(first.sessionId);
+    const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    const next = runs.find((run) => run.id !== firstRun!.id);
+    const secondAccepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: workspace.workspaceId,
+      runId: next!.id,
+    });
+    expect(secondAccepted?.personalConnectionDelegations).toMatchObject([
+      {
+        connectionId: secondAccount,
+        ownerSubjectId: workspace.subjectId,
+      },
+    ]);
+    expect(
+      (
+        await getScheduledTaskRunAcceptedExecution(client.db, {
+          workspaceId: workspace.workspaceId,
+          runId: firstRun!.id,
+        })
+      )?.personalConnectionDelegations,
+    ).toEqual(firstAccepted?.personalConnectionDelegations);
+    await connect();
+    expect(
+      await scheduler.dispatchScheduledTaskRun({ ...firstInput, producerKey: crypto.randomUUID() }),
+    ).toEqual({ action: "blocked", reason: "connection_account_unavailable" });
+    await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
+      agentConfig: {
+        ...task.agentConfig,
+        connectionAccounts: [{ serverId: "mail", connectionId: firstAccount }],
+      },
+    });
+    expect(
+      await scheduler.dispatchScheduledTaskRun({ ...firstInput, producerKey: crypto.randomUUID() }),
+    ).toEqual({ action: "blocked", reason: "connection_account_unavailable" });
+    expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
+      2,
+    );
+  });
+
   test("generated sessions resolve workspace and organization Variable Sets without personal authority", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -355,7 +457,6 @@ describe("scheduled task personal MCP authority", () => {
           metadata: {},
         },
         createdBy: { kind: "subject", subjectId: workspace.subjectId },
-        personalConnectionDelegations: [],
         variableSetId: variableSet.id,
         metadata: {},
       });
@@ -381,6 +482,7 @@ describe("scheduled task personal MCP authority", () => {
   test("freezes workspace-default MCP tools across fresh and recovery claims", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
+    const connection = await commonConnectionDelegationFixture(workspace);
     const session = await createSession(client.db, {
       ...workspace,
       initialMessage: "workspace default target",
@@ -418,6 +520,13 @@ describe("scheduled task personal MCP authority", () => {
       workspaceId: workspace.workspaceId,
       runId: run!.id,
     });
+    expect(accepted?.personalConnectionDelegations).toMatchObject([
+      {
+        serverId: "scheduled-common",
+        connectionId: connection.connection.id,
+        ownerSubjectId: workspace.subjectId,
+      },
+    ]);
     expect(TurnExecutionPolicyV1.parse(accepted?.turnExecutionPolicy)).toMatchObject({
       productModelId: "scripted-model",
       modelSource: "session",
@@ -688,7 +797,7 @@ describe("scheduled task personal MCP authority", () => {
     ) values (
       ${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId},
       'owner', '[]'::jsonb
-    )`;
+    ) on conflict (workspace_id, subject_id) do update set role = 'owner', permissions = '[]'::jsonb`;
     const credential = await createXaiSubscriptionCredential(client.db, {
       ...workspace,
       scope: "user",
@@ -915,10 +1024,10 @@ describe("scheduled task personal MCP authority", () => {
     });
   });
 
-  test("freezes and admits an activated common connection on real PostgreSQL", async () => {
+  test("captures owner account at occurrence admission without a task grant", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const common = await commonConnectionDelegationFixture(workspace);
+    await commonConnectionDelegationFixture(workspace);
     const task = await createScheduledTask(client.db, {
       ...workspace,
       name: "activated common authority",
@@ -930,11 +1039,10 @@ describe("scheduled task personal MCP authority", () => {
       agentConfig: {
         prompt: "Use the frozen common connection",
         resources: [],
-        tools: [],
+        tools: [{ kind: "mcp", id: "scheduled-common" }],
         metadata: {},
       },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      personalConnectionDelegations: [common.delegation],
       metadata: {},
     });
     const [taskSnapshot] = await admin<Array<{ count: number }>>`
@@ -942,7 +1050,7 @@ describe("scheduled task personal MCP authority", () => {
       from scheduled_task_connection_authority_snapshots
       where task_id = ${task.id} and task_authority_revision = ${task.authorityRevision}
     `;
-    expect(taskSnapshot?.count).toBe(1);
+    expect(taskSnapshot?.count).toBe(0);
 
     const dispatched = await activities().dispatchScheduledTaskRun({
       workspaceId: workspace.workspaceId,
@@ -972,9 +1080,13 @@ describe("scheduled task personal MCP authority", () => {
       temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
       runMode: "new_session_per_run",
       overlapPolicy: "allow_concurrent",
-      agentConfig: { prompt: "must not claim", resources: [], tools: [], metadata: {} },
+      agentConfig: {
+        prompt: "must not claim",
+        resources: [],
+        tools: [{ kind: "mcp", id: "scheduled-common" }],
+        metadata: {},
+      },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      personalConnectionDelegations: [common.delegation],
       metadata: {},
     });
     const dispatched = await activities().dispatchScheduledTaskRun({
@@ -988,9 +1100,7 @@ describe("scheduled task personal MCP authority", () => {
       await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
       await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
       await tx`select set_config('opengeni.subject_id', ${workspace.subjectId}, true)`;
-      await tx`select * from revoke_self_connection_use_grant(
-        ${workspace.accountId}::uuid, ${common.grant.id}::uuid
-      )`;
+      await tx`update connections set status = 'revoked' where id = ${common.connection.id}`;
     });
     const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
       sessionId: dispatched.sessionId,
@@ -1015,7 +1125,7 @@ describe("scheduled task personal MCP authority", () => {
     `;
     expect(evidence).toEqual({
       runStatus: "failed",
-      runError: "scheduled_connection_grant_changed",
+      runError: "scheduled_connection_changed",
       updateState: "failed",
       attempts: 0,
     });
@@ -1037,7 +1147,12 @@ describe("scheduled task personal MCP authority", () => {
       temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
       runMode: "new_session_per_run",
       overlapPolicy: "allow_concurrent",
-      agentConfig: { prompt: "must not materialize", resources: [], tools: [], metadata: {} },
+      agentConfig: {
+        prompt: "must not materialize",
+        resources: [],
+        tools: [{ kind: "mcp", id: "scheduled-common" }],
+        metadata: {},
+      },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
       variableSetId: variableSet.id,
       metadata: {},
@@ -1096,9 +1211,13 @@ describe("scheduled task personal MCP authority", () => {
       temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
       runMode: "new_session_per_run",
       overlapPolicy: "allow_concurrent",
-      agentConfig: { prompt: "recover only while live", resources: [], tools: [], metadata: {} },
+      agentConfig: {
+        prompt: "recover only while live",
+        resources: [],
+        tools: [{ kind: "mcp", id: "scheduled-common" }],
+        metadata: {},
+      },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      personalConnectionDelegations: [common.delegation],
       metadata: {},
     });
     const dispatched = await activities().dispatchScheduledTaskRun({
@@ -1130,9 +1249,7 @@ describe("scheduled task personal MCP authority", () => {
       await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
       await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
       await tx`select set_config('opengeni.subject_id', ${workspace.subjectId}, true)`;
-      await tx`select * from revoke_self_connection_use_grant(
-        ${workspace.accountId}::uuid, ${common.grant.id}::uuid
-      )`;
+      await tx`update connections set status = 'revoked' where id = ${common.connection.id}`;
     });
     const second = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
       sessionId: dispatched.sessionId,
@@ -1164,7 +1281,7 @@ describe("scheduled task personal MCP authority", () => {
     `;
     expect(evidence).toEqual({
       runStatus: "failed",
-      runError: "scheduled_connection_grant_changed",
+      runError: "scheduled_connection_changed",
       updateState: "delivered",
       turnStatus: "failed",
       attempts: 1,
@@ -1174,7 +1291,7 @@ describe("scheduled task personal MCP authority", () => {
   test("concurrent cold reusable common-authority runs adopt one exact session", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const common = await commonConnectionDelegationFixture(workspace);
+    await commonConnectionDelegationFixture(workspace);
     const task = await createScheduledTask(client.db, {
       ...workspace,
       name: "concurrent cold common authority",
@@ -1186,11 +1303,10 @@ describe("scheduled task personal MCP authority", () => {
       agentConfig: {
         prompt: "Converge concurrent accepted runs",
         resources: [],
-        tools: [],
+        tools: [{ kind: "mcp", id: "scheduled-common" }],
         metadata: {},
       },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      personalConnectionDelegations: [common.delegation],
       metadata: {},
     });
 
@@ -1273,7 +1389,7 @@ describe("scheduled task personal MCP authority", () => {
     "wrong_source_digest",
     "wrong_target_digest",
     "revoked",
-    "replaced_grant",
+    "reconnected_account",
   ] as const) {
     test(`accepted cold occurrence after canonical materialization: ${authorityCase}`, async () => {
       if (!available) return;
@@ -1290,11 +1406,10 @@ describe("scheduled task personal MCP authority", () => {
         agentConfig: {
           prompt: "Adopt the exact canonical producer",
           resources: [],
-          tools: [],
+          tools: [{ kind: "mcp", id: "scheduled-common" }],
           metadata: {},
         },
         createdBy: { kind: "subject", subjectId: workspace.subjectId },
-        personalConnectionDelegations: [common.delegation],
         metadata: {},
       });
       const secondProducerKey = `accepted-cold-${crypto.randomUUID()}`;
@@ -1349,20 +1464,14 @@ describe("scheduled task personal MCP authority", () => {
         await admin`update scheduled_task_reusable_connection_materializations set source_execution_digest = repeat('0', 64) where task_id = ${task.id}`;
       } else if (authorityCase === "wrong_target_digest") {
         await admin`update scheduled_task_reusable_connection_materializations set target_execution_digest = repeat('0', 64) where task_id = ${task.id}`;
-      } else if (authorityCase === "revoked" || authorityCase === "replaced_grant") {
+      } else if (authorityCase === "revoked" || authorityCase === "reconnected_account") {
         await admin.begin(async (tx) => {
           await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
           await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
           await tx`select set_config('opengeni.subject_id', ${workspace.subjectId}, true)`;
-          await tx`select * from revoke_self_connection_use_grant(${workspace.accountId}::uuid, ${common.grant.id}::uuid)`;
-          if (authorityCase === "replaced_grant") {
-            const [replacement] = await tx<
-              Array<{ id: string; generation: number }>
-            >`select grant_id as id, grant_generation::int as generation from issue_self_connection_use_grant(${workspace.accountId}::uuid, ${common.connection.authorityId}::uuid, ${workspace.workspaceId}::uuid, 'always', 'workspace_shared', null, true)`;
-            expect(
-              replacement!.id !== common.grant.id ||
-                replacement!.generation > common.grant.generation,
-            ).toBe(true);
+          await tx`update connections set status = 'revoked' where id = ${common.connection.id}`;
+          if (authorityCase === "reconnected_account") {
+            await tx`update connections set status = 'active', credential_encrypted = 'replacement-ciphertext' where id = ${common.connection.id}`;
           }
         });
       }
@@ -1377,7 +1486,7 @@ describe("scheduled task personal MCP authority", () => {
         expect(second).toMatchObject({ action: "start", sessionId: first.sessionId });
         expect(after.map((run) => run.status)).toEqual(["dispatched", "dispatched"]);
         expect(new Set(after.map((run) => run.sessionId))).toEqual(new Set([first.sessionId]));
-      } else if (authorityCase === "revoked" || authorityCase === "replaced_grant") {
+      } else if (authorityCase === "revoked" || authorityCase === "reconnected_account") {
         expect(second).toMatchObject({ action: "start", sessionId: first.sessionId });
         if (second.action !== "start") throw new Error("accepted run did not reach claim boundary");
         const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
@@ -1394,7 +1503,7 @@ describe("scheduled task personal MCP authority", () => {
         >`select run.status, run.error, update_value.state, (select count(*)::int from session_turn_attempts where session_id = run.session_id) as attempts from scheduled_task_runs run join session_system_updates update_value on update_value.scheduled_task_run_id = run.id where run.id = ${secondRunId}::uuid`;
         expect(evidence).toEqual({
           status: "failed",
-          error: "scheduled_connection_grant_changed",
+          error: "scheduled_connection_changed",
           state: "failed",
           attempts: 0,
         });
@@ -1409,70 +1518,49 @@ describe("scheduled task personal MCP authority", () => {
     });
   }
 
-  test("a revoked frozen grant creates one stable terminal producer receipt", async () => {
+  test("fresh automatic occurrences exclude a disconnected account", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const common = await commonConnectionDelegationFixture(workspace);
     const task = await createScheduledTask(client.db, {
       ...workspace,
-      name: "revoked accepted common authority",
+      name: "Disconnected automatic account",
       status: "active",
-      schedule: { type: "interval", everySeconds: 3_600 },
-      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      schedule: { type: "manual" },
+      temporalScheduleId: crypto.randomUUID(),
       runMode: "new_session_per_run",
       overlapPolicy: "allow_concurrent",
+      createdBy: { kind: "subject", subjectId: workspace.subjectId },
       agentConfig: {
-        prompt: "Do not run after authority revocation",
+        prompt: "Check available tools",
         resources: [],
-        tools: [],
+        tools: [{ kind: "mcp", id: "scheduled-common" }],
         metadata: {},
       },
-      createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      personalConnectionDelegations: [common.delegation],
       metadata: {},
     });
-    await admin.begin(async (tx) => {
-      await tx`select set_config('opengeni.account_id', ${workspace.accountId}, true)`;
-      await tx`select set_config('opengeni.workspace_id', ${workspace.workspaceId}, true)`;
-      await tx`select set_config('opengeni.subject_id', ${workspace.subjectId}, true)`;
-      await tx`
-        select * from revoke_self_connection_use_grant(
-          ${workspace.accountId}::uuid, ${common.grant.id}::uuid
-        )
-      `;
-    });
-
-    const producerKey = `revoked-common-${crypto.randomUUID()}`;
-    const first = await activities().dispatchScheduledTaskRun({
+    await admin`update connections set status = 'revoked' where id = ${common.connection.id}`;
+    const input = {
       workspaceId: workspace.workspaceId,
       taskId: task.id,
-      triggerType: "scheduled",
-      producerKey,
+      triggerType: "scheduled" as const,
+      producerKey: crypto.randomUUID(),
+    };
+    const first = await activities().dispatchScheduledTaskRun(input);
+    expect(first.action).toBe("start");
+    expect(await activities().dispatchScheduledTaskRun(input)).toMatchObject({
+      sessionId: first.sessionId,
     });
-    const replay = await activities().dispatchScheduledTaskRun({
-      workspaceId: workspace.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-      producerKey,
-    });
-    expect(first).toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
-    expect(replay).toEqual(first);
-    const [evidence] = await admin<
-      Array<{ runs: number; sessions: number; status: string; error: string }>
-    >`
-      select count(*)::int as runs,
-        (select count(*)::int from sessions where workspace_id = ${workspace.workspaceId})
-          as sessions,
-        min(status) as status, min(error) as error
-      from scheduled_task_runs
-      where workspace_id = ${workspace.workspaceId} and producer_key = ${producerKey}
-    `;
-    expect(evidence).toEqual({
-      runs: 1,
-      sessions: 0,
-      status: "failed",
-      error: "scheduled_run_authority_proof_rejected",
-    });
+    const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    expect(runs).toHaveLength(1);
+    expect(
+      (
+        await getScheduledTaskRunAcceptedExecution(client.db, {
+          workspaceId: workspace.workspaceId,
+          runId: runs[0]!.id,
+        })
+      )?.personalConnectionDelegations,
+    ).toEqual([]);
   });
 
   test("queued recovery validates creation policy after the task head and latest model change", async () => {
@@ -1761,7 +1849,8 @@ describe("scheduled task personal MCP authority", () => {
   test("an accepted occurrence keeps the task snapshot even if the task changes afterward", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const acceptedDelegations = delegation(workspace.subjectId, "linear", "linear.app");
+    const common = await commonConnectionDelegationFixture(workspace);
+    const acceptedDelegations = [common.delegation];
     const task = await createScheduledTask(client.db, {
       ...workspace,
       name: "freeze accepted occurrence",
@@ -1773,11 +1862,10 @@ describe("scheduled task personal MCP authority", () => {
       agentConfig: {
         prompt: "Run with the accepted personal connection snapshot",
         resources: [],
-        tools: [],
+        tools: [{ kind: "mcp", id: "scheduled-common" }],
         metadata: {},
       },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      personalConnectionDelegations: acceptedDelegations,
       metadata: {},
     });
 
@@ -1789,11 +1877,11 @@ describe("scheduled task personal MCP authority", () => {
     });
     expect(dispatched.action).toBe("start");
 
-    const laterDelegations = delegation(workspace.subjectId, "github", "github.com");
+    const laterAccount = crypto.randomUUID();
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
-      personalConnectionDelegations: laterDelegations,
       agentConfig: {
         ...task.agentConfig,
+        connectionAccounts: [{ serverId: "scheduled-common", connectionId: laterAccount }],
         prompt: "Changed only after the earlier occurrence was accepted",
       },
     });
@@ -1842,12 +1930,9 @@ describe("scheduled task personal MCP authority", () => {
       occurrence_authority: acceptedDelegations,
     });
     expect(
-      await getScheduledTaskPersonalConnectionDelegations(
-        client.db,
-        workspace.workspaceId,
-        task.id,
-      ),
-    ).toEqual(laterDelegations);
+      (await getScheduledTask(client.db, workspace.workspaceId, task.id))?.agentConfig
+        .connectionAccounts,
+    ).toEqual([{ serverId: "scheduled-common", connectionId: laterAccount }]);
   });
 
   test("Temporal sync failure restores every execution-affecting task field", async () => {
@@ -1882,13 +1967,16 @@ describe("scheduled task personal MCP authority", () => {
       runMode: "reusable_session",
       overlapPolicy: "buffer_one",
       agentConfig: {
+        connectionAccounts: originalDelegations.map(({ serverId, connectionId }) => ({
+          serverId,
+          connectionId,
+        })),
         prompt: "original prompt",
         resources: [],
         tools: [],
         metadata: { version: "original" },
       },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      personalConnectionDelegations: originalDelegations,
       variableSetId: variableSet.id,
       rigId: rig.id,
       metadata: { version: "original" },
@@ -1905,12 +1993,15 @@ describe("scheduled task personal MCP authority", () => {
       runMode: "new_session_per_run",
       overlapPolicy: "skip",
       agentConfig: {
+        connectionAccounts: changedDelegations.map(({ serverId, connectionId }) => ({
+          serverId,
+          connectionId,
+        })),
         prompt: "changed prompt",
         resources: [],
         tools: [],
         metadata: { version: "changed" },
       },
-      personalConnectionDelegations: changedDelegations,
       targetSessionId: null,
       reusableSessionId: null,
       variableSetId: null,
@@ -1944,13 +2035,7 @@ describe("scheduled task personal MCP authority", () => {
       rigId: rig.id,
       metadata: original.metadata,
     });
-    expect(
-      await getScheduledTaskPersonalConnectionDelegations(
-        client.db,
-        workspace.workspaceId,
-        original.id,
-      ),
-    ).toEqual(originalDelegations);
+    expect(restored?.ownerSubjectId).toBe(original.ownerSubjectId);
   });
 
   test("a materialized reusable workspace Variable Set task keeps its causal human on the next occurrence", async () => {

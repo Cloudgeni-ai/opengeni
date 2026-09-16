@@ -715,10 +715,9 @@ export type UserResourceDelegation = {
   resourceVersionId?: string | null | undefined;
 };
 
-export type McpConnectionAuthoritySelection = {
+export type McpConnectionAccountSelection = {
   serverId: string;
   connectionId: string;
-  userDelegation: UserResourceDelegation;
 };
 
 export type McpServerConnectionRef = {
@@ -2840,6 +2839,7 @@ export type IncidentTelemetryPreflightInput = Omit<
 };
 
 export type ScheduledTaskAgentConfig = {
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
@@ -2900,6 +2900,8 @@ export type ScheduledTask = {
   accountId: string;
   workspaceId: string;
   name: string;
+  /** Immutable execution owner; null for workspace/service tasks. */
+  ownerSubjectId: string | null;
   status: ScheduledTaskStatus;
   schedule: ScheduledTaskScheduleSpec;
   temporalScheduleId: string;
@@ -2909,7 +2911,6 @@ export type ScheduledTask = {
   agentConfig: ScheduledTaskAgentConfig;
   createdBy?: TurnInitiator | undefined;
   createdByContext?: TurnInitiatorContext | undefined;
-  personalConnections?: McpPersonalConnectionSummary[] | undefined;
   authorityRevision: number;
   executionDigest: string;
   targetSessionId: string | null;
@@ -4096,7 +4097,7 @@ export type UserResourceAuthoritySummary = {
   grants: UserResourceAuthorityGrant[];
 };
 export type ListUserResourceAuthoritiesOptions = {
-  resourceKind: UserResourceKind;
+  resourceKind: Exclude<UserResourceKind, "connection">;
   cursor?: string | undefined;
   limit?: number | undefined;
 };
@@ -4108,7 +4109,7 @@ export type ListUserResourceAuthoritiesResponse = {
 export type IssueUserResourceGrantRequest =
   | {
       scope: "user";
-      resourceKind: UserResourceKind;
+      resourceKind: Exclude<UserResourceKind, "connection">;
       mode: "session";
       context: "user_private" | "workspace_shared";
       sessionId: string;
@@ -4117,7 +4118,7 @@ export type IssueUserResourceGrantRequest =
     }
   | {
       scope: "user";
-      resourceKind: UserResourceKind;
+      resourceKind: Exclude<UserResourceKind, "connection">;
       mode: "always";
       context: "user_private" | "workspace_shared";
       sessionId?: null | undefined;
@@ -5269,7 +5270,7 @@ export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expecte
   controlEtag?: string;
   modelContext?: string;
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
-  connectionAuthorities?: McpConnectionAuthoritySelection[];
+  connectionAccounts?: McpConnectionAccountSelection[];
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
 };
 
@@ -5320,7 +5321,7 @@ export type CreateAgentScheduledTaskRequest = {
   action?: { kind: "agent_turn" } | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
-  connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
@@ -5351,7 +5352,7 @@ export type UpdateScheduledTaskRequest = {
   schedule?: ScheduledTaskScheduleSpec | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
-  connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
@@ -8046,7 +8047,7 @@ export type UserMessageEventInput = {
     controlEtag?: string | undefined;
     expectedDraftRevision?: number | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
-    connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
+    connectionAccounts?: McpConnectionAccountSelection[] | undefined;
     selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
     personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   };

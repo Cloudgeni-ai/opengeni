@@ -2124,22 +2124,20 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
         id, account_id, organization_membership_id, resource_kind, resource_id,
         origin_workspace_id, generation, status
       ) values (
-        ${authorityId}, ${human.accountId}, ${membership.id}, 'connection',
+        ${authorityId}, ${human.accountId}, ${membership.id}, 'document',
         ${crypto.randomUUID()}, ${human.personalWorkspaceId}, 1, 'active'
       )`;
     const app = buildApp(undefined, true);
     const headers = { cookie: human.cookie, "content-type": "application/json" };
-    const issue = async (workspaceId: string, connectionWrapper = false): Promise<Response> =>
+    const issue = async (workspaceId: string): Promise<Response> =>
       await app.request(
-        `http://x/v1/workspaces/${workspaceId}/${
-          connectionWrapper ? "connection-authorities" : "user-resource-authorities"
-        }/${authorityId}/grants`,
+        `http://x/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
         {
           method: "POST",
           headers,
           body: JSON.stringify({
             scope: "user",
-            ...(connectionWrapper ? {} : { resourceKind: "connection" }),
+            resourceKind: "document",
             mode: "always",
             context: "user_private",
           }),
@@ -2155,7 +2153,7 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
       where id = ${first.grant.grantId}`;
 
     const listResponse = await app.request(
-      `http://x/v1/workspaces/${human.personalWorkspaceId}/user-resource-authorities?scope=user&resourceKind=connection`,
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/user-resource-authorities?scope=user&resourceKind=document`,
       { headers },
     );
     expect(listResponse.status).toBe(200);
@@ -2175,7 +2173,7 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
     const reissued = (await reissueResponse.json()) as { grant: { grantId: string } };
     expect(reissued.grant.grantId).not.toBe(first.grant.grantId);
 
-    const routeGrantResponse = await issue(human.legacyWorkspaceId, true);
+    const routeGrantResponse = await issue(human.legacyWorkspaceId);
     expect(routeGrantResponse.status).toBe(200);
     const routeGrant = (await routeGrantResponse.json()) as { grant: { grantId: string } };
     await shared.admin`
@@ -2186,7 +2184,7 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
         and subject_id = ${human.subjectId}`;
 
     const revokeResponse = await app.request(
-      `http://x/v1/workspaces/${human.legacyWorkspaceId}/connection-authorities/grants/${routeGrant.grant.grantId}?scope=user`,
+      `http://x/v1/workspaces/${human.legacyWorkspaceId}/user-resource-authorities/grants/${routeGrant.grant.grantId}?scope=user`,
       { method: "DELETE", headers },
     );
     expect(revokeResponse.status).toBe(200);

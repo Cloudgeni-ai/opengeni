@@ -35,7 +35,22 @@ function activities() {
   return createScheduledTaskActivities(
     async () =>
       ({
-        settings: testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" }),
+        settings: testSettings({
+          databaseUrl: shared!.appUrl,
+          sandboxBackend: "none",
+          mcpServers: [
+            {
+              id: "combined-once",
+              name: "Example Mail",
+              url: "https://combined-once.example.com/mcp",
+              connectionRef: {
+                providerDomain: "combined-once.example.com",
+                kind: "oauth2",
+                subjectScope: "subject",
+              },
+            },
+          ],
+        }),
         db: client.db,
         bus: new MemoryEventBus(),
       }) as unknown as ActivityServices,
@@ -97,18 +112,6 @@ async function fixture() {
         authority_generation::int as "authorityGeneration"`;
     return row!;
   });
-  const connectionGrant = await admin.begin(async (tx) => {
-    await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
-    await tx`select set_config('opengeni.workspace_id', ${target!.id}, true)`;
-    await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
-    const [row] = await tx<Array<{ id: string; generation: number }>>`
-      select grant_id as id, grant_generation::int as generation
-      from issue_self_connection_use_grant(
-        ${account!.id}::uuid, ${connection.authorityId}::uuid,
-        ${target!.id}::uuid, 'always', 'workspace_shared', null, true
-      )`;
-    return row!;
-  });
   const initialDelegation = {
     serverId: "combined-once",
     connectionId: connection.id,
@@ -117,19 +120,6 @@ async function fixture() {
     providerDomain: "combined-once.example.com",
     kind: "oauth2" as const,
     connectionType: "mcp" as const,
-    userDelegation: {
-      authorityId: connection.authorityId,
-      grantId: connectionGrant.id,
-      organizationId: account!.id,
-      workspaceId: target!.id,
-      sessionId: null,
-      action: "connection.use" as const,
-      mode: "always" as const,
-      context: "workspace_shared" as const,
-      authorityEpoch: null,
-      authorityGeneration: connection.authorityGeneration,
-      grantGeneration: connectionGrant.generation,
-    },
   };
   const session = await createSession(client.db, {
     accountId: account!.id,
@@ -137,7 +127,7 @@ async function fixture() {
     subjectId,
     initialMessage: "combined once authority target",
     resources: [],
-    tools: [],
+    tools: [{ kind: "mcp", id: "combined-once" }],
     metadata: {},
     model: "scripted-model",
     reasoningEffort: "medium",
@@ -156,17 +146,7 @@ async function fixture() {
   await admin`update organization_user_resource_grants set
       mode='once', session_id=${session.id}, context=${visibility},
       authority_epoch=${authorityEpoch}, updated_at=now()
-    where id in (${variableGrant!.id}, ${connectionGrant.id})`;
-  const delegation = {
-    ...initialDelegation,
-    userDelegation: {
-      ...initialDelegation.userDelegation,
-      sessionId: session.id,
-      mode: "once" as const,
-      context: visibility,
-      authorityEpoch,
-    },
-  };
+    where id=${variableGrant!.id}`;
   return {
     accountId: account!.id,
     workspaceId: target!.id,
@@ -174,9 +154,7 @@ async function fixture() {
     subjectId,
     variableSetId: variableSet!.id,
     variableGrantId: variableGrant!.id,
-    connectionGrantId: connectionGrant.id,
     session,
-    delegation,
   };
 }
 
@@ -192,8 +170,12 @@ async function createCombinedTask(value: Awaited<ReturnType<typeof fixture>>) {
     runMode: "existing_session",
     targetSessionId: value.session.id,
     overlapPolicy: "allow_concurrent",
-    agentConfig: { prompt: "consume both once grants", resources: [], tools: [], metadata: {} },
-    personalConnectionDelegations: [value.delegation],
+    agentConfig: {
+      prompt: "use owned connection and once variable set",
+      resources: [],
+      tools: [{ kind: "mcp", id: "combined-once" }],
+      metadata: {},
+    },
     variableSetId: value.variableSetId,
     metadata: {},
   });
@@ -206,8 +188,6 @@ async function facts(
 ) {
   const [row] = await admin<Array<Record<string, unknown>>>`
     select
-      (select status from organization_user_resource_grants where id=${value.connectionGrantId})
-        as "connectionGrantStatus",
       (select status from organization_user_resource_grants where id=${value.variableGrantId})
         as "variableGrantStatus",
       (select count(*)::int from scheduled_task_runs run
@@ -223,7 +203,7 @@ async function facts(
        join scheduled_task_runs run on run.id=snapshot.run_id
        where run.task_id=${taskId} and run.producer_key=${producerKey}) as "personalRunSnapshots",
       (select count(*)::int from connection_use_once_consumption_receipts receipt
-       where receipt.grant_id=${value.connectionGrantId}) as "connectionReceipts",
+       where receipt.account_id=${value.accountId}) as "connectionReceipts",
       (select count(*)::int from scheduled_task_run_personal_resource_once_receipts receipt
        where receipt.grant_id=${value.variableGrantId}) as "personalScheduledReceipts",
       (select count(*)::int from personal_resource_once_consumption_receipts receipt
@@ -231,7 +211,7 @@ async function facts(
   return row!;
 }
 
-test("combined once success consumes both once grants and replay is receipt-idempotent", async () => {
+test("owned connection and once variable set execute atomically and replay is receipt-idempotent", async () => {
   if (!available) return;
   const value = await fixture();
   const task = await createCombinedTask(value);
@@ -257,14 +237,13 @@ test("combined once success consumes both once grants and replay is receipt-idem
     triggerEventId: first.action === "signal" ? first.triggerEventId : undefined,
   });
   expect(firstFacts).toEqual({
-    connectionGrantStatus: "consumed",
     variableGrantStatus: "consumed",
     runs: 1,
     runStatus: "dispatched",
     runError: null,
     connectionRunSnapshots: 1,
     personalRunSnapshots: 1,
-    connectionReceipts: 1,
+    connectionReceipts: 0,
     personalScheduledReceipts: 1,
     personalAttemptReceipts: 0,
   });
@@ -287,7 +266,6 @@ test("combined later personal admission failure rolls connection work back", asy
   const after = await facts(value, task.id, producerKey);
   expect(result).toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
   expect(after).toEqual({
-    connectionGrantStatus: "active",
     variableGrantStatus: "active",
     runs: 1,
     runStatus: "failed",
