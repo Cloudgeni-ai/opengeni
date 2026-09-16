@@ -631,9 +631,8 @@ it does not mutate connector-policy rows directly.
   viewer at the Connected accounts block above instead of an ambiguous
   whole-row Reconnect/Disconnect). The locked sentence defaults to "A
   workspace admin looks after this integration. You do not need to connect
-  anything."; an adapter may supply a truthful variant instead (e.g.
-  personal-only Slack tells a member that connection management permission is
-  required, because no admin can connect it for them). Provider limited-use
+  anything."; an adapter may supply a truthful variant when the account
+  needs its owner to reconnect. Provider limited-use
   disclosures (Google's OAuth disclosures) render in a fixed place above the
   footer, and the connect/publish affordances reference them via
   `aria-describedby`.
@@ -653,19 +652,17 @@ it does not mutate connector-policy rows directly.
   `quick-connect-dialog.tsx` component exists for the two authKind cases that
   do need a screen (`api_key`: one field, no scope bullet list; unreviewed
   `oauth2`: one line naming the domain), and is reused by account actions.
-  Gmail is not a multi-account provider: it is a single personal-only
-  Connector, not an API integration definition (see the Gmail section below).
+  Gmail uses a catalog Connector rather than an API integration definition (see the Gmail section below).
 
 **Connectors** are MCP servers from the catalog, plus workspace-defined Custom
 APIs (OpenAPI/GraphQL) - there is no third bucket. The existing `authKind`
 field (`"none" | "oauth2" | "api_key" | "unknown"`) already carries every
 behavioral difference the connect flow needs, so Custom API connectors use the
 same single-row setup treatment as any other Connector.
-Connection setup defaults to workspace-owned; a personal connection requires
-the explicit **Only me** choice (official Gmail and Slack's hosted MCP are the
-personal-only exceptions). The shared setup dialog explains that workspace
-sharing uses the account or credentials the human authorizes, not a new
-workspace identity. It preserves provider-specific ownership rules and stores
+Connection setup defaults to workspace ownership, with personal defaults for
+mail, calendar, contacts and drive integrations. Both **This workspace** and
+**Only me** remain selectable. The shared setup dialog explains that workspace
+sharing uses the account or credentials the human authorizes. It stores
 API-key credentials under each field's **wire header name**, never its human
 label. Connecting does not silently install bundled Skills.
 Inside that section a **Featured** strip of tiles driven by curated
@@ -848,15 +845,11 @@ is omitted from Google's authorization, token, and refresh requests. The MCP
 resource remains stored in the encrypted bundle and bound to the runtime
 connection.
 
-Gmail is personal-only. Enabling the capability makes Gmail available in the
-workspace catalog, but it does not share a mailbox: each member must authorize
-their own Google account. Personal connection rows and identifiers are hidden
-from other members, and a turn can execute Gmail only through the initiating
-member's frozen personal delegation. OpenGeni rejects workspace-owned Gmail
-OAuth and capability bindings at the API boundary. Gmail content that a user
-asks the agent to quote, summarize, or otherwise add to a session follows that
-session's visibility; connection privacy does not turn a shared session into a
-private one.
+Gmail defaults to personal ownership; users may instead connect it for the workspace.
+Personal account selection is frozen for the initiating user's accepted work,
+and another participant cannot borrow that account. A workspace connection
+uses the explicitly shared mailbox. Gmail content added to a conversation
+follows that conversation's visibility; account ownership does not change it.
 
 Gmail is the single connector path for the provider: the catalog row's
 `gmailmcp.googleapis.com/mcp/v1` resource is the connection and consent

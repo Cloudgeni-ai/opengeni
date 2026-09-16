@@ -55,7 +55,7 @@ import {
   type GoalSpec,
   type FirstPartyMcpToolName,
   type McpPersonalConnectionDelegation,
-  type McpConnectionAuthoritySelection,
+  type McpConnectionAccountSelection,
   type Permission,
   type PersonalResourceAttachmentIntent,
   type ReasoningEffort,
@@ -2787,7 +2787,7 @@ async function createSessionForRequestInFileScope(
     tools,
     resources,
     source: connectionDelegationSource,
-    authoritySelections: payload.connectionAuthorities,
+    authoritySelections: payload.connectionAccounts,
     googleDrivePublicationEnabled,
     atlassianEnabled,
   });
@@ -3426,7 +3426,7 @@ function sessionPromptBoundaryRequestHash(input: {
   latencyMode: "standard" | "priority" | "fast" | null;
   source: "user" | "api";
   mcpCredentialUpdates: SessionMcpCredentialUpdateInput[];
-  connectionAuthorities?: McpConnectionAuthoritySelection[];
+  connectionAccounts?: McpConnectionAccountSelection[];
   selectedHostMcpDelegations?: HostMcpCreateSelection[];
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
   commandActor: SessionCommandActor;
@@ -3446,7 +3446,7 @@ function sessionPromptBoundaryRequestHash(input: {
     latencyMode: input.latencyMode,
     source: input.source,
     mcpCredentialUpdates: input.mcpCredentialUpdates,
-    connectionAuthorities: input.connectionAuthorities ?? [],
+    connectionAccounts: input.connectionAccounts ?? [],
     ...(input.selectedHostMcpDelegations?.length
       ? { selectedHostMcpDelegations: input.selectedHostMcpDelegations }
       : {}),
@@ -3487,7 +3487,7 @@ async function acceptSessionUserMessageInFileScope(
     latencyMode?: "standard" | "priority" | "fast" | null;
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
-    connectionAuthorities?: McpConnectionAuthoritySelection[];
+    connectionAccounts?: McpConnectionAccountSelection[];
     selectedHostMcpDelegations?: HostMcpCreateSelection[];
     delivery?: "send" | "steer";
     origin?: "human" | "operator";
@@ -3562,9 +3562,7 @@ async function acceptSessionUserMessageInFileScope(
         source,
         mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
         selectedHostMcpDelegations: hostSelections,
-        ...(input.connectionAuthorities
-          ? { connectionAuthorities: input.connectionAuthorities }
-          : {}),
+        ...(input.connectionAccounts ? { connectionAccounts: input.connectionAccounts } : {}),
         ...(input.personalResourceAttachment
           ? { personalResourceAttachment: input.personalResourceAttachment }
           : {}),
@@ -3753,7 +3751,7 @@ async function acceptSessionUserMessageInFileScope(
         existingSession.firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
         (!existingSession.firstPartyMcpPermissions?.length ||
           existingSession.firstPartyMcpPermissions.includes("connections:read")),
-      ...(input.connectionAuthorities ? { authoritySelections: input.connectionAuthorities } : {}),
+      ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
     });
     const captureSelectedHostAuthority = prepareSelectedHostTurnAuthority(
       settingsWithSessionMcpServerMetadata(runtimeSettings, existingSession.mcpServers),

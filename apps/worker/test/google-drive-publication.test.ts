@@ -99,6 +99,7 @@ const identity = {
   initiator: { kind: "human" as const, subjectId: "subject-a" },
 };
 const publicationDelegation = {
+  originWorkspaceId: workspaceId,
   serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
   connectionId,
   ownerSubjectId: "subject-a",
@@ -262,7 +263,7 @@ describe("Google Drive editable artifact publication", () => {
     ).toBeNull();
   });
 
-  test("routes an activated same-organization publication through its frozen physical origin", async () => {
+  test("routes a sender-owned same-organization publication through its frozen physical origin", async () => {
     const originWorkspaceId = "77777777-7777-4777-8777-777777777777";
     let membershipReads = 0;
     const resolved = await resolveGoogleDrivePublicationTarget(
@@ -272,25 +273,12 @@ describe("Google Drive editable artifact publication", () => {
         {
           ...publicationDelegation,
           originWorkspaceId,
-          userDelegation: {
-            organizationId: accountId,
-            authorityId: "88888888-8888-4888-8888-888888888888",
-            authorityGeneration: 1,
-            workspaceId,
-            sessionId: null,
-            action: "connection.use",
-            mode: "always",
-            context: "workspace_shared",
-            authorityEpoch: null,
-            grantId: "99999999-9999-4999-8999-999999999999",
-            grantGeneration: 1,
-          },
         },
       ],
       {
         getMembership: async () => {
           membershipReads += 1;
-          return false;
+          return true;
         },
         getConnection: async (_db, requestedWorkspaceId) => {
           expect(requestedWorkspaceId).toBe(originWorkspaceId);
@@ -299,7 +287,7 @@ describe("Google Drive editable artifact publication", () => {
       },
     );
     expect(resolved).toEqual({ ...target, originWorkspaceId });
-    expect(membershipReads).toBe(0);
+    expect(membershipReads).toBe(1);
   });
 
   test("binds approval to the private connector target and hashes the idempotency key", () => {

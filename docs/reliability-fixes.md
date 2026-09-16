@@ -309,9 +309,10 @@ delivery state.
 **The protocol.** Migration 0275 and the scheduled worker make one durable run
 the accepted occurrence:
 
-- create/update freezes explicit credential-free `connectionAuthorities` on an
-  immutable task authority revision; omitted preserves, `[]` clears, and an
-  explicit array replaces;
+- personal schedules have an immutable initiating owner; `connectionAccounts`
+  narrows that owner's eligible accounts. Each occurrence resolves current
+  accounts, and retries keep their accepted selection. Migration 0478 removed
+  the earlier native connection-grant requirement;
 - stable producer identity inserts or reuses one run and one complete accepted
   execution snapshot before session or provider work; legacy Temporal input
   derives that identity from the namespace-qualified logical workflow id;

@@ -1,7 +1,5 @@
 // Workspace-owned MCP connections no longer bypass the accepted connection-use
-// authority (migration 0279): the worker authorizes the exact workspace row
-// through the same fences and audit facts as personal delegations, keeping
-// only the bounded pre-snapshot legacy path (a ref with no connection id).
+// authority: every request carries the exact workspace connection identity.
 import { describe, expect, test } from "bun:test";
 import type { SessionTurn } from "@opengeni/contracts";
 import type { Database, SessionTurnForExecution, resolveAcceptedConnectionUse } from "@opengeni/db";
@@ -25,7 +23,6 @@ function workspaceResolver(input: {
     authority: AuthorizeInput,
   ) => Awaited<ReturnType<typeof resolveAcceptedConnectionUse>>;
   onHostRequest?: (request: unknown) => void;
-  activated?: boolean;
 }) {
   return connectionTokenResolverForTurn({
     db: {} as Database,
@@ -38,7 +35,6 @@ function workspaceResolver(input: {
     turn,
     getHostTurnForAttempt: async () => turn as SessionTurnForExecution,
     authorizeAcceptedUse: async (_db, authority) => input.authorize(authority),
-    isSessionTenancyProductActivated: async () => input.activated ?? false,
     connectionCredentials: {
       mcpCredentials: async (request) => {
         input.onHostRequest?.(request);
@@ -145,7 +141,6 @@ describe("workspace connection lane", () => {
     let authorizeCalls = 0;
     let hostCalls = 0;
     const resolver = workspaceResolver({
-      activated: true,
       authorize: () => {
         authorizeCalls += 1;
         throw new Error("opaque host bindings must not enter native connection authority");
@@ -227,37 +222,10 @@ describe("workspace connection lane", () => {
     });
   });
 
-  test("a ref with no connection id keeps the bounded pre-snapshot legacy path", async () => {
+  test("a missing connection identity is rejected before host resolution", async () => {
     let authorizeCalls = 0;
     let hostCalls = 0;
     const resolver = workspaceResolver({
-      authorize: () => {
-        authorizeCalls += 1;
-        return { status: "denied" as const, reason: "connection_missing" };
-      },
-      onHostRequest: () => {
-        hostCalls += 1;
-      },
-    });
-    const result = await resolver({
-      ...workspaceRequest,
-      connectionRef: {
-        provider: "linear",
-        providerDomain: "linear.app",
-        kind: "oauth2" as const,
-        subjectScope: "workspace" as const,
-      },
-    });
-    expect(result.status).toBe("ok");
-    expect(authorizeCalls).toBe(0);
-    expect(hostCalls).toBe(1);
-  });
-
-  test("an activated organization rejects a ref with no connection id before host resolution", async () => {
-    let authorizeCalls = 0;
-    let hostCalls = 0;
-    const resolver = workspaceResolver({
-      activated: true,
       authorize: () => {
         authorizeCalls += 1;
         return { status: "denied" as const, reason: "connection_missing" };

@@ -325,45 +325,29 @@ personal grant, Variable Set, Rig, MCP server configuration, process, sandbox
 identity, pin, or workflow. Destination visibility and acknowledgement are
 idempotency-bound.
 
-## Personal-resource grants
+## Connected accounts
 
-The same canonical managed-cookie owner can manage explicit personal-resource
-delegations after organization activation. Pages are bounded to one exact kind;
-the server derives the only valid action and returns the full credential-free
-delegation to attach through the resource's ordinary session API.
+Authenticated messages use the initiating user's eligible connected accounts.
+Conversation visibility does not share account access. Queued work, retries and
+child work retain the initiating user. No per-conversation connection grant is
+required. Multiple eligible accounts require an explicit account choice:
 
 ```ts
-const page = await browserClient.listUserResourceAuthorities(workspaceId, {
-  resourceKind: "connection",
-  limit: 50,
-});
-const authority = page.authorities[0];
-if (!authority) throw new Error("No personal Connection is available");
-
-const issued = await browserClient.issueUserResourceGrant(workspaceId, authority.authorityId, {
-  scope: "user",
-  resourceKind: "connection",
-  mode: "session",
-  context: "workspace_shared",
-  sessionId,
-  expectedAuthorityEpoch: current.tenancy.authorityEpoch,
-  workspaceSharedAcknowledged: true,
-});
-
-await browserClient.revokeUserResourceGrant(workspaceId, issued.grant.grantId);
+const accounts = await browserClient.listOwnConnectionAccounts(workspaceId);
+// When choosing among multiple accounts, use the exact eligible server/account pair.
+const selection = { serverId: "mail", connectionId: accounts[0]!.id };
 ```
 
-The SDK deliberately exposes only exact-session and standing (`always`) grant
-management. It does not expose standalone `once`, custom expiry, scheduled or
-cross-workspace authority, or an atomic create-session-and-attach workflow.
-Revocation prevents future reads but cannot retract output already shared.
+General personal-resource grants for documents, variable sets and other resource
+kinds remain available through the root/core SDK. They do not authorize native
+connected accounts.
 
-## Scheduled connection authority
+## Personal schedules
 
-Agent schedules may carry explicit personal Connection authority. The public
-request contains only the credential-free server, Connection, and common-user
-grant tuple returned by the authority-selection API; the SDK never receives or
-stores provider credentials:
+A schedule created by an authenticated human or their active agent records that
+human as its immutable owner. Only that owner or their verified agent may edit,
+run, pause or delete it. Each occurrence resolves the owner's current accounts;
+accepted retries retain their original identity and account selection.
 
 ```ts
 const task = await client.createScheduledTask(workspaceId, {
@@ -371,18 +355,15 @@ const task = await client.createScheduledTask(workspaceId, {
   schedule: { type: "calendar", hour: 8, minute: 0, timeZone: "Europe/Oslo" },
   runMode: "reusable_session",
   agentConfig: { prompt: "Triage the new support issues" },
-  connectionAuthorities: [selection],
+  connectionAccounts: [selection],
 });
 ```
 
-PATCH semantics are deliberate: omit `connectionAuthorities` to preserve the
-exact prior immutable selection, pass `[]` to clear it, or pass a non-empty
-array to replace and revalidate it. Execution-changing edits that preserve
-personal authority must be made by the same causal human; use an explicit fresh
-selection when authority should move. `once` grants are consumed by the durable
-scheduled occurrence, not by an activity attempt, so retries reuse the same run
-receipt. `listScheduledTaskRuns` exposes terminal occurrence state while private
-Connection ids, subjects, and authority snapshots stay server-side.
+Account selections narrow eligible accounts; they never transfer ownership.
+Omitting `connectionAccounts` on update preserves the selection. Passing an
+empty array clears explicit account choices without changing the schedule owner.
+Service-owned schedules retain service execution and do not acquire a human's
+personal accounts. Run history remains credential-free.
 
 Deleting a task is externally idempotent and immediately removes it from live
 lists and quota, but the server retains a tombstone plus run/session/turn audit

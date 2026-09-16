@@ -1,7 +1,7 @@
-import type { McpConnectionAuthoritySelection } from "@/types";
+import type { McpConnectionAccountSelection } from "@/types";
 
 export type PersonalGitHubAuthorityCache = Readonly<{
-  authority: McpConnectionAuthoritySelection;
+  authority: McpConnectionAccountSelection;
   connectionVersion: number;
 }>;
 
@@ -10,18 +10,12 @@ export function reusablePersonalGitHubAuthority(
   expected: Readonly<{
     connectionId: string;
     connectionVersion: number;
-    connectionAuthorityGeneration?: number | undefined;
-    context?: "user_private" | "workspace_shared" | undefined;
   }>,
-): McpConnectionAuthoritySelection | null {
+): McpConnectionAccountSelection | null {
   if (
     !cache ||
     cache.authority.connectionId !== expected.connectionId ||
-    cache.connectionVersion !== expected.connectionVersion ||
-    (expected.connectionAuthorityGeneration !== undefined &&
-      cache.authority.userDelegation.authorityGeneration !==
-        expected.connectionAuthorityGeneration) ||
-    (expected.context !== undefined && cache.authority.userDelegation.context !== expected.context)
+    cache.connectionVersion !== expected.connectionVersion
   ) {
     return null;
   }

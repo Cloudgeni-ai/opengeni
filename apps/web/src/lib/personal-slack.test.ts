@@ -5,9 +5,8 @@ import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
 import {
   personalSlackAccountState,
   personalSlackCapability,
-  personalSlackConnections,
-  personalSlackOAuthTarget,
-  preferredPersonalSlackConnection,
+  hostedSlackConnections,
+  preferredHostedSlackConnection,
 } from "./personal-slack";
 
 function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
@@ -89,7 +88,7 @@ function capability(overrides: Partial<CapabilityCatalogItem> = {}): CapabilityC
 }
 
 describe("personal Slack account linking", () => {
-  test("matches only the official subject-owned hosted MCP seam", () => {
+  test("matches official hosted accounts in either ownership, excluding bot tokens", () => {
     const item = capability();
     expect(personalSlackCapability([item])).toBe(item);
     expect(
@@ -108,13 +107,11 @@ describe("personal Slack account linking", () => {
       id: crypto.randomUUID(),
       metadata: { mcpUrl: "https://slack.example.test/mcp" },
     });
-    expect(personalSlackConnections([workspaceBot, nonOfficial, personal])).toEqual([personal]);
-    expect(personalSlackOAuthTarget(item)).toEqual({
-      providerDomain: "slack.com",
-      mcpUrl: OPENGENI_PERSONAL_SLACK_MCP_URL,
-      ownership: "personal",
-    });
-    expect(personalSlackOAuthTarget(item)).not.toHaveProperty("oauthClient");
+    const shared = connection({ id: crypto.randomUUID(), subjectId: null });
+    expect(hostedSlackConnections([workspaceBot, nonOfficial, personal, shared])).toEqual([
+      personal,
+      shared,
+    ]);
   });
 
   test("prefers a usable row without losing a revoked reconnect target", () => {
@@ -124,8 +121,8 @@ describe("personal Slack account linking", () => {
       updatedAt: new Date("2026-07-31T12:00:00Z").toISOString(),
     });
     const active = connection({ updatedAt: new Date("2026-07-31T11:00:00Z").toISOString() });
-    expect(preferredPersonalSlackConnection([revoked, active])?.id).toBe(active.id);
-    expect(preferredPersonalSlackConnection([revoked])?.id).toBe(revoked.id);
+    expect(preferredHostedSlackConnection([revoked, active])?.id).toBe(active.id);
+    expect(preferredHostedSlackConnection([revoked])?.id).toBe(revoked.id);
   });
 
   test("uses creation time and UUID to break equal migration timestamp ties", () => {
@@ -145,8 +142,8 @@ describe("personal Slack account linking", () => {
       updatedAt: lowerUuid.updatedAt,
     });
 
-    expect(preferredPersonalSlackConnection([lowerUuid, older, canonical])?.id).toBe(canonical.id);
-    expect(preferredPersonalSlackConnection([canonical, older, lowerUuid])?.id).toBe(canonical.id);
+    expect(preferredHostedSlackConnection([lowerUuid, older, canonical])?.id).toBe(canonical.id);
+    expect(preferredHostedSlackConnection([canonical, older, lowerUuid])?.id).toBe(canonical.id);
   });
 
   test("keeps refreshable expiry distinct from reconnect-required and revoked states", () => {

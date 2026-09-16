@@ -1,3 +1,4 @@
+import { seedSenderConnections } from "./sender-connection-fixture";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
 import {
@@ -68,6 +69,32 @@ async function fixture() {
     subjectLabel: "Creator",
   });
   return access.workspaceGrants[0]!;
+}
+
+async function connectionLineage(
+  grant: Awaited<ReturnType<typeof fixture>>,
+  selections: Parameters<typeof seedSenderConnections>[2],
+) {
+  const ownerSubjectId = selections[0]?.ownerSubjectId ?? grant.subjectId;
+  const source = await createSession(client.db, {
+    ...sessionInput({ ...grant, subjectId: ownerSubjectId }),
+    personalConnectionDelegations: selections,
+  });
+  const started = await initializeSessionStartAtomically(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    sessionId: source.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
+  if (!started.turn) throw new Error("missing causal fixture turn");
+  return {
+    connectionAuthoritySubjectId: ownerSubjectId,
+    callerSessionId: source.id,
+    callerTurnId: started.turn.id,
+    callerAttemptId: crypto.randomUUID(),
+    callerExecutionGeneration: started.turn.executionGeneration,
+  };
 }
 
 function sessionInput(grant: Awaited<ReturnType<typeof fixture>>) {
@@ -318,6 +345,11 @@ describe("immutable session turn initiators", () => {
         kind: "oauth2" as const,
       },
     ];
+    await seedSenderConnections(
+      shared.admin,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+      winningDelegations,
+    );
     const first = await createSessionWithIdempotencyKey(client.db, {
       ...sessionInput(grant),
       personalConnectionDelegations: winningDelegations,
@@ -425,6 +457,11 @@ describe("immutable session turn initiators", () => {
         kind: "oauth2" as const,
       },
     ];
+    await seedSenderConnections(
+      shared.admin,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+      originalDelegations,
+    );
     const sent = await withWorkspaceSubjectRls(client.db, grant.workspaceId!, sender, (db) =>
       db.transaction((tx) =>
         submitHumanPromptInTransaction(tx as unknown as typeof db, {
@@ -680,6 +717,11 @@ describe("immutable session turn initiators", () => {
         kind: "oauth2" as const,
       },
     ];
+    await seedSenderConnections(
+      shared.admin,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+      sourceDelegations,
+    );
     const source = await createSession(client.db, {
       ...sessionInput(sourceGrant),
       personalConnectionDelegations: sourceDelegations,
@@ -795,7 +837,7 @@ describe("immutable session turn initiators", () => {
         goalId: coalescedGoal.id,
         causalTurnId: targetClaim.turn.id,
       },
-      personalConnectionDelegations: sourceDelegations,
+      personalConnectionDelegations: [],
     });
     if (!goalUpdate.added) throw new Error(`failed to add goal: ${goalUpdate.reason}`);
     const childUpdate = await addSessionSystemUpdate(client.db, {
@@ -817,7 +859,7 @@ describe("immutable session turn initiators", () => {
         parentTurnId: targetClaim.turn.id,
         childSessionId: source.id,
       },
-      personalConnectionDelegations: sourceDelegations,
+      personalConnectionDelegations: [],
     });
     if (!childUpdate.added) throw new Error(`failed to add child result: ${childUpdate.reason}`);
     const steerAttemptId = crypto.randomUUID();
@@ -1166,6 +1208,11 @@ describe("immutable session turn initiators", () => {
         kind: "oauth2" as const,
       },
     ];
+    await seedSenderConnections(
+      shared.admin,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+      steerDelegations,
+    );
     const noticeDelegations = [
       {
         serverId: "github",
@@ -1175,6 +1222,11 @@ describe("immutable session turn initiators", () => {
         kind: "oauth2" as const,
       },
     ];
+    await seedSenderConnections(
+      shared.admin,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+      noticeDelegations,
+    );
     const source = await createSession(client.db, {
       ...sessionInput(grant),
       personalConnectionDelegations: steerDelegations,
@@ -1204,6 +1256,7 @@ describe("immutable session turn initiators", () => {
         operationId: crypto.randomUUID(),
       },
       lineage: {
+        connectionAuthoritySubjectId: grant.subjectId,
         callerSessionId: source.id,
         callerTurnId: sourceStart.turn.id,
         callerAttemptId: crypto.randomUUID(),
@@ -1226,7 +1279,7 @@ describe("immutable session turn initiators", () => {
         text: "Use the notice authority later",
         operationId: crypto.randomUUID(),
       },
-      lineage: {},
+      lineage: await connectionLineage(grant, noticeDelegations),
       personalConnectionDelegations: noticeDelegations,
     });
     if (!notice.added) throw new Error(`failed to add notice: ${notice.reason}`);
@@ -1303,6 +1356,11 @@ describe("immutable session turn initiators", () => {
         kind: "oauth2" as const,
       },
     ];
+    await seedSenderConnections(
+      shared.admin,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+      firstDelegations,
+    );
     const secondDelegations = [
       {
         serverId: "github",
@@ -1312,10 +1370,22 @@ describe("immutable session turn initiators", () => {
         kind: "oauth2" as const,
       },
     ];
+    await seedSenderConnections(
+      shared.admin,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+      secondDelegations,
+    );
+    const lineages = new Map<string, Awaited<ReturnType<typeof connectionLineage>>>();
     const addNotice = async (
       text: string,
       personalConnectionDelegations: typeof firstDelegations,
     ) => {
+      const key = JSON.stringify(personalConnectionDelegations);
+      let lineage = lineages.get(key);
+      if (!lineage) {
+        lineage = await connectionLineage(grant, personalConnectionDelegations);
+        lineages.set(key, lineage);
+      }
       const result = await addSessionSystemUpdate(client.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
@@ -1330,7 +1400,7 @@ describe("immutable session turn initiators", () => {
           text,
           operationId: crypto.randomUUID(),
         },
-        lineage: {},
+        lineage,
         personalConnectionDelegations,
       });
       if (!result.added) throw new Error(`failed to add ${text}: ${result.reason}`);

@@ -404,7 +404,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     rootSessionId: mcpCredentialRootSessionId,
     attemptId: input.attemptId,
     turn,
-    observability,
   });
   const personalConnectionDelegations = turn.personalConnectionDelegations;
   const delegatedMembershipChecks = new Map<string, Promise<boolean>>();

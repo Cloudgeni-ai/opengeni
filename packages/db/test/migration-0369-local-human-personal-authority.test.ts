@@ -5,7 +5,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import {
   bootstrapWorkspace,
   createDb,
-  issueSelfLocalConnectionUseGrant,
+  listOwnedConnectionAccounts,
   persistProviderOAuthConnection,
   type DbClient,
 } from "../src";
@@ -46,7 +46,7 @@ describe("migration 0369 local human personal authority", () => {
     expect(source).not.toMatch(/\bDROP TABLE\b/u);
   });
 
-  test("bootstraps one local human and idempotently grants its personal connection", async () => {
+  test("bootstraps one local human whose own account is available without a use grant", async () => {
     if (!available) return;
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "opengeni:local",
@@ -98,29 +98,12 @@ describe("migration 0369 local human personal authority", () => {
     expect(connection?.authorityId).toEqual(expect.any(String));
     if (!connection?.authorityId) throw new Error("local connection authority was not created");
 
-    const input = {
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
-      subjectId: "dev",
-      authorityId: connection.authorityId,
-      context: "workspace_shared" as const,
-      workspaceSharedAcknowledged: true,
-    };
-    const granted = await issueSelfLocalConnectionUseGrant(client.db, input);
-    const replay = await issueSelfLocalConnectionUseGrant(client.db, input);
-    expect(granted).toMatchObject({
-      targetWorkspaceId: workspace.workspaceId,
-      action: "connection.use",
-      mode: "always",
-      context: "workspace_shared",
-      status: "active",
-      delegation: {
-        authorityId: connection.authorityId,
+    expect(
+      await listOwnedConnectionAccounts(client.db, {
+        accountId: workspace.accountId,
         workspaceId: workspace.workspaceId,
-        mode: "always",
-      },
-    });
-    expect(replay.grantId).toBe(granted.grantId);
-    expect(replay.generation).toBe(granted.generation);
+        subjectId: "dev",
+      }),
+    ).toContainEqual({ connectionId: connection.id, originWorkspaceId: workspace.workspaceId });
   }, 60_000);
 });

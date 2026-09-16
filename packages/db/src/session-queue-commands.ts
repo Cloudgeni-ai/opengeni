@@ -347,7 +347,6 @@ async function personalConnectionDelegationsForAgentActor(
   db: Database,
   workspaceId: string,
   actor: Extract<SessionCommandActor, { type: "agent_attempt" }>,
-  targetSessionId: string,
 ): Promise<{
   delegations: McpPersonalConnectionDelegation[];
   connectionAuthoritySubjectId: string | null;
@@ -377,21 +376,9 @@ async function personalConnectionDelegationsForAgentActor(
       `Agent authority turn has malformed personal MCP delegation state: ${actor.sessionId}/${actor.turnId}`,
     );
   }
-  // Agent messages and Agent Steer create new accepted work. A once grant is
-  // already bound to the caller turn, while a session grant may be projected
-  // only into another turn of that exact session. Always grants can cross the
-  // direct parent/child boundary subject to the live admission fences.
-  const delegations = parsed.data
-    .filter((delegation) => {
-      const authority = delegation.userDelegation;
-      if (!authority) return true;
-      if (authority.mode === "once") return false;
-      if (authority.mode === "session") return authority.sessionId === targetSessionId;
-      return true;
-    })
-    .map((delegation) => ({ ...delegation }));
-  const activated = delegations.filter((delegation) => delegation.userDelegation);
-  if (activated.length === 0) {
+  // New agent work inherits the exact originating turn's sender and accounts.
+  const delegations = parsed.data.map((delegation) => ({ ...delegation }));
+  if (delegations.length === 0) {
     return { delegations, connectionAuthoritySubjectId: null };
   }
   const connectionAuthoritySubjectId = row.initiatingHumanSubjectId;
@@ -400,7 +387,7 @@ async function personalConnectionDelegationsForAgentActor(
       `Agent authority turn lost its causal human: ${actor.sessionId}/${actor.turnId}`,
     );
   }
-  for (const delegation of activated) {
+  for (const delegation of delegations) {
     if (delegation.ownerSubjectId !== connectionAuthoritySubjectId) {
       throw new SessionControlInvariantError(
         `Agent authority turn causal human does not own retained connection authority: ${actor.sessionId}/${actor.turnId}`,
@@ -2082,9 +2069,7 @@ export async function submitHumanPromptInTransaction(
     : (frozenInitiator.initiatingHumanSubjectId ??
       (frozenInitiator.initiator.kind === "subject" ? frozenInitiator.initiator.subjectId : null));
   if (
-    (input.personalConnectionDelegations ?? []).some(
-      (delegation) => delegation.userDelegation !== undefined,
-    ) ||
+    (input.personalConnectionDelegations ?? []).length > 0 ||
     input.personalResourceAttachment !== undefined
   ) {
     if (!acceptedInitiatingHumanSubjectId) {
@@ -2647,7 +2632,6 @@ export async function sendAgentMessageInTransaction(
     db,
     input.workspaceId,
     input.actor,
-    input.targetSessionId,
   );
   const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
   const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
@@ -2897,7 +2881,6 @@ export async function steerAgentSessionInTransaction(
     db,
     input.workspaceId,
     input.actor,
-    input.targetSessionId,
   );
   const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
   const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);

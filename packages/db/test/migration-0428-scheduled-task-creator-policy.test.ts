@@ -141,7 +141,7 @@ describe("0428 creator policy (real PostgreSQL)", () => {
       select task.execution_digest as stored,
         encode(sha256(convert_to((
           to_jsonb(task) - array[
-            'name', 'status', 'updated_at', 'authority_revision', 'execution_digest',
+            'name', 'status', 'updated_at', 'authority_revision', 'execution_digest', 'owner_subject_id',
             'creator_first_party_mcp_tools', 'creator_first_party_mcp_permissions',
             'creator_session_policy'
           ]::text[]
@@ -176,14 +176,14 @@ describe("0428 creator policy (real PostgreSQL)", () => {
       select task.execution_digest as stored,
         encode(sha256(convert_to((
           to_jsonb(task) - array[
-            'name', 'status', 'updated_at', 'authority_revision', 'execution_digest',
+            'name', 'status', 'updated_at', 'authority_revision', 'execution_digest', 'owner_subject_id',
             'creator_first_party_mcp_tools', 'creator_first_party_mcp_permissions',
             'creator_session_policy'
           ]::text[]
         )::text, 'UTF8')), 'hex') as stripped,
         encode(sha256(convert_to((
           to_jsonb(task) - array[
-            'name', 'status', 'updated_at', 'authority_revision', 'execution_digest'
+            'name', 'status', 'updated_at', 'authority_revision', 'execution_digest', 'owner_subject_id'
           ]::text[]
         )::text, 'UTF8')), 'hex') as full
       from scheduled_tasks task

@@ -1656,10 +1656,11 @@ Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 authorization. Forms share `performCapabilityAction` and human-authorized
 Connection API. OAuth never replays tools; `attachSessionCapability` preserves
 selection through CAS. Skills retain workspace scope and reviewed hashes.
-Gmail startup failures remain diagnostic; discovery checks tools and requests consent.
-Personal MCP use requires an owner-issued exact-session grant, with shared-results
-acknowledgement for shared conversations. The composer restores only active grants
-matching visibility and authority epoch; credentials alone grant no use.
+Messages authorize the sender's accounts; queued work, retries and children
+retain that identity. Personal schedules have immutable owners. Setup offers
+Personal and Workspace with provider-specific defaults. Explicit choices win;
+reconnect preserves ownership. See [sender-owned connections](design/sender-owned-connections.md)
+for account selection, provider checks and migration.
 
 Host-owned shared MCP servers may explicitly select `hostBinding.selection:
 "accepted_turn"` instead of a fixed binding. The configuration fixes the entire

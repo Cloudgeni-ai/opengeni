@@ -41,6 +41,11 @@ test("a private scheduled target can retain its owner's attachment; shared targe
     subjectId: `user:${crypto.randomUUID()}`,
   });
   const grant: AccessGrant = { ...access.workspaceGrants[0]!, principalKind: "human_session" };
+  const [personal] = await shared.admin`insert into workspaces (account_id, name)
+    values (${grant.accountId}, 'Personal fixture') returning id`;
+  await shared.admin`insert into organization_memberships
+    (account_id, subject_id, status, personal_workspace_id)
+    values (${grant.accountId}, ${grant.subjectId}, 'active', ${personal!.id})`;
   const authorization: AccessGrantAuthorization = {
     grant,
     accountGrant: null,

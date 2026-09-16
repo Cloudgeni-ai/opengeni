@@ -380,6 +380,8 @@ describe("custom API control center browser acceptance", () => {
       const addAccount = sheet.getByRole("button", { name: "+ Add account" });
       await expectVisible(addAccount);
       await addAccount.click();
+      await page.getByRole("radio", { name: "This workspace", exact: false }).check();
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
       const [consent] = await Promise.all([
         context.waitForEvent("page"),
         page.getByRole("button", { name: "Authorize connection" }).click(),

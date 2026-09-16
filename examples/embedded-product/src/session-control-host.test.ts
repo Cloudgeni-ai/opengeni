@@ -118,7 +118,7 @@ test("host control keeps the authenticated actor and exact versions without expo
     delivery: "send",
     clientEventId: crypto.randomUUID(),
     controlEtag: "observed-version",
-    connectionAuthorities: [],
+    connectionAccounts: [],
   };
   expect(
     (

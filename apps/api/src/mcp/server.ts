@@ -233,6 +233,7 @@ import {
   validateScheduledTaskMachineTarget,
   validateScheduledTaskTarget,
   updateScheduledTaskForApi,
+  triggerScheduledTaskForGrant,
   validatedScheduledTaskUpdate,
 } from "@opengeni/core";
 import {
@@ -1382,7 +1383,7 @@ export function buildOpenGeniMcpServer(
           status: z4.string().optional(),
           // Explicit credential-free connection authority selections; declared
           // so MCP validation doesn't strip them before the contract parse.
-          connectionAuthorities: z4.array(z4.unknown()).optional(),
+          connectionAccounts: z4.array(z4.unknown()).optional(),
           variableSetId: z4.string().uuid().optional(),
           // Deprecated alias of variableSetId; declared so MCP validation doesn't
           // strip it before the contract parse maps it (rename back-compat).
@@ -1449,7 +1450,7 @@ export function buildOpenGeniMcpServer(
           status: z4.string().optional(),
           // Omitted preserves the frozen selections, [] clears them, and an
           // array replaces them; declared so MCP validation doesn't strip it.
-          connectionAuthorities: z4.array(z4.unknown()).optional(),
+          connectionAccounts: z4.array(z4.unknown()).optional(),
           variableSetId: z4.string().uuid().nullable().optional(),
           // Deprecated alias of variableSetId (rename back-compat); declared so MCP
           // validation doesn't strip it before the contract parse maps it.
@@ -1478,7 +1479,7 @@ export function buildOpenGeniMcpServer(
         if (!scheduledTaskUpdateChangesState(existing, update)) {
           return json(scheduledTaskReceipt("scheduled_tasks_update", existing, "unchanged", false));
         }
-        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, update);
+        const task = await updateScheduledTaskForApi(deps.db, grant, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
@@ -1501,7 +1502,7 @@ export function buildOpenGeniMcpServer(
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
-        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, {
+        const task = await updateScheduledTaskForApi(deps.db, grant, id, {
           status: "paused",
         });
         await syncUpdatedScheduledTask({
@@ -1536,7 +1537,7 @@ export function buildOpenGeniMcpServer(
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
         });
-        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, update);
+        const task = await updateScheduledTaskForApi(deps.db, grant, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
@@ -1602,7 +1603,7 @@ export function buildOpenGeniMcpServer(
             ? manualScheduledTaskTriggerUsageKey(grant.workspaceId, task.id, triggerToken)
             : `knowledge-source-sync:manual:${grant.workspaceId}:${task.id}:${triggerToken}`;
         const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
-        await deps.workflowClient.triggerScheduledTask({
+        await triggerScheduledTaskForGrant(deps.db, grant, deps.workflowClient, {
           task,
           agentRunUsageIdempotencyKey,
           triggerWorkflowId,
@@ -1657,9 +1658,8 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const { task, changed } = await deleteScheduledTaskWithDurableCleanup(deps, {
-          workspaceId: grant.workspaceId,
+          grant,
           taskId: id,
-          subjectId: grant.subjectId,
         });
         return json(
           mcpMutationReceipt({
@@ -2257,7 +2257,20 @@ function registerAtlassianTools(
     const authority = candidates[0]!;
     const metadata = AtlassianConnectionMetadata.safeParse(authority.connection.metadata);
     if (!metadata.success) throw new Error("Atlassian connection metadata is invalid");
+    const claims = exactAgentAttemptClaims(grant);
+    if (grant.principalKind === "agent_attempt" && !claims) {
+      throw new Error("Atlassian access requires the exact active agent attempt");
+    }
     return {
+      ...(claims
+        ? {
+            connectionUseContext: {
+              ...claims,
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+            },
+          }
+        : {}),
       connection: authority.connection,
       metadata: metadata.data,
       subjectId: authority.subjectId ?? grant.subjectId,
@@ -2274,7 +2287,10 @@ function registerAtlassianTools(
     async ({ connectionId }) => {
       const authority = await connectionFor(connectionId);
       const response = await browseAtlassianSources(deps, {
-        workspaceId: grant.workspaceId,
+        workspaceId: authority.connection.workspaceId,
+        ...(authority.connectionUseContext
+          ? { connectionUseContext: authority.connectionUseContext }
+          : {}),
         subjectId: authority.subjectId,
         connectionId: authority.connection.id,
       });
@@ -2307,7 +2323,10 @@ function registerAtlassianTools(
       return json({
         connectionId: authority.connection.id,
         results: await searchAtlassianLive(deps, {
-          workspaceId: grant.workspaceId,
+          workspaceId: authority.connection.workspaceId,
+          ...(authority.connectionUseContext
+            ? { connectionUseContext: authority.connectionUseContext }
+            : {}),
           subjectId: authority.subjectId,
           connectionId: authority.connection.id,
           query,
@@ -2333,7 +2352,10 @@ function registerAtlassianTools(
       const authority = await connectionFor(connectionId);
       return json(
         await getAtlassianLiveItem(deps, {
-          workspaceId: grant.workspaceId,
+          workspaceId: authority.connection.workspaceId,
+          ...(authority.connectionUseContext
+            ? { connectionUseContext: authority.connectionUseContext }
+            : {}),
           subjectId: authority.subjectId,
           connectionId: authority.connection.id,
           kind,
@@ -3596,10 +3618,6 @@ function scheduledTaskUpdateChangesState(
   if (update.metadata !== undefined && stableJson(update.metadata) !== stableJson(task.metadata)) {
     return true;
   }
-  // Personal-connection delegations are recomputed with agentConfig and can
-  // change even when the visible config is byte-identical (for example after a
-  // connection rotation), so preserve that refresh as a real mutation.
-  if (update.personalConnectionDelegations !== undefined) return true;
   return false;
 }
 

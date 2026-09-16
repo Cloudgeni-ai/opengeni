@@ -1,5 +1,6 @@
 import { retainedImageId } from "@opengeni/react";
-import { useSessionConnectionAuthorities } from "@/components/capabilities/use-session-connection-authorities";
+import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
+import { ConnectionAccountPicker } from "@/components/capabilities/connection-account-picker";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
 import {
   attachSessionCapability,
@@ -1641,17 +1642,23 @@ function SessionChatPane(props: {
     () => selectableSessionMcpServers.map((server) => server.id),
     [selectableSessionMcpServers],
   );
-  const connectionAuthorities = useSessionConnectionAuthorities(
+  const connectionAccounts = useConnectionAccounts(
     context.client,
-    props.session,
+    {
+      id: props.session.id,
+      workspaceId: props.session.workspaceId,
+      selectedIds:
+        props.session.effectiveToolPolicy?.selectedIds ??
+        props.session.tools.map((tool) => tool.id),
+    },
     context.workspaceCapabilityCatalog,
   );
   const reloadSessionAfterSetup = props.onReloadSession;
-  const refreshConnectionAuthorities = connectionAuthorities.refresh;
+  const refreshConnectionAccounts = connectionAccounts.refresh;
   const afterConnectionSetup = useCallback(async () => {
     await reloadSessionAfterSetup();
-    await refreshConnectionAuthorities();
-  }, [reloadSessionAfterSetup, refreshConnectionAuthorities]);
+    await refreshConnectionAccounts();
+  }, [reloadSessionAfterSetup, refreshConnectionAccounts]);
   const renderAuthNeeded = useCallback(
     (item: AuthNeededItem) => {
       const recommendation = sessionAuthRecommendation(item, context.workspaceCapabilityCatalog);
@@ -1881,19 +1888,20 @@ function SessionChatPane(props: {
       repositoryError: repositories.error,
       policyValid: composerPolicyValidRef.current,
       variableSetBlocked: variableSetComposerBlocked,
-      personalDecision: personalAttachment.requiresDecision,
+      personalDecision:
+        personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
       personalLoading:
         personalAttachment.loading ||
         personalAttachment.refreshing ||
-        connectionAuthorities.loading ||
-        connectionAuthorities.error !== null,
+        connectionAccounts.loading ||
+        connectionAccounts.error !== null,
     });
   const composer = useComposer(props.session.id, {
     events: props.events,
     sendExtras: () => ({
       resources: [...attachments.readyResources, ...repositories.pendingResources],
-      connectionAuthorities: [
-        ...connectionAuthorities.selections,
+      connectionAccounts: [
+        ...connectionAccounts.selections,
         ...(repositories.pendingResources.some(
           (resource) =>
             resource.kind === "repository" && resource.connectionType === "github_personal",
@@ -2586,13 +2594,19 @@ function SessionChatPane(props: {
 
       <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
-          {connectionAuthorities.error ? (
+          <ConnectionAccountPicker
+            groups={connectionAccounts.accountGroups}
+            choices={connectionAccounts.accountChoices}
+            onChoose={connectionAccounts.selectAccount}
+            disabled={terminal || composer.sending}
+          />
+          {connectionAccounts.error ? (
             <p role="alert" className="mb-2 text-xs text-fg-muted">
               Personal connection access could not be checked.{" "}
               <button
                 type="button"
                 className="text-brand underline"
-                onClick={() => void connectionAuthorities.refresh()}
+                onClick={() => void connectionAccounts.refresh()}
               >
                 Retry
               </button>

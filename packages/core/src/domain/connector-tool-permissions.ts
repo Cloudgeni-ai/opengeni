@@ -27,6 +27,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { GMAIL_REST_MCP_TOOLS, isOfficialGmailMcpConfig } from "@opengeni/runtime";
 import { hasPermission } from "../access";
 import { buildCapabilityCatalog, settingsWithMcpCapabilityServers } from "./capabilities";
 
@@ -129,6 +130,13 @@ async function listTools(
   input: Input,
   target: Awaited<ReturnType<typeof resolveTarget>>,
 ): Promise<ListedTool[]> {
+  // Runtime substitutes the reviewed REST bridge for this exact MCP identity.
+  // Its static catalog must not depend on Google's hosted MCP preview.
+  if (isOfficialGmailMcpConfig(target.server.url, target.server.connectionRef)) {
+    return GMAIL_REST_MCP_TOOLS.filter(
+      (tool) => !target.server.allowedTools || target.server.allowedTools.includes(tool.name),
+    );
+  }
   let headers = { ...target.server.headers };
   if (target.server.connectionRef) {
     const result = await buildConnectionTokenResolver(

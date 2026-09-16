@@ -65,6 +65,7 @@ import {
 } from "@opengeni/contracts/personal-github";
 import {
   hasPermission,
+  listOwnConnectionAccountsForGrant,
   hasReservedFikenMetadata,
   hasReservedOpenGeniSlackBotMetadata,
   isOpenGeniSlackBotConnection,
@@ -187,6 +188,16 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       ListConnectionsResponse.parse({
         connections: await listConnectionsMetadata(db, workspaceId, grant.subjectId),
+      }),
+    );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/connections/accounts", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    return c.json(
+      ListConnectionsResponse.parse({
+        connections: await listOwnConnectionAccountsForGrant(db, grant),
       }),
     );
   });

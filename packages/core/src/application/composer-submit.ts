@@ -48,7 +48,7 @@ export async function submitComposerDraftForRequest(
     reasoningEffort: input.reasoningEffort,
     latencyMode: input.latencyMode,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
-    connectionAuthorities: input.connectionAuthorities,
+    connectionAccounts: input.connectionAccounts,
     ...(input.selectedHostMcpDelegations
       ? { selectedHostMcpDelegations: input.selectedHostMcpDelegations }
       : {}),

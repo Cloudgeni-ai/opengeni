@@ -14,7 +14,7 @@ import {
 } from "@opengeni/contracts";
 import type {
   CreateSessionRequest,
-  McpConnectionAuthoritySelection,
+  McpConnectionAccountSelection,
   PersonalGitHubRepositorySelectionInput,
   SessionEvent,
 } from "@opengeni/sdk";
@@ -282,7 +282,7 @@ export type AppContextValue = {
   setSelectedPersonalGitHubRepoIds: Dispatch<SetStateAction<Set<string>>>;
   selectedPersonalGitHubRepoRefs: Record<string, string>;
   setSelectedPersonalGitHubRepoRefs: Dispatch<SetStateAction<Record<string, string>>>;
-  personalGitHubAuthority: McpConnectionAuthoritySelection | null;
+  personalGitHubAuthority: McpConnectionAccountSelection | null;
   githubAppOpen: boolean;
   setGithubAppOpen: Dispatch<SetStateAction<boolean>>;
   githubOrg: string;
@@ -299,6 +299,8 @@ export type AppContextValue = {
   workspaceDefaultToolIds: string[];
   /** True once the workspace capability catalog has completed its authoritative load. */
   workspaceMcpCatalogReady: boolean;
+  /** Failed or pending reads must never remove a saved tool selection. */
+  workspaceMcpCatalogLoadedSuccessfully: boolean;
   /** The authoritative workspace catalog, shared by tool policy and timeline presentation. */
   workspaceCapabilityCatalog: CapabilityCatalogItem[];
   currentResources: ResourceRef[];
@@ -364,8 +366,7 @@ export type AppContextValue = {
   ) => Promise<boolean>;
   ensurePersonalGitHubAuthority: (
     workspaceId: string,
-    context?: "user_private" | "workspace_shared",
-  ) => Promise<McpConnectionAuthoritySelection | null>;
+  ) => Promise<McpConnectionAccountSelection | null>;
   togglePersonalGitHubRepository: (
     workspaceId: string,
     repository: PersonalGitHubRepositoryCatalogItem,
@@ -653,6 +654,8 @@ export function RootRouteComponent() {
     CapabilityCatalogItem[]
   >([]);
   const [workspaceMcpCatalogReady, setWorkspaceMcpCatalogReady] = useState(false);
+  const [workspaceMcpCatalogLoadedSuccessfully, setWorkspaceMcpCatalogLoadedSuccessfully] =
+    useState(false);
   const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -792,6 +795,7 @@ export function RootRouteComponent() {
     setWorkspaceMcpServers([]);
     setWorkspaceCapabilityCatalog([]);
     setWorkspaceMcpCatalogReady(false);
+    setWorkspaceMcpCatalogLoadedSuccessfully(false);
   }, []);
 
   const resetWorkspaceState = useCallback(
@@ -1662,7 +1666,6 @@ export function RootRouteComponent() {
           reusablePersonalGitHubAuthority(current, {
             connectionId: connection.id,
             connectionVersion: connection.version,
-            connectionAuthorityGeneration: selection.connectionAuthorityGeneration,
           })
             ? current
             : null,
@@ -1760,44 +1763,16 @@ export function RootRouteComponent() {
   }
 
   async function ensurePersonalGitHubAuthority(
-    workspaceId: string,
-    context: "user_private" | "workspace_shared" = "workspace_shared",
-  ): Promise<McpConnectionAuthoritySelection | null> {
+    _workspaceId: string,
+  ): Promise<McpConnectionAccountSelection | null> {
     const connection = personalGitHubStatus?.connection;
     if (!connection?.authorityId || connection.status !== "active") {
       toast.error("Connect your GitHub account before selecting its repositories");
       return null;
     }
-    const cached = reusablePersonalGitHubAuthority(personalGitHubAuthorityCache, {
-      connectionId: connection.id,
-      connectionVersion: connection.version,
-      ...(personalGitHubSelection
-        ? { connectionAuthorityGeneration: personalGitHubSelection.connectionAuthorityGeneration }
-        : {}),
-      context,
-    });
-    if (cached) return cached;
-    try {
-      const response = await client.issueUserResourceGrant(workspaceId, connection.authorityId, {
-        scope: "user",
-        resourceKind: "connection",
-        mode: "always",
-        context,
-        workspaceSharedAcknowledged: context === "workspace_shared",
-      });
-      const authority = {
-        serverId: "github:personal",
-        connectionId: connection.id,
-        userDelegation: response.grant.delegation,
-      } satisfies McpConnectionAuthoritySelection;
-      setPersonalGitHubAuthorityCache({ authority, connectionVersion: connection.version });
-      return authority;
-    } catch (error) {
-      toast.error("Couldn't allow your GitHub identity here", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-      return null;
-    }
+    const authority = { serverId: "github:personal", connectionId: connection.id };
+    setPersonalGitHubAuthorityCache({ authority, connectionVersion: connection.version });
+    return authority;
   }
 
   async function togglePersonalGitHubRepository(
@@ -1835,6 +1810,7 @@ export function RootRouteComponent() {
     async (workspaceId: string, signal?: AbortSignal) => {
       const refreshId = mcpRefreshId.current + 1;
       mcpRefreshId.current = refreshId;
+      setWorkspaceMcpCatalogLoadedSuccessfully(false);
       const requestKey = `${accessKeyVersion}:${workspaceId}`;
       try {
         const result = await runCurrentWorkspaceRequest({
@@ -1862,11 +1838,13 @@ export function RootRouteComponent() {
           ),
         );
         setWorkspaceCapabilityCatalog(catalog.items);
+        setWorkspaceMcpCatalogLoadedSuccessfully(true);
         setWorkspaceMcpCatalogReady(true);
       } catch (error) {
         if (signal?.aborted || mcpRefreshId.current !== refreshId) throw error;
         // Fail-open: an unavailable catalog must not leave the create composer
         // stuck on draft hydrate / canSend=false.
+        setWorkspaceMcpCatalogLoadedSuccessfully(false);
         setWorkspaceMcpCatalogReady(true);
         throw error;
       }
@@ -1935,8 +1913,8 @@ export function RootRouteComponent() {
       const effectiveSubmission: TurnSubmission = includesPersonalGitHub
         ? {
             ...submission,
-            connectionAuthorities: [
-              ...(submission.connectionAuthorities ?? []).filter(
+            connectionAccounts: [
+              ...(submission.connectionAccounts ?? []).filter(
                 (authority) => authority.serverId !== "github:personal",
               ),
               personalGitHubAuthority!,
@@ -2633,6 +2611,7 @@ export function RootRouteComponent() {
           toolMcpServers,
           workspaceDefaultToolIds,
           workspaceMcpCatalogReady,
+          workspaceMcpCatalogLoadedSuccessfully,
           workspaceCapabilityCatalog,
           currentResources,
           repositoryValidationError,
@@ -2754,6 +2733,7 @@ export function RootRouteComponent() {
     toolMcpServers,
     workspaceDefaultToolIds,
     workspaceMcpCatalogReady,
+    workspaceMcpCatalogLoadedSuccessfully,
     workspaceCapabilityCatalog,
     workspaceStateOwnerId,
     workspaces,

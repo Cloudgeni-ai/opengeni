@@ -733,7 +733,7 @@ describe("SDK / contracts parity", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
       latencyMode: "priority",
-      connectionAuthorities: [],
+      connectionAccounts: [],
     };
     expect(ContractSubmitComposerDraftRequest.safeParse(submit).success).toBe(true);
     const { latencyMode: _latencyMode, ...missingLatency } = submit;
@@ -848,7 +848,7 @@ describe("SDK / contracts parity", () => {
         text: "hello",
         controlEtag: "control-1",
         expectedDraftRevision: 3,
-        connectionAuthorities: [],
+        connectionAccounts: [],
       },
     };
     const approval: ClientSessionEventInput = {

@@ -88,6 +88,8 @@ export type ScheduledTaskFormState = {
   workingDir: string;
   overlapPolicy: ScheduledTask["overlapPolicy"];
   includeOpenGeniTool: boolean;
+  mcpServerIds?: string[];
+  connectionAccounts?: import("@opengeni/sdk").McpConnectionAccountSelection[];
   slackBotConnectionId: string;
   resources: ResourceRef[];
 };
@@ -224,6 +226,10 @@ export function formStateFromScheduledTask(
   }
   return {
     ...base,
+    mcpServerIds: task.agentConfig.tools
+      .filter((tool) => tool.id !== "opengeni")
+      .map((tool) => tool.id),
+    connectionAccounts: task.agentConfig.connectionAccounts ?? [],
     name: task.name,
     knowledgeSource: task.agentConfig.knowledgeSource,
     description: scheduledTaskDescription(task),
@@ -344,9 +350,11 @@ export function agentConfigFromFormState(
   form: ScheduledTaskFormState,
   existingTask?: ScheduledTask,
 ): ScheduledTaskAgentConfig {
-  const tools = (existingTask?.agentConfig.tools ?? []).filter(
-    (tool) => !(tool.kind === "mcp" && tool.id === "opengeni"),
-  );
+  const tools = (
+    form.mcpServerIds?.map((id) => ({ kind: "mcp" as const, id })) ??
+    existingTask?.agentConfig.tools ??
+    []
+  ).filter((tool) => !(tool.kind === "mcp" && tool.id === "opengeni"));
   if (form.includeOpenGeniTool) {
     tools.push({ kind: "mcp", id: "opengeni" });
   }
