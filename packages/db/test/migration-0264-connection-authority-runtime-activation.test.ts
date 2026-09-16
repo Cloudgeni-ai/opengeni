@@ -12,7 +12,6 @@ const migrationUrl = new URL(
   "../drizzle/0264_connection_authority_runtime_activation.sql",
   import.meta.url,
 );
-const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const migrationName = "0264_connection_authority_runtime_activation.sql";
 // 0275 replaces the accepted-authority capture installed by 0264, 0299 repairs
 // that membership wrapper, and 0315 extends the 0275 ledgers. Migration 0345

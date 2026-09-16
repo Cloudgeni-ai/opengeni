@@ -199,6 +199,18 @@ export function scheduledConnectionSurfaceEligibility(
   };
 }
 
+/** Service attribution cannot become a personal schedule execution owner. */
+function scheduledTaskInitiatorForGrant(grant: AccessGrant) {
+  const creator = creationInitiatorForGrant(grant);
+  if (
+    creator.initiator?.kind === "subject" &&
+    personalConnectionDelegationSourceForGrant(grant).kind === "none"
+  ) {
+    return { ...creator, initiator: { ...creator.initiator, kind: "service" as const } };
+  }
+  return creator;
+}
+
 export async function createValidatedScheduledTask(input: {
   settings: Settings;
   db: Database;
@@ -366,7 +378,7 @@ export async function createValidatedScheduledTask(input: {
       )
       .map(({ serverId, connectionId }) => ({ serverId, connectionId }));
   }
-  const creationInitiator = creationInitiatorForGrant(input.grant);
+  const creationInitiator = scheduledTaskInitiatorForGrant(input.grant);
   const captureLinkAuthority = prepareExternalLinkTaskAdmission(
     input.authorization,
     creationInitiator.actor,
@@ -649,7 +661,7 @@ export async function assertScheduledTaskMutationOwner(
   grant: AccessGrant,
   taskId: string,
 ): Promise<void> {
-  const writer = creationInitiatorForGrant(grant);
+  const writer = scheduledTaskInitiatorForGrant(grant);
   const matches = await scheduledTaskMutationOwnerMatches(db, {
     workspaceId: grant.workspaceId,
     taskId,
@@ -880,7 +892,7 @@ export function scheduledTaskAuthorityUpdateForGrant(
   | "authorityUpdatedByContext"
   | "authorityUpdatedByActor"
 > {
-  const writer = creationInitiatorForGrant(grant);
+  const writer = scheduledTaskInitiatorForGrant(grant);
   return {
     refreshPersonalResourceAuthority: true,
     ...(writer.initiator ? { authorityUpdatedBy: writer.initiator } : {}),
@@ -1264,7 +1276,7 @@ export async function validatedScheduledTaskUpdate(input: {
   Object.assign(update, scheduledTaskAuthorityUpdateForGrant(input.grant));
   const linkCapture = prepareExternalLinkTaskAdmission(
     input.authorization,
-    creationInitiatorForGrant(input.grant).actor,
+    scheduledTaskInitiatorForGrant(input.grant).actor,
   );
   if (linkCapture) update.captureLinkAuthority = linkCapture;
   if (input.payload.selectedHostMcpDelegations !== undefined) {
@@ -1600,7 +1612,7 @@ async function validateScheduledTaskAgentConfig(input: {
   workspaceId: string;
   toolsProvided?: boolean;
 }): Promise<ScheduledTaskAgentConfig> {
-  const actor = creationInitiatorForGrant(input.grant).actor;
+  const actor = scheduledTaskInitiatorForGrant(input.grant).actor;
   const parent = actor ? await getSession(input.db, input.workspaceId, actor.sessionId) : null;
   if (actor && (!parent || parent.accountId !== input.grant.accountId)) {
     throw new HTTPException(403, {

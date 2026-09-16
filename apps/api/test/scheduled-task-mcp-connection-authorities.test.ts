@@ -266,23 +266,28 @@ test.each([
       subjectId: "user:other-participant",
       permissions: ["scheduled_tasks:manage", "scheduled_tasks:run"],
     };
-    const server = buildOpenGeniMcpServer(deps(client.db), other);
-    const connected = await connectedClient(server);
-    try {
-      const result = await connected.client.callTool({
-        name,
-        arguments: {
-          id: task.id,
-          ...(name === "scheduled_tasks_update"
-            ? { connectionAccounts: [], name: "Taken over" }
-            : {}),
-        },
-      });
-      expect(result).toMatchObject({ isError: true });
-      expect(resultText(result)).toContain("Only the schedule owner");
-      expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toEqual(task);
-    } finally {
-      await connected.close();
+    for (const caller of [
+      other,
+      { ...other, subjectId: workspace.subjectId, principalKind: "service" as const },
+    ]) {
+      const server = buildOpenGeniMcpServer(deps(client.db), caller);
+      const connected = await connectedClient(server);
+      try {
+        const result = await connected.client.callTool({
+          name,
+          arguments: {
+            id: task.id,
+            ...(name === "scheduled_tasks_update"
+              ? { connectionAccounts: [], name: "Taken over" }
+              : {}),
+          },
+        });
+        expect(result).toMatchObject({ isError: true });
+        expect(resultText(result)).toContain("Only the schedule owner");
+        expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toEqual(task);
+      } finally {
+        await connected.close();
+      }
     }
   },
 );
