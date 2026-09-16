@@ -1,6 +1,6 @@
 # Roadmap
 
-Directions we intend to take the runtime. None of these are commitments to a
+Directions we intend to take Opengeni. None of these are commitments to a
 date; open a [GitHub issue](https://github.com/Cloudgeni-ai/opengeni/issues)
 to discuss any of them.
 

@@ -7,7 +7,7 @@
   </a>
 </p>
 
-<h3 align="center">The open, self-hostable runtime for long-running AI agents.</h3>
+<h3 align="center">The open, self-hostable platform for long-running AI agents.</h3>
 
 <p align="center">
   Durable sessions · human approvals · governed memory · your choice of compute
@@ -34,7 +34,7 @@
 
 Opengeni is the platform layer that makes AI agents safe to trust with real work. It runs agents for hours or days, records every step in a replayable event log, pauses for human approval when it matters, and lets each session run either in a managed sandbox or directly on a machine you own.
 
-Opengeni is the runtime, not the agent. Use the web app to give agents work and follow along, or call the same session API from your own product and let Opengeni own durable state, history, approvals, and outputs. It comes out of two years of running agents against production cloud infrastructure at [CloudGeni](https://cloudgeni.ai).
+Opengeni is the platform, not the agent. Use the web app to give agents work and follow along, or call the same session API from your own product and let Opengeni own durable state, history, approvals, and outputs. It comes out of two years of running agents against production cloud infrastructure at [CloudGeni](https://cloudgeni.ai).
 
 ## Get started
 
@@ -67,7 +67,7 @@ Open http://127.0.0.1:3000, describe a task, and watch the session run.
 
 `bun run dev` installs dependencies, starts Postgres, NATS, Temporal, and object storage, runs migrations, builds the sandbox image, and starts the API, workers, and web app. See [Local development](docs/local-development.md) for manual startup, configuration, and the native (no Docker) path.
 
-## Use it from your code
+## Use it from your code and product
 
 ```ts
 import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
@@ -197,7 +197,7 @@ Opengeni's API is workspace-scoped and every request resolves to an access grant
 
 ## Contributing
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and the pull request workflow, and [AGENTS.md](AGENTS.md) if you work on the runtime itself.
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and the pull request workflow, and [AGENTS.md](AGENTS.md) if you work on the platform itself.
 
 ```bash
 bun run typecheck
