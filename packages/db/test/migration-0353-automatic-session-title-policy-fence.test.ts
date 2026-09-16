@@ -1028,6 +1028,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "target-schema runtime capability authorize_organization_shared_workspace_administration(uuid, uuid, text) is missing or ambiguous",
       "target-schema runtime capability claim_organization_user_setup_delivery_v2(jsonb) is missing or ambiguous",
       "target-schema runtime capability prepare_organization_user_setup_delivery_v2(jsonb) is missing or ambiguous",
+      "target-schema runtime capability list_owned_connection_accounts(uuid, uuid) is missing or ambiguous",
       "target-schema runtime capability mutate_managed_sign_in_method(text, text, jsonb) is missing or ambiguous",
       "target-schema runtime capability assert_managed_sign_in_recovery(text, text, uuid, jsonb) is missing or ambiguous",
       "target-schema runtime capability replay_managed_sign_in_method(text, text, jsonb) is missing or ambiguous",
