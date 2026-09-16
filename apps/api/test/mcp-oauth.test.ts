@@ -103,6 +103,68 @@ describe("MCP OAuth protocol", () => {
     expect(await rejected.json()).toEqual({ error: "invalid_redirect_uri" });
   });
 
+  test("registers native clients and ignores extra RFC 7591 metadata", async () => {
+    const app = new Hono();
+    registerMcpOAuthRoutes(
+      app,
+      depsWithRows([
+        {
+          client_id: "ogmcp_client_native",
+          redirect_uris: [
+            "cursor://anysphere.cursor-mcp/oauth/callback",
+            "https://www.cursor.com/agents/mcp/oauth/callback",
+            "http://localhost:8787/callback",
+          ],
+          client_name: "Desktop MCP client",
+          grant_types: ["authorization_code", "refresh_token"],
+          response_types: ["code"],
+          created_at: "2026-09-02T00:00:00.000Z",
+        },
+      ]),
+    );
+    const registered = await app.request("/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: [
+          "cursor://anysphere.cursor-mcp/oauth/callback",
+          "https://www.cursor.com/agents/mcp/oauth/callback",
+          "http://localhost:8787/callback",
+        ],
+        token_endpoint_auth_method: "none",
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+        client_name: "Desktop MCP client",
+        logo_uri: "https://client.example/logo.svg",
+        scope: "mcp:access",
+      }),
+    });
+    expect(registered.status).toBe(201);
+    expect(await registered.json()).toMatchObject({
+      client_id: "ogmcp_client_native",
+      client_name: "Desktop MCP client",
+      scope: "mcp:access",
+      redirect_uris: [
+        "cursor://anysphere.cursor-mcp/oauth/callback",
+        "https://www.cursor.com/agents/mcp/oauth/callback",
+        "http://localhost:8787/callback",
+      ],
+    });
+  });
+
+  test("explains reused browser consent instead of a raw OAuth JSON error", async () => {
+    const app = new Hono();
+    registerMcpOAuthRoutes(app, depsWithRows());
+    const response = await app.request("/oauth/authorize", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "decision=approve",
+    });
+    expect(response.status).toBe(400);
+    expect(response.headers.get("content-type")).toMatch(/text\/html/);
+    expect(await response.text()).toContain("Authorization expired");
+  });
+
   test("maps durable dynamic-registration admission failures to a retryable OAuth error", async () => {
     const app = new Hono();
     registerMcpOAuthRoutes(app, {
