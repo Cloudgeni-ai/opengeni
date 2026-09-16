@@ -32,9 +32,9 @@
 
 ---
 
-Opengeni is the platform layer that makes AI agents safe to trust with real work. It runs agents for hours or days, records every step in a replayable event log, pauses for human approval when it matters, and lets each session run either in a managed sandbox or directly on a machine you own.
+Opengeni is the platform underneath AI agents that do real work. It keeps a session running for hours or days, records every step in a replayable event log, stops for a human when an action needs approval, and runs each session either in a managed sandbox or directly on a machine you own.
 
-Opengeni is the platform, not the agent. Use the web app to give agents work and follow along, or call the same session API from your own product and let Opengeni own durable state, history, approvals, and outputs. It comes out of two years of running agents against production cloud infrastructure at [CloudGeni](https://cloudgeni.ai).
+It is the platform, not the agent. Give agents work from the web app and follow along, or call the same session API from your own product and let Opengeni hold the state, history, approvals, and outputs. It grew out of two years of running agents against production cloud infrastructure at [CloudGeni](https://cloudgeni.ai).
 
 ## Get started
 
