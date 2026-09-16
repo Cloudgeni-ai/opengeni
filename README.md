@@ -7,7 +7,7 @@
   </a>
 </p>
 
-<h3 align="center">Production-ready agentic service.</h3>
+<h3 align="center">Production-ready self-hostable agentic service.</h3>
 
 <p align="center">
   Durable sessions · human approvals · governed memory · your choice of compute
