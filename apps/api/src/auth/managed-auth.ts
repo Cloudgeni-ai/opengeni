@@ -14,16 +14,18 @@ import {
 } from "@opengeni/db/canonical-human-identities";
 import { betterAuth } from "better-auth";
 import { createEmailVerificationToken } from "better-auth/api";
-import { hashPassword } from "better-auth/crypto";
+import { hashPassword, verifyPassword } from "better-auth/crypto";
 import { sql } from "drizzle-orm";
 import { Pool } from "pg";
 
 import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-admission";
+import { deliverManagedSignInNotification } from "./managed-sign-in-notifications";
 import {
   currentManagedAuthProviderId,
   currentManagedAuthAttemptId,
   recordCurrentManagedAuthSession,
   shouldDiscardCurrentManagedAuthProviderSession,
+  currentManagedSignInConnectIntent,
 } from "./managed-auth-attempt-context";
 
 // `ManagedAuth` (the Better Auth `Auth<any>` alias) is owned by @opengeni/core
@@ -64,6 +66,10 @@ export function managedAuthUserCreateAdmission(
 /** Keep Better Auth password policy and storage format behind this boundary. */
 export async function hashManagedAuthPassword(password: string): Promise<string> {
   return await hashPassword(password);
+}
+
+export async function verifyManagedAuthPassword(password: string, hash: string): Promise<boolean> {
+  return await verifyPassword({ password, hash });
 }
 
 export function createManagedAuth(
@@ -180,7 +186,18 @@ export function createManagedAuth(
         updatedAt: "updated_at",
       },
       accountLinking: {
-        enabled: false,
+        enabled: true,
+        requireLocalEmailVerified: true,
+        trustedProviders: [],
+        allowDifferentEmails: false,
+      },
+      additionalFields: {
+        managedLinkIntentId: {
+          type: "string",
+          fieldName: "managed_link_intent_id",
+          input: false,
+          returned: false,
+        },
       },
       encryptOAuthTokens: true,
       storeStateStrategy: "database",
@@ -264,6 +281,26 @@ export function createManagedAuth(
       },
     },
     databaseHooks: {
+      account: {
+        create: {
+          before: async (account) => ({
+            data: {
+              ...account,
+              ...(currentManagedSignInConnectIntent()
+                ? { managedLinkIntentId: currentManagedSignInConnectIntent() }
+                : {}),
+            },
+          }),
+          after: async (account) => {
+            if (
+              !["google", "github"].includes(account.providerId) ||
+              currentManagedSignInConnectIntent()
+            )
+              return;
+            await deliverManagedSignInNotification(db, managedEmailTransport, account.id);
+          },
+        },
+      },
       session: {
         create: {
           before: async (session) => {

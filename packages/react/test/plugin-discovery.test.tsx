@@ -136,3 +136,58 @@ test("overview limits plugins to six and delegates View all without fetching ano
     await view.unmount();
   }
 });
+
+test("an OpenAI default keeps All and Anthropic selectable in the same order", async () => {
+  const client = {
+    discoverPlugins: mock(async () => ({ items: [item], total: 1, nextOffset: null })),
+  };
+  const view = await renderComponent(
+    <PluginDiscovery
+      client={client}
+      workspaceId="default-registry"
+      query=""
+      defaultProvider="openai"
+      onOpen={() => {}}
+    />,
+  );
+  try {
+    const buttons = [
+      ...view.container.querySelectorAll<HTMLButtonElement>(
+        '[aria-label="Plugin registry"] button',
+      ),
+    ];
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      "All",
+      "OpenAI plugin registry",
+      "Anthropic plugin registry",
+    ]);
+    expect(buttons.map((button) => button.getAttribute("aria-pressed"))).toEqual([
+      "false",
+      "true",
+      "false",
+    ]);
+    await flush(250);
+    expect(client.discoverPlugins).toHaveBeenLastCalledWith("default-registry", {
+      query: "",
+      provider: "openai",
+      offset: 0,
+    });
+    await actRun(() => buttons[0]!.click());
+    await flush(250);
+    expect(client.discoverPlugins).toHaveBeenLastCalledWith("default-registry", {
+      query: "",
+      provider: "",
+      offset: 0,
+    });
+    await actRun(() => buttons[2]!.click());
+    await flush(250);
+    expect(client.discoverPlugins).toHaveBeenLastCalledWith("default-registry", {
+      query: "",
+      provider: "anthropic",
+      offset: 0,
+    });
+    expect(buttons[2]!.getAttribute("aria-pressed")).toBe("true");
+  } finally {
+    await view.unmount();
+  }
+});

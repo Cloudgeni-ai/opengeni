@@ -16,6 +16,8 @@ on:
       - "scripts/dev-*"
       - "scripts/run-development-relay.sh"
       - "scripts/bun-version.ts"
+      - "scripts/ci/local-startup*"
+      - ".github/actions/playwright-browsers/**"
       - "packages/db/**"
       - "packages/config/**"
       - "apps/browser-extension/**"
@@ -34,12 +36,10 @@ jobs:
   docker:
     name: Fresh Docker startup and restart
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       OPENGENI_DEV_BACKEND: docker
       OPENGENI_COMPOSE_PROJECT: opengeni-startup-${{ github.run_id }}-${{ github.run_attempt }}
-      # Exercise the public path without a maintainer's authenticated gh session.
-      GH_CONFIG_DIR: ${{ runner.temp }}/opengeni-empty-gh
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -48,74 +48,26 @@ jobs:
         with:
           bun-version-file: .bun-version
       - name: Check startup ownership and prerequisite regressions
+        timeout-minutes: 2
         run: bun test scripts/check-development-prerequisites.test.ts scripts/dev-stack-lock.test.ts scripts/run-development-stack.test.ts
-      - name: Start the documented stack twice from fresh infrastructure
-        shell: bash
+      - name: Start the documented stack from a clean checkout
+        timeout-minutes: 50
+        run: bash scripts/ci/local-startup.sh first
+      - name: Install startup browser runtime
+        uses: ./.github/actions/playwright-browsers
+        timeout-minutes: 17
+        with:
+          browsers: chromium
+      - name: Verify rendered startup and restart
+        timeout-minutes: 15
         run: |
-          set -euo pipefail
-          test ! -e .env
-          test ! -e .env.runtime
-          test ! -e node_modules
-          mkdir -p "$GH_CONFIG_DIR"
-          launcher_pid=""
-          stop_launcher() {
-            if [ -n "$launcher_pid" ]; then
-              kill -TERM -- "-$launcher_pid" 2>/dev/null || true
-              wait "$launcher_pid" 2>/dev/null || true
-              launcher_pid=""
-            fi
-          }
-          cleanup() {
-            stop_launcher
-            bun run dev:clean --yes
-          }
-          trap cleanup EXIT
-          for attempt in 1 2; do
-            log="$RUNNER_TEMP/opengeni-startup-$attempt.log"
-            setsid bun run dev >"$log" 2>&1 &
-            launcher_pid=$!
-            deadline=$((SECONDS + 2700))
-            until grep -q "OpenGeni dev stack ready:" "$log"; do
-              if ! kill -0 "$launcher_pid" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
-                tail -100 "$log"
-                exit 1
-              fi
-              sleep 5
-            done
-            # This generated file belongs only to this job's unique project.
-            set -a
-            source .env.runtime
-            set +a
-            for port in "$OPENGENI_API_PORT" "$OPENGENI_WORKER_HTTP_PORT" "$OPENGENI_TURN_WORKER_HTTP_PORT" "$OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT" "$OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT"; do
-              curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:$port/healthz"
-            done
-            curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:$OPENGENI_WEB_PORT/" >/dev/null
-            curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:$OPENGENI_API_PORT/v1/workspaces" >"$RUNNER_TEMP/opengeni-workspaces-$attempt.json"
-            if [ "$attempt" = 1 ]; then
-              bunx --no-install playwright install --with-deps chromium
-            fi
-            node --input-type=module <<'JS'
-            import { chromium } from 'playwright';
-            const browser = await chromium.launch({ headless: true });
-            try {
-              const page = await browser.newPage();
-              const errors = [];
-              page.on('pageerror', error => errors.push(error.message));
-              await page.goto(`http://127.0.0.1:${process.env.OPENGENI_WEB_PORT}/`, { waitUntil: 'domcontentloaded' });
-              await page.getByText('What should the agent do?', { exact: true }).waitFor({ timeout: 60000 });
-              if (errors.length) throw new Error(errors.join('\n'));
-            } finally { await browser.close(); }
-          JS
-            git diff --exit-code -- bun.lock package.json
-            if [ "$attempt" = 1 ]; then
-              cp .env.runtime "$RUNNER_TEMP/opengeni-first-runtime"
-            else
-              for setting in OPENGENI_API_PORT OPENGENI_WEB_PORT OPENGENI_POSTGRES_HOST_PORT; do
-                diff <(grep "^$setting=" "$RUNNER_TEMP/opengeni-first-runtime") <(grep "^$setting=" .env.runtime)
-              done
-            fi
-            stop_launcher
-          done
+          bash scripts/ci/local-startup.sh verify
+          bash scripts/ci/local-startup.sh restart
+          bash scripts/ci/local-startup.sh verify
+      - name: Clean only the acceptance project
+        if: always()
+        timeout-minutes: 3
+        run: bash scripts/ci/local-startup.sh clean
       - name: Retain startup logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

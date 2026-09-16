@@ -1,3 +1,4 @@
+import { seedSenderConnections } from "./sender-connection-fixture";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { MODEL_CONTEXT_LABEL, type McpPersonalConnectionDelegation } from "@opengeni/contracts";
 import { and, asc, eq } from "drizzle-orm";
@@ -83,6 +84,11 @@ async function submit(
   delivery: "send" | "steer" = "send",
   personalConnectionDelegations: McpPersonalConnectionDelegation[] = [],
 ) {
+  await seedSenderConnections(
+    shared.admin,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+    personalConnectionDelegations,
+  );
   return await withWorkspaceSubjectRls(client.db, grant.workspaceId!, grant.subjectId, (db) =>
     db.transaction((tx) =>
       submitHumanPromptInTransaction(tx as unknown as typeof db, {

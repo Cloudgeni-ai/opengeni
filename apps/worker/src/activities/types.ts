@@ -434,6 +434,7 @@ export type DispatchScheduledTaskRunResult =
         | "scheduled_authority_exhausted"
         | "scheduled_run_terminal"
         | "scheduled_execution_unrepresentable"
+        | "connection_account_unavailable"
         | "knowledge_source_paused"
         | "legacy_source_schedule_requires_migration"
         | "incident_preflight_metadata_missing"

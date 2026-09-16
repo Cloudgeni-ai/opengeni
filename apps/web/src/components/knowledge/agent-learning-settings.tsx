@@ -15,6 +15,50 @@ export const LEARNING_MODE_LABEL: Record<AgentLearningMode, string> = {
   review_first: "Review first",
   off: "Off",
 };
+const UPDATE_PERMISSION_LABEL: Record<AgentLearningMode, string> = {
+  automatic: "Allow updates",
+  review_first: "Review first",
+  off: "Don’t allow updates",
+};
+
+const UPDATE_PERMISSION_HELP =
+  "Allow updates applies changes automatically. Review first requires approval. Don’t allow updates prevents agent changes.";
+
+function LearningModeSelect(props: {
+  id: string;
+  value: AgentLearningMode | "inherit";
+  defaultMode?: AgentLearningMode;
+  allowInherit: boolean;
+  compact?: boolean;
+  describedBy?: string;
+  onChange: (mode: AgentLearningMode | "inherit") => void;
+}) {
+  const labels = props.compact ? UPDATE_PERMISSION_LABEL : LEARNING_MODE_LABEL;
+  const effectiveMode = props.value === "inherit" ? props.defaultMode : props.value;
+  return (
+    <Select
+      id={props.id}
+      aria-describedby={props.describedBy}
+      value={props.value}
+      className={props.compact ? "w-[174px]" : undefined}
+      displayValue={
+        props.compact ? (effectiveMode ? labels[effectiveMode] : "Use default") : undefined
+      }
+      onChange={(event) => props.onChange(event.target.value as AgentLearningMode | "inherit")}
+    >
+      {props.allowInherit ? (
+        <option value="inherit">
+          Use default{props.defaultMode ? ` (${labels[props.defaultMode]})` : ""}
+        </option>
+      ) : null}
+      {Object.entries(labels).map(([value, label]) => (
+        <option key={value} value={value}>
+          {label}
+        </option>
+      ))}
+    </Select>
+  );
+}
 const CATEGORIES: { key: AgentLearningCategory; label: string; description: string }[] = [
   {
     key: "knowledge",
@@ -36,6 +80,7 @@ type AgentLearningSettingsEditorProps = {
   source?: AgentLearningContext;
   canEdit?: boolean;
   onSaved?: () => void;
+  compact?: boolean;
 };
 export function AgentLearningSettingsEditor(props: AgentLearningSettingsEditorProps) {
   const identity = JSON.stringify([
@@ -133,44 +178,47 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
 
   return (
     <div className="grid gap-3">
-      <p className="text-xs leading-5 text-fg-muted">
-        Automatic saves become available immediately. Review first saves a proposal and lets the
-        agent continue. Off stops agent changes; existing knowledge and skills remain available.
-      </p>
+      {!props.compact ? (
+        <p className="text-xs leading-5 text-fg-muted">
+          Automatic saves become available immediately. Review first saves a proposal and lets the
+          agent continue. Off stops agent changes; existing knowledge and skills remain available.
+        </p>
+      ) : (
+        <p id={`${fieldId}-permissions`} className="sr-only">
+          {UPDATE_PERMISSION_HELP}
+        </p>
+      )}
       <fieldset disabled={saving || props.canEdit === false} className="divide-y divide-border">
-        <legend className="sr-only">Agent learning</legend>
+        <legend className="sr-only">{props.compact ? "Agent updates" : "Agent learning"}</legend>
         {CATEGORIES.map(({ key, label, description }) => (
           <div key={key} className="flex flex-wrap items-center justify-between gap-3 py-3">
             <div className="min-w-0 flex-1">
               <label htmlFor={`${fieldId}-${key}`} className="text-sm font-medium">
                 {label}
               </label>
-              <p id={`${fieldId}-${key}-help`} className="mt-1 text-xs text-fg-muted">
-                {description}
-              </p>
-            </div>
-            <Select
-              id={`${fieldId}-${key}`}
-              aria-describedby={`${fieldId}-${key}-help`}
-              value={record.settings[key] ?? "inherit"}
-              onChange={(event) =>
-                void save(key, event.target.value as AgentLearningMode | "inherit")
-              }
-            >
-              {props.source ? (
-                <option value="inherit">
-                  Use default ({LEARNING_MODE_LABEL[defaults?.settings[key] ?? "review_first"]})
-                </option>
+              {!props.compact ? (
+                <p id={`${fieldId}-${key}-help`} className="mt-1 text-xs text-fg-muted">
+                  {description}
+                </p>
               ) : null}
-              {Object.entries(LEARNING_MODE_LABEL).map(([value, title]) => (
-                <option key={value} value={value}>
-                  {title}
-                </option>
-              ))}
-            </Select>
+            </div>
+            <LearningModeSelect
+              id={`${fieldId}-${key}`}
+              describedBy={props.compact ? `${fieldId}-permissions` : `${fieldId}-${key}-help`}
+              value={record.settings[key] ?? "inherit"}
+              compact={props.compact}
+              allowInherit={!!props.source}
+              defaultMode={defaults?.settings[key] ?? "review_first"}
+              onChange={(mode) => void save(key, mode)}
+            />
           </div>
         ))}
       </fieldset>
+      {props.compact ? (
+        <p className="text-xs text-fg-muted">
+          Agents can still use these resources when updates are off.
+        </p>
+      ) : null}
       {props.canEdit === false ? (
         <p className="text-xs text-fg-muted">
           A workspace administrator can change these defaults.
@@ -181,7 +229,7 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
           {error}
         </p>
       ) : null}
-      <p role="status" className="text-xs text-fg-muted">
+      <p role="status" className={saving || saved ? "text-xs text-fg-muted" : "sr-only"}>
         {saving ? "Saving…" : saved ? "Saved. Applies from the next agent run." : ""}
       </p>
     </div>
@@ -195,6 +243,7 @@ export function AgentLearningDraftEditor(props: {
   value: AgentLearningOverrides;
   onChange: (value: AgentLearningOverrides) => void;
   disabled?: boolean;
+  compact?: boolean;
 }) {
   const { client } = useAppContext();
   const id = useId();
@@ -203,6 +252,7 @@ export function AgentLearningDraftEditor(props: {
   useEffect(() => {
     let current = true;
     setDefaults(null);
+    setError(null);
     setError(null);
     void client
       .getAgentLearningSettings(props.workspaceId, props.scope)
@@ -217,39 +267,57 @@ export function AgentLearningDraftEditor(props: {
     };
   }, [client, props.workspaceId, props.scope]);
   return (
-    <fieldset disabled={props.disabled} className="grid gap-3">
-      <legend className="mb-2 text-sm font-medium">Agent learning</legend>
-      <p className="text-xs text-fg-muted">
-        Override the defaults here. Review first saves proposals without pausing the agent.
-      </p>
-      {CATEGORIES.map(({ key, label }) => (
-        <div key={key} className="flex flex-wrap items-center justify-between gap-2">
-          <label htmlFor={`${id}-${key}`} className="text-sm">
-            {label}
-          </label>
-          <Select
-            id={`${id}-${key}`}
-            value={props.value[key] ?? "inherit"}
-            onChange={(event) => {
-              const next = { ...props.value };
-              const value = event.target.value;
-              if (value === "inherit") delete next[key];
-              else next[key] = value as AgentLearningMode;
-              props.onChange(next);
-            }}
+    <fieldset disabled={props.disabled} className={props.compact ? "min-w-0" : "grid gap-3"}>
+      <legend className={props.compact ? "sr-only" : "mb-2 text-sm font-medium"}>
+        {props.compact ? "Agent updates" : "Agent learning"}
+      </legend>
+      {!props.compact ? (
+        <p className="text-xs text-fg-muted">
+          Override the defaults here. Review first saves proposals without pausing the agent.
+        </p>
+      ) : (
+        <p id={`${id}-permissions`} className="sr-only">
+          {UPDATE_PERMISSION_HELP}
+        </p>
+      )}
+      <div className={props.compact ? "divide-y divide-border" : "grid gap-3"}>
+        {CATEGORIES.map(({ key, label }) => (
+          <div
+            key={key}
+            className={
+              props.compact
+                ? "flex flex-wrap items-center justify-between gap-3 py-3"
+                : "flex flex-wrap items-center justify-between gap-2"
+            }
           >
-            <option value="inherit">
-              Use default
-              {defaults?.settings[key] ? ` (${LEARNING_MODE_LABEL[defaults.settings[key]]})` : ""}
-            </option>
-            {Object.entries(LEARNING_MODE_LABEL).map(([value, modeLabel]) => (
-              <option key={value} value={value}>
-                {modeLabel}
-              </option>
-            ))}
-          </Select>
-        </div>
-      ))}
+            <label
+              htmlFor={`${id}-${key}`}
+              className={props.compact ? "min-w-0 flex-1 text-sm font-medium" : "text-sm"}
+            >
+              {label}
+            </label>
+            <LearningModeSelect
+              id={`${id}-${key}`}
+              value={props.value[key] ?? "inherit"}
+              compact={props.compact}
+              describedBy={props.compact ? `${id}-permissions` : undefined}
+              defaultMode={defaults?.settings[key]}
+              allowInherit
+              onChange={(value) => {
+                const next = { ...props.value };
+                if (value === "inherit") delete next[key];
+                else next[key] = value as AgentLearningMode;
+                props.onChange(next);
+              }}
+            />
+          </div>
+        ))}
+      </div>
+      {props.compact ? (
+        <p className="mt-3 text-xs text-fg-muted">
+          Agents can still use these resources when updates are off.
+        </p>
+      ) : null}
       {error ? (
         <p role="alert" className="text-xs text-status-error">
           Couldn't load defaults: {error}

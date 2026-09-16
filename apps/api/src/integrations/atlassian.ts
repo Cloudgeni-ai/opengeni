@@ -1,3 +1,8 @@
+type AtlassianRequestAuthority = {
+  connectionUseContext?: Omit<AcceptedConnectionUseContext, "physicalRequestId" | "usePhase">;
+};
+
+import type { AcceptedConnectionUseContext } from "@opengeni/db";
 import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
@@ -436,7 +441,11 @@ export async function completeAtlassianOAuthCallback(
 
 export async function browseAtlassianSources(
   deps: ApiRouteDeps,
-  input: { workspaceId: string; subjectId: string; connectionId: string },
+  input: AtlassianRequestAuthority & {
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+  },
 ) {
   const connection = await getConnectionMetadata(
     deps.db,
@@ -477,7 +486,7 @@ export async function browseAtlassianSources(
 
 export async function searchAtlassianLive(
   deps: ApiRouteDeps,
-  input: {
+  input: AtlassianRequestAuthority & {
     workspaceId: string;
     subjectId: string;
     connectionId: string;
@@ -580,7 +589,7 @@ export async function searchAtlassianLive(
 
 export async function getAtlassianLiveItem(
   deps: ApiRouteDeps,
-  input: {
+  input: AtlassianRequestAuthority & {
     workspaceId: string;
     subjectId: string;
     connectionId: string;
@@ -1234,7 +1243,7 @@ async function materializeSchedules(
           action: { kind: "agent_turn" },
           runMode: "new_session_per_run",
           targetSessionId: null,
-          connectionAuthorities: [],
+          connectionAccounts: [],
           agentConfig: knowledgeSourceAgentConfig(action),
           variableSetId: null,
           environmentId: null,
@@ -1299,7 +1308,11 @@ async function materializeSchedules(
 
 async function browseJiraProjects(
   deps: ApiRouteDeps,
-  input: { workspaceId: string; subjectId: string; connectionId: string },
+  input: AtlassianRequestAuthority & {
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+  },
   site: AtlassianSite,
 ): Promise<AtlassianBrowseItem[]> {
   const items: AtlassianBrowseItem[] = [];
@@ -1345,7 +1358,11 @@ async function browseJiraProjects(
 
 async function browseConfluenceSpaces(
   deps: ApiRouteDeps,
-  input: { workspaceId: string; subjectId: string; connectionId: string },
+  input: AtlassianRequestAuthority & {
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+  },
   site: AtlassianSite,
 ): Promise<AtlassianBrowseItem[]> {
   const items: AtlassianBrowseItem[] = [];
@@ -1403,7 +1420,7 @@ export function confluenceNextUrl(cloudId: string, next: string): URL {
 
 async function atlassianApiRequest(
   deps: ApiRouteDeps,
-  input: {
+  input: AtlassianRequestAuthority & {
     workspaceId: string;
     subjectId: string;
     connectionId: string;
@@ -1424,9 +1441,20 @@ async function atlassianApiRequest(
   });
   const resolve = async (forceRefresh: boolean) =>
     await resolver({
-      workspaceId: input.workspaceId,
+      workspaceId: input.connectionUseContext?.workspaceId ?? input.workspaceId,
+      ...(input.connectionUseContext
+        ? {
+            connectionUseContext: {
+              ...input.connectionUseContext,
+              physicalRequestId: crypto.randomUUID(),
+              usePhase: "credential_resolution" as const,
+            },
+          }
+        : {}),
       subjectId: input.subjectId,
-      serverId: "atlassian-source-browser",
+      serverId: input.connectionUseContext
+        ? `atlassian:${input.connectionId}`
+        : "atlassian-source-browser",
       toolName: input.label,
       connectionRef: {
         providerDomain: ATLASSIAN_PROVIDER_DOMAIN,
@@ -1833,7 +1861,12 @@ function cqlString(value: string): string {
 
 async function readJiraLiveComments(
   deps: ApiRouteDeps,
-  input: { workspaceId: string; subjectId: string; connectionId: string; id: string },
+  input: AtlassianRequestAuthority & {
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    id: string;
+  },
   cloudId: string,
 ) {
   const comments: Array<{ author: string | null; createdAt: string | null; body: string }> = [];
@@ -1866,7 +1899,12 @@ async function readJiraLiveComments(
 
 async function readConfluenceLiveComments(
   deps: ApiRouteDeps,
-  input: { workspaceId: string; subjectId: string; connectionId: string; id: string },
+  input: AtlassianRequestAuthority & {
+    workspaceId: string;
+    subjectId: string;
+    connectionId: string;
+    id: string;
+  },
   cloudId: string,
 ) {
   const comments: Array<{ createdAt: string | null; content: string }> = [];

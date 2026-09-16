@@ -18,7 +18,6 @@ import {
   type EnableCapabilityRequest,
   type McpServerConnectionRef,
   type McpPersonalConnectionDelegation,
-  OPENGENI_PERSONAL_SLACK_MCP_URL,
   assertOrganizationIntegrationAllowed,
   type SocialConnection,
 } from "@opengeni/contracts";
@@ -64,7 +63,7 @@ import { hasPermission } from "../access";
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { listCapabilityPacks, listWorkspaceCapabilityPacks } from "./packs";
-import { assertHostMcpAuthoritySourceAdmissionEnabled } from "./host-mcp-authority-source-admission";
+import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -73,7 +72,6 @@ const mcpRegistryMaxPages = 3;
 const mcpCapabilityProbeTimeoutMs = 15000;
 const maxMcpCredentialHeaders = 16;
 const maxMcpCredentialHeaderValueLength = 4096;
-const officialGmailMcpUrl = "https://gmailmcp.googleapis.com/mcp/v1";
 // RFC 9110 field-name token characters.
 const mcpCredentialHeaderName = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
 
@@ -93,6 +91,7 @@ export async function buildCapabilityCatalog(input: {
     curatedLibrarySkills,
     installedSkills,
     codexAppsCredentialId,
+    runnableMcpServers,
   ] = await Promise.all([
     listCapabilityCatalogItems(input.db, input.workspaceId),
     listCapabilityInstallations(input.db, input.workspaceId),
@@ -105,7 +104,9 @@ export async function buildCapabilityCatalog(input: {
     input.settings.codexConnectedAppsEnabled
       ? resolveCodexAppsCredentialIdForRun(input.db, input.workspaceId)
       : Promise.resolve(null),
+    listEnabledMcpCapabilityServers(input.db, input.workspaceId),
   ]);
+  const runnableCapabilityIds = new Set(runnableMcpServers.map((server) => server.capabilityId));
   const catalogInstallations = capabilityInstallations.filter(
     (installation) => installation.kind === "mcp",
   );
@@ -159,7 +160,25 @@ export async function buildCapabilityCatalog(input: {
         item.kind === "skill"
           ? applyInstalledSkillEnablement(item, installedSkillById.get(item.id))
           : applyCapabilityEnablement(item, capabilityInstallationById.get(item.id), activePackIds);
-      return applyCapabilityLifecycle(projected);
+      // An installed connector can become unrunnable after a lifecycle or
+      // ownership change. Use the execution registry rather than presenting
+      // its stale catalog definition as a selectable tool.
+      const runtimeProjected =
+        projected.kind === "mcp" &&
+        projected.enabled &&
+        projected.source !== "configured" &&
+        projected.source !== "built_in" &&
+        !runnableCapabilityIds.has(projected.id)
+          ? {
+              ...projected,
+              runtime: {
+                ...projected.runtime,
+                available: false,
+                notes: "This installed connection is unavailable. Review its connection settings.",
+              },
+            }
+          : projected;
+      return applyCapabilityLifecycle(runtimeProjected);
     })
     .sort(compareCatalogItems);
   return {
@@ -517,20 +536,6 @@ async function validateMcpCapabilityConnectionRef(
   ref: McpServerConnectionRef,
 ): Promise<McpServerConnectionRef> {
   const subjectScope = ref.subjectScope ?? "workspace";
-  const endpointUrl = item.endpointUrl?.replace(/\/+$/, "");
-  // Gmail is a consumer mailbox; Slack's hosted MCP issues user tokens only and
-  // shared Slack authority belongs to the OpenGeni workspace bot. Neither may
-  // become a workspace-owned connection reference.
-  const personalOnly =
-    item.metadata.connectionOwnership === "personal_only" ||
-    endpointUrl === officialGmailMcpUrl ||
-    endpointUrl === OPENGENI_PERSONAL_SLACK_MCP_URL;
-  if (personalOnly && subjectScope !== "subject") {
-    throw new HTTPException(422, {
-      message:
-        "this capability requires a personal connection; each workspace member must connect their own account",
-    });
-  }
   const normalized: McpServerConnectionRef = {
     providerDomain: ref.providerDomain.trim(),
     subjectScope,
@@ -560,7 +565,7 @@ async function validateMcpCapabilityConnectionRef(
     });
   }
   if (normalized.authoritySource === "host") {
-    assertHostMcpAuthoritySourceAdmissionEnabled(input.settings, normalized);
+    assertNativeMcpConnectionRef(normalized);
     return normalized;
   }
 
@@ -1213,6 +1218,12 @@ function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] 
           category: "configured",
           tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
           endpointUrl: server.url,
+          // Deployment-managed personal selectors need the same account picker
+          // as installed connectors. Fixed bindings remain server-resolved.
+          connectionRef:
+            server.connectionRef?.subjectScope === "subject" && !server.connectionRef.connectionId
+              ? installationConnectionRef({ connectionRef: server.connectionRef })
+              : null,
           tools: [{ kind: "mcp", id: server.id }],
           runtime: {
             available: true,
@@ -1649,7 +1660,7 @@ export function applyCapabilityEnablement(
       ...item,
       enabled: true,
       enabledReason: "managed by deployment",
-      connectionRef: null,
+      connectionRef: item.connectionRef,
     };
   }
   if (item.source === "built_in") {
@@ -1691,7 +1702,10 @@ function applyCapabilityLifecycle(item: CapabilityCatalogItem): CapabilityCatalo
         detail: item.runtime.notes,
         managedBy: item.source === "built_in" ? "platform" : null,
       },
-      actions: ["inspect"],
+      actions:
+        item.enabled && item.kind === "mcp" && item.source !== "built_in"
+          ? ["disconnect", "inspect"]
+          : ["inspect"],
     };
   }
 

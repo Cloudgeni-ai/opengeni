@@ -115,8 +115,10 @@ returns on the configured environment origin. The callback preserves only Better
 Auth's state cookie, resolves the exact provider login binding, adopts the newly
 created session before redirecting to `/account-auth`, and then removes the ambient
 provider session cookie. A provider cannot create a managed social identity from
-an unverified email assertion, a callback cannot select another browser slot, and
-automatic email-match account linking remains disabled.
+an unverified email assertion, and a callback cannot select another browser slot.
+Automatic linking requires both the existing local email and incoming provider
+email to be verified and matching, and must respect explicit-disconnect
+suppression. See [Personal sign-in methods](#personal-sign-in-methods).
 
 The session-set-capable signed-out surface uses that isolated Add path for sign-in
 in both `dual` and `broker`. Account creation and verification resend remain
@@ -162,13 +164,15 @@ actor epoch so binding-private state cannot survive.
 
 ## Security invariants
 
-- Browser projections contain bounded display name, verified email claim, slot
+- Browser session-set projections contain bounded display name, verified email claim, slot
   UUID/state, counters, and CSRF proof only. They contain no Better Auth token,
   provider session id, return-intent secret, canonical identity id, login-binding
   id, organization id, or workspace id.
-- Better Auth automatic account linking remains disabled. Slot identity comes
-  only from the isolated authenticated provider result and canonical binding
-  lookup; never from URL, email selection, local storage, or callback parameters.
+- Verified-email automatic linking does not choose a browser slot. Slot identity
+  comes only from the isolated authenticated provider result and canonical
+  binding lookup; never from URL, email selection, local storage, or callback
+  parameters. The separate authenticated sign-in-method projection carries an
+  expected canonical identity fence for settings mutations, not slot authority.
 - Ordinary selected-session reads are side-effect free until a fenced actor lease
   is held. Revision drift, password recovery, provider revocation, or canonical
   binding change invalidates only the affected slot.
@@ -271,3 +275,87 @@ Canonical source: `packages/db/drizzle/0362_managed_auth_session_sets.sql`,
 `apps/api/src/auth/managed-auth-session-adapter.ts`,
 `packages/contracts/src/managed-auth-session-sets.ts`,
 `packages/sdk/src/accounts.ts`, and `packages/react/src/accounts.tsx`.
+
+## Personal sign-in methods
+
+Migration `0477_managed_sign_in_methods.sql` adds managed-human sign-in method
+management. This is a maintenance release: drain the old application roles,
+apply migrations, provision the restricted runtime role, then start the matching
+binary. Do not restart an old API exposing Better Auth's raw account-management
+routes. It does not change the configured `legacy` / `dual` / `broker` rollout.
+
+The product-owned API is:
+
+- `GET /v1/auth/sign-in-methods`: verified-email status, canonical identity
+  `identityId` and revision, freshness requirement, and secret-free credential/Google/GitHub
+  availability, connection, disconnect, and implicit-relink-suppression flags.
+- `POST /v1/auth/sign-in-methods/connect`: `operationId`,
+  `expectedIdentityId`, `expectedIdentityRevision`, and `provider` (`google` or `github`); returns an
+  OAuth authorization `url`. A provider account ID supplied by a client is never
+  proof. The callback consumes Better Auth's database-backed state and a separate
+  expiring, single-use product intent bound to the original human/session/actor.
+- `POST /v1/auth/sign-in-methods/disconnect`: the same request shape, without
+  OAuth navigation. It refuses to remove the last usable configured method.
+- `POST /v1/auth/sign-in-methods/password`: `operationId`,
+  `expectedIdentityId`, `expectedIdentityRevision`, `newPassword` (8–128 characters), and
+  `currentPassword` when a password already exists. Existing password proof is
+  rechecked by hash comparison under the same transaction as the update.
+
+All mutations require a verified local email, a live canonical managed-cookie
+session authenticated within five minutes, same-origin JSON browser admission,
+and the expected identity revision. Session refresh/mirroring does not create a
+new authentication timestamp. The expected canonical identity is a non-authorizing
+view fence, compared before work and at commit: a legacy cookie swap from human A
+to human B cannot apply A's form to B even when their revision numbers match.
+Freshness means a recent explicit OpenGeni password sign-in or verified provider
+authorization-code sign-in, not a guarantee of forced password/MFA entry at the
+provider; Google/GitHub may reuse their own SSO sessions. The unsupported raw
+ID-token shortcut is rejected. Dual/broker callers must first establish a selected
+session set and send its CSRF and actor-epoch headers. The commit rechecks actor
+authority and refuses competing actor mutations. OAuth completion rechecks the
+original actor again; switching, revoking, or aging out its proof cannot transfer
+a pending connection to another human.
+Legacy callbacks also require the browser's current signed session cookie to
+match the initiating session; a same-browser account replacement cancels the
+pending connection rather than applying it to the previous view.
+
+Raw managed-provider recovery initiation is not a sign-in-method toggle. Existing
+legitimate lost-factor recovery can still complete, but only with a fresh
+recovery-only session for the exact pending binding, verified local email,
+same-origin admission, and transactional actor/revision fencing. Completion
+records its notification obligation with the canonical recovery change.
+
+Changes use the canonical binding/revision lifecycle and invalidate the human's
+existing provider sessions. Affected slots become `reauth_required`, selected
+actors require reconciliation, and successful password/disconnect responses carry
+`reauthenticationRequired: true`. Connect returns to
+`/settings/security?signInMethod=connected` or `/settings/security?signInMethod=error`; the latter may include an
+`error` code. Clients must not continue using the old actor after success.
+
+Sensitive changes send notices through the existing managed-email transport.
+Password/disconnect responses expose delivery as `notification: sent | failed |
+outcome_unknown`; delivery failure does not undo committed security changes.
+The database commits one notification obligation with each security change.
+API replicas claim pending delivery with lease fencing and retry using the same
+provider idempotency key. The verified destination, sender, provider scope and
+idempotency deadline are frozen; changing provider or exhausting that guarantee
+leaves uncertain delivery for operator reconciliation rather than risking a
+duplicate notice. A crash before delivery is recoverable, and a crash after
+provider acceptance retries only inside the original provider guarantee.
+
+Provider tokens, account IDs, password hashes, internal sessions and intent
+payloads are excluded from the list response. After a lost mutation response,
+reauthenticate as the same human and replay the same operation ID and exact
+request payload. The durable keyed digest is secret-keyed, including password
+requests; altered payloads or another human are rejected. Replay returns the
+committed result without mutating methods or enqueueing another notice. A revoked
+session itself cannot retrieve a receipt. Mutation attempts are limited to ten
+per human per minute before password hashing or OAuth-state creation; committed
+result replay does not consume that budget.
+
+Canonical implementation: `apps/api/src/routes/managed-sign-in-methods.ts`,
+`packages/contracts/src/managed-sign-in-methods.ts`, and migration 0477. The
+restricted-PostgreSQL/Better Auth integration suite is
+`apps/api/test/managed-sign-in-methods.integration.test.ts`. Its simulated provider
+responses exercise real OAuth state and callback processing; they are not live
+Google/GitHub acceptance evidence.

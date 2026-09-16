@@ -1,5 +1,43 @@
 import { expect, test } from "bun:test";
-import { createBrowserConnectNavigation } from "../src";
+import { createBrowserConnectNavigation, reserveBrowserConnectNavigation } from "../src";
+
+test("reserves an isolated popup before discovery and navigates without another click", async () => {
+  const destinations: string[] = [];
+  let opens = 0;
+  let closed = false;
+  const popup = {
+    opener: {} as unknown,
+    location: {
+      replace(url: string) {
+        destinations.push(url);
+      },
+    },
+    close() {
+      closed = true;
+    },
+  };
+  const reserved = reserveBrowserConnectNavigation({
+    open() {
+      opens++;
+      return popup;
+    },
+    location: {
+      assign() {
+        throw new Error("unexpected redirect");
+      },
+    },
+  });
+  expect(opens).toBe(1);
+  expect(popup.opener).toBeNull();
+  expect(destinations).toEqual([]);
+  await Promise.resolve();
+  expect(() => reserved.navigation.openPopup("http://provider.example")).toThrow();
+  reserved.navigation.openPopup("https://provider.example/authorize?state=exact");
+  expect(opens).toBe(1);
+  expect(destinations).toEqual(["https://provider.example/authorize?state=exact"]);
+  reserved.close();
+  expect(closed).toBe(true);
+});
 
 test("isolates fresh popup before navigating and preserves exact destination", () => {
   const url = "https://provider.example/oauth?state=%2f#original";

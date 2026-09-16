@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 
-import { stableJson, type CapabilityCatalogAuthKind, type SkillActor } from "@opengeni/contracts";
+import {
+  stableJson,
+  type CapabilityCatalogAuthKind,
+  type SkillActor,
+  type PluginUninstallComponentImpact,
+  type PluginUninstallPreview,
+} from "@opengeni/contracts";
 import { and, asc, eq, inArray, ne, or, sql } from "drizzle-orm";
 
 import {
@@ -8,8 +14,19 @@ import {
   cleanupOrphanedCapabilityComponents,
   lockCapabilityComponentIdentity,
 } from "./capability-components";
-import { setSubjectRlsContext, withRlsContext, withWorkspaceRls, type Database } from "./database";
-import type { SkillSourceReleaseReceipt } from "./skill-source-release";
+import {
+  rawRows,
+  setSubjectRlsContext,
+  withRlsContext,
+  withWorkspaceRls,
+  type Database,
+} from "./database";
+import {
+  readSkillSourceReleaseHeads,
+  SkillSourceReleaseSnapshotChangedError,
+  type SkillSourceReleaseReceipt,
+} from "./skill-source-release";
+import { classifySkillSourceRelease } from "./skill-source-release-impact";
 import {
   removeIntegrationFacetBindingOwner,
   removeIntegrationFacetBindingOwnersForOwner,
@@ -22,6 +39,7 @@ import {
 } from "./skill-publication";
 import type { SkillPublicationReceipt } from "@opengeni/contracts";
 import { withOrganizationIntegrationAcquisition } from "./organization-integration-policy";
+import { nestedPostgresSqlState } from "./persistence-errors";
 
 export type PluginBomComponent = {
   key: string;
@@ -69,6 +87,14 @@ export class PluginOperationIdempotencyError extends Error {
 
 export class PluginInstallationVersionConflictError extends Error {
   readonly name = "PluginInstallationVersionConflictError";
+}
+
+export class PluginUninstallPreviewChangedError extends Error {
+  readonly code = "plugin_uninstall_preview_changed";
+  constructor(readonly preview?: PluginUninstallPreview) {
+    super("Plugin removal impact changed. Review the refreshed preview before confirming again.");
+    this.name = "PluginUninstallPreviewChangedError";
+  }
 }
 
 export class PluginInstallationVersionRequiredError extends Error {
@@ -909,31 +935,21 @@ export async function getPluginPackageUninstallPreview(
   db: Database,
   workspaceId: string,
   pluginKey: string,
-): Promise<{
-  installed: boolean;
-  version: string | null;
-  installationVersion: number | null;
-  components: Array<{
-    capabilityId: string;
-    kind: "skill" | "integration" | "mcp";
-    retainedByOtherOwners: boolean;
-  }>;
-}> {
+  subjectId?: string,
+): Promise<Omit<PluginUninstallPreview, "pluginKey">> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    if (subjectId) await setSubjectRlsContext(scopedDb, subjectId);
     const plugin = await pluginPackageInScope(scopedDb, workspaceId, pluginKey);
     if (!plugin || plugin.status === "disabled") {
       return { installed: false, version: null, installationVersion: null, components: [] };
     }
-    const components = await pluginOwnedComponents(
-      scopedDb,
-      workspaceId,
-      plugin.pluginInstallationId,
-    );
+    const impact = await pluginOwnedComponents(scopedDb, workspaceId, plugin.pluginInstallationId);
     return {
       installed: true,
       version: plugin.version,
       installationVersion: plugin.installationVersion,
-      components,
+      components: impact.components,
+      previewToken: pluginUninstallPreviewToken(plugin, impact.stateToken),
     };
   });
 }
@@ -946,6 +962,7 @@ export async function uninstallPluginPackage(
     subjectId: string;
     pluginKey: string;
     expectedInstallationVersion: number;
+    expectedPreviewToken?: string;
     idempotencyKey: string;
     skillActor?: SkillActor;
   },
@@ -958,6 +975,7 @@ export async function uninstallPluginPackage(
     stableJson({
       pluginKey: input.pluginKey,
       expectedInstallationVersion: input.expectedInstallationVersion,
+      ...(input.expectedPreviewToken ? { expectedPreviewToken: input.expectedPreviewToken } : {}),
     }),
   );
   return await withRlsContext(
@@ -967,6 +985,7 @@ export async function uninstallPluginPackage(
       await setSubjectRlsContext(scopedDb, input.subjectId);
       return await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        await lockSkillPublication(tx, input.workspaceId);
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`capability-operation:${input.workspaceId}:${input.idempotencyKey}`}, 0))`,
         );
@@ -1015,11 +1034,78 @@ export async function uninstallPluginPackage(
         if (plugin.installationVersion !== input.expectedInstallationVersion) {
           throw new PluginInstallationVersionConflictError("Plugin installation changed");
         }
-        const components = await pluginOwnedComponents(
+        // Match cleanup/source-refresh ordering: child installations, then canonical
+        // registry heads. Hold these locks through token comparison AND release.
+        await tx.execute(sql`SELECT p.id FROM capability_plugin_installations p
+          WHERE p.workspace_id=${input.workspaceId}::uuid AND p.id IN (
+            SELECT fi.plugin_installation_id FROM capability_facet_installations fi
+            JOIN capability_component_owners o ON o.facet_installation_id=fi.id
+            WHERE o.workspace_id=${input.workspaceId}::uuid AND o.owner_kind='plugin'
+              AND o.owner_id=${plugin.pluginInstallationId}
+          ) ORDER BY p.id FOR UPDATE`);
+        try {
+          // Facet FK locks fence new owners; owner row locks fence releases by
+          // Packs/direct callers that do not use the Plugin publication lock.
+          // Those paths may remove an owner before acquiring the child lock, so
+          // fail for a refreshed preview rather than creating a lock-order cycle.
+          await tx.execute(sql`SELECT fi.id FROM capability_facet_installations fi
+            WHERE fi.workspace_id=${input.workspaceId}::uuid AND EXISTS (
+              SELECT 1 FROM capability_component_owners own
+              WHERE own.facet_installation_id=fi.id AND own.owner_kind='plugin'
+                AND own.owner_id=${plugin.pluginInstallationId}
+            ) ORDER BY fi.id FOR UPDATE NOWAIT`);
+          await tx.execute(sql`SELECT o.id FROM capability_component_owners o
+            WHERE o.workspace_id=${input.workspaceId}::uuid AND EXISTS (
+              SELECT 1 FROM capability_component_owners own
+              WHERE own.facet_installation_id=o.facet_installation_id
+                AND own.owner_kind='plugin' AND own.owner_id=${plugin.pluginInstallationId}
+            ) ORDER BY o.id FOR UPDATE NOWAIT`);
+        } catch (error) {
+          if (nestedPostgresSqlState(error) === "55P03")
+            throw new PluginUninstallPreviewChangedError();
+          throw error;
+        }
+        const skillBindings = await rawRows<{ id: string }>(
+          tx,
+          sql`
+          SELECT DISTINCT h.id FROM skill_source_bindings b
+          JOIN capability_facet_installations fi ON fi.facet_id=b.skill_facet_id
+            AND fi.account_id=b.account_id AND fi.workspace_id=b.workspace_id
+          JOIN capability_component_owners o ON o.facet_installation_id=fi.id
+          JOIN preference_registry_preferences h ON h.id=b.preference_id AND h.account_id=b.account_id
+          WHERE b.workspace_id=${input.workspaceId}::uuid AND o.owner_kind='plugin'
+            AND o.owner_id=${plugin.pluginInstallationId} ORDER BY h.id`,
+        );
+        for (const head of skillBindings) {
+          try {
+            await tx.execute(
+              sql`SELECT preference_id FROM preference_registry_lock_heads(ARRAY[${head.id}::uuid])`,
+            );
+          } catch (error) {
+            // A concurrent scope move can make the selected head invisible while
+            // this lock waits. Roll back and obtain the refreshed preview outside
+            // the failed transaction, without disclosing the hidden head.
+            if (nestedPostgresSqlState(error) === "42501")
+              throw new PluginUninstallPreviewChangedError();
+            throw error;
+          }
+        }
+        const impact = await pluginOwnedComponents(
           tx,
           input.workspaceId,
           plugin.pluginInstallationId,
         );
+        const previewToken = pluginUninstallPreviewToken(plugin, impact.stateToken);
+        if (input.expectedPreviewToken && input.expectedPreviewToken !== previewToken) {
+          throw new PluginUninstallPreviewChangedError({
+            pluginKey: input.pluginKey,
+            installed: true,
+            version: plugin.version,
+            installationVersion: plugin.installationVersion,
+            previewToken,
+            components: impact.components,
+          });
+        }
         await removeIntegrationFacetBindingOwnersForOwner(tx, {
           workspaceId: input.workspaceId,
           owner: { kind: "plugin", id: plugin.pluginInstallationId },
@@ -1034,12 +1120,20 @@ export async function uninstallPluginPackage(
             ),
           )
           .returning({ facetInstallationId: schema.capabilityComponentOwners.facetInstallationId });
-        const skillReleases = await cleanupOrphanedCapabilityComponents(
-          tx,
-          input.workspaceId,
-          owned.map((row) => row.facetInstallationId),
-          input.skillActor,
-        );
+        let skillReleases: SkillSourceReleaseReceipt[];
+        try {
+          skillReleases = await cleanupOrphanedCapabilityComponents(
+            tx,
+            input.workspaceId,
+            owned.map((row) => row.facetInstallationId),
+            input.skillActor,
+            skillBindings.map((head) => head.id),
+          );
+        } catch (error) {
+          if (error instanceof SkillSourceReleaseSnapshotChangedError)
+            throw new PluginUninstallPreviewChangedError();
+          throw error;
+        }
         await tx
           .update(schema.capabilityPluginInstallations)
           .set({
@@ -1048,8 +1142,8 @@ export async function uninstallPluginPackage(
             updatedAt: new Date(),
           })
           .where(eq(schema.capabilityPluginInstallations.id, plugin.pluginInstallationId));
-        const retainedComponents = components
-          .filter((component) => component.retainedByOtherOwners)
+        const retainedComponents = impact.components
+          .filter((component) => component.disposition === "retained")
           .map((component) => component.capabilityId);
         await completeInlineOperation(tx, input, requestDigest, {
           status: "uninstalled",
@@ -1108,18 +1202,13 @@ async function pluginOwnedComponents(
   db: Database,
   workspaceId: string,
   ownerPluginInstallationId: string,
-): Promise<
-  Array<{
-    capabilityId: string;
-    kind: "skill" | "integration" | "mcp";
-    retainedByOtherOwners: boolean;
-  }>
-> {
+): Promise<{ components: PluginUninstallComponentImpact[]; stateToken: string }> {
   const rows = await db
     .select({
       facetInstallationId: schema.capabilityFacetInstallations.id,
       facetKind: schema.capabilityFacets.kind,
       skillCapabilityId: schema.capabilitySkillFacets.capabilityId,
+      name: schema.capabilityPlugins.name,
       manifest: schema.capabilityPluginVersions.manifest,
     })
     .from(schema.capabilityComponentOwners)
@@ -1145,6 +1234,10 @@ async function pluginOwnedComponents(
       schema.capabilityPluginVersions,
       eq(schema.capabilityPluginVersions.id, schema.capabilityPluginInstallations.pluginVersionId),
     )
+    .innerJoin(
+      schema.capabilityPlugins,
+      eq(schema.capabilityPlugins.id, schema.capabilityPluginInstallations.pluginId),
+    )
     .leftJoin(
       schema.capabilitySkillFacets,
       eq(schema.capabilitySkillFacets.facetId, schema.capabilityFacets.id),
@@ -1159,7 +1252,12 @@ async function pluginOwnedComponents(
     .orderBy(asc(schema.capabilityFacets.kind), asc(schema.capabilityFacets.facetKey));
   const components = new Map<
     string,
-    { capabilityId: string; kind: "skill" | "integration" | "mcp"; facetIds: string[] }
+    {
+      capabilityId: string;
+      name: string;
+      kind: "skill" | "integration" | "mcp";
+      facetIds: string[];
+    }
   >();
   for (const row of rows) {
     const manifest = objectValue(row.manifest);
@@ -1175,15 +1273,26 @@ async function pluginOwnedComponents(
     if (!capabilityId || !kind) continue;
     const existing = components.get(capabilityId);
     if (existing) existing.facetIds.push(row.facetInstallationId);
-    else components.set(capabilityId, { capabilityId, kind, facetIds: [row.facetInstallationId] });
+    else
+      components.set(capabilityId, {
+        capabilityId,
+        kind,
+        name: row.name,
+        facetIds: [row.facetInstallationId],
+      });
   }
-  const result = [];
+  const result: PluginUninstallComponentImpact[] = [];
+  const state: unknown[] = [];
   for (const component of components.values()) {
-    const [ownerCount] = await db
-      .select({ count: sql<number>`count(*)::int` })
+    const owners = await db
+      .select({
+        kind: schema.capabilityComponentOwners.ownerKind,
+        id: schema.capabilityComponentOwners.ownerId,
+      })
       .from(schema.capabilityComponentOwners)
       .where(
         and(
+          eq(schema.capabilityComponentOwners.workspaceId, workspaceId),
           inArray(schema.capabilityComponentOwners.facetInstallationId, component.facetIds),
           // Retention is deliberately physical, not runtime-effective. A Plugin
           // in needs_attention may be resumable and must keep shared component
@@ -1196,13 +1305,94 @@ async function pluginOwnedComponents(
           ),
         ),
       );
+    const remainingOwners: PluginUninstallComponentImpact["remainingOwners"] = [];
+    for (const owner of owners.sort((a, b) =>
+      `${a.kind}:${a.id}`.localeCompare(`${b.kind}:${b.id}`),
+    )) {
+      let name =
+        owner.kind === "direct"
+          ? "Direct installation"
+          : owner.kind === "migration"
+            ? "Migrated installation"
+            : "Another installed owner";
+      if (owner.kind === "plugin") {
+        const [named] = await db
+          .select({ manifest: schema.capabilityPluginVersions.manifest })
+          .from(schema.capabilityPluginInstallations)
+          .innerJoin(
+            schema.capabilityPluginVersions,
+            eq(
+              schema.capabilityPluginVersions.id,
+              schema.capabilityPluginInstallations.pluginVersionId,
+            ),
+          )
+          .where(
+            and(
+              eq(schema.capabilityPluginInstallations.workspaceId, workspaceId),
+              sql`${schema.capabilityPluginInstallations.id}::text = ${owner.id}`,
+            ),
+          );
+        name = stringValue(objectValue(named?.manifest).name) ?? name;
+      } else if (owner.kind === "pack") {
+        const [named] = await db
+          .select({
+            manifest: schema.packInstallations.manifestSnapshot,
+            packId: schema.packInstallations.packId,
+          })
+          .from(schema.packInstallations)
+          .where(
+            and(
+              eq(schema.packInstallations.workspaceId, workspaceId),
+              or(
+                sql`${schema.packInstallations.id}::text = ${owner.id}`,
+                eq(schema.packInstallations.packId, owner.id),
+              ),
+            ),
+          );
+        name = stringValue(objectValue(named?.manifest).name) ?? named?.packId ?? name;
+      }
+      if (!remainingOwners.some((item) => item.kind === owner.kind && item.name === name))
+        remainingOwners.push({
+          kind: owner.kind as PluginUninstallComponentImpact["remainingOwners"][number]["kind"],
+          name,
+        });
+    }
+    const heads =
+      component.kind === "skill"
+        ? await readSkillSourceReleaseHeads(db, workspaceId, component.facetIds)
+        : [];
+    const head = heads[0];
+    const skillImpact = head ? classifySkillSourceRelease(head, workspaceId) : null;
+    const retainedByOtherOwners = owners.length > 0;
+    const retentionReasons: PluginUninstallComponentImpact["retentionReasons"] = [];
+    if (retainedByOtherOwners) retentionReasons.push("other_owners");
+    if (skillImpact) retentionReasons.push(...skillImpact.retentionReasons);
+    else if (component.kind === "skill") retentionReasons.push("registry_unavailable");
+    state.push({ facetIds: component.facetIds, owners, heads });
     result.push({
       capabilityId: component.capabilityId,
       kind: component.kind,
-      retainedByOtherOwners: (ownerCount?.count ?? 0) > 0,
+      name: head?.title ?? component.name,
+      retainedByOtherOwners,
+      disposition: retainedByOtherOwners
+        ? "retained"
+        : (skillImpact?.disposition ?? (component.kind === "skill" ? "retained" : "removed")),
+      retentionReasons,
+      remainingOwners,
+      ...(head ? { skillId: head.id } : {}),
     });
   }
-  return result;
+  return { components: result, stateToken: sha256(stableJson({ state, components: result })) };
+}
+
+function pluginUninstallPreviewToken(plugin: InstalledPluginPackage, stateToken: string): string {
+  return sha256(
+    stableJson({
+      installationId: plugin.pluginInstallationId,
+      version: plugin.installationVersion,
+      stateToken,
+    }),
+  );
 }
 
 async function completeInlineOperation(

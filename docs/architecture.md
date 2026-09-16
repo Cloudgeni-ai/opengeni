@@ -28,9 +28,8 @@ clients and bounded browser access to storage, sandboxes, relays, Codex WebRTC,
 and Gateway realtime WebSockets. Workers run agents in provisioned sandboxes or
 Connected Machines.
 
-The main surfaces are sessions and goals; tools and connections; Knowledge,
-instructions and Skills; files and editable artifacts; and SDK, React and web
-clients. The focused ownership map in §13 gives each area's canonical sources.
+The ownership map in §13 links canonical sources for sessions, tools, Knowledge,
+Skills, artifacts and clients.
 
 External users require explicit live membership. `asUser()` supplies canonical
 identity; an end-user label does not. Private/shared visibility differs from
@@ -146,19 +145,19 @@ External SDK history and append verification: [`run-lifecycle.md`](run-lifecycle
 
 ### 3.4 Long runs are bounded by policy and intent, not arbitrary loop caps
 
-Agents may work for days. Model-call counts, continuations, and elapsed time
-do not establish lack of progress. Controls are budget admission, provider
-capacity, explicit Pause/Cancel, goal state, and host policy.
-
-Recoverable conditions preserve the logical turn/session when safe. An active
-goal creates a durable Postgres continuation-evaluation obligation; Temporal
-signals and workflows are replaceable delivery nudges. Goals do not live in
-`Agent.instructions` or only in workflow memory.
-
-Do not add a generic model-call, continuation, or activity-duration cap as a
-substitute for correcting a recovery, pacing, memory, or tool-lifecycle defect.
+Agents may work for days. Call/continuation/duration counts do not prove stalled
+progress. Controls are budget admission, provider capacity, Pause/Cancel, goal
+state and host policy. Recoverable conditions preserve logical turns/sessions
+when safe. Postgres owns continuation obligations; Temporal delivers replaceable
+nudges. Goals never live in `Agent.instructions` or solely workflow memory.
+Generic caps cannot replace recovery, pacing, memory or tool-lifecycle fixes.
 
 Canonical: [`goals.md`](goals.md) and [`run-lifecycle.md`](run-lifecycle.md).
+
+Reports—including secondary audits—use native documents. Operational instructions
+route; the Documents Skill guides authoring; goal/artifact domains validate
+persisted requirements and current inspection proof. Chat/code/local-file
+exceptions remain. See [`goals.md`](goals.md).
 
 ### 3.5 Each durable store has one job
 
@@ -230,6 +229,14 @@ transaction-local boundary; a resource UUID by itself never authorizes access.
 
 Organization membership, workspace membership, API keys, delegated grants,
 private-session ownership, and personal-resource grants are distinct facts.
+Organization keys with `workspace:admin` may configure their organization's
+private-session product setting through the normal settings API. The shared
+database administrator fence rechecks the live key even on command replay;
+changing this setting grants no access to private session contents.
+Visibility transitions clear session-initial personal connection selections
+under the native transaction-local visibility capability. This cleanup cannot
+change captured turn authority or parent provenance; ordinary writes and
+caller-supplied capability settings alone remain insufficient.
 Do not infer human authority from session creation, current UI identity, a
 worker process, a connection row, or provenance metadata. A turn freezes its
 initiating principal and the authority snapshots needed by later execution and
@@ -1129,6 +1136,11 @@ Capabilities define integration/tool shapes. Connections bind credentials and
 ownership. Session policy selects authorized tools.
 MCP/Codemode execute tools; neither grants authority.
 
+Omitted personal selections restore existing exact-owner grants; explicit empty
+selections suppress restoration. Children inherit captured authority. Canonical:
+`packages/core/src/domain/personal-connection-delegations.ts` and
+[shared connection presentation](connection-presentation.md).
+
 Connector permission management: `packages/core/src/domain/connector-tool-permissions.ts`.
 See [`session-mcp-servers.md`](session-mcp-servers.md).
 
@@ -1299,10 +1311,21 @@ Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.m
 `@opengeni/sdk` owns client contracts; `@opengeni/react` owns hooks/UI.
 `apps/web` consumes them, never owns hidden domain semantics.
 
+`ConnectPanel`, `ConnectionDiscovery` and `McpConnectionCard` share connection
+inventory and OAuth setup across console and embeds. Host presentation filters
+never authorize acquisition. Session-targeted setup preserves exact personal
+consent and tool selection; connection-only setup never mutates a session.
+Canonical mechanics: [shared connection presentation](connection-presentation.md).
+
 `SessionConversation` includes feed, queue/actions, durable composer, model policy,
 human-input forms and history. `ChatComposer` is input-only. Sites supply their
 Site-bound client. Foreground/background share tokens; light embeds set
 `data-og-theme="light"` inside the iframe.
+
+`conversationTimeline`, `SessionChrome`, `SessionCommands` and `ChatComposer`
+share reconciliation and controls. Commands mount only in the open activity drawer.
+`SessionConnectionRequest` resolves exact native identities; missing or ambiguous
+matches fail closed. Selection/grant helpers live in `packages/react/src`.
 
 Sites install exact SDK/React/Codemode/CLI versions from virtual skill file
 `package-versions.json`: source-manifest defaults or canary
@@ -1335,23 +1358,15 @@ repository chips stay eager; local Suspense fallbacks preserve the transcript
 while conditional chunks load. `test/e2e/session-lazy-panels.browser.e2e.ts`
 checks these boundaries against the production build at desktop and mobile sizes.
 
-Most integrations use the standalone service through a server-side SDK proxy
-and optional React surfaces. In-process embedding may bind host identity,
-persistence, event, billing, credential, and worker ports without changing core boundaries.
+Products normally use a server-side SDK proxy and optional React surfaces;
+advanced in-process embedding preserves the same boundaries.
 
-The opt-in `opengeni-product-integration` Pack supplies developer guidance, not
-tools/credentials/customer-facing behavior. `session_selected` requires explicit
-create-time `installedSkillIds`; installation never injects it into chats.
-Migration 0394 requires draining workers lacking this filter. Separate implementation
-workspaces are optional. Canonical:
+The `opengeni-product-integration` Pack is developer guidance, activated only by
+create-time `installedSkillIds`, never installation alone. See
 `packages/core/src/domain/product-integration-pack.ts` and
-[`product-integration.md`](product-integration.md).
+[`product-integration.md`](product-integration.md); migration 0394 requires draining old workers.
 
-Canonical: [`../packages/sdk/README.md`](../packages/sdk/README.md),
-[`../packages/react/README.md`](../packages/react/README.md),
-[`product-integration.md`](product-integration.md),
-[`embedding-workbench.md`](embedding-workbench.md), and
-[`embedding.md`](embedding.md).
+Package READMEs and [embedding](embedding.md) document these surfaces.
 
 ---
 
@@ -1638,13 +1653,10 @@ organization-workspace lifecycle authority; see [external membership operation r
 
 ## 14. Keeping this current
 
-Update this map alongside application, package, example, provider, process,
-ownership, invariant (§3), flow (§4), lifecycle (§5), or canonical-source (§13)
-changes. Keep invariants, purpose, and ownership here; mechanics and rollout in
-[`README.md`](README.md)'s focused docs.
+Update this map with ownership, invariant, flow, lifecycle and source changes.
+Keep mechanics and rollout in [`README.md`](README.md)'s focused docs.
 
-`goal_resume` resumes goals regardless of pause reason or actor; active goals
-return unchanged. See `docs/goals.md` for `goal_resume` and `goal_pause`.
+Goal resume/pause semantics: [goals](goals.md).
 
 Filtered session page ownership and its maintenance boundary: [session pagination](session-pagination.md).
 
@@ -1652,35 +1664,25 @@ Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 
 ### In-conversation connection setup
 
-`SessionCapabilityCard` uses `MessageTimeline.renderAuthNeeded`; hosts retain
-authorization. Forms share `performCapabilityAction` and human-authorized
-Connection API. OAuth never replays tools; `attachSessionCapability` preserves
-selection through CAS. Skills retain workspace scope and reviewed hashes.
-Gmail startup failures remain diagnostic; discovery checks tools and requests consent.
-Personal MCP use requires an owner-issued exact-session grant, with shared-results
-acknowledgement for shared conversations. The composer restores only active grants
-matching visibility and authority epoch; credentials alone grant no use.
+`SessionCapabilityCard` shares native Connection APIs; hosts retain authorization.
+OAuth never replays tools. Skills retain workspace scope and reviewed hashes.
+Messages authorize the sender's accounts; queued work, retries and children
+retain that identity. Personal schedules have immutable owners. Setup offers
+Personal and Workspace with provider-specific defaults. Explicit choices win;
+reconnect preserves ownership. See [sender-owned connections](design/sender-owned-connections.md)
+for account selection, provider checks and migration.
 
-Host-owned shared MCP servers may explicitly select `hostBinding.selection:
-"accepted_turn"` instead of a fixed binding. The configuration fixes the entire
-destination/provider/scope/resource definition except account identity; only an
-immutable accepted turn/task snapshot chooses the exact owner binding. Worker
-resolution and every physical use retain native live authority checks. An empty
-realtime session creates no turn authority; its first text Send captures the
-current participant's selection. See [remote host MCP credentials](remote-mcp-credentials.md).
+`apps/worker/src/activities/mcp-credentials.ts` binds native credentials/refresh
+to accepted user, connection, turn and attempt; physical requests recheck authority.
+Gateway calls also recheck the caller. Shared turns never borrow credentials;
+empty realtime creates capture none. Session-local definitions govern continued
+turns and existing-session schedules. Retries retain selection.
 
-Native remote MCP resolver registration is organization-owned configuration,
-keyed by the authoritative workspace `externalSource`. Only a live organization
-service key with full (`workspace:admin`) access administers it; participants
-cannot choose callback routes. Human `account:admin` is not granted to these keys.
-Any retained registration opts the organization into exact namespace routing,
-with no static fallback. Endpoint/secret updates preserve registration identity
-and accepted authority but increment a live physical-use transport generation.
-The registry uses native encrypted storage and metadata-only operation receipts;
-it is not a general webhook registry. Canonical sources:
-`packages/core/src/remote-mcp-credentials.ts`,
-`packages/core/src/application/host-mcp-resolvers.ts`, and
-`packages/db/src/host-mcp-resolvers.ts`.
+Host callback/registry APIs and flags are removed; host references fail closed.
+Historical replay guards grant no access. Cleanup and verification are tracked in
+[MCP connection cutover](remote-mcp-credentials.md) and
+[embedding authority internals](embedding-authority-internals.md).
+Future suppliers must reuse native connections.
 
 ### Embeddable connection presentation
 

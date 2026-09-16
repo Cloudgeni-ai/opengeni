@@ -2,7 +2,6 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
-import { sessionAuthRecommendation } from "./session-auth-recommendation";
 
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import type { AuthNeededItem } from "@opengeni/react";
@@ -37,9 +36,9 @@ const updateConnection = mock(async () => row);
 const enableCapability = mock(async () => {
   enabled = true;
 });
-const issueUserResourceGrant = mock(async (..._args: unknown[]) => ({}));
 const context = {
   client: {
+    connectTransport: () => ({}),
     listCapabilities: async () => ({
       items: [
         {
@@ -63,8 +62,6 @@ const context = {
     listIntegrationDefinitions: async () => ({ definitions: [] }),
     listApiIntegrations: async () => ({ integrations: [] }),
     catalogAssetUrl: (path: string) => path,
-    listUserResourceAuthorities: async () => ({ authorities: [] }),
-    issueUserResourceGrant,
     createConnection,
     updateConnection,
     enableCapability,
@@ -85,6 +82,7 @@ const context = {
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({ toast: { success: () => {}, error: () => {} } }));
 GlobalRegistrator.register();
+const { sessionAuthRecommendation } = await import("./session-auth-recommendation");
 const { buildTimeline } = await import("@opengeni/react");
 const { createRoot } = await import("react-dom/client");
 const { SessionCapabilityCard } = await import("./session-capability-card");
@@ -122,7 +120,6 @@ async function render(
   context.workspaceCapabilityCatalog = [cachedCatalogItem];
   enabled = personalAccount;
   connections = personalAccount ? [{ ...row, subjectId: "owner", authorityId: "authority" }] : [];
-  issueUserResourceGrant.mockClear();
   updateConnection.mockClear();
   createConnection.mockClear();
   enableCapability.mockClear();
@@ -222,10 +219,16 @@ describe("conversation connection card", () => {
     const cached = { ...catalogItem, authKind: "oauth2" as const };
     const h = await render(false, { ...cached, name: "Current Example" }, cached);
     try {
-      expect(button(h.container, "Connect Example").textContent).toBe("Connect Example");
-      await act(async () => button(h.container, "Connect Example").click());
+      expect(button(h.container, "Connect Current Example").textContent).toBe(
+        "Connect Current Example",
+      );
+      await act(async () => button(h.container, "Connect Current Example").click());
       expect(h.container.querySelector("h3")?.textContent).toBe("Current Example");
-      await act(async () => button(h.container, "Cancel").click());
+      await act(async () =>
+        h.container
+          .querySelector<HTMLButtonElement>('[aria-label="Close connection setup"]')!
+          .click(),
+      );
       expect(h.container.querySelector('[data-state="suggested"]')).not.toBeNull();
       expect(h.container.querySelector("h3")?.textContent).toBe("Current Example");
       expect(button(h.container, "Connect Current Example").textContent).toBe(
@@ -234,7 +237,6 @@ describe("conversation connection card", () => {
       expect(createConnection).not.toHaveBeenCalled();
       expect(updateConnection).not.toHaveBeenCalled();
       expect(enableCapability).not.toHaveBeenCalled();
-      expect(issueUserResourceGrant).not.toHaveBeenCalled();
     } finally {
       await h.close();
     }
@@ -262,14 +264,12 @@ describe("conversation connection card", () => {
     expect(h.container.textContent).toContain("Connect for workspace");
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog).not.toBeNull();
-    expect(dialog?.className).toContain("sm:max-w-[42rem]");
-    expect(dialog?.className).toContain("sm:top-1/2");
+    expect(dialog?.className).toContain("og-session-capability-dialog");
     expect(h.host.querySelector("form")).toBeNull();
     await act(async () => button(h.container, "Cancel").click());
     expect(h.container.querySelector("form")).toBeNull();
     expect(createConnection).not.toHaveBeenCalled();
     expect(enableCapability).not.toHaveBeenCalled();
-    expect(issueUserResourceGrant).not.toHaveBeenCalled();
     await h.close();
   });
   test("switching workspace discards the open dialog and its credential draft", async () => {
@@ -281,7 +281,6 @@ describe("conversation connection card", () => {
       expect(document.querySelector('[role="dialog"]')).toBeNull();
       expect(h.container.querySelector('input[type="password"]')).toBeNull();
       expect(createConnection).not.toHaveBeenCalled();
-      expect(issueUserResourceGrant).not.toHaveBeenCalled();
     } finally {
       await h.close();
     }
@@ -309,47 +308,27 @@ describe("conversation connection card", () => {
     expect(h.container.textContent).not.toContain("secret-for-provider-only");
     await h.close();
   });
-  test("a personal account requires explicit shared-results consent before completion", async () => {
-    const h = await render(true, catalogItem, catalogItem, true);
-    expect(h.container.textContent).toContain("Review permission to use your personal account");
-    expect(issueUserResourceGrant).not.toHaveBeenCalled();
-    await act(async () => button(h.container, "Add API key").click());
-    const use = button(h.container, "Use in this");
-    expect(use.disabled).toBe(true);
-    expect(issueUserResourceGrant).not.toHaveBeenCalled();
-    expect(h.container.querySelector('[data-state="complete"]')).toBeNull();
-    await act(async () =>
-      (h.container.querySelector('input[type="checkbox"]') as HTMLInputElement).click(),
-    );
-    expect(use.disabled).toBe(false);
-    await act(async () => use.click());
-    expect(issueUserResourceGrant).toHaveBeenCalledTimes(1);
-    expect(issueUserResourceGrant.mock.calls[0]?.[2]).toMatchObject({
-      mode: "session",
-      sessionId: "session",
-      expectedAuthorityEpoch: 4,
-      workspaceSharedAcknowledged: true,
-    });
-    expect(h.container.textContent).toContain("Connected · Available in this conversation");
-    await h.close();
-  });
-  test("a private conversation retains its personal-account disclosure without shared consent", async () => {
-    const h = await render(true, catalogItem, catalogItem, false, "private");
-    try {
-      await act(async () => button(h.container, "Add API key").click());
-      const dialog = document.querySelector('[role="dialog"]');
-      expect(dialog?.textContent).toContain(
-        "Allow your personal account only in this private conversation and its continuations.",
-      );
-      expect(dialog?.querySelector('input[type="checkbox"]')).toBeNull();
-      expect(button(h.container, "Use in this").disabled).toBe(false);
-      expect(issueUserResourceGrant).not.toHaveBeenCalled();
-      await act(async () => button(h.container, "Cancel").click());
-      expect(issueUserResourceGrant).not.toHaveBeenCalled();
-    } finally {
-      await h.close();
-    }
-  });
+  test.each(["workspace", "private"] as const)(
+    "a personal account attaches tools without a conversation grant (%s)",
+    async (visibility) => {
+      const h = await render(true, catalogItem, catalogItem, true, visibility);
+      try {
+        await act(async () => button(h.container, "Add API key").click());
+        const dialog = document.querySelector("[role=dialog]");
+        expect(dialog?.textContent).toContain(
+          "Your messages and personal schedules can use this account.",
+        );
+        expect(dialog?.querySelector("input[type=checkbox]")).toBeNull();
+        const add = button(h.container, "Add tools");
+        expect(add.disabled).toBe(false);
+        await act(async () => add.click());
+        expect(createConnection).not.toHaveBeenCalled();
+        expect(h.container.textContent).toContain("Connected · Available in this conversation");
+      } finally {
+        await h.close();
+      }
+    },
+  );
   test("retry after a partial save reuses the persisted Connection", async () => {
     const h = await render();
     enableCapability.mockImplementationOnce(async () => {

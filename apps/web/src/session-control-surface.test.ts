@@ -210,16 +210,37 @@ describe("session control surface architecture", () => {
   });
 
   test("keeps Variable Sets editable through create and established composer actions", async () => {
-    const [route, establishedRoute, establishedControl, establishedPicker] = await Promise.all([
+    const [
+      route,
+      establishedRoute,
+      establishedControl,
+      establishedPicker,
+      newPicker,
+      shortlistEditor,
+    ] = await Promise.all([
       source("routes/sessions-index.tsx"),
       source("routes/session.tsx"),
       source("components/personal-resource-attachment-control.tsx"),
       source("components/session/session-variable-set-picker.tsx"),
+      source("components/session/new-session-variable-set-picker.tsx"),
+      source("components/session/variable-set-shortlist-editor.tsx"),
     ]);
-    expect(route).toContain("Add Variable Set…");
-    expect(route).toContain("<SelectedVariableSetList");
+    expect(route).toContain("<NewSessionVariableSetPicker");
     expect(route).toContain("const showVariableSets = props.variableSetsOnly === true");
-    expect(route).toContain("hasVariableSetChoices && draft.variableSetIds.length < 25");
+    expect(route).toContain("canAttachVariableSets={canAttachVariableSets}");
+    expect(route).toContain("canUseVariableSets={canUseVariableSets}");
+    expect(route).toContain("canAttach={props.canAttachVariableSets === true}");
+    expect(route).toContain("canUse={props.canUseVariableSets === true}");
+    expect(newPicker).toContain("<VariableSetShortlistEditor");
+    expect(newPicker).toContain("const canEnable = props.canAttach && props.canUse");
+    expect(newPicker).toContain("canAdd={!props.disabled && canEnable}");
+    expect(newPicker).toContain("if (props.disabled || unauthorizedAddition) return");
+    expect(newPicker).toContain("props.onChange(variableSetRuntimeIds(rows))");
+    expect(shortlistEditor).toContain("Add variable sets");
+    expect(shortlistEditor).toContain("enabledCount >= 25");
+    expect(shortlistEditor).toContain(
+      "props.disabled || (enabled && (!props.canAdd || enabledCount >= 25))",
+    );
     expect(route).toContain("PersonalResourceAccessInline");
     expect(route).not.toContain("PersonalResourceScopeChoice");
     expect(route).not.toContain("personalScopeChoice");
@@ -255,7 +276,8 @@ describe("session control surface architecture", () => {
     expect(route).toContain("Couldn’t verify the selected Variable Set or Rig");
     expect(route).toContain("onRetry: () => void refreshPersonalResourceCatalogs()");
     expect(establishedRoute).toContain("<SessionVariableSetPicker");
-    expect(establishedPicker).toContain("Attach Variable Set…");
+    expect(establishedPicker).toContain("<VariableSetShortlistEditor");
+    expect(establishedPicker).toContain("canAdd={canAdd}");
     expect(establishedPicker).toContain("all attachments must be removed together");
     expect(establishedPicker).toContain("The complete attachment selection can still be cleared.");
     expect(establishedPicker).toContain("The update committed");

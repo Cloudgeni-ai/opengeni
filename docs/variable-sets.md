@@ -8,6 +8,24 @@ Variable sets are named encrypted secret collections with one explicit owner sco
 
 A variable set is attached to runnable things — a session, a scheduled task, or a capability pack installation that declares it uses one — and its values are injected only after exact runtime authority is revalidated. A session may select up to 25 explicit Variable Sets in ordered low-to-high precedence. The legacy singular `variableSetId` remains an alias for the final, highest-precedence explicit set.
 
+The chat composer presents explicit sets **highest priority first**. It reverses
+enabled rows when writing the existing low-to-high API selection, and reverses
+loaded selections so existing collision winners do not change. The shortlist and
+searchable add view scroll without pagination; no more than 25 sets can be on.
+Off rows remain in place (including after Save), and their ordering controls are
+disabled. X removes a row from this shortlist, never deletes the Variable Set.
+Undo and Cancel restore the saved list, switches, and order. Existing chats keep
+the idle, permission, and post-save refresh guards; new chats save into the draft.
+
+Shortlist presentation is a browser-local preference, following the web app's
+versioned localStorage convention. `og.variable-set-shortlist:v1` keys encode the
+authenticated subject, workspace, and chat ID (or `new-chat` draft namespace).
+Only IDs, array order, and enabled booleans are stored, never names or secret
+values. Server/draft attachment IDs always determine runtime enabled membership;
+remembered flags cannot re-enable a set. This preference is not synchronized
+between browsers, and blocked storage falls back to in-memory editing. No API,
+authorization, database, or inspector restart contract changes are involved.
+
 The web creation form makes this scope a required, explicit choice and every
 list row carries the same Organization, Workspace, or Only me label. Scope is a
 property of the resource, not a duplicate navigation hierarchy. Only an active

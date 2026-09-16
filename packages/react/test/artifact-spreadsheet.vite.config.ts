@@ -15,6 +15,9 @@ export default defineConfig({
     watch: { ignored: ["**/*"] },
   },
   optimizeDeps: {
-    entries: [resolve(demoRoot, "artifact-spreadsheet-scroll-fixture.tsx")],
+    entries: [
+      resolve(demoRoot, "artifact-spreadsheet-scroll-fixture.tsx"),
+      resolve(demoRoot, "artifact-document-newline-fixture.tsx"),
+    ],
   },
 });

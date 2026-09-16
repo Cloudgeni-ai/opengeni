@@ -1,111 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
-  ConnectionAuthorityEnvelope,
-  IssueConnectionUseGrantRequest,
-  ListConnectionAuthoritiesResponse,
   ConnectionUseAttribution,
   ConnectionUseAuthoritySnapshot,
 } from "../src/connection-authority";
 
 const id = (suffix: string) => `00000000-0000-4000-8000-${suffix.padStart(12, "0")}`;
 
-const delegation = {
-  authorityId: id("1"),
-  grantId: id("2"),
-  organizationId: id("3"),
-  workspaceId: id("4"),
-  sessionId: id("5"),
-  action: "connection.use",
-  mode: "session",
-  context: "workspace_shared",
-  authorityEpoch: 7,
-  authorityGeneration: 2,
-  grantGeneration: 3,
-} as const;
-
 describe("connection authority contracts", () => {
-  test("preserves legacy workspace omission without accepting personal owner input", () => {
-    expect(ConnectionAuthorityEnvelope.parse({})).toEqual({ scope: "workspace" });
-    expect(
-      ConnectionAuthorityEnvelope.safeParse({ scope: "workspace", ownerSubjectId: "user:alice" })
-        .success,
-    ).toBe(false);
-  });
-
-  test("requires the common connection.use delegation for user scope", () => {
-    expect(ConnectionAuthorityEnvelope.safeParse({ scope: "user" }).success).toBe(false);
-    expect(
-      ConnectionAuthorityEnvelope.safeParse({
-        scope: "user",
-        userDelegation: { ...delegation, action: "github.use" },
-      }).success,
-    ).toBe(false);
-    expect(
-      ConnectionAuthorityEnvelope.parse({ scope: "user", userDelegation: delegation }),
-    ).toEqual({ scope: "user", userDelegation: delegation });
-  });
-
-  test("keeps owner lifecycle input and output opaque and connection-specific", () => {
-    expect(
-      IssueConnectionUseGrantRequest.safeParse({
-        scope: "user",
-        mode: "always",
-        context: "user_private",
-        ownerSubjectId: "user:mallory",
-        action: "provider.admin",
-      }).success,
-    ).toBe(false);
-    const clean = {
-      scope: "user" as const,
-      nextCursor: null,
-      authorities: [
-        {
-          authorityId: id("1"),
-          resourceId: id("8"),
-          originWorkspaceId: id("4"),
-          generation: 1,
-          status: "active" as const,
-          grants: [
-            {
-              grantId: id("2"),
-              targetWorkspaceId: id("4"),
-              targetSessionId: null,
-              action: "connection.use" as const,
-              mode: "always" as const,
-              context: "user_private" as const,
-              authorityEpoch: null,
-              generation: 1,
-              status: "active" as const,
-              expiresAt: null,
-              delegation: {
-                ...delegation,
-                sessionId: null,
-                mode: "always" as const,
-                context: "user_private" as const,
-                authorityEpoch: null,
-              },
-            },
-          ],
-        },
-      ],
-    };
-    expect(
-      ListConnectionAuthoritiesResponse.safeParse({
-        ...clean,
-        scope: "user",
-        authorities: [
-          {
-            ...clean.authorities[0],
-            authorityId: id("1"),
-            ownerSubjectId: "must-not-survive",
-            connectionId: id("9"),
-          },
-        ],
-      }).success,
-    ).toBe(false);
-    expect(ListConnectionAuthoritiesResponse.parse(clean)).toEqual(clean);
-  });
-
   test("freezes exact personal owner, scope, generation, and delegation provenance", () => {
     const snapshot = ConnectionUseAuthoritySnapshot.parse({
       organizationId: id("3"),
@@ -124,20 +25,20 @@ describe("connection authority contracts", () => {
       ownerSubjectId: "user:alice",
       ownerOrganizationMembershipId: id("9"),
       ownerMembershipAuthorizationRevision: 11,
-      authoritySource: "user_delegation",
+      authoritySource: "sender",
       selectionSources: ["mcp:example"],
-      userDelegation: delegation,
+      userDelegation: null,
     });
     expect(snapshot).toMatchObject({
       connectionId: id("8"),
       connectionGeneration: 9,
       ownerSubjectId: "user:alice",
-      userDelegation: delegation,
+      userDelegation: null,
     });
   });
 
-  test("models bounded legacy-user attribution without common authority provenance", () => {
-    const snapshot = ConnectionUseAuthoritySnapshot.parse({
+  test("rejects legacy user snapshots and live attribution", () => {
+    const legacy = {
       organizationId: id("3"),
       originWorkspaceId: id("4"),
       targetWorkspaceId: id("4"),
@@ -157,10 +58,10 @@ describe("connection authority contracts", () => {
       authoritySource: "legacy_user_compatibility",
       selectionSources: ["mcp:example"],
       userDelegation: null,
-    });
-    expect(snapshot.scope).toBe("legacy_user");
+    };
+    expect(ConnectionUseAuthoritySnapshot.safeParse(legacy).success).toBe(false);
     expect(
-      ConnectionUseAttribution.parse({
+      ConnectionUseAttribution.safeParse({
         organizationId: id("3"),
         workspaceId: id("4"),
         sessionId: id("5"),
@@ -170,8 +71,8 @@ describe("connection authority contracts", () => {
         ownerSubjectId: "user:alice",
         authorityId: null,
         grantId: null,
-      }).scope,
-    ).toBe("legacy_user");
+      }).success,
+    ).toBe(false);
   });
 
   test("keeps usage attribution credential and value free", () => {
@@ -184,7 +85,7 @@ describe("connection authority contracts", () => {
       scope: "user",
       ownerSubjectId: "user:alice",
       authorityId: id("1"),
-      grantId: id("2"),
+      grantId: null,
     };
     expect(
       ConnectionUseAttribution.safeParse({

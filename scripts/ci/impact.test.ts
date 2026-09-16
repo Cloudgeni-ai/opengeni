@@ -29,6 +29,7 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
 ] as const;
 const AI_GATEWAY_CONNECTION_E2E = "test/e2e/ai-gateway-connection.browser.e2e.ts";
 const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
+const COMPOSER_MENUS_E2E = "test/e2e/composer-menus.browser.e2e.ts";
 const PERSONAL_WORKSPACE_ACCESSIBILITY_E2E =
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts";
 const PERSONAL_RESOURCE_ATTACHMENTS_E2E = "test/e2e/personal-resource-attachments.browser.e2e.ts";
@@ -48,6 +49,31 @@ const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
+  test("native report delivery belongs to the required prepared package lane, never unit shards", () => {
+    const suite = "apps/api/test/native-report-delivery.test.ts";
+    expect(OPT_IN_TESTS[suite]).toContain("required package-contracts gate");
+    const tests = discoverTestFiles();
+    expect([...tests.unit, ...tests.integration, ...tests.e2e]).not.toContain(suite);
+    for (const changed of [
+      suite,
+      "apps/api/src/editable-artifact-production.ts",
+      "apps/api/src/mcp/server.ts",
+      "packages/core/src/domain/editable-artifacts/agent-application.ts",
+      "packages/db/src/session-goal-reports.ts",
+      "packages/db/drizzle/0474_goal_report_requirements.sql",
+      "packages/contracts/src/session-goal-reports.ts",
+      "packages/testing/src/shared-pg.ts",
+      "packages/storage/src/index.ts",
+      "packages/artifact-tool/src/runtime-development.ts",
+      "scripts/prepare-development-artifact-runtime.ts",
+      ".github/workflows/ci.yml",
+    ]) {
+      const plan = createImpactPlan([changed]);
+      expect(plan.unitTests, changed).not.toContain(suite);
+      expect(plan.buildPackages, changed).toContain("@opengeni/api-router");
+    }
+  }, 30_000);
+
   test("preview loading coverage follows React and testing dependencies without widening leaf plans", () => {
     for (const path of [
       "packages/react/src/components/MessageTimeline.tsx",
@@ -124,6 +150,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/chat-media-entry.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
       COMPACT_SESSION_VIEW_E2E,
+      COMPOSER_MENUS_E2E,
       "test/e2e/composer-pane.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
@@ -135,6 +162,7 @@ describe("fail-closed change impact", () => {
       PERSONAL_RESOURCE_ATTACHMENTS_E2E,
       PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/plugin-discovery.browser.e2e.ts",
+      "test/e2e/plugin-removal.browser.e2e.ts",
       PREVIEW_LOADING_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,
@@ -399,6 +427,34 @@ describe("fail-closed change impact", () => {
     );
   });
 
+  test("composer menus follow the real web fixture and shared dependencies without widening leaf plans", () => {
+    for (const path of [
+      COMPOSER_MENUS_E2E,
+      "apps/web/test/composer-menus.html",
+      "apps/web/test/composer-menus-fixture.tsx",
+      "apps/web/src/components/composer-mobile-plus.tsx",
+      "apps/web/src/components/ui/composer-menu.tsx",
+      "apps/web/src/components/repository-picker.tsx",
+      "apps/web/src/components/follow-up-repository-menu-body.tsx",
+      "apps/web/src/components/session/new-session-variable-set-picker.tsx",
+      "apps/web/src/components/pickers.tsx",
+      "packages/react/src/index.ts",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(COMPOSER_MENUS_E2E);
+      expect(plan.unitTests, path).not.toContain(COMPOSER_MENUS_E2E);
+      expect(plan.integrationTests, path).not.toContain(COMPOSER_MENUS_E2E);
+    }
+    for (const path of ["packages/ogtool/src/index.ts", "packages/browserd/src/index.ts"]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toEqual([]);
+    }
+  });
+
   test("account request observation stays in the native accounts lane", () => {
     const regression = "test/e2e/browser-account-request-observation.browser.e2e.ts";
     const plan = createImpactPlan([regression]);
@@ -481,6 +537,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/chat-media-entry.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
       COMPACT_SESSION_VIEW_E2E,
+      COMPOSER_MENUS_E2E,
       "test/e2e/composer-pane.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
@@ -492,6 +549,7 @@ describe("fail-closed change impact", () => {
       PERSONAL_RESOURCE_ATTACHMENTS_E2E,
       PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/plugin-discovery.browser.e2e.ts",
+      "test/e2e/plugin-removal.browser.e2e.ts",
       PREVIEW_LOADING_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
       RESTORED_ATTACHMENT_PREVIEW_E2E,

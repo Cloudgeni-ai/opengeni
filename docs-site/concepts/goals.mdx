@@ -17,6 +17,22 @@ A goal is `active`, `paused`, or `completed`.
 
 Pausing the session (the workstream) is separate from pausing the goal: it holds inference without changing goal state.
 
+## Reports are artifact deliverables
+
+User-facing reports are native document Artifacts, including reports produced
+while doing another task—for example, a Knowledge organization audit. The agent
+declares the report before authoring, creates the document through the Documents
+Skill, inspects the relevant content after its final edit, and provides the
+artifact reference in its handoff.
+
+Declared report requirements must have verified artifact delivery evidence before
+the goal can complete. A sandbox link or a claim that the document was inspected
+does not satisfy that requirement. If artifact tooling or access fails, delivery
+remains incomplete and the agent explains the blocker.
+
+Ordinary chat answers, progress updates, internal worker findings, source-code
+links, and explicitly requested local-file work do not require report artifacts.
+
 ## No run-length caps by design
 
 OpenGeni runs agents that legitimately work for days. There is no default cap on model calls per turn or on continuation count. What bounds a run is policy and intent: budget and admission limits, explicit goal completion or pause, and human interrupts.

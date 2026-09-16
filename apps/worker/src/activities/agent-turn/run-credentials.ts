@@ -287,13 +287,10 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   // provider may supply it; unset still self-mints GitHub from settings.
   // gitToken/gitTokens are undefined on the selfhosted skip path (the machine
   // uses its own git creds).
-  // Git and MCP credentials share one lineage snapshot for this turn. A
-  // host that supplies both ports must never see two independently resolved
-  // roots for the same execution merely because the call sites are far apart.
+  // Git credential providers share one lineage snapshot for this turn.
+  // MCP access uses the native accepted connection context independently.
   const needsHostCredentialRoot = Boolean(
-    connectionCredentials?.gitCredentials ||
-    personalGitHubCredentials ||
-    connectionCredentials?.mcpCredentials,
+    connectionCredentials?.gitCredentials || personalGitHubCredentials,
   );
   const hostCredentialRootSessionId = needsHostCredentialRoot
     ? await getSessionRootId(db, input.workspaceId, input.sessionId)
@@ -748,7 +745,6 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     initialRunCredentialMaterial,
     runCredentialsNote,
     authorizeGitHubTokenMint,
-    hostCredentialRootSessionId,
     gitCredentialAuthority,
     codemodeAuthority,
     sandboxArtifactRuntime,

@@ -105,6 +105,10 @@ const LazyAccountAuthRoute = lazyRouteComponent(
   () => import("@/routes/account-auth"),
   "AccountAuthRoute",
 );
+const LazyPersonalSecurityRoute = lazyRouteComponent(
+  () => import("@/routes/personal-security"),
+  "PersonalSecurityRoute",
+);
 const LazyOnboardingPreviewRoute = lazyRouteComponent(
   () => import("@/routes/onboarding-preview"),
   "OnboardingPreviewRoute",
@@ -229,6 +233,11 @@ const accountAuthRoute = createRoute({
     ...(search.social === "complete" || search.social === "error" ? { social: search.social } : {}),
   }),
   component: AccountAuth,
+});
+const personalSecurityRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "settings/security",
+  component: LazyPersonalSecurityRoute,
 });
 // DEV-only visual harness for the Session composer chrome stack (queue / goal /
 // agents / composer). Public so it needs no live auth or session; omitted from
@@ -444,6 +453,7 @@ const workspaceStateRoute = createRoute({
 const workspaceArtifactsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts",
+  validateSearch: artifactReturnSearch,
   component: Artifacts,
 });
 const workspaceArtifactDetailRoute = createRoute({
@@ -509,6 +519,7 @@ const routeTree = rootRoute.addChildren([
   identityLinkRoute,
   setupAccountRoute,
   accountAuthRoute,
+  personalSecurityRoute,
   ...(import.meta.env.DEV
     ? [composerChromeGalleryRoute, agentTopologyPreviewRoute, onboardingPreviewRoute]
     : []),
@@ -749,7 +760,9 @@ function WorkspaceState() {
 }
 
 function Artifacts() {
-  return <LazyArtifactsRoute {...workspaceArtifactsRoute.useParams()} />;
+  const { workspaceId } = workspaceArtifactsRoute.useParams();
+  const { fromSession } = workspaceArtifactsRoute.useSearch();
+  return <LazyArtifactsRoute workspaceId={workspaceId} fromSession={fromSession} />;
 }
 function IdentityLink() {
   const { linkId } = identityLinkRoute.useParams();

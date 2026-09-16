@@ -18,9 +18,9 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
-    "./host-mcp-resolvers": {
-      "types": "./src/host-mcp-resolvers.ts",
-      "default": "./src/host-mcp-resolvers.ts"
+    "./managed-sign-in-methods": {
+      "types": "./src/managed-sign-in-methods.ts",
+      "default": "./src/managed-sign-in-methods.ts"
     },
     "./mcp-endpoint": {
       "types": "./src/mcp-endpoint.ts",

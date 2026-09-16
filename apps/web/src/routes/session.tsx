@@ -1,5 +1,6 @@
 import { retainedImageId } from "@opengeni/react";
-import { useSessionConnectionAuthorities } from "@/components/capabilities/use-session-connection-authorities";
+import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
+import { ConnectionAccountPicker } from "@/components/capabilities/connection-account-picker";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
 import {
   attachSessionCapability,
@@ -25,6 +26,7 @@ import {
 } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
+  conversationTimeline,
   projectPendingApprovals,
   useComposer,
   useFileAttachments,
@@ -171,7 +173,7 @@ const ChatInteractiveBlock = lazy(() =>
 
 const HumanInputSurface = lazy(() => import("@/components/session/human-input"));
 const SessionCommands = lazy(() =>
-  import("@/components/session/commands").then((module) => ({ default: module.SessionCommands })),
+  import("@opengeni/react/session-ui").then((module) => ({ default: module.SessionCommands })),
 );
 
 const SessionCapabilityCard = lazy(async () => ({
@@ -1641,17 +1643,23 @@ function SessionChatPane(props: {
     () => selectableSessionMcpServers.map((server) => server.id),
     [selectableSessionMcpServers],
   );
-  const connectionAuthorities = useSessionConnectionAuthorities(
+  const connectionAccounts = useConnectionAccounts(
     context.client,
-    props.session,
+    {
+      id: props.session.id,
+      workspaceId: props.session.workspaceId,
+      selectedIds:
+        props.session.effectiveToolPolicy?.selectedIds ??
+        props.session.tools.map((tool) => tool.id),
+    },
     context.workspaceCapabilityCatalog,
   );
   const reloadSessionAfterSetup = props.onReloadSession;
-  const refreshConnectionAuthorities = connectionAuthorities.refresh;
+  const refreshConnectionAccounts = connectionAccounts.refresh;
   const afterConnectionSetup = useCallback(async () => {
     await reloadSessionAfterSetup();
-    await refreshConnectionAuthorities();
-  }, [reloadSessionAfterSetup, refreshConnectionAuthorities]);
+    await refreshConnectionAccounts();
+  }, [reloadSessionAfterSetup, refreshConnectionAccounts]);
   const renderAuthNeeded = useCallback(
     (item: AuthNeededItem) => {
       const recommendation = sessionAuthRecommendation(item, context.workspaceCapabilityCatalog);
@@ -1881,19 +1889,20 @@ function SessionChatPane(props: {
       repositoryError: repositories.error,
       policyValid: composerPolicyValidRef.current,
       variableSetBlocked: variableSetComposerBlocked,
-      personalDecision: personalAttachment.requiresDecision,
+      personalDecision:
+        personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
       personalLoading:
         personalAttachment.loading ||
         personalAttachment.refreshing ||
-        connectionAuthorities.loading ||
-        connectionAuthorities.error !== null,
+        connectionAccounts.loading ||
+        connectionAccounts.error !== null,
     });
   const composer = useComposer(props.session.id, {
     events: props.events,
     sendExtras: () => ({
       resources: [...attachments.readyResources, ...repositories.pendingResources],
-      connectionAuthorities: [
-        ...connectionAuthorities.selections,
+      connectionAccounts: [
+        ...connectionAccounts.selections,
         ...(repositories.pendingResources.some(
           (resource) =>
             resource.kind === "repository" && resource.connectionType === "github_personal",
@@ -2055,88 +2064,19 @@ function SessionChatPane(props: {
     });
   }, [failedOptimisticMessageCount, props.session.id, props.session.workspaceId]);
   const timelineWithOptimisticSends = useMemo<TimelineItem[]>(() => {
-    const queuedEventIds = new Set(
-      props.queue.queue
-        .filter((turn) => turn.metadata.delivery !== "steer")
-        .map((turn) => turn.triggerEventId),
+    return conversationTimeline(
+      props.timeline,
+      {
+        queue: props.queue.queue,
+        snapshot: props.queue.snapshot,
+        acceptedSteers: props.queue.acceptedSteers,
+      },
+      {
+        optimisticMessages,
+        retryOptimisticMessage,
+        removeOptimisticMessage,
+      },
     );
-    const optimisticQueuedClientIds = new Set(
-      (optimisticMessages ?? [])
-        .filter(
-          (message) =>
-            message.destination === "queue" &&
-            !(
-              message.turnId &&
-              message.appliedQueueVersion !== null &&
-              message.appliedQueueVersion !== undefined &&
-              props.queue.snapshot &&
-              props.queue.snapshot.version >= message.appliedQueueVersion &&
-              !props.queue.queue.some((turn) => turn.id === message.turnId)
-            ),
-        )
-        .map((message) => message.clientEventId),
-    );
-    const visibleTimeline = props.timeline.filter((item) => {
-      if (item.kind !== "user-message") return true;
-      if (queuedEventIds.has(item.id)) return false;
-      const clientEventId = item.reconciliationKey?.startsWith("user-message:")
-        ? item.reconciliationKey.slice("user-message:".length)
-        : null;
-      return !clientEventId || !optimisticQueuedClientIds.has(clientEventId);
-    });
-    const visibleTimelineClientEventIds = new Set(
-      visibleTimeline
-        .filter((item) => item.kind === "user-message")
-        .flatMap((item) => {
-          const key = item.reconciliationKey;
-          return key?.startsWith("user-message:") ? [key.slice("user-message:".length)] : [];
-        }),
-    );
-    const optimisticItems: UserMessageItem[] = (optimisticMessages ?? [])
-      .filter(
-        (message) =>
-          message.destination === "chat" &&
-          !visibleTimelineClientEventIds.has(message.clientEventId),
-      )
-      .map((message) => ({
-        kind: "user-message",
-        id: `optimistic:${message.clientEventId}`,
-        reconciliationKey: `user-message:${message.clientEventId}`,
-        text: message.text,
-        annotations: message.annotations.map((annotation, ordinal) => ({
-          ...annotation,
-          ordinal,
-        })),
-        resources: message.resources,
-        tools: [],
-        occurredAt: message.occurredAt,
-        delivery: {
-          state: message.state,
-          ...(message.error ? { error: message.error } : {}),
-          ...(message.state === "failed"
-            ? {
-                onRetry: () => retryOptimisticMessage?.(message.clientEventId),
-                onRemove: () => removeOptimisticMessage?.(message.clientEventId),
-              }
-            : {}),
-        },
-      }));
-    const visibleTimelineEventIds = new Set(
-      visibleTimeline.filter((item) => item.kind === "user-message").map((item) => item.id),
-    );
-    const acceptedQueueSteers: UserMessageItem[] = (props.queue.acceptedSteers ?? [])
-      .filter((steer) => !visibleTimelineEventIds.has(steer.triggerEventId))
-      .map((steer) => ({
-        kind: "user-message",
-        id: steer.triggerEventId,
-        text: steer.text,
-        annotations: steer.annotations,
-        resources: steer.resources,
-        tools: steer.tools,
-        occurredAt: steer.occurredAt,
-        delivery: { state: steer.state },
-      }));
-    return [...visibleTimeline, ...optimisticItems, ...acceptedQueueSteers];
   }, [
     optimisticMessages,
     removeOptimisticMessage,
@@ -2556,7 +2496,6 @@ function SessionChatPane(props: {
         <div className="mx-auto w-full max-w-3xl">
           <SessionChrome
             sessionStatus={props.session.status}
-            compact
             onOpenSession={props.onOpenSession}
             queue={props.queue}
             composer={terminal ? undefined : composer}
@@ -2586,13 +2525,19 @@ function SessionChatPane(props: {
 
       <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
-          {connectionAuthorities.error ? (
+          <ConnectionAccountPicker
+            groups={connectionAccounts.accountGroups}
+            choices={connectionAccounts.accountChoices}
+            onChoose={connectionAccounts.selectAccount}
+            disabled={terminal || composer.sending}
+          />
+          {connectionAccounts.error ? (
             <p role="alert" className="mb-2 text-xs text-fg-muted">
               Personal connection access could not be checked.{" "}
               <button
                 type="button"
                 className="text-brand underline"
-                onClick={() => void connectionAuthorities.refresh()}
+                onClick={() => void connectionAccounts.refresh()}
               >
                 Retry
               </button>

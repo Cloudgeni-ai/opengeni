@@ -230,7 +230,7 @@ describe("migration 0305 under a NOSUPERUSER NOBYPASSRLS owner", () => {
       "issue_self_connection_use_grant(uuid,uuid,uuid,text,text,uuid,boolean)",
       "revoke_self_connection_use_grant(uuid,uuid)",
     ];
-    const legacyPrivileges = await admin<Array<{ signature: string; executable: boolean }>>`
+    const legacyPrivileges = await admin<Array<{ signature: string; executable: boolean | null }>>`
       select signature,
         has_function_privilege(
           'opengeni_app',
@@ -240,7 +240,11 @@ describe("migration 0305 under a NOSUPERUSER NOBYPASSRLS owner", () => {
       from unnest(${admin.array(legacySignatures)}::text[]) as signature
       order by signature`;
     expect(Array.from(legacyPrivileges)).toEqual(
-      [...legacySignatures].sort().map((signature) => ({ signature, executable: false })),
+      [...legacySignatures].sort().map((signature) => ({
+        signature,
+        // The sender-owned cutover removes the native connection-grant routines.
+        executable: signature.includes("connection_") ? null : false,
+      })),
     );
     const routines = await admin<Array<{ name: string; settings: string[] | null }>>`
       select proname as name, proconfig as settings

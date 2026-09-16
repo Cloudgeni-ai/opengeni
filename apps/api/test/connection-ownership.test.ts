@@ -82,7 +82,7 @@ describe("personal Connection owner principal", () => {
     expect(isPersonalConnectionOwnerPrincipal(withGrant({ principalKind: undefined }))).toBe(false);
   });
 
-  test("requires contextIntegrity, matching requireConnectionAuthorityOwner", () => {
+  test("requires authenticated context integrity", () => {
     // The anti-substitution invariant. Without it, a grant whose account has no
     // matching account grant (a surviving membership row in an organization
     // where the membership is no longer active) could mint a personal

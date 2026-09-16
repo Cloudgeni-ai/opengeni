@@ -53,6 +53,7 @@ describe("knowledge-source scheduled task contracts", () => {
       accountId,
       workspaceId,
       name: "Legacy agent task",
+      ownerSubjectId: null,
       status: "active",
       schedule: { type: "interval", everySeconds: 3600 },
       temporalScheduleId: "scheduled-task-legacy",

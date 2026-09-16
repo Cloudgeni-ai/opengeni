@@ -1,6 +1,61 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { isMissingProcessLookup, runCommand, startProcess, waitFor } from "../src/process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  isMissingProcessLookup,
+  runCommand,
+  startProcess,
+  testServiceCommand,
+  waitFor,
+} from "../src/process";
+
+describe("test service environment", () => {
+  test("disables implicit dotenv loading while preserving explicit CLI choices", () => {
+    expect(testServiceCommand(["bun", "server.ts"])).toEqual(["bun", "--no-env-file", "server.ts"]);
+    expect(testServiceCommand([process.execPath, "server.ts"])).toEqual([
+      process.execPath,
+      "--no-env-file",
+      "server.ts",
+    ]);
+    for (const args of [
+      ["bun", "--env-file", "fixture.env", "server.ts"],
+      ["bun", "--env-file=fixture.env", "server.ts"],
+      ["bun", "--no-env-file", "server.ts"],
+      ["node", "server.js"],
+    ]) {
+      expect(testServiceCommand(args)).toEqual(args);
+    }
+  });
+
+  test("does not inherit checkout dotenv values and retains explicit service configuration", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opengeni-service-env-"));
+    await writeFile(join(directory, ".env"), "OPENGENI_SERVICE_ENV_FIXTURE=checkout\n");
+    let service: Awaited<ReturnType<typeof startProcess>> | undefined;
+    try {
+      service = await startProcess(
+        [
+          "bun",
+          "-e",
+          'console.log("fixture:" + (process.env.OPENGENI_SERVICE_ENV_FIXTURE ?? "absent") + ":" + process.env.OPENGENI_SERVICE_EXPLICIT_FIXTURE); setInterval(() => {}, 1000);',
+        ],
+        {
+          cwd: directory,
+          env: {
+            OPENGENI_SERVICE_ENV_FIXTURE: undefined,
+            OPENGENI_SERVICE_EXPLICIT_FIXTURE: "managed",
+          },
+        },
+      );
+      await waitFor(() => service!.logs().includes("fixture:"), { timeoutMs: 5_000 });
+      expect(service.logs()).toContain("fixture:absent:managed");
+    } finally {
+      await service?.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("process lookup errors", () => {
   test("treats both vanished files and vanished processes as normal lookup races", () => {

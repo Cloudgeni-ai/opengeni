@@ -1160,18 +1160,14 @@ export async function reconcileConnectedMachineBackgroundCommands(
               retryClock: defaultSelfhostedRetryClock,
               journal: { attachGeneration: () => String(Date.now()), persistSettled: () => {} },
             });
-            const replay = await client.readExisting(
+            await replayConnectedCommandOutput(
+              client,
               claim.opId,
-              proof ? 5_000 : 250,
+              Boolean(proof),
               async (frames) => {
                 await captureConnectedCommandOutput(db, claim, bus)(claim.commandId, frames);
               },
             );
-            if (proof && replay.status !== "completed" && !replay.terminal) {
-              throw new Error(
-                "Connected command terminal output replay has not reached its exit frontier",
-              );
-            }
           }
           if (!proof) {
             await deferConnectedCommandClaim(
@@ -1248,6 +1244,35 @@ export async function reconcileConnectedMachineBackgroundCommands(
     });
     if (claims.length < CONNECTED_COMMAND_RECONCILIATION_LIMIT) break;
   } while (Date.now() < deadline);
+}
+
+export async function replayConnectedCommandOutput(
+  client: Pick<OpStreamExecClient, "readExisting">,
+  opId: string,
+  terminalKnown: boolean,
+  capture: Parameters<OpStreamExecClient["readExisting"]>[2],
+): Promise<void> {
+  // A completed operation can need several bounded reads to replay its retained
+  // frames. Keep the reader's integrity checkpoint until the exit is verified;
+  // replacing it after each partial read would restart forever at frame one.
+  let capturedThrough = 0n;
+  while (true) {
+    const before = capturedThrough;
+    const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, async (frames) => {
+      await capture(frames);
+      for (const frame of frames) {
+        const sequence = BigInt(frame.sequence);
+        if (sequence > capturedThrough) capturedThrough = sequence;
+      }
+    });
+    if (!terminalKnown || replay.status === "completed" || replay.terminal) return;
+    // This is a finite terminal drain, not a poller for a running command.
+    // Failed persistence, transport/integrity errors, and no-progress reads
+    // return control to normal reconciliation without licensing settlement.
+    if (capturedThrough === before) {
+      throw new Error("Connected command terminal output replay has not reached its exit frontier");
+    }
+  }
 }
 
 export async function probeConnectedMachineBackgroundCommand(

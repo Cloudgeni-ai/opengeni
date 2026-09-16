@@ -1061,12 +1061,12 @@ describe("first-party MCP tool visibility policy", () => {
       const tools = (await client.listTools()).tools;
       const search = tools.find((tool) => tool.name === "capability_catalog_search");
       const request = tools.find((tool) => tool.name === "capability_authorization_request");
-      expect(search?.description).toContain("never installs, connects, or authorizes");
+      expect(search?.description).toContain("does not connect or authorize anything");
       expect(search?.inputSchema).toMatchObject({
         required: ["query"],
         properties: { query: { type: "string" }, limit: { type: "integer" } },
       });
-      expect(request?.description).toContain("never grants access");
+      expect(request?.description).toContain("grants no access");
       expect(request?.inputSchema).toMatchObject({
         required: expect.arrayContaining(["capabilityId", "rationale"]),
       });

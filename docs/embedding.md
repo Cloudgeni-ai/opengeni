@@ -13,27 +13,19 @@ The contract is simple: **all ports unset means standalone**. The defaults in `a
 
 ## Consumption Shapes
 
-### Durable participant-owned host tools
+### Participant-owned MCP connections
 
-For shared conversations, configure the explicit native
-`connectionRef.hostBinding: {selection: "accepted_turn"}` descriptor with
-`authoritySource: "host"`, `subjectScope: "subject"`, no `connectionId`, and the
-exact provider/scope/resource constraints. Each authenticated `asUser()` caller
-selects its own durable delegation on each accepted Send/Steer; configuration
-alone never grants use. Fixed binding references retain their exact-match rule.
+Use ordinary native connections, optionally scoped to the canonical user.
+The integrating backend uses `asUser()` to provision that user's connection
+through the ordinary connection API. Each accepted Send selects its own native
+connection authority; configuration and conversation visibility alone do not
+grant another participant's connection access.
 An empty `startMode: "realtime"` create has no turn and takes no selection;
 the first text `sendMessage` captures its own explicit selection normally.
-See [remote host MCP credentials](remote-mcp-credentials.md) for registration,
-selection, replay, scheduled/child inheritance and physical-use checks.
-
-Standalone embedding backends can register an organization-owned credential
-resolver with `putHostMcpResolver`, keyed by their stable workspace
-`externalSource`. Future `ensureWorkspace` calls select it without per-workspace
-configuration. Registration is service-admin-only; participant `asUser` calls
-still select their own accepted binding. Endpoint/secret rotation changes the
-transport generation, not accepted user authority. The first registration opts
-the organization into exact namespace routing with no static fallback; see the
-linked guide for the explicit legacy-migration acknowledgement.
+Native OAuth refresh rotates credentials without changing the captured user.
+Schedules and children use native captured execution context, not a callback
+registry or the scheduler's technical identity. See the
+[architecture map](architecture.md) and [cutover notes](remote-mcp-credentials.md).
 
 ### Skill reading in direct runtime hosts
 

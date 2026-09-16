@@ -14,6 +14,7 @@ import type { ControlRpc } from "@opengeni/runtime/sandbox";
 import {
   connectedCommandProofFromStatus,
   probeConnectedMachineBackgroundCommand,
+  replayConnectedCommandOutput,
 } from "../src/activities/sandbox-lease";
 
 function claim(state: "running" | "stopping"): ConnectedMachineBackgroundCommandClaim {
@@ -60,6 +61,65 @@ function rpc(answer: OpStatus) {
 }
 
 describe("Connected Machine background-command reconciliation", () => {
+  for (const mode of ["empty", "duplicate", "capture-failure", "running"] as const) {
+    test(`replay preserves ${mode} boundaries without claiming terminal completion`, async () => {
+      let reads = 0;
+      const reader = {
+        readExisting: async (
+          _id: string,
+          _wait: number,
+          capture: Parameters<
+            Parameters<typeof replayConnectedCommandOutput>[0]["readExisting"]
+          >[2],
+        ) => {
+          reads += 1;
+          await capture(
+            mode === "empty" ? [] : [{ sequence: "1", stream: "stdout", chunk: "part" }],
+          );
+          return { status: "running" };
+        },
+      } as unknown as Parameters<typeof replayConnectedCommandOutput>[0];
+      const result = replayConnectedCommandOutput(
+        reader,
+        "durable-op",
+        mode !== "running",
+        async () => {
+          if (mode === "capture-failure") throw new Error("capture failed");
+        },
+      );
+      if (mode === "running") await result;
+      else
+        await expect(result).rejects.toThrow(
+          mode === "capture-failure" ? "capture failed" : "exit frontier",
+        );
+      expect(reads).toBe(mode === "duplicate" ? 2 : 1);
+    });
+  }
+
+  test("completed output drains successive retained batches through one reader before settlement", async () => {
+    const captured: string[] = [];
+    let reads = 0;
+    const reader = {
+      readExisting: async (
+        opId: string,
+        _wait: number,
+        capture: (
+          frames: Array<{ sequence: string; stream: "stdout"; chunk: string }>,
+        ) => Promise<void>,
+      ) => {
+        expect(opId).toBe("durable-op");
+        reads += 1;
+        await capture([{ sequence: String(reads), stream: "stdout", chunk: "part" }]);
+        return reads === 5 ? { status: "completed", outcome: {} } : { status: "running" };
+      },
+    } as unknown as Parameters<typeof replayConnectedCommandOutput>[0];
+    await replayConnectedCommandOutput(reader, "durable-op", true, async (frames) => {
+      captured.push(...frames.map((frame) => frame.sequence));
+    });
+    expect(captured).toEqual(["1", "2", "3", "4", "5"]);
+    expect(reads).toBe(5);
+  });
+
   test("runner failure remains typed with zero exit even when cancellation or timeout also occurred", () => {
     for (const failureCode of ["OP_OVERFLOW", "OP_PIPE_IO", "OP_SPOOL_IO"]) {
       expect(

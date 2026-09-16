@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import type { ConnectAttempt, ConnectController } from "@opengeni/connect";
-import { useConnect } from "./connect";
+import { useConnect } from "./hooks/use-connect";
 
 const setupStatus: Record<ConnectAttempt["state"], string> = {
   ready: "Ready to connect",
@@ -35,6 +35,8 @@ export type ConnectSetupProps = {
   controller: ConnectController;
   /** Called synchronously in the click handler so a host can open a popup. */
   onAuthorize: (attempt: ConnectAttempt) => void | Promise<unknown>;
+  /** Called synchronously on Continue; hosts can reserve a popup before advancing. */
+  onSelectAccount?: (accountId: string) => void | Promise<unknown>;
   /** Host pagination must retain selections across pages and submit the final set. */
   onBrowseResources?: (attempt: ConnectAttempt) => void | Promise<unknown>;
   className?: string;
@@ -61,11 +63,13 @@ function ScopedSetup({
   controller,
   onAuthorize,
   onBrowseResources,
+  onSelectAccount,
   className,
   authorizeLabel = "Authorize connection",
 }: ConnectSetupProps) {
   const view = useConnect(controller);
   const [localError, setLocalError] = useState(false);
+  const [navigating, setNavigating] = useState(false);
   const invoke = (operation: () => unknown | Promise<unknown>) => {
     setLocalError(false);
     try {
@@ -91,7 +95,7 @@ function ScopedSetup({
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
-    if (view.busy) return;
+    if (view.busy || navigating) return;
     const key = crypto.randomUUID();
     if (action.type === "credentials") {
       const values = Object.fromEntries(
@@ -105,7 +109,15 @@ function ScopedSetup({
       if (
         action.accounts.some((account) => account.id === accountId && account.status !== "disabled")
       )
-        invoke(() => view.advance({ type: "account", accountId }, key));
+        invoke(async () => {
+          if (!onSelectAccount) return view.advance({ type: "account", accountId }, key);
+          setNavigating(true);
+          try {
+            await onSelectAccount(accountId);
+          } finally {
+            setNavigating(false);
+          }
+        });
     } else if (action.type === "select_resources") {
       if (action.cursor) return;
       const resourceIds = data.getAll("resource").map(String);
@@ -129,7 +141,7 @@ function ScopedSetup({
     <section
       className={["og-connect-setup", className].filter(Boolean).join(" ")}
       aria-label="Connection setup"
-      aria-busy={view.busy}
+      aria-busy={view.busy || navigating}
     >
       <div className="og-connect-setup-summary">
         <p className="og-connect-setup-scope">
@@ -154,7 +166,7 @@ function ScopedSetup({
       )}
       {!terminal && (
         <form key={`${attempt.id}:${attempt.revision}`} onSubmit={submit} autoComplete="off">
-          <fieldset disabled={view.busy}>
+          <fieldset disabled={view.busy || navigating}>
             {["credentials", "select_account", "select_resources", "preview"].includes(
               action.type,
             ) ? (
@@ -261,7 +273,7 @@ function ScopedSetup({
                 className="og-connect-setup-primary"
                 onClick={() => invoke(() => onAuthorize(structuredClone(attempt)))}
               >
-                {authorizeLabel}
+                {navigating ? "Waiting for authorization…" : authorizeLabel}
               </button>
             )}
             {action.type === "wait" && (

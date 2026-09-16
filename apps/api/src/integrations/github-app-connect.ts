@@ -210,6 +210,18 @@ export async function completeGitHubAppConnect(
       state.providerId,
       acquiring,
     );
+    // Recover a repeated install callback only while its next stage is still
+    // current. A completed/superseded attempt returns home without reopening OAuth.
+    if (
+      claim.status === "replayed" &&
+      state.phase === "install" &&
+      claim.attempt.revision === stored.attempt.revision &&
+      claim.attempt.nextAction.type === "authorize"
+    )
+      return new Response(null, {
+        status: 302,
+        headers: { Location: claim.attempt.nextAction.url },
+      });
     if (claim.status !== "replayed") {
       const provider =
         state.providerId === "github-lens" ? deps.prReviewGithubAppApi : deps.githubAppApi;
@@ -390,14 +402,19 @@ export async function completeGitHubAppConnect(
           },
         };
       }
-      if (acquiring)
-        await finishOAuthAcquisition(
-          deps.db,
-          state,
-          { ...operation, commit: prepared.commit },
-          state.providerId,
-        );
-      else await finishConnectOperation(deps.db, state, { ...operation, commit: prepared.commit });
+      const completed = acquiring
+        ? await finishOAuthAcquisition(
+            deps.db,
+            state,
+            { ...operation, commit: prepared.commit },
+            state.providerId,
+          )
+        : await finishConnectOperation(deps.db, state, { ...operation, commit: prepared.commit });
+      // Installation is only the first half of consent. Keep this browser on
+      // the exact authorization stage committed above; polling still waits for
+      // the final owner proof before reporting connection completion.
+      if (state.phase === "install" && completed.nextAction.type === "authorize")
+        return new Response(null, { status: 302, headers: { Location: completed.nextAction.url } });
     }
   } catch {
     // Preserve unknown outcomes; never replay provider authorization to recover.

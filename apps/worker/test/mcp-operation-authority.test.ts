@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 import type { ConnectionUseAttribution } from "@opengeni/contracts/connection-authority";
-import type { HostMcpAcceptedAuthority } from "@opengeni/contracts/host-mcp-bindings";
 import { mcpOperationAuthorityDigest } from "../src/activities/mcp-operation-authority";
 import type { ResolveConnectionCredentialInput } from "@opengeni/db";
 
@@ -25,24 +24,6 @@ const native = {
   authorityId: "accepted-authority",
   grantId: "grant",
 } as ConnectionUseAttribution;
-const host = {
-  version: 1,
-  accountId: "org",
-  workspaceId: "workspace",
-  targetSessionId: "session",
-  targetSessionVisibility: "shared",
-  targetSessionAuthorityEpoch: 1,
-  ownerSubjectId: "owner",
-  ownerOrganizationMembershipId: "membership",
-  ownerMembershipAuthorizationRevision: 1,
-  bindingId: "binding",
-  bindingGeneration: 1,
-  delegationId: "delegation",
-  delegationGeneration: 1,
-  definition: { serverId: "server", destinationUrl: "https://example.test/mcp" },
-  source: { kind: "direct" },
-  acceptedWork: { kind: "turn", turnId: "turn-1" },
-} as unknown as HostMcpAcceptedAuthority;
 
 test("native authority is stable across observers, retries and secret rotation; exact selection is bound", () => {
   const digest = mcpOperationAuthorityDigest(request, { native });
@@ -83,29 +64,6 @@ test("native authority is stable across observers, retries and secret rotation; 
       { native },
     ),
   ).toBe(digest);
-});
-
-test("host authority binds durable revisions, not accepted turn provenance", () => {
-  const digest = mcpOperationAuthorityDigest(request, { host });
-  expect(
-    mcpOperationAuthorityDigest(request, {
-      host: {
-        ...host,
-        acceptedWork: { kind: "turn", turnId: "turn-2" },
-        source: { kind: "inherited_turn", sessionId: "session", turnId: "turn-1" },
-      },
-    }),
-  ).toBe(digest);
-  for (const change of [
-    { ownerSubjectId: "other" },
-    { targetSessionAuthorityEpoch: 2 },
-    { ownerMembershipAuthorizationRevision: 2 },
-    { bindingGeneration: 2 },
-    { delegationGeneration: 2 },
-    { delegationId: "other" },
-  ]) {
-    expect(mcpOperationAuthorityDigest(request, { host: { ...host, ...change } })).not.toBe(digest);
-  }
 });
 
 test("workspace connection authority also distinguishes the accepted principal, never credentials", () => {

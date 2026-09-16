@@ -15,7 +15,7 @@ import {
   capabilityMonogram,
   capabilityQuickConnectPlan,
   capabilityReconnectPlan,
-  capabilityRequiresPersonalConnection,
+  defaultCapabilityConnectionOwnership,
   capabilitySourceLabel,
   connectionHealth,
   connectionToReuseForApiKey,
@@ -330,46 +330,33 @@ describe("capabilityConnectPlan", () => {
     });
   });
 
-  test("official Gmail is personal-only even before refreshed catalog metadata arrives", () => {
+  test("ownership defaults are preferences, not provider restrictions", () => {
     expect(
-      capabilityRequiresPersonalConnection(
+      defaultCapabilityConnectionOwnership(
+        item({ metadata: { oauthProfile: { defaultOwnership: "personal" } } }),
+      ),
+    ).toBe("personal");
+    expect(
+      defaultCapabilityConnectionOwnership(
         item({
-          mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1",
-          metadata: {},
+          metadata: {
+            defaultConnectionOwnership: "workspace",
+            oauthProfile: { defaultOwnership: "personal" },
+          },
         }),
       ),
-    ).toBe(true);
+    ).toBe("workspace");
     expect(
-      capabilityRequiresPersonalConnection(
-        item({ metadata: { connectionOwnership: "personal_only" } }),
+      defaultCapabilityConnectionOwnership(
+        item({ metadata: { defaultConnectionOwnership: "personal" } }),
       ),
-    ).toBe(true);
-  });
-
-  test("Slack's hosted MCP is personal-only; shared Slack access is the workspace bot", () => {
-    expect(
-      capabilityRequiresPersonalConnection(
-        item({
-          providerDomain: "slack.com",
-          mcpUrl: "https://mcp.slack.com/mcp",
-          metadata: {},
-        }),
-      ),
-    ).toBe(true);
-    expect(
-      capabilityRequiresPersonalConnection(
-        item({
-          providerDomain: "slack.com",
-          endpointUrl: "https://mcp.slack.com/mcp/",
-          metadata: {},
-        }),
-      ),
-    ).toBe(true);
-    expect(
-      capabilityRequiresPersonalConnection(
-        item({ providerDomain: "slack.com", mcpUrl: "https://slack.example.test/mcp" }),
-      ),
-    ).toBe(false);
+    ).toBe("personal");
+    expect(defaultCapabilityConnectionOwnership(item({ providerDomain: "linear.app" }))).toBe(
+      "workspace",
+    );
+    expect(defaultCapabilityConnectionOwnership(item({ providerDomain: "slack.com" }))).toBe(
+      "workspace",
+    );
   });
 
   test("MCP with required headers collects an api_key with humanized labels", () => {
@@ -1318,16 +1305,16 @@ describe("capabilityQuickConnectPlan (row/tile icon fast path)", () => {
     ).toMatchObject({ confirm: true });
   });
 
-  test("a personal-only connector never quick-connects a workspace-owned binding", () => {
+  test("quick connect respects the configured personal default", () => {
     for (const mcpUrl of ["https://gmailmcp.googleapis.com/mcp/v1", "https://mcp.slack.com/mcp"]) {
       const personalOnly = item({
         kind: "mcp",
         authKind: "oauth2",
         providerDomain: "google.com",
         mcpUrl,
-        metadata: { curation: { official: true } },
+        metadata: { curation: { official: true }, defaultConnectionOwnership: "personal" },
       });
-      expect(capabilityRequiresPersonalConnection(personalOnly)).toBe(true);
+      expect(defaultCapabilityConnectionOwnership(personalOnly)).toBe("personal");
       expect(capabilityQuickConnectPlan(personalOnly)).toMatchObject({
         mode: "oauth",
         ownership: "personal",
@@ -1340,7 +1327,7 @@ describe("capabilityQuickConnectPlan (row/tile icon fast path)", () => {
           authKind: "api_key",
           providerDomain: "example.test",
           metadata: {
-            connectionOwnership: "personal_only",
+            defaultConnectionOwnership: "personal",
             requiredHeaders: ["X-Api-Key"],
           },
         }),

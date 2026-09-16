@@ -625,10 +625,18 @@ export type SessionEffectiveToolPolicy = {
   idsTruncated: boolean;
 };
 
+export type SessionGoalReportRequirement = { id: string; title: string };
+export type SessionGoalReportDelivery = {
+  requirementId: string;
+  artifactId: string;
+  inspectionReceiptId: string;
+};
+
 export type GoalSpec = {
   text: string;
   successCriteria?: string | undefined;
   rootConstraints?: string[] | undefined;
+  reportRequirements?: SessionGoalReportRequirement[] | undefined;
   maxAutoContinuations?: number | undefined;
   mutationPolicy?: SessionGoalMutationPolicy | undefined;
 };
@@ -707,10 +715,9 @@ export type UserResourceDelegation = {
   resourceVersionId?: string | null | undefined;
 };
 
-export type McpConnectionAuthoritySelection = {
+export type McpConnectionAccountSelection = {
   serverId: string;
   connectionId: string;
-  userDelegation: UserResourceDelegation;
 };
 
 export type McpServerConnectionRef = {
@@ -1819,7 +1826,7 @@ export type SkillReviewReference = {
 };
 
 export type HumanInputQuestion = {
-  skillReview?: SkillReviewReference | undefined;
+  skillReview?: SkillReviewReference | null | undefined;
   id: string;
   kind: HumanInputQuestionKind;
   prompt: string;
@@ -2832,6 +2839,7 @@ export type IncidentTelemetryPreflightInput = Omit<
 };
 
 export type ScheduledTaskAgentConfig = {
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
@@ -2892,6 +2900,8 @@ export type ScheduledTask = {
   accountId: string;
   workspaceId: string;
   name: string;
+  /** Immutable execution owner; null for workspace/service tasks. */
+  ownerSubjectId: string | null;
   status: ScheduledTaskStatus;
   schedule: ScheduledTaskScheduleSpec;
   temporalScheduleId: string;
@@ -2901,7 +2911,6 @@ export type ScheduledTask = {
   agentConfig: ScheduledTaskAgentConfig;
   createdBy?: TurnInitiator | undefined;
   createdByContext?: TurnInitiatorContext | undefined;
-  personalConnections?: McpPersonalConnectionSummary[] | undefined;
   authorityRevision: number;
   executionDigest: string;
   targetSessionId: string | null;
@@ -2917,10 +2926,6 @@ export type ScheduledTask = {
 };
 
 export type CreateSessionRequest = {
-  /** Opt-in host grants for a direct external-user initial turn. */
-  selectedHostMcpDelegations?:
-    | { serverId: string; delegationId: string; generation: number }[]
-    | undefined;
   /** Omitted: defaults/inheritance; []: no bundled guidance. Children cannot widen. */
   bundledSkillIds?: BundledSkillId[] | undefined;
   excludedMcpServerIds?: string[] | undefined;
@@ -4088,7 +4093,7 @@ export type UserResourceAuthoritySummary = {
   grants: UserResourceAuthorityGrant[];
 };
 export type ListUserResourceAuthoritiesOptions = {
-  resourceKind: UserResourceKind;
+  resourceKind: Exclude<UserResourceKind, "connection">;
   cursor?: string | undefined;
   limit?: number | undefined;
 };
@@ -4100,7 +4105,7 @@ export type ListUserResourceAuthoritiesResponse = {
 export type IssueUserResourceGrantRequest =
   | {
       scope: "user";
-      resourceKind: UserResourceKind;
+      resourceKind: Exclude<UserResourceKind, "connection">;
       mode: "session";
       context: "user_private" | "workspace_shared";
       sessionId: string;
@@ -4109,7 +4114,7 @@ export type IssueUserResourceGrantRequest =
     }
   | {
       scope: "user";
-      resourceKind: UserResourceKind;
+      resourceKind: Exclude<UserResourceKind, "connection">;
       mode: "always";
       context: "user_private" | "workspace_shared";
       sessionId?: null | undefined;
@@ -4900,6 +4905,8 @@ export type SessionGoal = {
   text: string;
   successCriteria: string | null;
   rootConstraints: string[];
+  /** Optional for older-server/source compatibility; current servers always supply this projection. */
+  reportRequirements?: SessionGoalReportRequirement[] | undefined;
   evidence: string | null;
   rationale: string | null;
   pausedReason: string | null;
@@ -5259,7 +5266,7 @@ export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expecte
   controlEtag?: string;
   modelContext?: string;
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
-  connectionAuthorities?: McpConnectionAuthoritySelection[];
+  connectionAccounts?: McpConnectionAccountSelection[];
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
 };
 
@@ -5310,8 +5317,7 @@ export type CreateAgentScheduledTaskRequest = {
   action?: { kind: "agent_turn" } | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
-  connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
-  selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
@@ -5341,8 +5347,7 @@ export type UpdateScheduledTaskRequest = {
   schedule?: ScheduledTaskScheduleSpec | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
-  connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
-  selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
@@ -7536,20 +7541,29 @@ export type ListInstalledPluginsResponse = {
   plugins: PluginInstallationSummary[];
 };
 
+export type PluginUninstallComponentImpact = {
+  capabilityId: string;
+  kind: "skill" | "integration" | "mcp";
+  retainedByOtherOwners: boolean;
+  name: string;
+  disposition: "removed" | "retained" | "inactive";
+  retentionReasons: Array<"other_owners" | "customized" | "re_scoped" | "registry_unavailable">;
+  remainingOwners: Array<{ kind: "direct" | "plugin" | "pack" | "migration"; name: string }>;
+  skillId?: string | undefined;
+};
+
 export type PluginUninstallPreview = {
   pluginKey: string;
   installed: boolean;
   version: string | null;
   installationVersion: number | null;
-  components: Array<{
-    capabilityId: string;
-    kind: "skill" | "integration" | "mcp";
-    retainedByOtherOwners: boolean;
-  }>;
+  previewToken?: string | undefined;
+  components: PluginUninstallComponentImpact[];
 };
 
 export type UninstallPluginRequest = {
   expectedInstallationVersion: number;
+  expectedPreviewToken?: string | undefined;
   idempotencyKey: string;
 };
 
@@ -8027,8 +8041,7 @@ export type UserMessageEventInput = {
     controlEtag?: string | undefined;
     expectedDraftRevision?: number | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
-    connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
-    selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
+    connectionAccounts?: McpConnectionAccountSelection[] | undefined;
     personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   };
 };

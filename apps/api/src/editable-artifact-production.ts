@@ -47,6 +47,7 @@ import {
   PostgresEditableArtifactStore,
   listEditableArtifactIdsForSession,
   touchEditableArtifactSessionLink,
+  recordNativeDocumentInspection,
   dbSql,
   withRlsContext,
   type Database,
@@ -167,6 +168,11 @@ export async function createStandaloneEditableArtifactApplication(input: {
         await touchEditableArtifactSessionLink(input.db, scope, sessionId, artifactId),
     } satisfies EditableArtifactAgentAssociationPort),
     inspector: kernel,
+    recordInspection: async (inspection) => {
+      if (inspection.actor.kind !== "agent")
+        throw new Error("Inspection proof requires an agent attempt");
+      return recordNativeDocumentInspection(input.db, { ...inspection, actor: inspection.actor });
+    },
     officeImports,
     workspaceFiles: new EditableArtifactWorkspaceFileAdapter({
       db: input.db,

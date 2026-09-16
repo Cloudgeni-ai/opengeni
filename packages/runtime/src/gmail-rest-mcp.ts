@@ -329,8 +329,7 @@ export function isOfficialGmailMcpConfig(
   return (
     canonicalUrl(url) === canonicalUrl(OFFICIAL_GMAIL_MCP_URL) &&
     connectionRef?.providerDomain.toLowerCase() === "gmailmcp.googleapis.com" &&
-    connectionRef.kind === "oauth2" &&
-    connectionRef.subjectScope === "subject"
+    connectionRef.kind === "oauth2"
   );
 }
 

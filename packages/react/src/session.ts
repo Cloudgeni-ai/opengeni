@@ -23,6 +23,7 @@ export type {
   EmbeddedSessionClientOverride as ClientOverride,
 } from "./session-context";
 export { createEmbeddedSessionClient } from "./embedded-session-client";
+export { conversationTimeline } from "./conversation-timeline";
 export type {
   ComposerDraftMapContext,
   CreateEmbeddedSessionClientOptions,

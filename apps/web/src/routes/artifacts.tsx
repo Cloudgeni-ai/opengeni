@@ -9,6 +9,7 @@ import { loadSiteSnapshot } from "@opengeni/react/sites";
 import { SiteConversations } from "@/components/artifacts/site-conversations";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
+  AlertTriangleIcon,
   ArrowLeftIcon,
   ArchiveIcon,
   ArchiveRestoreIcon,
@@ -22,6 +23,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
+import { artifactRouteErrorMessage, mapArtifactRouteError } from "@/lib/artifact-route-error";
 import { ArtifactLibrary } from "@/components/artifacts/artifact-library";
 import { defaultArtifactFilters } from "@/lib/artifact-catalog";
 import { useArtifactCatalog } from "@/lib/use-artifact-catalog";
@@ -40,11 +42,28 @@ function formatDate(value: string): string {
   return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
 }
 
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
-}
-
 const NO_SITE_TOOLS: readonly ToolGatewayIdentity[] = [];
+
+function SiteLoadError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+  const view = mapArtifactRouteError(error, "site");
+  const message = artifactRouteErrorMessage(view);
+  if (view.retryable) {
+    return <LoadErrorState title={view.title} error={new Error(message)} onRetry={onRetry} />;
+  }
+  return (
+    <div
+      role="alert"
+      aria-live="assertive"
+      className="flex items-start gap-2 rounded-lg border border-status-failed/40 bg-status-failed/10 p-3 text-sm text-fg"
+    >
+      <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-failed" />
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-medium">{view.title}</div>
+        <div className="mt-0.5 break-words text-xs leading-4 text-fg-muted">{message}</div>
+      </div>
+    </div>
+  );
+}
 
 export function ArtifactsRoute({
   workspaceId,
@@ -61,10 +80,13 @@ export function ArtifactsRoute({
         key={`${workspaceId}:${artifactId}`}
         workspaceId={workspaceId}
         artifactId={artifactId}
+        fromSession={fromSession}
       />
     </ArtifactSessionPage>
   ) : (
-    <ArtifactListRoute key={workspaceId} workspaceId={workspaceId} />
+    <ArtifactSessionPage workspaceId={workspaceId} fromSession={fromSession}>
+      <ArtifactListRoute key={workspaceId} workspaceId={workspaceId} />
+    </ArtifactSessionPage>
   );
 }
 
@@ -122,10 +144,12 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
 export function ArtifactDetailRoute({
   workspaceId,
   artifactId,
+  fromSession,
   embedded = false,
 }: {
   workspaceId: string;
   artifactId: string;
+  fromSession?: string | undefined;
   embedded?: boolean;
 }) {
   const context = useAppContext();
@@ -184,7 +208,7 @@ export function ArtifactDetailRoute({
     });
   }, [artifactId, context.client, requestedTools, siteVersionId, workspaceId]);
   const startEditSession = async () => {
-    if (!detail || detail.artifact.status === "archived") return;
+    if (!canPublish || !detail || detail.artifact.status === "archived") return;
     const artifact = detail.artifact;
     const created = await context.startSession(workspaceId, {
       text: `Help me edit the Site “${artifact.title}”: /workspaces/${workspaceId}/artifacts/${artifact.id}`,
@@ -249,14 +273,7 @@ export function ArtifactDetailRoute({
   };
   const archived = detail?.artifact.status === "archived";
   if (embedded) {
-    if (error)
-      return (
-        <LoadErrorState
-          title="Couldn't load Site"
-          error={asError(error)}
-          onRetry={() => void load()}
-        />
-      );
+    if (error) return <SiteLoadError error={error} onRetry={() => void load()} />;
     if (!detail || !content)
       return (
         <div role="status" className="p-4 text-sm text-fg-muted">
@@ -287,6 +304,7 @@ export function ArtifactDetailRoute({
         <Link
           to="/workspaces/$workspaceId/artifacts"
           params={{ workspaceId }}
+          search={fromSession ? { fromSession } : {}}
           className="mb-3 inline-flex w-fit items-center gap-1.5 text-xs font-medium text-fg-subtle transition-colors hover:text-fg"
         >
           <ArrowLeftIcon className="size-3.5" />
@@ -311,53 +329,52 @@ export function ArtifactDetailRoute({
               {detail?.artifact.description ?? "An interactive workspace Site."}
             </p>
           </div>
-          <div className="flex shrink-0 flex-wrap items-center gap-2">
-            <SiteConversations
-              key={artifactId}
-              workspaceId={workspaceId}
-              siteId={artifactId}
-              title={detail?.artifact.title ?? "this Site"}
-            />
-            {archived ? (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void setSiteStatus("active")}
-                disabled={!canPublish || !detail || statusBusy}
-              >
-                <ArchiveRestoreIcon className="mr-2 size-4" />
-                {statusBusy ? "Restoring…" : "Restore Site"}
-              </Button>
-            ) : (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setArchiveDialogOpen(true)}
-                disabled={!canPublish || !detail || statusBusy}
-              >
-                <ArchiveIcon className="mr-2 size-4" />
-                Archive
-              </Button>
-            )}
-            <Button
-              size="sm"
-              onClick={() => void startEditSession()}
-              disabled={!detail || context.busy || archived}
-            >
-              <SparklesIcon className="mr-2 size-4" />
-              Edit with Geni
-            </Button>
-          </div>
+          {detail && !error ? (
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              <SiteConversations
+                key={artifactId}
+                workspaceId={workspaceId}
+                siteId={artifactId}
+                title={detail.artifact.title}
+              />
+              {canPublish &&
+                (archived ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void setSiteStatus("active")}
+                    disabled={!canPublish || statusBusy}
+                  >
+                    <ArchiveRestoreIcon className="mr-2 size-4" />
+                    {statusBusy ? "Restoring…" : "Restore Site"}
+                  </Button>
+                ) : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setArchiveDialogOpen(true)}
+                    disabled={!canPublish || statusBusy}
+                  >
+                    <ArchiveIcon className="mr-2 size-4" />
+                    Archive
+                  </Button>
+                ))}
+              {canPublish ? (
+                <Button
+                  size="sm"
+                  onClick={() => void startEditSession()}
+                  disabled={context.busy || archived}
+                >
+                  <SparklesIcon className="mr-2 size-4" />
+                  Edit with Geni
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </div>
       {!detail && !error ? <Skeleton className="h-96 w-full" /> : null}
-      {error ? (
-        <LoadErrorState
-          title="Couldn't load Site"
-          error={asError(error)}
-          onRetry={() => void load()}
-        />
-      ) : null}
+      {error ? <SiteLoadError error={error} onRetry={() => void load()} /> : null}
       {detail && content ? (
         <div className="grid gap-6">
           {archived ? (
@@ -382,7 +399,7 @@ export function ArtifactDetailRoute({
                 : undefined
             }
             editDisabled={context.busy || archived}
-            onEdit={() => void startEditSession()}
+            onEdit={canPublish ? () => void startEditSession() : undefined}
             toolBridge={archived ? undefined : siteToolBridge}
             connectedToolCount={content.requestedTools.length}
           />

@@ -40,35 +40,18 @@ Then open the smallest source files that answer the question:
 - Core domain/access/billing helpers: `packages/core/src/` (`access/`, `domain/`, `billing/`, and `dependencies.ts`). These moved out of `apps/api`; API routes are HTTP adapters over `@opengeni/core`.
 - Public shapes: `packages/contracts/src/index.ts`, especially workspace, access, billing, usage, session, file, document, schedule, and MCP contracts.
 - External host identities and credential authority: `packages/core/src/access/`,
-  `packages/contracts/src/external-identities.ts`, and `packages/db/src/host-mcp-bindings.ts`.
+  `packages/contracts/src/external-identities.ts`, and `packages/db/src/connection-authority.ts`.
   Verified external owning-user authority is distinct from a managed login cookie.
-  The host binding registry is credential-free; registration is not a worker or
-  scheduled execution grant. Check live caller wiring before claiming durability.
-  Verified owner host delegation issuance shares the binding API's commit-time
-  proof. Its persisted grants remain separate from production accepted-work
-  capture; no grant alone authorizes execution. Direct external-user creates may
-  explicitly select matching configured server grants for the initial turn.
-  `withDirectHostMcpAdmission` prepares a locked direct-turn snapshot only; its
-  callback must persist within canonical accepted-work transaction boundaries.
-  Never call it for scheduled/inherited work or treat it as caller authentication.
-  `captureDirectHostMcpAuthority` persists that snapshot in the 0445 append-only
-  ledger with an independent canonical insert guard. Production capture callers
-  now capture atomically for explicit direct initial-turn and follow-up send/steer selection. Worker `authorizeDirectHostMcpUse` validates captured direct
-  work and exact same-session causal resumptions. Migration 0446 separately
-  proves delivered goal/child-result lineage before copying authority. Revoked
-  selections are omitted, not broadened. Migration 0447 freezes host selections
-  on native task revisions and captures exact scheduled runs; retain promotion
-  during reusable-session materialization and restore source revisions on rollback.
-  Migration 0448 admits only the spawning turn's selected `always` grants to a
-  child's initial turn. Scheduled origin survives successors. Agent-created
-  schedules use the live accepted attempt, never a creator account lookup.
-  Preserve frozen initiatingHumanSubjectId independently of service audit identity.
-  Missing snapshots and unrelated-owner references remain denied.
-  Request-time external/service gateway credentials use the separate opt-in
-  `mcpGatewayCredentials` port with non-turn authority; do not fabricate sessions
-  or treat this callback as durable execution delegation.
-  Worker host execution separately rechecks canonical active-attempt liveness
-  before resolution and physical use; this is not binding/owner delegation.
+  Integrating backends provision ordinary native connections under `asUser`;
+  interactive and backend setup share ownership and refresh machinery.
+  Accepted turns/tasks capture exact named-user connection selection; execution
+  and physical requests recheck live authority. Shared turns cannot borrow a
+  creator's credentials. Preserve captured initiatingHumanSubjectId for schedules
+  and child work, independently of request-time service administration.
+  Host-specific registry, callback and selection APIs are retired; do not restore
+  them as a parallel framework. Historical tables are not executable authority.
+  The request-time gateway uses native connections with live caller checks, not
+  fabricated sessions. See `docs/remote-mcp-credentials.md` for cutover status.
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
 - Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn/`.
 - Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/packs.md` and `docs/capabilities.md` (capability packs / MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
@@ -131,6 +114,14 @@ Keep these boundaries explicit:
   fallback.
 - Old unscoped operational routes are deleted, not soft-deprecated. Do not add compatibility aliases unless the user explicitly changes that product decision.
 - Better Auth is only the managed-mode browser human auth resolver. It is not the tenant model and should not appear in core session/file/document/schedule route code.
+- Managed sign-in method changes belong to `apps/api/src/routes/managed-sign-in-methods.ts`
+  and its canonical identity/database guards. Discover the current contract in
+  `packages/contracts/src/managed-sign-in-methods.ts` and the rollout in
+  `docs/browser-login-session-sets.md`. Preserve verified-email linking,
+  explicit-disconnect suppression, expected-human/revision fences, recent
+  authentication, and last-usable-method protection across every login route;
+  do not expose raw provider mutation routes or use `trustedProviders` to bypass
+  email verification. Login methods are distinct from integration permissions.
 - OpenGeni organization API keys are owned by OpenGeni and use the
   `Authorization` header. The optional deployment shared key uses
   `x-opengeni-access-key`.

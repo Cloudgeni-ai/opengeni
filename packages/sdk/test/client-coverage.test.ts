@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/artifact-client";
+import { OpenGeniEmbeddingClient } from "../src/embedding-client";
 import { OpenGeniApiError, OpenGeniSecureContextRequiredError } from "../src/errors";
 import {
   OPENGENI_API_CONTRACT_REVISION,
@@ -2389,6 +2390,27 @@ describe("OpenGeniClient connections", () => {
       ...overrides,
     };
   }
+
+  test("recovers a connection creation result without sending credentials", async () => {
+    const connection = fakeConnection({ status: "revoked" });
+    const { fetch, requests } = recordingFetch(() => jsonResponse({ connection }));
+    const client = new OpenGeniEmbeddingClient({
+      baseUrl: "https://api.example.test",
+      apiKey: "og_test_key",
+      fetch,
+    }).asUser("alice");
+    const operationId = "d4226368-95d9-4eca-9dd3-1df27dd81891";
+    expect(await client.getConnectionCreationResult(WORKSPACE_ID, operationId)).toEqual(connection);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("GET");
+    expect(new URL(requests[0]!.url).pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/connections/operations/${operationId}`,
+    );
+    expect(requests[0]!.body).toBeNull();
+    expect(
+      JSON.parse(decodeURIComponent(requests[0]!.headers["x-opengeni-external-actor"]!)),
+    ).toEqual({ mode: "external", identity: { externalId: "alice", source: "default" } });
+  });
 
   test("list/create/update/delete round-trip through their unwrapped connection shape", async () => {
     const connection = fakeConnection();

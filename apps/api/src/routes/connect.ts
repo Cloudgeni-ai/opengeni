@@ -32,7 +32,7 @@ import {
   createConnection,
   updateConnection,
   encryptEnvironmentValue,
-  normalizedHostCredentialHeaders,
+  normalizedCredentialHeaders,
   listGitHubInstallationAccessForWorkspace,
   getPackInstallation,
   listPrReviewAppRegistrations,
@@ -242,27 +242,27 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: "Gmail",
         family: "google",
         readiness:
-          !external || !canWrite || !personal
+          !external || !canWrite
             ? "unsupported"
             : mcpConfigured
               ? "available"
               : "needs_configuration",
-        ownership: personal ? ["personal"] : [],
+        ownership: personal ? ["workspace", "personal"] : ["workspace"],
         setup: ["oauth"],
       }),
       ConnectProvider.parse({
         id: "slack-personal",
-        label: "My Slack account",
+        label: "Slack account",
         family: "slack",
         readiness:
-          !external || !canWrite || !personal
+          !external || !canWrite
             ? "unsupported"
             : mcpConfigured &&
                 deps.settings.slackClientId?.trim() &&
                 deps.settings.slackClientSecret?.trim()
               ? "available"
               : "needs_configuration",
-        ownership: personal ? ["personal"] : [],
+        ownership: personal ? ["workspace", "personal"] : ["workspace"],
         setup: ["oauth"],
       }),
       ConnectProvider.parse({
@@ -923,7 +923,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       try {
         credentialHeaders =
           "headers" in values
-            ? normalizedHostCredentialHeaders(
+            ? normalizedCredentialHeaders(
                 z.record(z.string(), z.string()).parse(JSON.parse(values.headers)),
               )
             : { authorization: `Bearer ${values.token}` };
@@ -1670,14 +1670,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             "fiken-token",
           ].includes(input.providerId)
         ) {
-          if (input.providerId === "slack-personal" && input.ownership !== "personal")
-            throw new HTTPException(422, {
-              message: "Hosted Slack MCP requires personal ownership",
-            });
-          if (input.providerId === "gmail" && input.ownership !== "personal")
-            throw new HTTPException(422, {
-              message: "Gmail requires personal ownership; each user connects their own account",
-            });
           if (input.providerId === "fiken-token" && input.ownership !== "workspace")
             throw new HTTPException(422, { message: "Fiken is workspace-owned" });
           requireEnvironmentEncryption(deps.settings);

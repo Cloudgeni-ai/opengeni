@@ -60,17 +60,15 @@ This is a maintenance-only runtime-role contract change: stop old API/control/
 turn workers, supply every application database role, migrate, provision the
 matching roles, and start only matching binaries. Do not restart pre-0463 code.
 Configure `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` consistently across API/workers.
-Thereafter instance registration and rotation require no process restart.
-No existing organization opts in automatically; the first registration enables
-exact namespace routing with no static fallback. See
-[remote host MCP credentials](remote-mcp-credentials.md#native-instance-registration)
-for the explicit legacy-migration acknowledgement and authority boundaries.
+This is historical schema guidance. The current runtime has removed the resolver
+registration API and callback execution; new integrations use ordinary native
+OAuth connections. See [cutover notes](remote-mcp-credentials.md#native-instance-registration).
 
 `0467_host_resolver_full_organization_keys.sql` is a rolling correction to the
 existing write trigger: resolver administration uses the `workspace:admin`
 permission issued by full organization API keys, not human `account:admin`.
-Deploy the matching API/core code with the migration. No key rotation, added
-permissions, role provisioning change, or resolver re-registration is needed.
+This correction remains part of migration history; it does not restore resolver
+administration in the current API.
 
 ### Host MCP, native-link and Connect authority migrations (0443–0456)
 
@@ -177,10 +175,8 @@ owning-user proof; do not synthesize native-cookie flags or grant Personal
 workspace membership to service keys. The matching runtime adds live external
 authority checks before session-create, visibility-change, and fork commits.
 
-The optional remote host MCP credential adapter is configured separately with
-server-owned secrets. It is not required for inline credentials or native OAuth.
-See [remote MCP credentials](remote-mcp-credentials.md) for the endpoint contract,
-limits, and live host authorization obligations.
+The former remote host MCP credential adapter and its environment setting are
+removed. Use native OAuth connections; see [cutover notes](remote-mcp-credentials.md).
 
 ## Workspace MCP OAuth
 
@@ -840,9 +836,30 @@ Register these exact callback URLs against the canonical public origin:
 
 The public client config exposes only the enabled provider names. OAuth tokens,
 client secrets, Better Auth state, and provider session identifiers remain
-server-side. Better Auth automatic email-based account linking stays disabled;
-an existing email/password human is not silently merged with a newly presented
-Google or GitHub identity.
+server-side. Google and GitHub sign-ins may automatically attach a new login
+method to an existing human only when the email matches and both the existing
+email and the provider's email assertion are verified. This also supports a
+verified email/password user signing in through a social provider. Linking adds
+a method to that same canonical human; it never merges separate users or changes
+organization memberships, workspace access, or billing ownership.
+
+Keep provider email verification and local email verification checks enabled.
+Do not use Better Auth's `trustedProviders` option to bypass the incoming
+email-verification check. An unverified email or conflicting provider identity
+must not silently acquire another human's authority.
+
+Personal sign-in settings expose connected login methods separately from
+repository, Gmail, and Drive integrations. Sensitive changes require fresh
+authentication, and disconnecting the last usable method is refused. An explicit
+disconnect must remain effective: subsequent same-email sign-in cannot silently
+reconnect that method; the user must explicitly reconnect it with provider proof.
+
+The sign-in-method boundary requires a maintenance rollout, not mixed old/new
+API replicas. Follow [Personal sign-in methods](browser-login-session-sets.md#personal-sign-in-methods):
+drain the old runtime writers, apply the migration and role provisioning, then
+start the matching release. Do not restart an older API that exposes the raw
+provider-management routes. This feature does not authorize changing the
+deployment's configured browser session-set mode.
 
 ### Durable invited-user email delivery (0351)
 
@@ -2728,7 +2745,9 @@ Connected Machines:
 
 Non-secret wiring goes in config/values: `OPENGENI_SELFHOSTED_NATS_URL` and
 `OPENGENI_SELFHOSTED_RELAY_URL` (the public wss URLs the agent dials, matching the
-ingress hosts) plus the callout account/user names. The relay's non-secret tuning
+ingress hosts; both are returned to the agent as connect info at enrollment)
+plus the callout account/user names. The relay process itself listens on
+`OPENGENI_RELAY_BIND`. The relay's non-secret tuning
 knobs are `OPENGENI_RELAY_RING_FRAMES`, `OPENGENI_RELAY_SPLICE_BUFFER`,
 `OPENGENI_RELAY_RATE_BURST_BYTES`, `OPENGENI_RELAY_RATE_BYTES_PER_SEC`, and
 `OPENGENI_RELAY_PAIR_TIMEOUT_SECS`. A missing token secret makes the relay reject

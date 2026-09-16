@@ -23,6 +23,64 @@ const versionId = "e".repeat(32);
 const jobId = "f".repeat(32);
 
 describe("authored artifact CodeMode facade", () => {
+  test("hands off the server reference after create and final body inspection without goal tools", async () => {
+    const artifactReference = `[Open report](/workspaces/11111111-1111-4111-8111-111111111111/artifacts/editable/${artifact.id})`;
+    const documentArtifact = { ...artifact, modality: "document" as const, artifactReference };
+    const fake = fakeClient((path) => {
+      if (path === "artifacts.create" || path === "artifacts.get") return result(documentArtifact);
+      if (path === "artifacts.inspect")
+        return result({ artifact: documentArtifact, projection: { blocks: [] } });
+      throw new Error(`No goal tools are available: ${path}`);
+    });
+    const document = await createOpenGeniCodemode(fake.client).artifacts.create(
+      "document",
+      "Report",
+    );
+    expect((await document.get()).artifactReference).toBe(artifactReference);
+    const inspected = await document.inspect({
+      kind: "body",
+      startBlock: 0,
+      limits: { maxItems: 100, maxTextUtf16: 10000, maxTableCells: 100 },
+    });
+    expect(inspected.artifact.artifactReference).toBe(artifactReference);
+    expect(fake.calls.map((call) => call.path)).toEqual([
+      "artifacts.create",
+      "artifacts.get",
+      "artifacts.inspect",
+    ]);
+  });
+  test("preserves server-authored document inspection proof without inventing legacy proof", async () => {
+    const documentArtifact = { ...artifact, modality: "document" as const };
+    const inspectionReceiptId = "11111111-1111-4111-8111-111111111111";
+    let includeReceipt = true;
+    const fake = fakeClient((path) => {
+      if (path === "artifacts.inspect") {
+        return result({
+          artifact: documentArtifact,
+          projection: { blocks: [] },
+          ...(includeReceipt ? { inspectionReceiptId } : {}),
+        });
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+    const document = createOpenGeniCodemode(fake.client).artifacts.use(documentArtifact);
+    const query = {
+      kind: "body" as const,
+      startBlock: 0,
+      limits: { maxItems: 200, maxTextUtf16: 100000, maxTableCells: 10000 },
+    };
+    const inspected = await document.inspect(query);
+    expect(inspected.inspectionReceiptId).toBe(inspectionReceiptId);
+    expect(inspected.artifact.headSequence).toBe(documentArtifact.headSequence);
+    expect(fake.calls[0]?.args).toEqual({
+      artifactId: documentArtifact.id,
+      modality: "document",
+      request: query,
+    });
+    includeReceipt = false;
+    expect((await document.inspect(query)).inspectionReceiptId).toBeUndefined();
+  });
+
   test("creates, edits, inspects, and exports through exact artifacts paths", async () => {
     const fake = fakeClient((path) => {
       if (path === "artifacts.create") return result(artifact);

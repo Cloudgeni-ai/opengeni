@@ -1,3 +1,4 @@
+import { ConnectionOwnershipDialog } from "./connection-ownership-selector";
 import {
   hasOpenGeniSlackReactionScope,
   resolveWorkspaceSlackOrchestrationNoticeSettings,
@@ -34,8 +35,7 @@ import { clearSlackInstallResult, slackInstallFeedback } from "@/lib/slack-insta
 import {
   personalSlackAccountState,
   personalSlackCapability,
-  personalSlackOAuthTarget,
-  preferredPersonalSlackConnection,
+  preferredHostedSlackConnection,
   type PersonalSlackAccountState,
 } from "@/lib/personal-slack";
 import {
@@ -204,6 +204,11 @@ export function useSlackIntegration({
   const client = context.client;
   const connectTransport = useMemo(() => client.connectTransport(), [client]);
   const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
+  const [newConnection, setNewConnection] = useState<NativeConnectRequest | null>(null);
+  useEffect(() => {
+    setNewConnection(null);
+    setConnectRequest(null);
+  }, [workspaceId, context.accessContext.subjectId]);
   const completeConnect = useCallback(() => {
     setConnectRequest(null);
     void refresh()
@@ -294,7 +299,7 @@ export function useSlackIntegration({
   const savedDestination = slackBotDocumentDestinationAuthority(botConnection?.metadata);
 
   const personalItem = personalSlackCapability(items);
-  const personalConnection = preferredPersonalSlackConnection(connections ?? []);
+  const personalConnection = preferredHostedSlackConnection(connections ?? []);
   const personalState = preview?.personal ?? personalSlackAccountState(personalConnection, loaded);
   const personalAvailable = personalItem !== null || readOnly;
 
@@ -403,25 +408,26 @@ export function useSlackIntegration({
   }, [botConnectionId, client, isAdmin, publicationLoaded, readOnly, sheetOpen, workspaceId]);
 
   async function startPersonalOAuth() {
-    const target = personalSlackOAuthTarget(personalItem);
-    if (!personalItem || !target) {
-      toast.error("Personal Slack is unavailable", {
+    if (!personalItem) {
+      toast.error("Slack account connection is unavailable", {
         description: "The official hosted Slack integration is not present in this catalog.",
       });
       return;
     }
-    setConnectRequest({
+    const request: NativeConnectRequest = {
       scope: { workspaceId, transport: connectTransport },
       providerId: "slack-personal",
       displayName: "Slack account",
       description: "Let OpenGeni read and send Slack messages as you.",
       logoUrl: SLACK_LOGO_URL,
       authorizeLabel: "Continue to Slack",
-      ownership: "personal",
+      ownership: personalConnection?.subjectId ? "personal" : "workspace",
       returnUrl: window.location.href,
       idempotencyKey: crypto.randomUUID(),
       ...(personalConnection ? { reconnectAccountId: personalConnection.id } : {}),
-    });
+    };
+    if (personalConnection) setConnectRequest(request);
+    else setNewConnection(request);
   }
 
   async function disconnectPersonal(): Promise<boolean> {
@@ -431,7 +437,7 @@ export function useSlackIntegration({
       await client.deleteConnection(workspaceId, personalConnection.id);
       await refresh();
       onRuntimeChanged();
-      toast.success("Personal Slack account disconnected");
+      toast.success("Slack account disconnected");
       return true;
     } catch (error) {
       toast.error("Couldn't disconnect your Slack account", {
@@ -1007,6 +1013,10 @@ export function useSlackIntegration({
               ? "Reconnect needed"
               : "Disconnected",
       });
+      facts.push({
+        label: "Available to",
+        value: state.connection.subjectId === null ? "This workspace" : "Only me",
+      });
       facts.push({ label: "Last used", value: formatDate(state.connection.lastUsedAt) });
     }
 
@@ -1030,9 +1040,7 @@ export function useSlackIntegration({
           : undefined;
 
     const canStartOAuth = personalAvailable && canManagePersonal && !readOnly;
-    // Personal Slack is personal-only: no admin can connect it for a member, so
-    // a member without connections:write gets the truthful permission sentence
-    // rather than the generic admin-managed one.
+    // Changing an account still requires connection management permission.
     const lockedFooter: IntegrationFooter = !canManagePersonal
       ? { kind: "locked", message: SLACK_PERSONAL_PERMISSION_SENTENCE }
       : !personalAvailable
@@ -1087,6 +1095,18 @@ export function useSlackIntegration({
 
   const dialogs = (
     <>
+      {newConnection && (
+        <ConnectionOwnershipDialog
+          name="Slack account"
+          value={newConnection.ownership}
+          onChange={(ownership) => setNewConnection({ ...newConnection, ownership })}
+          onContinue={() => {
+            setConnectRequest(newConnection);
+            setNewConnection(null);
+          }}
+          onClose={() => setNewConnection(null)}
+        />
+      )}
       {connectRequest && (
         <NativeConnectSetup
           transport={connectTransport}
@@ -1106,7 +1126,7 @@ export function useSlackIntegration({
         open={personalDisconnectOpen}
         onOpenChange={setPersonalDisconnectOpen}
         title="Disconnect your Slack account?"
-        description="OpenGeni will stop using your personal Slack connection. This does not disconnect the workspace bot or revoke access inside Slack."
+        description="OpenGeni will stop using this Slack account connection. This does not disconnect the workspace bot or revoke access inside Slack."
         confirmLabel="Disconnect my Slack account"
         cancelAutoFocus
         onConfirm={disconnectPersonal}

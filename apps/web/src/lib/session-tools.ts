@@ -56,6 +56,21 @@ export function selectableSessionMcpServerIds(ids: Iterable<string>): Set<string
   return new Set([...ids].filter(isSelectableSessionMcpServerId));
 }
 
+/** Compare a retained draft with the current executable catalog, not saved defaults. */
+export function unavailableSessionMcpServerIds(
+  selectedIds: Iterable<string>,
+  servers: readonly McpServerOption[],
+  catalogLoadedSuccessfully: boolean,
+): string[] {
+  if (!catalogLoadedSuccessfully) return [];
+  const available = new Set(
+    servers
+      .filter((server) => server.connectionStatus !== "unavailable")
+      .map((server) => server.id),
+  );
+  return [...selectableSessionMcpServerIds(selectedIds)].filter((id) => !available.has(id));
+}
+
 const FIRST_PARTY_ACTION_LABELS: Partial<Record<FirstPartyMcpToolName, string>> = {
   set_session_title: "Rename this session",
   set_other_session_title: "Rename another session",

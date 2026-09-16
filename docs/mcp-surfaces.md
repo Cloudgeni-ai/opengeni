@@ -12,7 +12,7 @@ page exists so you pick the right one in one read.
 | **Site tool bridge** (`@opengeni/sdk/site`) | Immutable Site version requests exact identities; the current viewer remains authoritative | Parent-filtered projection over the live workspace HTTP/SDK gateway, carried on one document-retained iframe bootstrap `MessagePort`. Requested identities are only a maximum allowlist; publishing grants no authority. Top-level sandbox previews use the same client through a same-origin Codemode adapter | No credential enters Site code; the published parent uses its current session and the local Bun host retains the attempt bearer | Publisher-controlled Site code needs typed tools in either the published renderer or sandbox preview |
 | **Docs MCP** (`/mcp/docs`) | Nobody — built in | Dedicated compatibility endpoint; the same Docs implementation is also included in the unified gateway | Caller's bearer | A narrowly configured client needs only workspace document search |
 | **Files MCP** (`/mcp/files`) | Nobody — built in | Dedicated compatibility endpoint; the same Files implementation is also included in the unified gateway | Caller's bearer with `files:read` | A narrowly configured client needs only file materialization |
-| **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Workspace-owned OAuth or admin-supplied headers, authenticated-encrypted at rest; ordinary projections are metadata-only. Dedicated permissioned plaintext reads are an approved release-held follow-up. Gmail and Slack's hosted MCP are personal-only and never workspace-owned | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions and schedules in a workspace |
+| **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Workspace-owned OAuth or admin-supplied headers, authenticated-encrypted at rest; ordinary projections are metadata-only. Dedicated permissioned plaintext reads are an approved release-held follow-up. Gmail and hosted Slack MCP support personal or workspace ownership; personal use follows the immutable initiating user | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions and schedules in a workspace |
 | **Per-session MCP servers** (`mcpServers` on session create) | The embedding host, per session | One session; static headers rotatable on every user turn; host connection refs resolved per request | Authenticated-encrypted headers with metadata-only ordinary projections, or a non-secret opaque `connectionRef` resolved by the standalone/host broker. Dedicated plaintext reads are an approved release-held follow-up | An embedding host injects its own tool server or binds an existing provider connection without duplicating it |
 | **Codex Apps MCP** | Deployment enables the feature; a scoped human explicitly designates one workspace credential; session policy selects it | Available only while that exact designation remains authorized; workspace-default sessions receive it as optional, while explicit/fixed sessions see it only when selected | Only the designated Apps credential, independent of inference | A compatible model should use connected ChatGPT apps without tying their authority to inference routing or silently widening an exact tool allowlist |
 
@@ -33,6 +33,23 @@ consumed capability leaves a durable hash-only operation tombstone: the same
 operation id cannot be approved again after execution may have started.
 
 First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
+
+### Human integration setup in chat
+
+The shared operational guidance tells the agent to use available integration
+tools directly. When needed access is missing, it routes discovery through
+`capability_catalog_search`.
+Every candidate requiring authorization includes `setup.nextAction` naming
+`capability_authorization_request` and the exact catalog capability ID. Ready or
+unavailable candidates return no setup action. Search itself is read-only.
+
+For a suitable candidate, the agent requests the card with that ID and a
+task-specific rationale. Showing the card requires no preliminary confirmation;
+the card itself presents the setup decision. The same exact-attempt-fenced `tool.auth_needed`
+event and generic chat renderer handle all catalog integrations. Requesting the
+card requires no integration-management permission and creates no connection,
+installation, credential, or grant; the authenticated human completes setup.
+Provider-specific status tools remain read-only and do not synthesize cards.
 
 ### Recovery from tool-search misses
 

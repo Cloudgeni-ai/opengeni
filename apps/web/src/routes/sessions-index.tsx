@@ -1,5 +1,6 @@
 import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
+import { useRepositoryCatalogRefresh } from "@/lib/use-follow-up-repositories";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import {
@@ -77,7 +78,7 @@ import {
   RepositoryContextMenuBody,
   type RepositoryContextPickerProps,
 } from "@/components/repository-picker";
-import { SelectedVariableSetList } from "@/components/session/selected-variable-set-list";
+import { NewSessionVariableSetPicker } from "@/components/session/new-session-variable-set-picker";
 import { Button } from "@/components/ui/button";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
@@ -92,6 +93,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
+import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
+import { ConnectionAccountPicker } from "@/components/capabilities/connection-account-picker";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
@@ -152,6 +155,7 @@ import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
   selectableSessionMcpServerIds,
+  unavailableSessionMcpServerIds,
   newSessionDraftToolPolicy,
   rehydrateRepositoryResources,
   repositorySelectionFromResources,
@@ -206,6 +210,16 @@ function SessionsIndexRouteContent({
   launch: ComposerLaunchSearch;
 }) {
   const context = useAppContext();
+  const connectionAccounts = useConnectionAccounts(
+    context.client,
+    {
+      id: "new-session",
+      workspaceId,
+      selectedIds: [...context.selectedCapabilityToolIds],
+    },
+    context.workspaceCapabilityCatalog,
+  );
+  const repositoryCatalogRefresh = useRepositoryCatalogRefresh(workspaceId, context);
   const firstPartyMcpToolPolicy = useMemo(
     () => clientFirstPartyMcpToolPolicy(context.clientConfig),
     [context.clientConfig],
@@ -977,14 +991,39 @@ function SessionsIndexRouteContent({
           : "";
       if (
         busy ||
+        !context.workspaceMcpCatalogReady ||
         newSessionDraft.loading ||
         newSessionDraft.conflict ||
         !newSessionPolicyValid ||
         privateCreateUnavailable ||
         personalResourceCatalogRefreshPending ||
+        (!realtimeModel &&
+          createdSessionAuthority === null &&
+          (connectionAccounts.loading ||
+            connectionAccounts.error !== null ||
+            connectionAccounts.requiresAccountChoice)) ||
         (createdSessionAuthority === null && !fixedResourceSelection.selectionResolved)
       )
         return false;
+      if (createdSessionAuthority === null) {
+        const unavailable = unavailableSessionMcpServerIds(
+          context.selectedCapabilityToolIds,
+          context.toolMcpServers,
+          context.workspaceMcpCatalogLoadedSuccessfully,
+        );
+        if (unavailable.length > 0) {
+          const removed = new Set(unavailable);
+          context.setSelectedCapabilityToolIds(
+            (current) => new Set([...current].filter((id) => !removed.has(id))),
+          );
+          setConnectorExclusions((current) => [...new Set([...current, ...unavailable])]);
+          toast.error("Some selected tools are no longer available", {
+            description:
+              "Removed them from this draft. Your message is still here; review the tools and send again.",
+          });
+          return false;
+        }
+      }
       if (realtimeModel && personalMachineSelected) {
         toast.error("Voice can't start on a personal Connected Machine", {
           description:
@@ -1093,6 +1132,7 @@ function SessionsIndexRouteContent({
                 reasoningEffort,
                 latencyMode,
                 ...submission.extras,
+                connectionAccounts: connectionAccounts.selections,
               },
               {
                 targetSandboxId: submission.options.targetSandboxId,
@@ -1246,6 +1286,10 @@ function SessionsIndexRouteContent({
       !newSessionDraft.conflict &&
       newSessionPolicyValid &&
       !personalResourceCatalogRefreshPending &&
+      (createdSessionAuthority !== null ||
+        (!connectionAccounts.loading &&
+          connectionAccounts.error === null &&
+          !connectionAccounts.requiresAccountChoice)) &&
       (createdSessionAuthority !== null || fixedResourceSelection.selectionResolved) &&
       (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
     pause: async () => {},
@@ -1349,6 +1393,20 @@ function SessionsIndexRouteContent({
         ) : null}
 
         <div ref={composerRegionRef} className="mt-8 [&_textarea]:min-h-[calc(2lh+1rem)]">
+          <ConnectionAccountPicker
+            groups={connectionAccounts.accountGroups}
+            choices={connectionAccounts.accountChoices}
+            onChoose={connectionAccounts.selectAccount}
+            disabled={busy || newSessionDraft.loading}
+          />
+          {connectionAccounts.error ? (
+            <p role="alert" className="mb-2 text-sm text-fg-muted">
+              {connectionAccounts.error}{" "}
+              <Button variant="ghost" onClick={() => void connectionAccounts.refresh()}>
+                Retry
+              </Button>
+            </p>
+          ) : null}
           <ConsoleComposer
             workspaceId={workspaceId}
             composer={createComposer}
@@ -1393,6 +1451,7 @@ function SessionsIndexRouteContent({
                           <WorkspaceRepositoryMenuBody
                             workspaceId={workspaceId}
                             disabled={busy || newSessionDraft.loading}
+                            catalogRefresh={repositoryCatalogRefresh}
                           />
                         ),
                       },
@@ -1405,6 +1464,9 @@ function SessionsIndexRouteContent({
                         panel: (
                           <ManagedSandboxFields
                             variableSetsOnly
+                            variableSetWorkspaceId={workspaceId}
+                            canAttachVariableSets={canAttachVariableSets}
+                            canUseVariableSets={canUseVariableSets}
                             draft={draft}
                             onChange={setDraft}
                             disabled={busy || newSessionDraft.loading}
@@ -1979,15 +2041,18 @@ function WorkspaceRepositoryMenuBody({
   workspaceId,
   disabled,
   leading,
+  catalogRefresh,
 }: {
   workspaceId: string;
   disabled: boolean;
   leading?: ReactNode;
+  catalogRefresh: ReturnType<typeof useRepositoryCatalogRefresh>;
 }) {
   const context = useAppContext();
   return (
     <RepositoryContextMenuBody
       {...workspaceRepositoryPickerProps(context, workspaceId, disabled)}
+      {...catalogRefresh}
       {...(leading ? { leading } : {})}
     />
   );
@@ -2339,6 +2404,10 @@ function ComputeKindButton(props: {
 
 function ManagedSandboxFields(props: {
   variableSetsOnly?: boolean;
+  variableSetWorkspaceId?: string;
+  canAttachVariableSets?: boolean;
+  canUseVariableSets?: boolean;
+  onClose?: () => void;
   leading?: ReactNode;
   draft: SessionDraft;
   onChange: (draft: SessionDraft) => void;
@@ -2350,18 +2419,8 @@ function ManagedSandboxFields(props: {
 }) {
   const { draft, onChange } = props;
   const personalRigs = props.rigs.filter((resource) => resource.scope === "user");
-  const personalVariableSets = props.variableSets.filter((resource) => resource.scope === "user");
   const workspaceRigs = props.rigs.filter((resource) => resource.scope !== "user");
-  const workspaceVariableSets = props.variableSets.filter((resource) => resource.scope !== "user");
   const showRigs = !props.variableSetsOnly && (workspaceRigs.length > 0 || personalRigs.length > 0);
-  const availableWorkspaceVariableSets = workspaceVariableSets.filter(
-    (variableSet) => !draft.variableSetIds.includes(variableSet.id),
-  );
-  const availablePersonalVariableSets = personalVariableSets.filter(
-    (variableSet) => !draft.variableSetIds.includes(variableSet.id),
-  );
-  const hasVariableSetChoices =
-    availableWorkspaceVariableSets.length > 0 || availablePersonalVariableSets.length > 0;
   const showVariableSets = props.variableSetsOnly === true;
   if (!showRigs && !showVariableSets && !props.catalogRecovery.error) {
     return null;
@@ -2377,7 +2436,7 @@ function ManagedSandboxFields(props: {
           : "mt-5 overflow-hidden rounded-lg border border-border bg-surface/40"
       }
     >
-      {props.leading ? (
+      {props.leading && !showVariableSets ? (
         <div className="flex items-center gap-2 px-1 pb-2">
           {props.leading}
           <span className="text-sm font-medium">Variable sets</span>
@@ -2453,68 +2512,20 @@ function ManagedSandboxFields(props: {
 
       {/* Keep restored selections visible even when the caller may attach/use
           exact IDs but cannot enumerate the Variable Set catalog. */}
-      {showVariableSets ? (
-        <div
-          className={cn(
-            "flex flex-col items-stretch gap-3 px-3 py-2",
-            showRigs && "border-t border-border/70",
-          )}
-        >
-          <Label className="sr-only">
-            <BoxIcon className="size-3 shrink-0 text-fg-subtle" />
-            Variable sets
-          </Label>
-          <div className="min-w-0 max-w-80 flex-1 space-y-2">
-            {draft.variableSetIds.length > 0 ? (
-              <SelectedVariableSetList
-                selectedIds={draft.variableSetIds}
-                variableSets={[...workspaceVariableSets, ...personalVariableSets]}
-                disabled={props.disabled}
-                onChange={(variableSetIds) => {
-                  onChange({
-                    ...draft,
-                    variableSetIds,
-                    variableSetId: variableSetIds.at(-1) ?? "",
-                  });
-                }}
-              />
-            ) : (
-              <p className="text-right text-xs text-fg-subtle">No Variable Sets selected</p>
-            )}
-            {hasVariableSetChoices && draft.variableSetIds.length < 25 ? (
-              <Select
-                value=""
-                disabled={props.disabled}
-                onChange={(event) => {
-                  const variableSetId = event.target.value;
-                  if (!variableSetId) return;
-                  const next = [...draft.variableSetIds, variableSetId];
-                  onChange({ ...draft, variableSetIds: next, variableSetId });
-                }}
-                className="h-8 w-full text-xs"
-              >
-                <option value="">Add Variable Set…</option>
-                {availableWorkspaceVariableSets.map((variableSet) => (
-                  <option key={variableSet.id} value={variableSet.id}>
-                    {variableSet.name} ({variableSet.variables.length} vars)
-                  </option>
-                ))}
-                {availablePersonalVariableSets.length > 0 ? (
-                  <optgroup label="Only me">
-                    {availablePersonalVariableSets.map((variableSet) => (
-                      <option key={variableSet.id} value={variableSet.id}>
-                        {variableSet.name} ({variableSet.variables.length} vars)
-                      </option>
-                    ))}
-                  </optgroup>
-                ) : null}
-              </Select>
-            ) : null}
-            <p className="text-right text-2xs text-fg-subtle">
-              Later sets override earlier sets when names collide.
-            </p>
-          </div>
-        </div>
+      {showVariableSets && props.variableSetWorkspaceId ? (
+        <NewSessionVariableSetPicker
+          workspaceId={props.variableSetWorkspaceId}
+          canAttach={props.canAttachVariableSets === true}
+          canUse={props.canUseVariableSets === true}
+          runtimeIds={draft.variableSetIds}
+          variableSets={props.variableSets}
+          disabled={props.disabled}
+          leading={props.leading}
+          onClose={props.onClose}
+          onChange={(variableSetIds) =>
+            onChange({ ...draft, variableSetIds, variableSetId: variableSetIds.at(-1) ?? "" })
+          }
+        />
       ) : null}
       <PersonalResourceAccessInline access={props.personalResourceAccess} embedded />
     </div>

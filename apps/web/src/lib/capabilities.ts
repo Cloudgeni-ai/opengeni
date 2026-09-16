@@ -332,9 +332,7 @@ export function capabilityQuickConnectPlan(
   item: CapabilityCatalogItem,
 ): CapabilityQuickConnectPlan | null {
   const plan = capabilityConnectPlan(item);
-  const ownership: ConnectionOwnership = capabilityRequiresPersonalConnection(item)
-    ? "personal"
-    : DEFAULT_CONNECTION_OWNERSHIP;
+  const ownership = defaultCapabilityConnectionOwnership(item);
   if (plan.mode === "enable") return { mode: "enable" };
   if (plan.mode === "oauth") {
     return {
@@ -373,18 +371,13 @@ export function apiKeyCredential(
   return { headers: { [field.name]: value } };
 }
 
-const OFFICIAL_GMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1";
-// Slack's hosted MCP issues user tokens only; shared Slack access is the
-// OpenGeni workspace bot, never one member's grant.
-const OFFICIAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp";
-const PERSONAL_ONLY_MCP_URLS = new Set([OFFICIAL_GMAIL_MCP_URL, OFFICIAL_SLACK_MCP_URL]);
-
-export function capabilityRequiresPersonalConnection(item: CapabilityCatalogItem): boolean {
-  return (
-    item.metadata.connectionOwnership === "personal_only" ||
-    PERSONAL_ONLY_MCP_URLS.has(item.mcpUrl?.replace(/\/+$/, "") ?? "") ||
-    PERSONAL_ONLY_MCP_URLS.has(item.endpointUrl?.replace(/\/+$/, "") ?? "")
-  );
+export function defaultCapabilityConnectionOwnership(
+  item: CapabilityCatalogItem,
+): ConnectionOwnership {
+  const preferred =
+    item.metadata.defaultConnectionOwnership ??
+    recordValue(item.metadata.oauthProfile)?.defaultOwnership;
+  return preferred === "personal" ? "personal" : DEFAULT_CONNECTION_OWNERSHIP;
 }
 
 /**

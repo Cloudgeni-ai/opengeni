@@ -3,14 +3,21 @@ import { Link } from "@tanstack/react-router";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import { LightboxProvider } from "@opengeni/react";
 import { isRetainedImageContentType } from "@opengeni/react/artifacts";
-import { ArrowLeftIcon, DownloadIcon, FileIcon } from "lucide-react";
+import {
+  AlertTriangleIcon,
+  ArrowLeftIcon,
+  DownloadIcon,
+  FileIcon,
+  RefreshCwIcon,
+} from "lucide-react";
 import { useAppContext } from "@/context";
 import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
 import { InlineChatImage } from "@/components/artifacts/inline-chat-image";
 import { ContentPage } from "@/components/ui/content-layout";
 import { Button } from "@/components/ui/button";
-import { LoadErrorState, PageHeader } from "@/components/common";
+import { CopyableMono, PageHeader } from "@/components/common";
 import { saveRetainedArtifact } from "@/lib/retained-artifact-download";
+import { retainedArtifactLoadErrorPresentation } from "@/lib/retained-artifact-load-error";
 
 export function RetainedArtifactRoute({
   workspaceId,
@@ -29,6 +36,7 @@ export function RetainedArtifactRoute({
         key={`${workspaceId}:${artifactId}`}
         workspaceId={workspaceId}
         artifactId={artifactId}
+        fromSession={fromSession}
       />
     </LightboxProvider>
   );
@@ -44,9 +52,11 @@ export function RetainedArtifactRoute({
 function RetainedArtifactDetail({
   workspaceId,
   artifactId,
+  fromSession,
 }: {
   workspaceId: string;
   artifactId: string;
+  fromSession?: string;
 }) {
   const { client, accessKeyVersion } = useAppContext();
   const key = `${workspaceId}:${artifactId}:${accessKeyVersion}`;
@@ -120,6 +130,7 @@ function RetainedArtifactDetail({
       <Link
         to="/workspaces/$workspaceId/artifacts"
         params={{ workspaceId }}
+        search={fromSession ? { fromSession } : {}}
         className="mb-5 flex min-h-10 items-center gap-2 text-sm text-fg-muted hover:text-fg"
       >
         <ArrowLeftIcon className="size-4" />
@@ -127,8 +138,7 @@ function RetainedArtifactDetail({
       </Link>
       {!loaded ? <p role="status">Loading artifact…</p> : null}
       {loaded?.error ? (
-        <LoadErrorState
-          title="Artifact unavailable"
+        <RetainedArtifactLoadError
           error={loaded.error}
           onRetry={() => setRetry((value) => value + 1)}
         />
@@ -166,5 +176,38 @@ function RetainedArtifactDetail({
         </>
       ) : null}
     </ContentPage>
+  );
+}
+
+function RetainedArtifactLoadError({ error, onRetry }: { error: Error; onRetry: () => void }) {
+  const presentation = retainedArtifactLoadErrorPresentation(error);
+  return (
+    <div
+      role="alert"
+      aria-live="assertive"
+      className="flex items-start gap-2 rounded-lg border border-status-failed/40 bg-status-failed/10 p-3 text-sm text-fg"
+    >
+      <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-failed" />
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-medium">{presentation.title}</div>
+        <p className="mt-0.5 text-xs leading-4 text-fg-muted">{presentation.description}</p>
+        {presentation.supportReference ? (
+          <div className="mt-2 min-w-0">
+            <div className="text-xs text-fg-subtle">Support reference</div>
+            <CopyableMono value={presentation.supportReference} />
+          </div>
+        ) : null}
+      </div>
+      {presentation.retryable ? (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-status-failed/50 px-2 text-xs font-medium text-fg transition-colors hover:bg-status-failed/20"
+        >
+          <RefreshCwIcon className="size-3" />
+          Retry
+        </button>
+      ) : null}
+    </div>
   );
 }

@@ -309,8 +309,6 @@ import type {
   ListManagedOrganizationMembershipsResponse,
   ListUserResourceAuthoritiesOptions,
   ListUserResourceAuthoritiesResponse,
-  IssueUserResourceGrantRequest,
-  UserResourceGrantMutationResponse,
   UpdateGitHubActionPolicyRequest,
   RevokeUserResourceGrantResponse,
   ListOrganizationInvitationsPageResponse,
@@ -4515,19 +4513,6 @@ export class OpenGeniClient {
     );
   }
 
-  /** Issue an exact-session or standing personal-resource grant. */
-  async issueUserResourceGrant(
-    workspaceId: string,
-    authorityId: string,
-    request: IssueUserResourceGrantRequest,
-  ): Promise<UserResourceGrantMutationResponse> {
-    return await this.requestJson<UserResourceGrantMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
-      request,
-    );
-  }
-
   /** Revoke an owner grant through the exact workspace it targets. */
   async revokeUserResourceGrant(
     workspaceId: string,
@@ -7424,6 +7409,15 @@ export class OpenGeniClient {
 
   // --- Connections -------------------------------------------------------------------------------
 
+  /** The authenticated user's active accounts across this organization. */
+  async listOwnConnectionAccounts(workspaceId: string): Promise<ConnectionMetadata[]> {
+    const response = await this.requestJson<ListConnectionsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/connections/accounts`,
+    );
+    return response.connections;
+  }
+
   async listConnections(workspaceId: string): Promise<ConnectionMetadata[]> {
     const response = await this.requestJson<ListConnectionsResponse>(
       "GET",
@@ -7718,6 +7712,27 @@ export class OpenGeniClient {
   /** Public, immutably-cached URL for a catalog item's logo, or null when the item has none. */
   catalogAssetUrl(logoAssetPath: string | null): string | null {
     return logoAssetPath ? `${this.baseUrl}/v1/${logoAssetPath}` : null;
+  }
+
+  /** Read a passive catalog mark through this client's authenticated transport.
+   * Useful when an embedding backend protects even public upstream assets. */
+  async downloadCatalogAsset(
+    logoAssetPath: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<Blob> {
+    if (
+      !/^catalog-assets\/[a-zA-Z0-9_./-]+$/.test(logoAssetPath) ||
+      logoAssetPath.split("/").some((part) => !part || part === "." || part === "..")
+    )
+      throw new TypeError("A catalog asset path is required");
+    const response = await this.requestResponse("GET", `/v1/${logoAssetPath}`, {}, options);
+    const type = response.headers.get("content-type")?.split(";")[0] ?? "";
+    if (!type.startsWith("image/")) {
+      await response.body?.cancel();
+      throw new Error("The catalog asset is not an image");
+    }
+    const bytes = await readBoundedResponseBytes(response, 2_000_000, null);
+    return new Blob([Uint8Array.from(bytes)], { type });
   }
 
   // --- GitHub ----------------------------------------------------------------------------------

@@ -106,6 +106,7 @@ import {
   runManagedAuthProvider,
 } from "./auth/managed-auth-attempt-context";
 import { createManagedEmailTransport } from "./auth/managed-email";
+import { startManagedSignInNotificationDelivery } from "./auth/managed-sign-in-notifications";
 import {
   assertManagedEmailTransportMetadata,
   assertOrganizationUserSetupQueryTransportConfigured,
@@ -153,8 +154,7 @@ import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organizati
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerConnectRoutes } from "./routes/connect";
-import { registerHostMcpBindingRoutes } from "./routes/host-mcp-bindings";
-import { registerHostMcpResolverRoutes } from "./routes/host-mcp-resolvers";
+
 import { registerExternalIdentityLinkRoutes } from "./routes/external-identity-links";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerKnowledgeRoutes } from "./routes/knowledge";
@@ -208,12 +208,15 @@ import { registerOrganizationSessionRoutes } from "./routes/organization-session
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
 import {
+  registerManagedSignInMethodRoutes,
+  handleManagedSignInConnectCallback,
+} from "./routes/managed-sign-in-methods";
+import {
   registerManagedAuthSessionSetRoutes,
   requireManagedAuthProviderRouteAllowed,
   scrubManagedAuthProviderResponse,
 } from "./routes/managed-auth-session-sets";
 import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
-import { registerConnectionAuthorityRoutes } from "./routes/connection-authorities";
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
 import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
@@ -300,6 +303,7 @@ export function createAppComposition(deps: AppDependencies): {
   const managedAuthSessionAdapter =
     deps.managedAuthSessionAdapter ??
     (managedAuth ? createBetterAuthSessionAdapter(managedAuth, deps.db) : null);
+  if (managedAuth) startManagedSignInNotificationDelivery(deps.db, managedEmailTransport);
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;
   let documentServices: DocumentServices | null = deps.documentServices ?? null;
@@ -670,10 +674,61 @@ export function createAppComposition(deps: AppDependencies): {
   // wildcard handler or the provider returns its own 404 first.
   registerManagedOnboardingRoutes(app, routeDeps);
   registerManagedAuthSessionSetRoutes(app, routeDeps);
+  registerManagedSignInMethodRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
+      if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
+        const body = await c.req.raw
+          .clone()
+          .json()
+          .catch(() => null);
+        if (
+          !body ||
+          !["google", "github"].includes(body.provider) ||
+          Object.prototype.hasOwnProperty.call(body, "idToken")
+        ) {
+          return c.json(
+            {
+              code: "SIGN_IN_METHOD_OAUTH_REDIRECT_REQUIRED",
+              message: "Use the browser OAuth sign-in redirect",
+            },
+            403,
+          );
+        }
+      }
+      if (oauthCallbackProvider) {
+        const connectResponse = await handleManagedSignInConnectCallback(
+          c,
+          routeDeps,
+          oauthCallbackProvider,
+        );
+        if (connectResponse) return connectResponse;
+      }
+      if (
+        new Set([
+          "link-social",
+          "unlink-account",
+          "list-accounts",
+          "set-password",
+          "change-password",
+          "change-email",
+          "update-user",
+          "delete-user",
+          "get-access-token",
+          "refresh-token",
+          "account-info",
+        ]).has(pathname.slice("/v1/auth/".length))
+      ) {
+        return c.json(
+          {
+            code: "SIGN_IN_METHOD_PRODUCT_ROUTE_REQUIRED",
+            message: "Use personal sign-in method settings",
+          },
+          403,
+        );
+      }
       if (deps.settings.managedAuthSessionSetMode === "legacy") {
         return oauthCallbackProvider
           ? await runManagedAuthProvider(
@@ -1257,8 +1312,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
   registerConnectRoutes(app, routeDeps);
-  registerHostMcpBindingRoutes(app, routeDeps);
-  registerHostMcpResolverRoutes(app, routeDeps);
+
   registerExternalIdentityLinkRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
   registerApiIntegrationRoutes(app, routeDeps);
@@ -1290,7 +1344,6 @@ export function createAppComposition(deps: AppDependencies): {
   registerOrganizationSessionRoutes(app, routeDeps);
   registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);
-  registerConnectionAuthorityRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
 
   app.notFound((c) => {

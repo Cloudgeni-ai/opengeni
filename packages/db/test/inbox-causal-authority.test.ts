@@ -9,8 +9,6 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
-  createHostMcpBinding,
-  issueHostMcpDelegation,
   createWorkspace,
   ensureExternalIdentity,
   grantWorkspaceAccess,
@@ -293,51 +291,15 @@ describe("same-human cross-origin inbox authority under app RLS", () => {
     },
   );
 
-  test("equivalent live host selections coalesce and inherit exactly one authority", async () => {
+  test("equivalent historical host selections coalesce without creating new host authority", async () => {
     const f = await fixture();
-    const owner = {
-      accountId: f.accountId,
-      workspaceId: f.workspaceId,
-      subjectId: f.human,
-      authorizationRevision: 1,
-    };
-    const binding = await createHostMcpBinding(client.db, owner, {
-      operationId: crypto.randomUUID(),
-      definition: f.host.definition,
-    });
-    const delegation = await issueHostMcpDelegation(client.db, owner, {
-      operationId: crypto.randomUUID(),
-      bindingId: binding.id,
-      expectedBindingGeneration: binding.generation,
-      grant: {
-        scope: "user",
-        mode: "always",
-        context: "workspace_shared",
-        workspaceSharedAcknowledged: true,
-      },
-    });
-    const authority = {
-      ...f.host,
-      bindingId: binding.id,
-      bindingGeneration: binding.generation,
-      delegationId: delegation.id,
-      delegationGeneration: delegation.generation,
-    };
-    const receivingTurnId = await verify(f, [{ host: authority }, { host: authority }], true);
+    const receivingTurnId = await verify(f, [{ host: f.host }, { host: f.host }], true);
     const rows = await withWorkspaceSubjectRls(client.db, f.workspaceId, f.human, (tx) =>
       tx.execute(
         sql`select canonical_snapshot from host_mcp_turn_authorities where turn_id=${receivingTurnId}::uuid`,
       ),
     );
-    expect(Array.from(rows)).toEqual([
-      {
-        canonical_snapshot: {
-          ...authority,
-          acceptedWork: { kind: "turn", turnId: receivingTurnId },
-          source: { kind: "inherited_turn", sessionId: f.sessionId, turnId: f.turns[0] },
-        },
-      },
-    ]);
+    expect(Array.from(rows)).toEqual([]);
   });
 
   test("candidate authority reads restore the incoming subject before delivery", async () => {

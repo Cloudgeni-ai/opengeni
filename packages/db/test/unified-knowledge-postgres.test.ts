@@ -200,7 +200,7 @@ describe("unified Knowledge storage", () => {
     await expect(
       updateScheduledTaskForApi(
         client.db,
-        f.workspaceId,
+        authorization.grant,
         task.id,
         { name: "Must roll back" },
         {
@@ -220,7 +220,7 @@ describe("unified Knowledge storage", () => {
     );
     const changed = await updateScheduledTaskForApi(
       client.db,
-      f.workspaceId,
+      authorization.grant,
       task.id,
       { name: "Reviewed ingestion" },
       {

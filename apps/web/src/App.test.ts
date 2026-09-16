@@ -2675,6 +2675,7 @@ function scheduledTask(
   patch: Partial<ScheduledTask> = {},
 ): ScheduledTask {
   return {
+    ownerSubjectId: null,
     id: "00000000-0000-4000-8000-000000000100",
     accountId: "account-1",
     workspaceId: "workspace-1",

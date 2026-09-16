@@ -18,11 +18,15 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "58a6d7f959a6ff9317944b3c50be4dbadf67a2bb48c22601319b142629b51ff2"
+      "sha256": "da63dfa0686fc10b7029c6152bd8ae8fe9b24044d08cbdcd0aa63731a038d0cc"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
       "sha256": "a739913b5470819b147f4d94633cdbbb7edbe89decfa98888aefa7d24ef3a9e7"
+    },
+    {
+      "path": ".github/workflows/local-startup.yml",
+      "sha256": "3871e7efe7ffc8ba1603a4c657eaa27c0e8becfe9ca4deb5599ae53e7c82fae5"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -642,6 +646,12 @@
       "job": "package-contracts",
       "step": "Install pinned artifact-kernel build toolchain",
       "sha256": "4b16355061365f4914d4e87afb8eeb3c12b30cd6bf63573c548e15016bd143f0"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "package-contracts",
+      "step": "Native report delivery contracts",
+      "sha256": "f2a29e986e8d98bc124d9fbd9ea179d89787212a7ff354ec08d7b53863028b80"
     },
     {
       "workflow": ".github/workflows/ci.yml",

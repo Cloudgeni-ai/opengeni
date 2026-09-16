@@ -31,6 +31,17 @@ import {
 } from "./workspace-model-connection-access";
 export * from "./model-connection-access";
 import { createHash, randomUUID } from "node:crypto";
+import {
+  appendGoalReportRequirements,
+  goalReportRequirements,
+  GOAL_REPORT_REQUIREMENTS_KEY,
+} from "./session-goal-reports";
+import { verifyGoalReportDeliveries, type ReportArtifactActor } from "./session-goal-reports";
+export { recordNativeDocumentInspection } from "./session-goal-reports";
+import {
+  type SessionGoalReportRequirement,
+  type SessionGoalReportDelivery,
+} from "@opengeni/contracts";
 import { lockSkillPublication } from "./skill-publication";
 import {
   StoredSessionSkills,
@@ -51,11 +62,9 @@ import { releaseOrphanedSkillHeads, type SkillSourceReleaseReceipt } from "./ski
 import type { SkillActor, SkillWriteReceipt } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
 import {
-  normalizeHostCreateSelection,
-  metadataWithHostCreateSelection,
-  hostCreateSelectionFromMetadata,
-  type HostMcpCreateSelection,
-} from "./host-selection-identity";
+  withoutRetiredSessionCreateMetadata,
+  hasRetiredSessionCreateSelection,
+} from "./retired-session-create-metadata";
 export * from "./connect-attempts";
 export * from "./external-identities";
 export * from "./external-identity-links";
@@ -67,17 +76,7 @@ import {
   cloneExternalLinkTaskAuthority,
   getExternalLinkTurnAuthorization,
 } from "./external-link-work";
-export * from "./host-mcp-bindings";
-export * from "./host-mcp-resolvers";
-import {
-  inheritCausalHostMcpTurnAuthorities,
-  inheritChildHostMcpTurnAuthorities,
-} from "./host-mcp-bindings";
-export * from "./host-mcp-task-authority";
-import {
-  cloneHostMcpTaskAuthorities,
-  captureScheduledHostMcpTurnAuthorities,
-} from "./host-mcp-task-authority";
+
 import {
   SESSION_GOAL_PROGRESS_MAX_BYTES,
   SESSION_GOAL_RATIONALE_MAX_BYTES,
@@ -93,7 +92,6 @@ import {
   type ChildRequiresActionResolvedOutcome,
   type ChildRequiresActionRespondedByKind,
   ModelContextContributionSummaries,
-  OPENGENI_PERSONAL_SLACK_MCP_URL,
   ListWorkspaceMemberCandidatesResponse,
   OrganizationMember,
   WorkspaceMember as WorkspaceMemberContract,
@@ -686,7 +684,7 @@ export {
   type UserProfileLookup,
 } from "./database";
 export { withSessionRlsActorContext } from "./database";
-export { normalizedHostCredentialHeaders } from "./connection-token-resolver";
+export { normalizedCredentialHeaders } from "./connection-token-resolver";
 import {
   buildCodexTokenResolver as buildCodexTokenResolverCore,
   fetchCodexRateLimitResetCreditsForAccount as fetchCodexRateLimitResetCreditsForAccountCore,
@@ -704,10 +702,7 @@ import {
   type ConnectionCredentialForBroker,
   type ConnectionTokenResolverOptions,
 } from "./connection-token-resolver";
-import {
-  resolveAcceptedConnectionUse,
-  resolveConnectionUseAuthority,
-} from "./connection-authority";
+import { resolveAcceptedConnectionUse } from "./connection-authority";
 import {
   resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction,
   xaiCredentialWorkspacePredicate,
@@ -5468,7 +5463,6 @@ export type CreateScheduledTaskInput = {
   createdBy?: TurnInitiator;
   createdByContext?: TurnInitiatorContext;
   createdByActor?: AgentSessionCreationActor | null;
-  personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   /** Frozen creator boundary; omit (or pass null fields) for human/API creates. */
   creatorPolicy?: ScheduledTaskCreatorPolicy | null;
@@ -5479,7 +5473,7 @@ export type CreateScheduledTaskInput = {
   metadata: Record<string, unknown>;
   /** Trusted database-only admission seam. Throwing rolls the task creation back. */
   beforeCreateCommit?: (tx: Database) => Promise<void>;
-  captureHostAuthority?: (tx: Database, task: ScheduledTask) => Promise<void>;
+
   captureLinkAuthority?: (tx: Database, task: ScheduledTask) => Promise<void>;
 };
 
@@ -5491,21 +5485,19 @@ export type UpdateScheduledTaskInput = Partial<{
   overlapPolicy: ScheduledTaskOverlapPolicy;
   action: ScheduledTaskAction;
   agentConfig: ScheduledTaskAgentConfig;
-  personalConnectionDelegations: McpPersonalConnectionDelegation[];
   reusableSessionId: string | null;
   targetSessionId: string | null;
   variableSetId: string | null;
   rigId: string | null;
   metadata: Record<string, unknown>;
   refreshPersonalResourceAuthority: boolean;
-  cloneConnectionAuthorityFromRevision: number;
   clonePersonalResourceAuthorityFromRevision: number;
   authorityUpdatedBy: TurnInitiator;
   authorityUpdatedByContext: TurnInitiatorContext;
   authorityUpdatedByActor: AgentSessionCreationActor | null;
   /** Trusted database-only admission seam. Throwing rolls the task update back. */
   beforeUpdateCommit: (tx: Database) => Promise<void>;
-  captureHostAuthority: (tx: Database, task: ScheduledTask) => Promise<void>;
+
   captureLinkAuthority: (tx: Database, task: ScheduledTask) => Promise<void>;
 }>;
 
@@ -9797,17 +9789,6 @@ export async function listEnabledMcpCapabilityServers(
       // time.
       return [];
     }
-    if (
-      connectionRef &&
-      item.endpointUrl.replace(/\/+$/, "") === OPENGENI_PERSONAL_SLACK_MCP_URL &&
-      connectionRef.subjectScope !== "subject"
-    ) {
-      // The hosted Slack MCP is personal-only. A workspace-scoped ref could
-      // only have been stored before that rule; enable-time fences stop new
-      // ones, and this stops an already-enabled one from executing a shared
-      // human token at runtime. It is not runnable until reconnected personally.
-      return [];
-    }
     const metadata = item.metadata;
     const config = installation.config;
     const allowedTools = stringArrayConfig(config.allowedTools ?? metadata.allowedTools);
@@ -10134,6 +10115,104 @@ async function createConnectionInScope(
     throw new Error("Failed to create connection");
   }
   return mapConnectionMetadata(row);
+}
+
+export class ConnectionCreateIdempotencyError extends Error {
+  constructor() {
+    super("Connection operationId was already used with different input");
+    this.name = "ConnectionCreateIdempotencyError";
+  }
+}
+
+export async function getConnectionCreationResult(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string; operationId: string },
+) {
+  return withRlsContext(db, input, async (tx) => {
+    await setSubjectRlsContext(tx, input.subjectId);
+    const [receipt] = await tx
+      .select({ id: schema.connections.id })
+      .from(schema.connections)
+      .where(
+        and(
+          eq(schema.connections.workspaceId, input.workspaceId),
+          eq(schema.connections.createdBySubjectId, input.subjectId),
+          eq(schema.connections.createOperationId, input.operationId),
+        ),
+      )
+      .limit(1);
+    return receipt
+      ? getConnectionMetadata(tx, input.workspaceId, receipt.id, input.subjectId)
+      : null;
+  });
+}
+
+export async function createConnectionIdempotently(
+  db: Database,
+  input: CreateConnectionInput & {
+    operation?: { id: string; requestDigest: string };
+    /** Runs inside the first creation transaction, never on operation replay. */
+    onCreated?: (
+      tx: Database,
+      connection: Awaited<ReturnType<typeof createConnection>>,
+    ) => Promise<void>;
+  },
+) {
+  const operation = input.operation;
+  if (!operation) {
+    if (input.onCreated) throw new Error("Initial connection setup requires an operationId");
+    return createConnection(db, input);
+  }
+  const actor = input.createdBySubjectId;
+  if (!actor) throw new Error("Idempotent connection creation requires an initiating subject");
+  return withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      await setSubjectRlsContext(tx, actor);
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`connection-create:${input.workspaceId}:${actor}:${operation.id}`}, 0))`,
+      );
+      const [existing] = await tx
+        .select({
+          id: schema.connections.id,
+          digest: schema.connections.createRequestDigest,
+        })
+        .from(schema.connections)
+        .where(
+          and(
+            eq(schema.connections.workspaceId, input.workspaceId),
+            eq(schema.connections.createdBySubjectId, actor),
+            eq(schema.connections.createOperationId, operation.id),
+          ),
+        )
+        .limit(1);
+      if (existing) {
+        if (existing.digest !== operation.requestDigest)
+          throw new ConnectionCreateIdempotencyError();
+        const connection = await getConnectionMetadata(tx, input.workspaceId, existing.id, actor);
+        if (!connection) throw new ConnectionCreateIdempotencyError();
+        return connection;
+      }
+      const connection = await createConnection(tx, input);
+      await input.onCreated?.(tx, connection);
+      const [receipt] = await tx
+        .update(schema.connections)
+        .set({
+          createOperationId: operation.id,
+          createRequestDigest: operation.requestDigest,
+        })
+        .where(
+          and(
+            eq(schema.connections.workspaceId, input.workspaceId),
+            eq(schema.connections.id, connection.id),
+          ),
+        )
+        .returning({ id: schema.connections.id });
+      if (!receipt) throw new Error("Connection creation receipt was not persisted");
+      return connection;
+    },
+  );
 }
 
 export async function createConnection(
@@ -16816,6 +16895,13 @@ export async function createScheduledTask(
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           name: input.name,
+          ownerSubjectId:
+            (input.action?.kind ?? "agent_turn") === "agent_turn"
+              ? (frozenCreator.initiatingHumanSubjectId ??
+                (frozenCreator.initiator.kind === "subject"
+                  ? frozenCreator.initiator.subjectId
+                  : null))
+              : null,
           status: input.status,
           schedule: input.schedule,
           temporalScheduleId: input.temporalScheduleId,
@@ -16824,7 +16910,6 @@ export async function createScheduledTask(
           action: input.action ?? { kind: "agent_turn" },
           agentConfig: input.agentConfig,
           ...creatorColumns(frozenCreator),
-          personalConnectionDelegations: input.personalConnectionDelegations ?? [],
           xaiProviderAccountAuthoritySnapshot:
             input.xaiProviderAccountAuthoritySnapshot ??
             WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -16852,11 +16937,43 @@ export async function createScheduledTask(
         ${row.id}::uuid,
         ${row.authorityRevision}::bigint
       )`);
-      await input.captureHostAuthority?.(scopedDb, mapScheduledTask(row));
+
       await input.captureLinkAuthority?.(scopedDb, mapScheduledTask(row));
       return mapScheduledTask(row);
     },
   );
+}
+
+/** Trusted mutation seam: verify an exact agent attempt before deriving its human. */
+export async function scheduledTaskMutationOwnerMatches(
+  db: Database,
+  input: {
+    workspaceId: string;
+    taskId: string;
+    createdBy?: TurnInitiator;
+    createdByContext?: TurnInitiatorContext;
+    createdByActor?: AgentSessionCreationActor | null;
+  },
+): Promise<boolean> {
+  return withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const actor = await frozenSessionCreatorForInsert(tx, input);
+    const [task] = await tx
+      .select({ owner: schema.scheduledTasks.ownerSubjectId })
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+          eq(schema.scheduledTasks.id, input.taskId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!task) return false;
+    const subject =
+      actor.initiatingHumanSubjectId ??
+      (actor.initiator.kind === "subject" ? actor.initiator.subjectId : null);
+    return task.owner === null || task.owner === subject;
+  });
 }
 
 export async function updateScheduledTask(
@@ -16866,7 +16983,7 @@ export async function updateScheduledTask(
   input: UpdateScheduledTaskInput,
 ): Promise<ScheduledTask> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [previousHostRevision] = await scopedDb
+    const [previousLinkRevision] = await scopedDb
       .select({ authorityRevision: schema.scheduledTasks.authorityRevision })
       .from(schema.scheduledTasks)
       .where(
@@ -16882,12 +16999,6 @@ export async function updateScheduledTask(
       input.clonePersonalResourceAuthorityFromRevision !== undefined
     ) {
       throw new Error("scheduled task authority refresh and clone are mutually exclusive");
-    }
-    if (
-      input.cloneConnectionAuthorityFromRevision !== undefined &&
-      !input.refreshPersonalResourceAuthority
-    ) {
-      throw new Error("scheduled connection authority clone requires a resource refresh");
     }
     if (input.refreshPersonalResourceAuthority) {
       const frozenUpdater = await frozenSessionCreatorForInsert(scopedDb, {
@@ -16913,11 +17024,6 @@ export async function updateScheduledTask(
         ...(input.overlapPolicy !== undefined ? { overlapPolicy: input.overlapPolicy } : {}),
         ...(input.action !== undefined ? { action: input.action } : {}),
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
-        ...(input.personalConnectionDelegations !== undefined
-          ? {
-              personalConnectionDelegations: input.personalConnectionDelegations,
-            }
-          : {}),
         ...(input.targetSessionId !== undefined
           ? { reusableSessionId: input.targetSessionId }
           : input.reusableSessionId !== undefined
@@ -16946,24 +17052,12 @@ export async function updateScheduledTask(
       throw new Error(`Scheduled task not found: ${taskId}`);
     }
     if (input.refreshPersonalResourceAuthority) {
-      if (input.cloneConnectionAuthorityFromRevision !== undefined) {
-        await scopedDb.execute(
-          sql`select refresh_scheduled_task_personal_resources_clone_connections(
-            ${row.accountId}::uuid,
-            ${row.workspaceId}::uuid,
-            ${row.id}::uuid,
-            ${input.cloneConnectionAuthorityFromRevision}::bigint,
-            ${row.authorityRevision}::bigint
-          )`,
-        );
-      } else {
-        await scopedDb.execute(sql`select freeze_scheduled_task_personal_resources(
-          ${row.accountId}::uuid,
-          ${row.workspaceId}::uuid,
-          ${row.id}::uuid,
-          ${row.authorityRevision}::bigint
-        )`);
-      }
+      await scopedDb.execute(sql`select freeze_scheduled_task_personal_resources(
+        ${row.accountId}::uuid,
+        ${row.workspaceId}::uuid,
+        ${row.id}::uuid,
+        ${row.authorityRevision}::bigint
+      )`);
       await scopedDb.execute(sql`select record_scheduled_task_revision_authority(
         ${row.accountId}::uuid,
         ${row.workspaceId}::uuid,
@@ -16988,23 +17082,13 @@ export async function updateScheduledTask(
     }
     const mapped = mapScheduledTask(row);
     if (input.captureLinkAuthority) await input.captureLinkAuthority(scopedDb, mapped);
-    else if (previousHostRevision)
+    else if (previousLinkRevision)
       await cloneExternalLinkTaskAuthority(
         scopedDb,
         mapped,
-        input.clonePersonalResourceAuthorityFromRevision ??
-          input.cloneConnectionAuthorityFromRevision ??
-          previousHostRevision.authorityRevision,
+        input.clonePersonalResourceAuthorityFromRevision ?? previousLinkRevision.authorityRevision,
       );
-    if (input.captureHostAuthority) await input.captureHostAuthority(scopedDb, mapped);
-    else if (previousHostRevision)
-      await cloneHostMcpTaskAuthorities(
-        scopedDb,
-        mapped,
-        input.clonePersonalResourceAuthorityFromRevision ??
-          input.cloneConnectionAuthorityFromRevision ??
-          previousHostRevision.authorityRevision,
-      );
+
     return mapped;
   });
 }
@@ -17083,46 +17167,14 @@ export async function getScheduledTaskIncludingDeletedForUpdate(
   });
 }
 
-export async function getScheduledTaskPersonalConnectionDelegations(
-  db: Database,
-  workspaceId: string,
-  taskId: string,
-): Promise<McpPersonalConnectionDelegation[]> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        delegations: schema.scheduledTasks.personalConnectionDelegations,
-      })
-      .from(schema.scheduledTasks)
-      .where(
-        and(
-          eq(schema.scheduledTasks.workspaceId, workspaceId),
-          eq(schema.scheduledTasks.id, taskId),
-        ),
-      )
-      .limit(1);
-    return row
-      ? parsedPersonalConnectionDelegations(
-          row.delegations,
-          `scheduled_tasks:${workspaceId}:${taskId}`,
-        )
-      : [];
-  });
-}
-
 /**
- * Lock and project the exact mutable incident-task authority inside a caller's
- * dispatch/claim transaction. Returning the frozen personal delegation tuple
- * from the same row prevents a later task edit from mixing with the task
- * snapshot used for preflight.
+ * Lock the incident task definition inside the dispatch transaction. Account
+ * authority belongs to the accepted occurrence, never the mutable task head.
  */
 export async function requireScheduledTaskIncidentAuthorityInTransaction(
   tx: Database,
   input: { workspaceId: string; taskId: string },
-): Promise<{
-  task: ScheduledTask;
-  personalConnectionDelegations: McpPersonalConnectionDelegation[];
-}> {
+): Promise<ScheduledTask> {
   const [row] = await tx
     .select()
     .from(schema.scheduledTasks)
@@ -17136,13 +17188,7 @@ export async function requireScheduledTaskIncidentAuthorityInTransaction(
     .for("update")
     .limit(1);
   if (!row) throw new Error(`Scheduled task not found: ${input.taskId}`);
-  return {
-    task: mapScheduledTask(row),
-    personalConnectionDelegations: parsedPersonalConnectionDelegations(
-      row.personalConnectionDelegations,
-      `scheduled_tasks:${input.workspaceId}:${input.taskId}`,
-    ),
-  };
+  return mapScheduledTask(row);
 }
 
 export async function getScheduledTaskXaiProviderAccountAuthoritySnapshot(
@@ -17969,12 +18015,8 @@ export async function materializeScheduledTaskReusableSessionFromRun(
       }
       const materializedTask = await getScheduledTask(scopedDb, input.workspaceId, input.taskId);
       if (!materializedTask || materializedTask.authorityRevision !== Number(row.authorityRevision))
-        throw new Error("scheduled host materialization revision changed");
-      await cloneHostMcpTaskAuthorities(
-        scopedDb,
-        materializedTask,
-        input.sourceTaskAuthorityRevision,
-      );
+        throw new Error("scheduled materialization revision changed");
+
       await cloneExternalLinkTaskAuthority(
         scopedDb,
         materializedTask,
@@ -31844,8 +31886,7 @@ export type SessionCreateInput = {
   createIdempotencyKey?: string | null;
   /** Exact explicit installed-Skill selection used for keyed-create replay. */
   selectedInstalledSkillIds?: string[];
-  /** Backend-only replay identity; does not admit host credential authority. */
-  selectedHostMcpDelegations?: HostMcpCreateSelection[];
+
   sandboxGroupId?: string | null;
   sandboxOs?: SandboxOs;
   /** Exact accepted generated-session compaction policy; internal lifecycle callers only. */
@@ -32140,7 +32181,7 @@ type SessionCreateReplayIdentity = {
   visibility?: "user_private" | "workspace_shared";
   variableSetIds: string[];
   selectedInstalledSkillIds: string[];
-  selectedHostMcpDelegations?: HostMcpCreateSelection[];
+
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   /** Access/memory scope of the retrying request; omitted means the defaults. */
   agentAccess?: SessionAgentAccess;
@@ -32197,10 +32238,7 @@ function assertSessionCreateReplayIdentity(
     stableJson(input.initialAgentLearning ?? {})
   )
     throw new SessionCreateIdempotencyConflictError();
-  if (
-    stableJson(hostCreateSelectionFromMetadata(existing.metadata)) !==
-    stableJson(normalizeHostCreateSelection(input.selectedHostMcpDelegations))
-  ) {
+  if (hasRetiredSessionCreateSelection(existing.metadata)) {
     throw new SessionCreateIdempotencyConflictError();
   }
   if (
@@ -32333,12 +32371,11 @@ async function createSessionInTransaction(
   const variableSetId = variableSetIds.at(-1) ?? null;
   const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
   const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
-    metadataWithHostCreateSelection(
+    withoutRetiredSessionCreateMetadata(
       withBundledSkillSelectionMetadata(
         metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
         input.bundledSkillIds,
       ),
-      input.selectedHostMcpDelegations,
     ),
     selectedInstalledSkillIds,
   );
@@ -32395,7 +32432,7 @@ async function createSessionInTransaction(
         visibility: createRequestedVisibility,
         variableSetIds,
         selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
-        selectedHostMcpDelegations: input.selectedHostMcpDelegations ?? [],
+
         initialPersonalResourceAttachmentIntent:
           input.initialPersonalResourceAttachmentIntent ?? null,
         ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
@@ -32654,7 +32691,7 @@ async function createSessionInTransaction(
           visibility: createRequestedVisibility,
           variableSetIds,
           selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
-          selectedHostMcpDelegations: input.selectedHostMcpDelegations ?? [],
+
           initialPersonalResourceAttachmentIntent:
             input.initialPersonalResourceAttachmentIntent ?? null,
           ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
@@ -32868,7 +32905,7 @@ export async function getInitializedSessionCreateReplay(
     visibility?: "user_private" | "workspace_shared";
     variableSetIds: string[];
     selectedInstalledSkillIds: string[];
-    selectedHostMcpDelegations?: HostMcpCreateSelection[];
+
     initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
     deferInitialTurn?: boolean;
   },
@@ -59514,6 +59551,7 @@ export type CreateSessionGoalInput = {
   text: string;
   successCriteria?: string | null;
   rootConstraints?: string[];
+  reportRequirements?: SessionGoalReportRequirement[];
   maxAutoContinuations?: number | null;
   mutationPolicy?: SessionGoalMutationPolicy;
   expectedObjectiveRevision?: number;
@@ -59543,6 +59581,7 @@ export async function createSessionGoal(
           text: input.text,
           successCriteria: input.successCriteria ?? null,
           rootConstraints,
+          metadata: appendGoalReportRequirements({}, input.reportRequirements),
           maxAutoContinuations: input.maxAutoContinuations ?? null,
           mutationPolicy: input.mutationPolicy ?? "preserve_intent",
           createdBy: input.createdBy,
@@ -59934,6 +59973,7 @@ export async function clearSessionGoal(
   db: Database,
   workspaceId: string,
   sessionId: string,
+  options: { actor: "api" | "agent" } = { actor: "api" },
 ): Promise<{
   cleared: boolean;
   goal: SessionGoal | null;
@@ -59966,6 +60006,21 @@ export async function clearSessionGoal(
           .limit(1);
         if (!existing) {
           return { cleared: false, goal: null, event: null };
+        }
+        if (
+          existing.status !== "completed" &&
+          goalReportRequirements(existing.metadata).length > 0
+        ) {
+          if (options.actor === "agent") {
+            throw new SessionControlConflictError(
+              "An agent cannot clear pending report requirements",
+            );
+          }
+          // Exact trusted API cancellation capability; never accepted from
+          // caller JSON. Rolling writers cannot silently delete new reports.
+          await tx.execute(
+            sql`select set_config('opengeni.goal_report_clear_id', ${existing.id}, true)`,
+          );
         }
         await tx.delete(schema.sessionGoals).where(eq(schema.sessionGoals.id, existing.id));
         const sequence = session.lastSequence + 1;
@@ -60063,6 +60118,7 @@ export async function upsertSessionGoal(
             text: input.text,
             successCriteria: input.successCriteria ?? null,
             rootConstraints: suppliedRootConstraints ?? [],
+            metadata: appendGoalReportRequirements({}, input.reportRequirements),
             maxAutoContinuations: input.maxAutoContinuations ?? null,
             mutationPolicy: input.mutationPolicy ?? "preserve_intent",
             createdBy: input.createdBy,
@@ -60204,6 +60260,12 @@ export async function upsertSessionGoal(
           text: input.text,
           successCriteria: input.successCriteria ?? null,
           rootConstraints,
+          metadata: appendGoalReportRequirements(
+            existing.status === "completed"
+              ? { ...existing.metadata, [GOAL_REPORT_REQUIREMENTS_KEY]: [], reportDeliveriesV1: [] }
+              : existing.metadata,
+            input.reportRequirements,
+          ),
           maxAutoContinuations: input.maxAutoContinuations ?? null,
           mutationPolicy: input.mutationPolicy ?? existing.mutationPolicy,
           evidence: null,
@@ -60332,6 +60394,9 @@ export async function upsertScheduledSessionGoalForRun(
           successCriteria: input.successCriteria ?? null,
           maxAutoContinuations: input.maxAutoContinuations ?? null,
           ...(input.mutationPolicy ? { mutationPolicy: input.mutationPolicy } : {}),
+          ...(acceptedGoal.reportRequirements
+            ? { reportRequirements: acceptedGoal.reportRequirements }
+            : {}),
           createdBy: "scheduled_task",
         });
         const now = new Date();
@@ -60380,7 +60445,10 @@ export async function upsertScheduledSessionGoalForRun(
  */
 export async function upsertSessionGoalWithEvent(
   db: Database,
-  input: CreateSessionGoalInput & { actor: "agent" | "api" },
+  input: CreateSessionGoalInput & {
+    actor: "agent" | "api";
+    commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+  },
 ): Promise<{
   goal: SessionGoal;
   replaced: boolean;
@@ -60417,6 +60485,14 @@ export async function upsertSessionGoalWithEvent(
           throw new Error(`Session not found: ${input.sessionId}`);
         }
         if (input.actor === "agent") {
+          if (input.commandActor) {
+            await assertAgentCommandAuthorityInTransaction(tx, {
+              workspaceId: input.workspaceId,
+              actor: input.commandActor,
+              targetSessionId: input.sessionId,
+              action: "goal",
+            });
+          }
           const [existing] = await tx
             .select({
               objectiveRevision: schema.sessionGoals.objectiveRevision,
@@ -60470,6 +60546,7 @@ export async function upsertSessionGoalWithEvent(
                     ? { successCriteria: result.goal.successCriteria }
                     : {}),
                   rootConstraints: result.goal.rootConstraints,
+                  reportRequirements: result.goal.reportRequirements,
                   version: result.goal.version,
                   objectiveRevision: result.goal.objectiveRevision,
                   mutationPolicy: result.goal.mutationPolicy,
@@ -61459,6 +61536,7 @@ export async function recordSessionGoalProgressWithEvent(
   sessionId: string,
   input: {
     progressNote: string;
+    reportRequirements?: SessionGoalReportRequirement[];
     command: {
       accountId: string;
       actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
@@ -61495,6 +61573,9 @@ export async function recordSessionGoalProgressWithEvent(
         operationKey: input.command.operationKey,
         canonicalRequestHash: canonicalSessionCommandHash({
           progressNote: input.progressNote,
+          ...(input.reportRequirements !== undefined
+            ? { reportRequirements: input.reportRequirements }
+            : {}),
         }),
         identityScope: "target_operation",
       });
@@ -61533,7 +61614,14 @@ export async function recordSessionGoalProgressWithEvent(
       if (existing.status !== "active") {
         throw new Error("session goal is not active; progress cannot be recorded");
       }
-      const goal = mapSessionGoal(existing);
+      const metadata = appendGoalReportRequirements(existing.metadata, input.reportRequirements);
+      if (input.reportRequirements !== undefined) {
+        await tx
+          .update(schema.sessionGoals)
+          .set({ metadata })
+          .where(eq(schema.sessionGoals.id, existing.id));
+      }
+      const goal = mapSessionGoal({ ...existing, metadata });
       const now = new Date();
       const [event] = await tx
         .insert(schema.sessionEvents)
@@ -61553,6 +61641,9 @@ export async function recordSessionGoalProgressWithEvent(
                 goalId: goal.id,
                 objectiveRevision: goal.objectiveRevision,
                 progressNote: input.progressNote,
+                ...(input.reportRequirements !== undefined
+                  ? { reportRequirements: input.reportRequirements }
+                  : {}),
                 actor: "agent",
               },
               occurredAt: now,
@@ -61813,6 +61904,9 @@ export async function setSessionGoalStatus(
     evidence?: string;
     rationale?: string;
     pausedReason?: string;
+    reportDeliveries?: SessionGoalReportDelivery[];
+    reportArtifactActor?: ReportArtifactActor;
+    commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
   },
 ): Promise<{
   goal: SessionGoal;
@@ -61830,6 +61924,14 @@ export async function setSessionGoalStatus(
       .for("no key update")
       .limit(1);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
+    if (input.commandActor) {
+      await assertAgentCommandAuthorityInTransaction(scopedDb, {
+        workspaceId,
+        actor: input.commandActor,
+        targetSessionId: sessionId,
+        action: "goal",
+      });
+    }
     const [existing] = await scopedDb
       .select()
       .from(schema.sessionGoals)
@@ -61854,6 +61956,16 @@ export async function setSessionGoalStatus(
     if (existing.status === "completed") {
       throw new Error("session goal is completed; set a new goal to continue");
     }
+    if (input.status === "completed") {
+      await verifyGoalReportDeliveries(scopedDb, {
+        accountId: session.accountId,
+        workspaceId,
+        sessionId,
+        metadata: existing.metadata,
+        deliveries: input.reportDeliveries,
+        ...(input.reportArtifactActor ? { actor: input.reportArtifactActor } : {}),
+      });
+    }
     const [row] = await scopedDb
       .update(schema.sessionGoals)
       .set({
@@ -61864,6 +61976,7 @@ export async function setSessionGoalStatus(
         ...(input.status === "completed"
           ? {
               evidence: input.evidence ?? null,
+              metadata: { ...existing.metadata, reportDeliveriesV1: input.reportDeliveries ?? [] },
               pausedReason: null,
               continuationObservedRevision: existing.continuationWakeRevision,
             }
@@ -61933,6 +62046,9 @@ export async function setSessionGoalStatusWithEvent(
     evidence?: string;
     rationale?: string;
     pausedReason?: string;
+    reportDeliveries?: SessionGoalReportDelivery[];
+    reportArtifactActor?: ReportArtifactActor;
+    commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     event: SetSessionGoalStatusEvent;
   },
 ): Promise<{
@@ -61961,6 +62077,11 @@ export async function setSessionGoalStatusWithEvent(
       }
       const result = await setSessionGoalStatus(tx, workspaceId, sessionId, {
         status: input.status,
+        ...(input.reportDeliveries !== undefined
+          ? { reportDeliveries: input.reportDeliveries }
+          : {}),
+        ...(input.reportArtifactActor ? { reportArtifactActor: input.reportArtifactActor } : {}),
+        ...(input.commandActor ? { commandActor: input.commandActor } : {}),
         ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
         ...(input.rationale !== undefined ? { rationale: input.rationale } : {}),
         ...(input.pausedReason !== undefined ? { pausedReason: input.pausedReason } : {}),
@@ -61971,6 +62092,7 @@ export async function setSessionGoalStatusWithEvent(
           ? {
               goalId: result.goal.id,
               evidence: input.event.evidence,
+              reportDeliveries: result.goal.metadata.reportDeliveriesV1 ?? [],
               version: result.goal.version,
             }
           : input.event.type === "goal.paused"
@@ -62827,12 +62949,9 @@ export async function materializeGoalContinuation(
           )
           .limit(1);
         const personalConnectionDelegations = causalTurn
-          ? personalConnectionDelegationsForSameSessionSuccessor(
-              parsedPersonalConnectionDelegations(
-                causalTurn.personalConnectionDelegations,
-                `session_turns:${input.workspaceId}:${input.sessionId}:${causalTurn.id}`,
-              ),
-              input.sessionId,
+          ? parsedPersonalConnectionDelegations(
+              causalTurn.personalConnectionDelegations,
+              `session_turns:${input.workspaceId}:${input.sessionId}:${causalTurn.id}`,
             )
           : [];
         const xaiProviderAccountAuthoritySnapshot = causalTurn
@@ -62886,7 +63005,7 @@ export async function materializeGoalContinuation(
                     goalWakeRevision,
                     ...(causalTurn ? { causalTurnId: causalTurn.id } : {}),
                     ...(causalTurn?.initiatingHumanSubjectId &&
-                    personalConnectionDelegations.some((delegation) => delegation.userDelegation)
+                    personalConnectionDelegations.length > 0
                       ? {
                           connectionAuthoritySubjectId: causalTurn.initiatingHumanSubjectId,
                         }
@@ -63011,6 +63130,7 @@ function mapSessionGoal(row: typeof schema.sessionGoals.$inferSelect): SessionGo
     text: row.text,
     successCriteria: row.successCriteria,
     rootConstraints: row.rootConstraints,
+    reportRequirements: goalReportRequirements(row.metadata),
     evidence: row.evidence,
     rationale: row.rationale,
     pausedReason: row.pausedReason,
@@ -63047,6 +63167,7 @@ export type InitializeSessionStartInput = {
     text: string;
     successCriteria?: string | null;
     rootConstraints?: string[];
+    reportRequirements?: SessionGoalReportRequirement[];
     maxAutoContinuations?: number | null;
     mutationPolicy?: SessionGoalMutationPolicy;
     createdBy?: SessionGoalCreatedBy;
@@ -63199,6 +63320,7 @@ export async function initializeSessionStartAtomically(
               text: input.goal.text,
               successCriteria: input.goal.successCriteria ?? null,
               rootConstraints,
+              metadata: appendGoalReportRequirements({}, input.goal.reportRequirements),
               maxAutoContinuations: input.goal.maxAutoContinuations ?? null,
               mutationPolicy: input.goal.mutationPolicy ?? "preserve_intent",
               createdBy: input.goal.createdBy ?? "api",
@@ -63560,11 +63682,9 @@ export async function initializeSessionStartAtomically(
                 ? causalParentTurn.initiatorSubjectId
                 : null);
           }
-          if (
-            initialPersonalConnectionDelegations.some((delegation) => delegation.userDelegation)
-          ) {
+          if (initialPersonalConnectionDelegations.length > 0) {
             if (!initialTurnInitiatingHumanSubjectId) {
-              throw new Error("Activated connection acceptance requires an initiating human");
+              throw new Error("Personal connection acceptance requires an initiating human");
             }
             await tx.execute(sql`
               SELECT set_config(
@@ -63639,19 +63759,7 @@ export async function initializeSessionStartAtomically(
             sourceTurnId: session.parentTurnId,
             kind: "child",
           });
-        if (
-          insertedTurn &&
-          session.parentSessionId &&
-          session.parentTurnId &&
-          turn.initiatingHumanSubjectId
-        )
-          await inheritChildHostMcpTurnAuthorities(tx as unknown as Database, {
-            accountId: session.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: session.id,
-            turnId: turn.id,
-            subjectId: turn.initiatingHumanSubjectId,
-          });
+
         if (initialPersonalResourceIntent) {
           const attachmentInitiatingHumanSubjectId =
             turn.initiatingHumanSubjectId ??
@@ -63896,9 +64004,9 @@ export async function enqueueSessionTurn(
         const acceptedAt = new Date();
         const initiatingHumanSubjectId =
           input.initiator.kind === "subject" ? input.initiator.subjectId : null;
-        if (input.personalConnectionDelegations?.some((delegation) => delegation.userDelegation)) {
+        if ((input.personalConnectionDelegations?.length ?? 0) > 0) {
           if (!initiatingHumanSubjectId) {
-            throw new Error("Activated connection acceptance requires an initiating human");
+            throw new Error("Personal connection acceptance requires an initiating human");
           }
           await tx.execute(sql`
             SELECT set_config(
@@ -64032,11 +64140,10 @@ function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string 
   return stableJson({
     personalConnectionDelegations,
     xai: frozenXaiExecutionAuthority(update),
-    connectionAuthoritySubjectId: personalConnectionDelegations.some(
-      (delegation) => delegation.userDelegation,
-    )
-      ? (update.lineage.connectionAuthoritySubjectId ?? null)
-      : null,
+    connectionAuthoritySubjectId:
+      personalConnectionDelegations.length > 0
+        ? (update.lineage.connectionAuthoritySubjectId ?? null)
+        : null,
     scheduledTaskRunId: update.scheduledTaskRunId,
   });
 }
@@ -64149,22 +64256,6 @@ function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
     candidateCausalKey === null ||
     selectedCausalKey === candidateCausalKey
   );
-}
-
-function personalConnectionDelegationsForSameSessionSuccessor(
-  delegations: McpPersonalConnectionDelegation[],
-  targetSessionId: string,
-): McpPersonalConnectionDelegation[] {
-  // A continuation/internal turn is new accepted work. Session and always
-  // grants may be re-admitted under the live DB fences; once remains bound to
-  // its original accepted turn and is never copied forward.
-  return delegations.filter((delegation) => {
-    const authority = delegation.userDelegation;
-    if (!authority) return true;
-    if (authority.mode === "once") return false;
-    if (authority.mode === "session") return authority.sessionId === targetSessionId;
-    return true;
-  });
 }
 
 function boundedInternalUpdateEventText(
@@ -66632,21 +66723,17 @@ export async function claimSessionWorkForAttempt(
             // freezes the same visibility/owner-membership authority tuple.
             initiatingHumanSubjectId = privateOwnerSubjectId;
           }
-          if (
-            internalPersonalConnectionDelegations.some((delegation) => delegation.userDelegation)
-          ) {
+          if (internalPersonalConnectionDelegations.length > 0) {
             if (!initiatingHumanSubjectId) {
-              throw new Error("Activated connection acceptance requires an initiating human");
+              throw new Error("Personal connection acceptance requires an initiating human");
             }
             if (
               internalPersonalConnectionDelegations.some(
-                (delegation) =>
-                  delegation.userDelegation &&
-                  delegation.ownerSubjectId !== initiatingHumanSubjectId,
+                (delegation) => delegation.ownerSubjectId !== initiatingHumanSubjectId,
               )
             ) {
               throw new Error(
-                "Activated connection owner does not match the causal initiating human",
+                "Personal connection owner does not match the causal initiating human",
               );
             }
             await tx.execute(sql`
@@ -66767,13 +66854,6 @@ export async function claimSessionWorkForAttempt(
               turnId: internalTurn.id,
               runId: scheduledTaskRunId,
             });
-            await captureScheduledHostMcpTurnAuthorities(tx as unknown as Database, {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              turnId: internalTurn.id,
-              runId: scheduledTaskRunId,
-            });
           } else if (causalHumanTurnId && initiatingHumanSubjectId) {
             await inheritExternalLinkTurnAuthority(tx as unknown as Database, {
               accountId: session.accountId,
@@ -66782,14 +66862,6 @@ export async function claimSessionWorkForAttempt(
               turnId: internalTurn.id,
               sourceTurnId: causalHumanTurnId,
               kind: "causal",
-            });
-            await inheritCausalHostMcpTurnAuthorities(tx as unknown as Database, {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              subjectId: initiatingHumanSubjectId,
-              sourceTurnId: causalHumanTurnId,
-              targetTurnId: internalTurn.id,
             });
           }
           // The batch is now durable model memory. Every child it reports on has
@@ -73675,14 +73747,11 @@ async function parentOutboxAuthorityTx(
   lineage: Record<string, unknown>;
 }> {
   const personalConnectionDelegations = session.parentTurnId
-    ? personalConnectionDelegationsForSameSessionSuccessor(
-        await personalConnectionDelegationsForTurnInTransaction(
-          tx,
-          workspaceId,
-          session.parentSessionId,
-          session.parentTurnId,
-        ),
+    ? await personalConnectionDelegationsForTurnInTransaction(
+        tx,
+        workspaceId,
         session.parentSessionId,
+        session.parentTurnId,
       )
     : [];
   const xaiProviderAccountAuthoritySnapshot = session.parentTurnId
@@ -73721,10 +73790,8 @@ async function parentOutboxAuthorityTx(
   const connectionAuthoritySubjectId =
     parentTurn?.initiatingHumanSubjectId ??
     (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null);
-  const hasUserDelegation = personalConnectionDelegations.some(
-    (delegation) => delegation.userDelegation,
-  );
-  if (hasUserDelegation && !connectionAuthoritySubjectId) {
+  const hasPersonalConnections = personalConnectionDelegations.length > 0;
+  if (hasPersonalConnections && !connectionAuthoritySubjectId) {
     throw new Error("Child lifecycle outbox lost its parent connection authority subject");
   }
   return {
@@ -73734,7 +73801,7 @@ async function parentOutboxAuthorityTx(
       childSessionId: session.id,
       parentSessionId: session.parentSessionId,
       ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
-      ...(connectionAuthoritySubjectId && hasUserDelegation
+      ...(connectionAuthoritySubjectId && hasPersonalConnections
         ? { connectionAuthoritySubjectId }
         : {}),
       ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
@@ -75381,12 +75448,9 @@ async function sameSessionCausalAuthorityTx(
     )
     .limit(1);
   if (!turn) return null;
-  const personalConnectionDelegations = personalConnectionDelegationsForSameSessionSuccessor(
-    parsedPersonalConnectionDelegations(
-      turn.personalConnectionDelegations,
-      `session_turns:${turn.id}`,
-    ),
-    input.sessionId,
+  const personalConnectionDelegations = parsedPersonalConnectionDelegations(
+    turn.personalConnectionDelegations,
+    `session_turns:${turn.id}`,
   );
   const xaiProviderAccountAuthoritySnapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
     turn.xaiProviderAccountAuthoritySnapshot,
@@ -75396,7 +75460,7 @@ async function sameSessionCausalAuthorityTx(
     (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
   if (
     !human &&
-    (personalConnectionDelegations.some((d) => d.userDelegation) ||
+    (personalConnectionDelegations.length > 0 ||
       xaiProviderAccountAuthoritySnapshot.scope === "user")
   ) {
     throw new SessionControlInvariantError("Causal turn lost its personal execution authority");
@@ -75406,7 +75470,7 @@ async function sameSessionCausalAuthorityTx(
     xaiProviderAccountAuthoritySnapshot,
     lineage: {
       causalTurnId: turn.id,
-      ...(human && personalConnectionDelegations.some((d) => d.userDelegation)
+      ...(human && personalConnectionDelegations.length > 0
         ? { connectionAuthoritySubjectId: human }
         : {}),
       ...(human && xaiProviderAccountAuthoritySnapshot.scope === "user"
@@ -78014,6 +78078,7 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     name: row.name,
+    ownerSubjectId: row.ownerSubjectId,
     status: row.status as ScheduledTaskStatus,
     schedule: row.schedule as ScheduledTaskScheduleSpec,
     temporalScheduleId: row.temporalScheduleId,
@@ -78027,10 +78092,6 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
       row.createdByContext as TurnInitiatorContext,
     ),
     createdByContext: row.createdByContext as TurnInitiatorContext,
-    personalConnections: parsedPersonalConnectionDelegations(
-      row.personalConnectionDelegations,
-      `scheduled_tasks:${row.workspaceId}:${row.id}`,
-    ).map(({ serverId, providerDomain }) => ({ serverId, providerDomain })),
     authorityRevision: row.authorityRevision,
     executionDigest: row.executionDigest,
     reusableSessionId: existingSessionTarget ? null : row.reusableSessionId,
@@ -78840,7 +78901,6 @@ function connectionBrokerDeps(): ConnectionBrokerDeps {
     encrypt: encryptEnvironmentValue,
     keyBytes: environmentsEncryptionKeyBytes,
     now: () => new Date(),
-    authorizeUse: resolveConnectionUseAuthority,
     authorizeAcceptedUse: resolveAcceptedConnectionUse,
   };
 }
@@ -78911,11 +78971,7 @@ export {
 } from "./codex-token-resolver";
 
 export {
-  buildHostConnectionTokenResolver,
-  buildHostGatewayConnectionTokenResolver,
   ConnectionRefreshHttpError,
-  HostMcpCredentialBindingError,
-  HostMcpCredentialScopeError,
   isPrivateAddress,
   normalizeBearerScheme,
   refreshOAuthConnectionCredential,
@@ -78925,7 +78981,6 @@ export {
   type ConnectionStatusGuard,
   type ConnectionTokenRefreshInput,
   type ConnectionTokenResolverOptions,
-  type HostMcpCredentialResolverContext,
   type PermanentConnectionRefreshFailure,
   type RefreshTransportOptions,
   type ResolveConnectionCredentialInput,
@@ -78971,6 +79026,7 @@ export {
   finalizePluginPackageInstall,
   getInstalledPluginPackage,
   getPluginPackageUninstallPreview,
+  PluginUninstallPreviewChangedError,
   installPluginMcpReference,
   listInstalledPluginPackages,
   PluginInstallationVersionConflictError,

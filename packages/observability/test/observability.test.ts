@@ -943,9 +943,8 @@ describe("observability", () => {
 
   test("counts one compatibility-lane use with the lane as its only label", async () => {
     const obs = createObservability(settings, { component: "worker", now: () => 1 });
-    recordTenancyCompatibilityLaneUse(obs, "connection_pre_snapshot_ref");
-    recordTenancyCompatibilityLaneUse(obs, "connection_pre_snapshot_ref");
-    recordTenancyCompatibilityLaneUse(obs, "connection_legacy_user");
+    recordTenancyCompatibilityLaneUse(obs, "workspace_writer_unattributed");
+    recordTenancyCompatibilityLaneUse(obs, "workspace_writer_unattributed");
 
     const metrics = await obs.prometheusMetrics();
     const sample = (lane: string): string =>
@@ -956,14 +955,12 @@ describe("observability", () => {
             line.startsWith("opengeni_tenancy_compatibility_lane_uses_total{") &&
             line.includes(`lane="${lane}"`),
         ) ?? "";
-    expect(sample("connection_pre_snapshot_ref")).toMatch(/\s2$/);
-    expect(sample("connection_legacy_user")).toMatch(/\s1$/);
-    expect(sample("workspace_writer_unattributed")).toMatch(/\s0$/);
+    expect(sample("workspace_writer_unattributed")).toMatch(/\s2$/);
     // Content-free: only the reviewed lane name plus the registry's fixed
     // deployment labels. No tenant, subject, connection, or resource identity.
-    const labels = sample("connection_legacy_user").slice(
-      sample("connection_legacy_user").indexOf("{") + 1,
-      sample("connection_legacy_user").indexOf("}"),
+    const labels = sample("workspace_writer_unattributed").slice(
+      sample("workspace_writer_unattributed").indexOf("{") + 1,
+      sample("workspace_writer_unattributed").indexOf("}"),
     );
     expect(
       labels
@@ -979,9 +976,11 @@ describe("observability", () => {
       obs,
       "connection_id_47f0d0a1" as unknown as (typeof TENANCY_COMPATIBILITY_LANES)[number],
     );
-    expect(() => recordTenancyCompatibilityLaneUse(null, "connection_legacy_user")).not.toThrow();
     expect(() =>
-      recordTenancyCompatibilityLaneUse(undefined, "connection_legacy_user"),
+      recordTenancyCompatibilityLaneUse(null, "workspace_writer_unattributed"),
+    ).not.toThrow();
+    expect(() =>
+      recordTenancyCompatibilityLaneUse(undefined, "workspace_writer_unattributed"),
     ).not.toThrow();
 
     const metrics = await obs.prometheusMetrics();

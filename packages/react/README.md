@@ -43,6 +43,11 @@ installation. `ConnectionCatalog` accepts the same states through each option's
 `state`. Older callers that omit `state` keep their visible status labels, so
 provider warnings are not hidden during migration.
 
+`PluginDiscovery` accepts `defaultProvider="openai"` or `"anthropic"` to choose
+the initial registry. Omitting it starts with All. Users can still switch among
+All, OpenAI, and Anthropic; changing the search preserves their selection. The
+OpenGeni Plugins page starts with OpenAI.
+
 ```tsx
 import { ConnectPanel } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";

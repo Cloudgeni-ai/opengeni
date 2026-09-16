@@ -1,5 +1,63 @@
 import { describe, expect, test } from "bun:test";
-import { nextCanaryVersion, planCanaryVersions } from "./publish-canary";
+import { nextCanaryVersion, planCanaryVersions, workflowCanarySequence } from "./publish-canary";
+
+describe("workflow canary sequence", () => {
+  test("uses distinct safe sequences for runs and retries even with stale registry tags", () => {
+    const first = workflowCanarySequence("1234", "1");
+    const retry = workflowCanarySequence("1234", "2");
+    const later = workflowCanarySequence("1235", "1");
+    expect(first).toBe(1234001);
+    expect(retry).toBeGreaterThan(first);
+    expect(later).toBeGreaterThan(retry);
+    expect(nextCanaryVersion("1.0.0", "1.0.0-canary.3", first)).toBe("1.0.0-canary.1234001");
+    expect(nextCanaryVersion("1.0.0", null, retry)).toBe("1.0.0-canary.1234002");
+    expect(() => nextCanaryVersion("1.0.0", "1.0.0-canary.1234005", first)).toThrow("superseded");
+    expect(workflowCanarySequence()).toBe(0);
+  });
+
+  test("fails before publication for partial, malformed or unsafe identities", () => {
+    for (const [run, attempt] of [
+      ["1234", undefined],
+      [undefined, "1"],
+      ["bad", "1"],
+      ["1", "0"],
+      ["1", "1000"],
+      [String(Number.MAX_SAFE_INTEGER), "1"],
+    ]) {
+      expect(() => workflowCanarySequence(run, attempt)).toThrow();
+    }
+    expect(() => nextCanaryVersion("1.0.0", null, -1)).toThrow();
+    expect(() => nextCanaryVersion("1.0.0", `1.0.0-canary.${Number.MAX_SAFE_INTEGER}`)).toThrow();
+  });
+
+  test("rejects older workflow retries instead of reusing a newer invisible reservation", () => {
+    for (const attempt of ["1", "2"]) {
+      expect(() =>
+        nextCanaryVersion("1.0.0", "1.0.0-canary.1235001", workflowCanarySequence("1234", attempt)),
+      ).toThrow("dispatch a new publication run");
+    }
+    expect(
+      nextCanaryVersion("1.0.0", "1.0.0-canary.1235001", workflowCanarySequence("1236", "1")),
+    ).toBe("1.0.0-canary.1236001");
+  });
+
+  test("keeps fixed groups aligned after an earlier partial publication", () => {
+    const packages = [
+      { name: "a", version: "1.0.0" },
+      { name: "b", version: "1.0.0" },
+    ];
+    const versions = planCanaryVersions(
+      packages,
+      new Map([
+        ["a", "1.0.0-canary.1234001"],
+        ["b", "1.0.0-canary.3"],
+      ]),
+      [["a", "b"]],
+      workflowCanarySequence("1234", "2"),
+    );
+    expect([...versions.values()]).toEqual(["1.0.0-canary.1234002", "1.0.0-canary.1234002"]);
+  });
+});
 
 describe("nextCanaryVersion", () => {
   test("starts at canary.0 from a stable version", () => {

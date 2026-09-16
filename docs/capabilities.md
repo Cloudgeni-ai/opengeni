@@ -365,10 +365,47 @@ still pinned to the current version.
 
 An update records a new immutable Plugin version, computes added/removed/
 changed/unchanged component keys, and removes stale ownership edges only after
-the replacement BOM completes. Uninstall preview reports whether each child is
-retained by another owner. Uninstall removes only this Plugin's edges, disables
-orphaned child installations, and never removes a shared component or a
-Connection.
+the replacement BOM completes. Uninstall preview returns named component impact:
+`name`, `disposition` (`removed`, `retained`, or `inactive`), `retentionReasons`,
+`remainingOwners` (`kind` and a scope-visible display `name`), and a visible
+canonical `skillId` for Skills. `retainedByOtherOwners` remains the physical
+ownership projection, including pending/repairing owners; it does not imply
+runtime availability. Reasons are `other_owners`, `customized`, `re_scoped`, or
+`registry_unavailable` (conservative retention when the head is not visible).
+Owner names are resolved only within the current workspace; unavailable names
+use a generic label, never another workspace's identity.
+
+Preview and cleanup use the same Skill release classifier. Removing the last
+source owner deactivates an untouched, source-managed workspace Skill, but keeps
+customized or re-scoped active Skills and their history. `removed` means removal
+from active use, not erasure of registry history. An already inactive Skill is
+reported as `inactive`. `retainedComponents` in the removal result includes
+customized/re-scoped Skills as well as physically shared components.
+
+Installed previews include an opaque `previewToken`. Clients should send it as
+`expectedPreviewToken` alongside `expectedInstallationVersion` and
+`idempotencyKey` on DELETE. The backend locks child installations and visible
+Skill heads, fences facet/owner changes, compares live ownership and Skill
+revision/scope/status to the preview, and holds those locks through release.
+Conflicting ownership writes use a nonblocking lock so they cannot introduce a
+cross-owner lock-order cycle. Contention or changed impact returns HTTP
+409 with `{ code: "plugin_uninstall_preview_changed", message, preview }`; review
+the refreshed preview before confirming again. A rejected comparison performs
+no removal and does not consume the idempotency key. Exact successful retries
+replay the original receipt. Older callers may omit the token, but still receive
+live classification and safe customization preservation; an installation-version
+fence alone does not prove they reviewed the current Skill impact.
+
+Cleanup carries the exact head set locked before comparison; it never widens
+that set when another subject moves a previously private Skill into workspace
+scope. Discovering a newly visible head aborts removal before acquiring that
+head's lock or deactivating it, and returns the same refreshed-preview conflict.
+The failed transaction contains no committed ownership or idempotency changes.
+
+Uninstall removes only this Plugin's ownership edges and disables orphaned child
+installations. It never disconnects or deletes a Connection, erases Skill history,
+or adds service/API-key/agent authority to remove source-bound Skills. Removing
+those sources continues to require the existing trusted human-session actor.
 
 The owning endpoints are:
 
@@ -594,9 +631,8 @@ it does not mutate connector-policy rows directly.
   viewer at the Connected accounts block above instead of an ambiguous
   whole-row Reconnect/Disconnect). The locked sentence defaults to "A
   workspace admin looks after this integration. You do not need to connect
-  anything."; an adapter may supply a truthful variant instead (e.g.
-  personal-only Slack tells a member that connection management permission is
-  required, because no admin can connect it for them). Provider limited-use
+  anything."; an adapter may supply a truthful variant when the account
+  needs its owner to reconnect. Provider limited-use
   disclosures (Google's OAuth disclosures) render in a fixed place above the
   footer, and the connect/publish affordances reference them via
   `aria-describedby`.
@@ -616,19 +652,17 @@ it does not mutate connector-policy rows directly.
   `quick-connect-dialog.tsx` component exists for the two authKind cases that
   do need a screen (`api_key`: one field, no scope bullet list; unreviewed
   `oauth2`: one line naming the domain), and is reused by account actions.
-  Gmail is not a multi-account provider: it is a single personal-only
-  Connector, not an API integration definition (see the Gmail section below).
+  Gmail uses a catalog Connector rather than an API integration definition (see the Gmail section below).
 
 **Connectors** are MCP servers from the catalog, plus workspace-defined Custom
 APIs (OpenAPI/GraphQL) - there is no third bucket. The existing `authKind`
 field (`"none" | "oauth2" | "api_key" | "unknown"`) already carries every
 behavioral difference the connect flow needs, so Custom API connectors use the
 same single-row setup treatment as any other Connector.
-Connection setup defaults to workspace-owned; a personal connection requires
-the explicit **Only me** choice (official Gmail and Slack's hosted MCP are the
-personal-only exceptions). The shared setup dialog explains that workspace
-sharing uses the account or credentials the human authorizes, not a new
-workspace identity. It preserves provider-specific ownership rules and stores
+Connection setup defaults to workspace ownership, with personal defaults for
+mail, calendar, contacts and drive integrations. Both **This workspace** and
+**Only me** remain selectable. The shared setup dialog explains that workspace
+sharing uses the account or credentials the human authorizes. It stores
 API-key credentials under each field's **wire header name**, never its human
 label. Connecting does not silently install bundled Skills.
 Inside that section a **Featured** strip of tiles driven by curated
@@ -811,15 +845,11 @@ is omitted from Google's authorization, token, and refresh requests. The MCP
 resource remains stored in the encrypted bundle and bound to the runtime
 connection.
 
-Gmail is personal-only. Enabling the capability makes Gmail available in the
-workspace catalog, but it does not share a mailbox: each member must authorize
-their own Google account. Personal connection rows and identifiers are hidden
-from other members, and a turn can execute Gmail only through the initiating
-member's frozen personal delegation. OpenGeni rejects workspace-owned Gmail
-OAuth and capability bindings at the API boundary. Gmail content that a user
-asks the agent to quote, summarize, or otherwise add to a session follows that
-session's visibility; connection privacy does not turn a shared session into a
-private one.
+Gmail defaults to personal ownership; users may instead connect it for the workspace.
+Personal account selection is frozen for the initiating user's accepted work,
+and another participant cannot borrow that account. A workspace connection
+uses the explicitly shared mailbox. Gmail content added to a conversation
+follows that conversation's visibility; account ownership does not change it.
 
 Gmail is the single connector path for the provider: the catalog row's
 `gmailmcp.googleapis.com/mcp/v1` resource is the connection and consent

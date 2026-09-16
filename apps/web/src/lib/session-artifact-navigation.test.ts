@@ -4,36 +4,70 @@ import { sessionArtifactFromHref } from "./session-artifact-navigation";
 import { isEditableArtifactKind } from "./artifact-catalog";
 import { parseSync } from "oxc-parser";
 
-const workspace = "11111111-1111-4111-8111-111111111111";
-const artifact = "22222222-2222-4222-8222-222222222222";
+// Production seed 2026-09-15: Sites/files are UUIDs; native editors are 32-hex.
+const workspace = "5d929faa-c755-4146-9d60-e55f42251f0d";
+const siteId = "dc24100a-e408-4713-9c12-ef41e3964f6a";
+const documentId = "d10307ab68064d36855af499c9e3ccc7";
+const fileId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const uuidShaped = "22222222-2222-4222-8222-222222222222";
 const origin = "https://console.example";
-const path = `/workspaces/${workspace}/artifacts/${artifact}`;
+const sitePath = `/workspaces/${workspace}/artifacts/${siteId}`;
+const documentPath = `/workspaces/${workspace}/artifacts/editable/${documentId}`;
+const filePath = `/workspaces/${workspace}/artifacts/files/${fileId}`;
 
 describe("session artifact navigation", () => {
   test("recognizes canonical relative and absolute Site and editor links", () => {
-    for (const href of [path, `${origin}${path}`]) {
+    for (const href of [sitePath, `${origin}${sitePath}`]) {
       expect(sessionArtifactFromHref(href, origin, workspace)).toEqual({
-        id: artifact,
+        id: siteId,
         editable: false,
       });
     }
+    expect(sessionArtifactFromHref(documentPath, origin, workspace)).toEqual({
+      id: documentId,
+      editable: true,
+    });
+    expect(sessionArtifactFromHref(`${origin}${documentPath}`, origin, workspace)).toEqual({
+      id: documentId,
+      editable: true,
+    });
+  });
+  test("rejects UUID-shaped editor IDs and 32-hex Site or file IDs", () => {
     expect(
       sessionArtifactFromHref(
-        path.replace("/artifacts/", "/artifacts/editable/"),
+        `/workspaces/${workspace}/artifacts/editable/${uuidShaped}`,
         origin,
         workspace,
       ),
-    ).toEqual({ id: artifact, editable: true });
+    ).toBeNull();
+    expect(
+      sessionArtifactFromHref(
+        `/workspaces/${workspace}/artifacts/${documentId}`,
+        origin,
+        workspace,
+      ),
+    ).toBeNull();
+    expect(
+      sessionArtifactFromHref(
+        `/workspaces/${workspace}/artifacts/files/${documentId}`,
+        origin,
+        workspace,
+      ),
+    ).toBeNull();
   });
   test("leaves foreign, malformed, download, and version-specific destinations alone", () => {
     for (const href of [
-      `https://other.example${path}`,
-      `//other.example${path}`,
-      path.replace(workspace, artifact),
-      `${path}/content`,
-      `${path}?version=1`,
-      `${path}#section`,
-      path.replace(artifact, "invalid"),
+      `https://other.example${sitePath}`,
+      `//other.example${sitePath}`,
+      `https://user:pass@console.example${sitePath}`,
+      sitePath.replace(workspace, siteId),
+      `${sitePath}/content`,
+      `${sitePath}?version=1`,
+      `${sitePath}#section`,
+      `${documentPath}?version=1`,
+      `${documentPath}#section`,
+      sitePath.replace(siteId, "invalid"),
+      documentPath.replace(documentId, "invalid"),
       "javascript:alert(1)",
       "/workspace/report.html",
     ])
@@ -41,11 +75,17 @@ describe("session artifact navigation", () => {
   });
   test("recognizes durable image and file destinations without a sandbox path", () => {
     expect(
-      sessionArtifactFromHref(path.replace("/artifacts/", "/artifacts/images/"), origin, workspace),
+      sessionArtifactFromHref(
+        sitePath.replace("/artifacts/", "/artifacts/images/"),
+        origin,
+        workspace,
+      ),
     ).toBeNull();
-    expect(
-      sessionArtifactFromHref(path.replace("/artifacts/", "/artifacts/files/"), origin, workspace),
-    ).toEqual({ id: artifact, editable: false, kind: "file" });
+    expect(sessionArtifactFromHref(filePath, origin, workspace)).toEqual({
+      id: fileId,
+      editable: false,
+      kind: "file",
+    });
   });
   test("accepts only a session ID as return context, never an arbitrary URL", () => {
     expect(artifactReturnSearch({ fromSession: workspace })).toEqual({ fromSession: workspace });
@@ -57,7 +97,7 @@ describe("session artifact navigation", () => {
       [workspace],
       undefined,
     ]) {
-      expect(artifactReturnSearch({ fromSession })).toEqual({});
+      expect(artifactReturnSearch({ fromSession })).toEqual({ fromSession: undefined });
     }
   });
 });
@@ -110,14 +150,11 @@ describe("production session artifact-link callback", () => {
   for (const modality of ["document", "spreadsheet", "presentation"]) {
     test(`an editable link selects ${modality}, never a colliding image`, async () => {
       const { onOpen, requests } = await sessionOpenCallback([
-        { id: artifact, modality: "image" },
-        { id: artifact, modality },
+        { id: documentId, modality: "image" },
+        { id: documentId, modality },
       ]);
-      const target = sessionArtifactFromHref(
-        path.replace("/artifacts/", "/artifacts/editable/"),
-        origin,
-        workspace,
-      )!;
+      const target = sessionArtifactFromHref(documentPath, origin, workspace)!;
+      expect(target).toEqual({ id: documentId, editable: true });
       expect(onOpen(target)).toBe(true);
       expect(requests).toHaveLength(1);
       expect(requests[0]?.artifactKind).toBe(modality);
@@ -125,14 +162,16 @@ describe("production session artifact-link callback", () => {
   }
   for (const modality of ["image", "file"]) {
     test(`an undiscovered editable link is not intercepted by ${modality} metadata`, async () => {
-      const { onOpen, requests } = await sessionOpenCallback([{ id: artifact, modality }]);
-      const target = sessionArtifactFromHref(
-        path.replace("/artifacts/", "/artifacts/editable/"),
-        origin,
-        workspace,
-      )!;
+      const { onOpen, requests } = await sessionOpenCallback([{ id: documentId, modality }]);
+      const target = sessionArtifactFromHref(documentPath, origin, workspace)!;
       expect(onOpen(target)).toBe(false);
       expect(requests).toEqual([]);
     });
   }
+  test("unknown editable modality is not guessed and leaves the full-page destination", async () => {
+    const { onOpen, requests } = await sessionOpenCallback([{ id: documentId, modality: "site" }]);
+    const target = sessionArtifactFromHref(documentPath, origin, workspace)!;
+    expect(onOpen(target)).toBe(false);
+    expect(requests).toEqual([]);
+  });
 });

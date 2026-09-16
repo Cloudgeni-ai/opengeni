@@ -18,6 +18,8 @@ import {
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   GoalSpec,
+  SessionGoalReportRequirements,
+  SessionGoalReportDeliveries,
   boundSessionMcpText as capSessionDiscoveryText,
   compactSessionMcpListRow,
   sessionMcpIncludesRelatedWork,
@@ -160,6 +162,7 @@ import type { AnySchema, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/ser
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
+import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { registerKnowledgeEntryTools } from "./knowledge-entries";
 import {
   FIRST_PARTY_TOOL_AUTHORIZATION,
@@ -230,6 +233,7 @@ import {
   validateScheduledTaskMachineTarget,
   validateScheduledTaskTarget,
   updateScheduledTaskForApi,
+  triggerScheduledTaskForGrant,
   validatedScheduledTaskUpdate,
 } from "@opengeni/core";
 import {
@@ -1379,7 +1383,7 @@ export function buildOpenGeniMcpServer(
           status: z4.string().optional(),
           // Explicit credential-free connection authority selections; declared
           // so MCP validation doesn't strip them before the contract parse.
-          connectionAuthorities: z4.array(z4.unknown()).optional(),
+          connectionAccounts: z4.array(z4.unknown()).optional(),
           variableSetId: z4.string().uuid().optional(),
           // Deprecated alias of variableSetId; declared so MCP validation doesn't
           // strip it before the contract parse maps it (rename back-compat).
@@ -1446,7 +1450,7 @@ export function buildOpenGeniMcpServer(
           status: z4.string().optional(),
           // Omitted preserves the frozen selections, [] clears them, and an
           // array replaces them; declared so MCP validation doesn't strip it.
-          connectionAuthorities: z4.array(z4.unknown()).optional(),
+          connectionAccounts: z4.array(z4.unknown()).optional(),
           variableSetId: z4.string().uuid().nullable().optional(),
           // Deprecated alias of variableSetId (rename back-compat); declared so MCP
           // validation doesn't strip it before the contract parse maps it.
@@ -1475,7 +1479,7 @@ export function buildOpenGeniMcpServer(
         if (!scheduledTaskUpdateChangesState(existing, update)) {
           return json(scheduledTaskReceipt("scheduled_tasks_update", existing, "unchanged", false));
         }
-        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, update);
+        const task = await updateScheduledTaskForApi(deps.db, grant, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
@@ -1498,7 +1502,7 @@ export function buildOpenGeniMcpServer(
           return json(scheduledTaskReceipt("scheduled_tasks_pause", existing, "unchanged", false));
         }
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
-        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, {
+        const task = await updateScheduledTaskForApi(deps.db, grant, id, {
           status: "paused",
         });
         await syncUpdatedScheduledTask({
@@ -1533,7 +1537,7 @@ export function buildOpenGeniMcpServer(
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
         });
-        const task = await updateScheduledTaskForApi(deps.db, grant.workspaceId, id, update);
+        const task = await updateScheduledTaskForApi(deps.db, grant, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
@@ -1599,7 +1603,7 @@ export function buildOpenGeniMcpServer(
             ? manualScheduledTaskTriggerUsageKey(grant.workspaceId, task.id, triggerToken)
             : `knowledge-source-sync:manual:${grant.workspaceId}:${task.id}:${triggerToken}`;
         const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
-        await deps.workflowClient.triggerScheduledTask({
+        await triggerScheduledTaskForGrant(deps.db, grant, deps.workflowClient, {
           task,
           agentRunUsageIdempotencyKey,
           triggerWorkflowId,
@@ -1654,9 +1658,8 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id }) => {
         const { task, changed } = await deleteScheduledTaskWithDurableCleanup(deps, {
-          workspaceId: grant.workspaceId,
+          grant,
           taskId: id,
-          subjectId: grant.subjectId,
         });
         return json(
           mcpMutationReceipt({
@@ -2254,7 +2257,20 @@ function registerAtlassianTools(
     const authority = candidates[0]!;
     const metadata = AtlassianConnectionMetadata.safeParse(authority.connection.metadata);
     if (!metadata.success) throw new Error("Atlassian connection metadata is invalid");
+    const claims = exactAgentAttemptClaims(grant);
+    if (grant.principalKind === "agent_attempt" && !claims) {
+      throw new Error("Atlassian access requires the exact active agent attempt");
+    }
     return {
+      ...(claims
+        ? {
+            connectionUseContext: {
+              ...claims,
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+            },
+          }
+        : {}),
       connection: authority.connection,
       metadata: metadata.data,
       subjectId: authority.subjectId ?? grant.subjectId,
@@ -2271,7 +2287,10 @@ function registerAtlassianTools(
     async ({ connectionId }) => {
       const authority = await connectionFor(connectionId);
       const response = await browseAtlassianSources(deps, {
-        workspaceId: grant.workspaceId,
+        workspaceId: authority.connection.workspaceId,
+        ...(authority.connectionUseContext
+          ? { connectionUseContext: authority.connectionUseContext }
+          : {}),
         subjectId: authority.subjectId,
         connectionId: authority.connection.id,
       });
@@ -2304,7 +2323,10 @@ function registerAtlassianTools(
       return json({
         connectionId: authority.connection.id,
         results: await searchAtlassianLive(deps, {
-          workspaceId: grant.workspaceId,
+          workspaceId: authority.connection.workspaceId,
+          ...(authority.connectionUseContext
+            ? { connectionUseContext: authority.connectionUseContext }
+            : {}),
           subjectId: authority.subjectId,
           connectionId: authority.connection.id,
           query,
@@ -2330,7 +2352,10 @@ function registerAtlassianTools(
       const authority = await connectionFor(connectionId);
       return json(
         await getAtlassianLiveItem(deps, {
-          workspaceId: grant.workspaceId,
+          workspaceId: authority.connection.workspaceId,
+          ...(authority.connectionUseContext
+            ? { connectionUseContext: authority.connectionUseContext }
+            : {}),
           subjectId: authority.subjectId,
           connectionId: authority.connection.id,
           kind,
@@ -2420,7 +2445,7 @@ function registerGoalTools(
     "goal_set",
     {
       description:
-        "Create a goal when this session has none, or replace a completed goal with a new one. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
+        "Create a goal when this session has none, or replace a completed goal with a new one. Declare user-facing native document reports with reportRequirements before producing them. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
       // `maxAutoContinuations` is deliberately not agent-facing: the ceiling is
       // API/scheduled-task pacing configuration, and an agent that set its own
       // cap used to silence its orchestration for hours. Continuation pacing is
@@ -2428,9 +2453,10 @@ function registerGoalTools(
       inputSchema: {
         text: goalText,
         successCriteria: successCriteriaSchema.optional(),
+        reportRequirements: SessionGoalReportRequirements.optional(),
       },
     },
-    async ({ text, successCriteria }) => {
+    async ({ text, successCriteria, reportRequirements }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
@@ -2444,15 +2470,24 @@ function registerGoalTools(
           ? (grant.metadata["turnId"] as string)
           : null;
       await assertGoalReactivationAllowed(deps, grant.workspaceId, sessionId, callerTurnId);
+      const context = exactAgentCommandContext(grant, sessionId);
       const { goal, replaced, events } = await upsertSessionGoalWithEvent(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId,
         text,
         successCriteria: successCriteria ?? null,
+        ...(reportRequirements !== undefined ? { reportRequirements } : {}),
         maxAutoContinuations: null,
         createdBy: "agent",
         actor: "agent",
+        commandActor: {
+          type: "agent_attempt",
+          sessionId: context.callerSessionId,
+          turnId: context.callerTurnId,
+          attemptId: context.callerAttemptId,
+          executionGeneration: context.callerExecutionGeneration,
+        },
       });
       if (events.length > 0) {
         await deps.bus.publish(grant.workspaceId, sessionId, events);
@@ -2540,13 +2575,14 @@ function registerGoalTools(
     "goal_progress",
     {
       description:
-        "Record concrete progress toward the unchanged active goal. This does not change goal text, success criteria, mutation policy, or objective revision. Do not use it merely to keep the continuation loop alive.",
+        "Record concrete progress toward the unchanged active goal. Optionally append reportRequirements for secondary user-facing reports discovered during other work; existing requirement IDs and titles cannot be changed or removed. This does not change goal text, success criteria, mutation policy, or objective revision. Do not use it merely to keep the continuation loop alive.",
       inputSchema: {
         progressNote: progressNoteSchema,
         idempotencyKey: z4.string().uuid(),
+        reportRequirements: SessionGoalReportRequirements.optional(),
       },
     },
-    async ({ progressNote, idempotencyKey }) => {
+    async ({ progressNote, idempotencyKey, reportRequirements }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       const context = exactAgentCommandContext(grant, sessionId);
       const { goal, events, operationId, replay } = await recordSessionGoalProgressWithEvent(
@@ -2555,6 +2591,7 @@ function registerGoalTools(
         sessionId,
         {
           progressNote,
+          ...(reportRequirements !== undefined ? { reportRequirements } : {}),
           command: {
             accountId: grant.accountId,
             actor: {
@@ -2635,16 +2672,23 @@ function registerGoalTools(
     "goal_complete",
     {
       description:
-        "Mark the session goal as completed. Requires concrete evidence (what was done and how it satisfies the success criteria). Completion prevents further continuation turns.",
-      inputSchema: { evidence: z4.string().min(1) },
+        "Mark the session goal as completed with concrete evidence. Every persisted report requirement must have a matching reportDeliveries entry containing a native document artifactId and its server-issued inspectionReceiptId from a post-edit body inspection. Missing, stale, inaccessible or summary-only proof fails; inspect again after an edit. Omit reportDeliveries only when no reports were declared. Successful completion returns report artifact references and prevents further continuation turns.",
+      inputSchema: {
+        evidence: z4.string().min(1),
+        reportDeliveries: SessionGoalReportDeliveries.optional(),
+      },
     },
-    async ({ evidence }) => {
+    async ({ evidence, reportDeliveries }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
       if (!existing) {
         throw new Error("this session has no goal; use goal_set first");
       }
+      const context = exactAgentCommandContext(grant, sessionId);
+      const reportArtifactActor = editableArtifactActorForGrant(grant, "0000000000000001");
+      if (reportArtifactActor.kind !== "agent")
+        throw new Error("Goal completion requires exact agent authority");
       const { goal, events } = await setSessionGoalStatusWithEvent(
         deps.db,
         grant.workspaceId,
@@ -2652,6 +2696,15 @@ function registerGoalTools(
         {
           status: "completed",
           evidence,
+          ...(reportDeliveries !== undefined ? { reportDeliveries } : {}),
+          reportArtifactActor,
+          commandActor: {
+            type: "agent_attempt",
+            sessionId: context.callerSessionId,
+            turnId: context.callerTurnId,
+            attemptId: context.callerAttemptId,
+            executionGeneration: context.callerExecutionGeneration,
+          },
           event: { type: "goal.completed", evidence },
         },
       );
@@ -2659,8 +2712,8 @@ function registerGoalTools(
       if (events.length > 0) {
         await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
-      return json(
-        mcpMutationReceipt({
+      return json({
+        ...mcpMutationReceipt({
           operation: "goal_complete",
           committed: true,
           outcome: changed ? "updated" : "unchanged",
@@ -2675,7 +2728,13 @@ function registerGoalTools(
           idempotency: { status: "not_supported" },
           nextAction: { tool: "session_get", arguments: { sessionId } },
         }),
-      );
+        reportDeliveries: SessionGoalReportDeliveries.parse(
+          goal.metadata.reportDeliveriesV1 ?? [],
+        ).map((delivery) => ({
+          ...delivery,
+          artifactReference: `[Open report](/workspaces/${grant.workspaceId}/artifacts/editable/${delivery.artifactId})`,
+        })),
+      });
     },
   );
 
@@ -3559,10 +3618,6 @@ function scheduledTaskUpdateChangesState(
   if (update.metadata !== undefined && stableJson(update.metadata) !== stableJson(task.metadata)) {
     return true;
   }
-  // Personal-connection delegations are recomputed with agentConfig and can
-  // change even when the visible config is byte-identical (for example after a
-  // connection rotation), so preserve that refresh as a real mutation.
-  if (update.personalConnectionDelegations !== undefined) return true;
   return false;
 }
 
@@ -5750,7 +5805,7 @@ function registerCapabilityDiscoveryTools(
     "capability_catalog_search",
     {
       description:
-        "Search OpenGeni's reviewed workspace capability catalog when the user asks to add an integration or the task needs a capability that is not currently usable. Search by the outcome needed (for example `GitHub repositories`, `product analytics`, or `Slack notifications`), compare the returned candidates, and prefer a ready or verified exact match. This only reads secret-free metadata; it never installs, connects, or authorizes anything.",
+        "Find integrations in OpenGeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. This reads metadata only and does not connect or authorize anything.",
       inputSchema: {
         query: z4.string().min(1).max(500),
         limit: z4.number().int().min(1).max(20).optional(),
@@ -5780,6 +5835,10 @@ function registerCapabilityDiscoveryTools(
         setup: {
           ...setups[index]!,
           requiredVariables: capabilityRequiredVariables(item),
+          nextAction:
+            setups[index]!.status === "authorization_required"
+              ? { toolName: "capability_authorization_request", capabilityId: item.id }
+              : null,
         },
       }));
       return json({ query, matches });
@@ -5790,7 +5849,7 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "After capability_catalog_search and after explaining one chosen recommendation to the user, post exactly one in-session human authorization card for that catalog capability. This tool never grants access, enables a capability, reads a secret, or mints provider credentials; the authenticated user must click and confirm the provider/domain flow. Do not call it for a candidate reported ready or unavailable.",
+        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable.",
       inputSchema: {
         capabilityId: z4.string().min(1).max(512),
         rationale: z4.string().min(1).max(2000),

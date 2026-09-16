@@ -40,6 +40,15 @@ test("queued delivery failures remain visible and retryable; acknowledged queue 
   expect(
     conversationTimeline(
       [],
+      { queue: [], snapshot: null },
+      {
+        optimisticMessages: [{ ...message, state: "sending" }],
+      },
+    ),
+  ).toHaveLength(0);
+  expect(
+    conversationTimeline(
+      [],
       { queue: [turn], snapshot: null },
       {
         optimisticMessages: [{ ...message, state: "queued", turnId: turn.id }],
@@ -145,18 +154,18 @@ test("complete conversation loads queue and provides queue actions beside compos
       node.textContent?.includes("2 queued"),
     );
     expect(button).toBeDefined();
-    await actRun(() => button!.click());
+    if (button!.getAttribute("aria-expanded") !== "true") {
+      await actRun(() => button!.click());
+    }
     await flush(50);
     expect(view.container.textContent).toContain("first queued prompt");
     expect(view.container.textContent).toContain("second queued prompt");
-    expect(
-      view.container.querySelector("[aria-label='More actions for queued prompt 1']"),
-    ).not.toBeNull();
+    await flush(300);
     const remove = view.container.querySelector<HTMLButtonElement>(
-      "[aria-label='Delete queued prompt 1']",
+      "[aria-label='Remove queued prompt 1']",
     )!;
     await actRun(() => remove.click());
-    await flush(50);
+    await flush(400);
     expect(view.container.textContent).not.toContain("first queued prompt");
     expect(view.container.textContent).toContain("second queued prompt");
   } finally {

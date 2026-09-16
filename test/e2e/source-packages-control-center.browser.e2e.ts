@@ -205,13 +205,16 @@ describe("Bundles section browser acceptance", () => {
         .getByRole("button", { name: "Remove" })
         .click();
       dialog = page.getByRole("dialog");
-      await expectText(dialog, "3 components are in this Plugin. 1 will remain");
+      await expectText(dialog, "Will be removed");
+      await expectText(dialog, "Will stay");
+      await expectText(dialog, "Also installed separately.");
       await assertAccessibleAndBounded(page, '[role="dialog"]');
       await dialog.screenshot({ path: `${evidenceDir}remove-impact-dialog-dark.png` });
-      await dialog.getByRole("button", { name: "Remove Plugin" }).click();
+      await dialog.getByRole("button", { name: "Remove plugin", exact: true }).click();
       await expectHidden(pluginRow);
       expect(state.pluginRemoveRequests.at(-1)).toMatchObject({
         expectedInstallationVersion: 3,
+        expectedPreviewToken: "f".repeat(64),
       });
 
       await page.getByRole("tab", { name: "Skills", exact: true }).click();
@@ -1142,10 +1145,35 @@ function pluginUninstallPreview(state: UiState) {
     installed: state.pluginInstalled,
     version: state.pluginInstalled ? "2.0.0" : null,
     installationVersion: state.pluginInstalled ? state.pluginInstallationVersion : null,
+    previewToken: "f".repeat(64),
     components: [
-      { capabilityId: "api:linear", kind: "integration", retainedByOtherOwners: false },
-      { capabilityId: skillCapabilityId, kind: "skill", retainedByOtherOwners: true },
-      { capabilityId: "mcp:reference", kind: "mcp", retainedByOtherOwners: false },
+      {
+        capabilityId: "api:linear",
+        name: "Linear",
+        kind: "integration",
+        retainedByOtherOwners: false,
+        disposition: "removed",
+        retentionReasons: [],
+        remainingOwners: [],
+      },
+      {
+        capabilityId: skillCapabilityId,
+        name: "Release operator",
+        kind: "skill",
+        retainedByOtherOwners: true,
+        disposition: "retained",
+        retentionReasons: ["other_owners"],
+        remainingOwners: [{ kind: "direct", name: "Direct installation" }],
+      },
+      {
+        capabilityId: "mcp:reference",
+        name: "Reference tools",
+        kind: "mcp",
+        retainedByOtherOwners: false,
+        disposition: "removed",
+        retentionReasons: [],
+        remainingOwners: [],
+      },
     ],
   };
 }

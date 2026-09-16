@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
+import { OpenGeniDocumentAuthorityClient } from "../src/document-authority-client";
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
@@ -157,15 +158,20 @@ describe("OpenGeniClient", () => {
   test("manages bounded session/always personal grants without exposing once", async () => {
     const authorityId = "66666666-6666-4666-8666-666666666666";
     const grantId = "77777777-7777-4777-8777-777777777777";
-    const { client, requests } = makeClient(() => jsonResponse({}));
+    const { fetch, requests } = recordingFetch(() => jsonResponse({}));
+    const client = new OpenGeniDocumentAuthorityClient({
+      baseUrl: "https://api.example.test/",
+      apiKey: "og_test_key",
+      fetch,
+    });
     await client.listUserResourceAuthorities(WORKSPACE_ID, {
-      resourceKind: "connection",
+      resourceKind: "document",
       cursor: authorityId,
       limit: 25,
     });
     await client.issueUserResourceGrant(WORKSPACE_ID, authorityId, {
       scope: "user",
-      resourceKind: "connection",
+      resourceKind: "document",
       mode: "session",
       context: "workspace_shared",
       sessionId: SESSION_ID,
@@ -183,13 +189,13 @@ describe("OpenGeniClient", () => {
     const listUrl = new URL(requests[0]!.url);
     expect(Object.fromEntries(listUrl.searchParams)).toEqual({
       scope: "user",
-      resourceKind: "connection",
+      resourceKind: "document",
       cursor: authorityId,
       limit: "25",
     });
     expect(JSON.parse(requests[1]!.body!)).toEqual({
       scope: "user",
-      resourceKind: "connection",
+      resourceKind: "document",
       mode: "session",
       context: "workspace_shared",
       sessionId: SESSION_ID,
@@ -591,7 +597,7 @@ describe("OpenGeniClient", () => {
         model: "gpt-5.6-sol",
         reasoningEffort: "high",
         latencyMode: "priority",
-        connectionAuthorities: [],
+        connectionAccounts: [],
       }),
     ).toEqual(response as never);
 
@@ -610,7 +616,7 @@ describe("OpenGeniClient", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
       latencyMode: "priority",
-      connectionAuthorities: [],
+      connectionAccounts: [],
     });
   });
 
@@ -1422,7 +1428,7 @@ describe("OpenGeniClient", () => {
       clientEventId: "ce-1",
       controlEtag: "control-1",
       expectedDraftRevision: 3,
-      connectionAuthorities: [],
+      connectionAccounts: [],
     });
     expect(result.sequence).toBe(4);
     const request = requests[0]!;
@@ -1437,7 +1443,7 @@ describe("OpenGeniClient", () => {
         modelContext: "Host context for this turn.",
         controlEtag: "control-1",
         expectedDraftRevision: 3,
-        connectionAuthorities: [],
+        connectionAccounts: [],
       },
     });
   });
