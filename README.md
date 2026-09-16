@@ -14,9 +14,12 @@
 </p>
 
 <p align="center">
-  <a href="https://app.opengeni.ai">Try it</a> ·
-  <a href="https://docs.opengeni.ai">Docs</a> ·
+  <a href="https://app.opengeni.ai"><strong>Start free at app.opengeni.ai →</strong></a>
+</p>
+
+<p align="center">
   <a href="https://docs.opengeni.ai/quickstart">Quickstart</a> ·
+  <a href="https://docs.opengeni.ai">Docs</a> ·
   <a href="https://docs.opengeni.ai/guides/self-host">Self-host</a> ·
   <a href="https://github.com/Cloudgeni-ai/opengeni/issues">Issues</a>
 </p>
@@ -31,7 +34,13 @@
 
 Opengeni is the platform layer that makes AI agents safe to trust with real work. It runs agents for hours or days, records every step in a replayable event log, pauses for human approval when it matters, and lets each session run either in a managed sandbox or directly on a machine you own.
 
-Opengeni is the runtime, not the agent. Use the included web app to give agents work and follow along, or call the same session API from your own product and let Opengeni own durable state, history, approvals, and outputs. It comes out of two years of running agents against production cloud infrastructure at [CloudGeni](https://cloudgeni.ai).
+Opengeni is the runtime, not the agent. Use the web app to give agents work and follow along, or call the same session API from your own product and let Opengeni own durable state, history, approvals, and outputs. It comes out of two years of running agents against production cloud infrastructure at [CloudGeni](https://cloudgeni.ai).
+
+## Get started
+
+**The fastest way is the managed service.** Sign up at [app.opengeni.ai](https://app.opengeni.ai), name your organization, connect a model (a ChatGPT/Codex or SuperGrok subscription, a provider key, or prepaid credits), and start your first session. Nothing to deploy. The [quickstart](https://docs.opengeni.ai/quickstart) walks through it.
+
+Prefer to run it yourself? The whole platform is open source. Jump to [Run it locally](#run-it-locally) for a one-command dev stack, or to [Self-host](https://docs.opengeni.ai/guides/self-host) for production.
 
 ## Features
 
@@ -41,11 +50,11 @@ Opengeni is the runtime, not the agent. Use the included web app to give agents 
 - **Run anywhere.** A managed sandbox (Docker, Modal, or a cloud provider) or a **Connected Machine**: your laptop, build server, or GPU box, enrolled once and driven directly. Machines only dial out and receive no platform credentials.
 - **Agent Knowledge.** Files, retained sources, and useful findings in one searchable library, with personal and workspace ownership and optional review before anything is published.
 - **Integrate in one handler.** One organization API key on your server, one chat endpoint, and React components for the timeline, composer, and approvals.
-- **Self-host everything.** API, web app, workers, Helm chart, and reference Terraform for Azure, AWS, and GCP are all Apache-2.0. Or use the managed service at [app.opengeni.ai](https://app.opengeni.ai).
+- **Managed or self-hosted.** Use [app.opengeni.ai](https://app.opengeni.ai) with nothing to run, or deploy the same API, web app, workers, Helm chart, and reference Terraform for Azure, AWS, and GCP yourself. All of it is Apache-2.0.
 
-## Quick start
+## Run it locally
 
-You need [Bun](https://bun.sh), Docker, [rustup](https://rustup.rs), and an OpenAI or Azure OpenAI key.
+For development, or to evaluate the platform before self-hosting. You need [Bun](https://bun.sh), Docker, [rustup](https://rustup.rs), and an OpenAI or Azure OpenAI key.
 
 ```bash
 git clone https://github.com/Cloudgeni-ai/opengeni.git
@@ -111,7 +120,7 @@ Token streams and tool output never pass through Temporal history, and agent tur
 
 | I want to...                          | Read                                                                                                        |
 | ------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Use the hosted app                    | [Quickstart](https://docs.opengeni.ai/quickstart)                                                           |
+| Start on the managed service          | [Quickstart](https://docs.opengeni.ai/quickstart)                                                           |
 | Run it locally                        | [Local development](docs/local-development.md)                                                              |
 | Deploy to production                  | [Self-host](https://docs.opengeni.ai/guides/self-host) · [Deployment guide](docs/deployment.md)             |
 | Add agents to my product              | [Product integration](docs/product-integration.md) · [SDK reference](https://docs.opengeni.ai/reference/sdk) |
