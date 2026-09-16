@@ -79,3 +79,24 @@ test("focused disclosure takes priority over the paragraph moving below it", () 
   expect(timelineAnchorCorrection(scroller, anchors)).toBe(60);
   scroller.remove();
 });
+
+test("capture measures each group once and retained anchors avoid a group lookup", () => {
+  const scroller = document.createElement("div");
+  scroller.innerHTML = '<div data-og-group-key="row">Short row</div>';
+  const group = scroller.firstElementChild as HTMLElement;
+  position(scroller, 0, 400);
+  position(group, 20);
+  const measure = group.getBoundingClientRect;
+  let reads = 0;
+  group.getBoundingClientRect = () => {
+    reads += 1;
+    return measure();
+  };
+  const anchors = captureTimelineAnchor(scroller)!;
+  expect(reads).toBe(1);
+  scroller.querySelectorAll = () => {
+    throw new Error("Retained anchor must not enumerate the replacement DOM");
+  };
+  expect(timelineAnchorCorrection(scroller, anchors)).toBe(0);
+  expect(reads).toBe(2);
+});

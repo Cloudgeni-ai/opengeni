@@ -21,9 +21,10 @@ export class TimelineBeforeLayout extends Component<{
 export function captureTimelineAnchor(scroller: HTMLElement): TimelineAnchor | null {
   const viewport = scroller.getBoundingClientRect();
   if (viewport.height <= 0) return null;
-  const groups = Array.from(scroller.querySelectorAll<HTMLElement>("[data-og-group-key]")).filter(
-    (group) => group.getBoundingClientRect().height > 0,
-  );
+  // Capture each box once: these measurements share one pre-commit DOM snapshot.
+  const groups = Array.from(scroller.querySelectorAll<HTMLElement>("[data-og-group-key]"))
+    .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+    .filter(({ rect }) => rect.height > 0);
   const anchors: TimelineAnchor = [];
   // A disclosure is the reader's explicit point of interaction. In particular,
   // anchoring a paragraph below an expanding disclosure would move its button.
@@ -39,8 +40,7 @@ export function captureTimelineAnchor(scroller: HTMLElement): TimelineAnchor | n
     }
   }
   // A paragraph survives even when earlier deltas reconstruct its containing message.
-  for (const group of groups) {
-    const rect = group.getBoundingClientRect();
+  for (const { element: group, rect } of groups) {
     if (rect.bottom <= viewport.top || rect.top >= viewport.bottom) continue;
     for (const element of group.querySelectorAll<HTMLElement>("p, li, pre, h1, h2, h3, h4")) {
       const box = element.getBoundingClientRect();
@@ -52,11 +52,11 @@ export function captureTimelineAnchor(scroller: HTMLElement): TimelineAnchor | n
   }
   // Prefer a retained visible row, then a following row. A following row also
   // anchors the unchanged suffix of a partially loaded message above it.
-  const rows = groups.map((element) => ({
+  const rows = groups.map(({ element, rect }) => ({
     element,
     key: element.getAttribute("data-og-group-key"),
     text: null,
-    top: element.getBoundingClientRect().top,
+    top: rect.top,
   }));
   anchors.push(...rows.filter((row) => row.top >= viewport.top));
   anchors.push(...rows.filter((row) => row.top < viewport.top).reverse());
@@ -69,7 +69,7 @@ export function timelineAnchorCorrection(
   anchors: TimelineAnchor,
 ): number | null {
   let blocks: HTMLElement[] | undefined;
-  const groups = Array.from(scroller.querySelectorAll<HTMLElement>("[data-og-group-key]"));
+  let groups: HTMLElement[] | undefined;
   for (const anchor of anchors) {
     let element: HTMLElement | undefined;
     if (
@@ -78,6 +78,7 @@ export function timelineAnchorCorrection(
     ) {
       element = anchor.element;
     } else if (anchor.key) {
+      groups ??= Array.from(scroller.querySelectorAll<HTMLElement>("[data-og-group-key]"));
       element = groups.find((group) => group.getAttribute("data-og-group-key") === anchor.key);
     } else if (anchor.text) {
       blocks ??= Array.from(scroller.querySelectorAll<HTMLElement>("p, li, pre, h1, h2, h3, h4"));
