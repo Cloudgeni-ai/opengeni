@@ -16,6 +16,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   assertRuntimeDatabasePosture,
+  isRetryableRuntimeDatabaseStartupError,
   createDb,
   markSessionWorkflowWakeDelivered,
   runtimeDatabaseReadyCheck,
@@ -362,7 +363,7 @@ export async function startApi(
     await retryStartupDependency(
       "PostgreSQL runtime posture",
       () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
-      { ...retryOptions, onRetry },
+      { ...retryOptions, onRetry, shouldRetry: isRetryableRuntimeDatabaseStartupError },
     );
     const resolvedCatalog = await retryStartupDependency(
       "model catalog",

@@ -24,6 +24,11 @@ type Job = Readonly<{
 type Workflow = Readonly<{ jobs?: Readonly<Record<string, Job>> }>;
 
 const EXPECTED_CAPS = [
+  ["local-startup.yml", "docker", "Check startup ownership and prerequisite regressions", 2, "run"],
+  ["local-startup.yml", "docker", "Start the documented stack from a clean checkout", 50, "run"],
+  ["local-startup.yml", "docker", "Install startup browser runtime", 17, "action"],
+  ["local-startup.yml", "docker", "Verify rendered startup and restart", 15, "run"],
+  ["local-startup.yml", "docker", "Clean only the acceptance project", 3, "run"],
   ["ci.yml", "plan", "Install exact dependency tree", 11, "run"],
   ["ci.yml", "source-contracts", "Profile impacted TypeScript 7 projects", 11, "run"],
   ["ci.yml", "source-contracts", "Run exactly the explained source guards", 16, "run"],
@@ -58,6 +63,7 @@ const EXPECTED_CAPS = [
 ] as const;
 
 const EXPECTED_JOB_BUDGETS = {
+  "local-startup.yml:docker": { stepCaps: 87, needed: 88, jobCap: 90 },
   "ci.yml:plan": { stepCaps: 11, needed: 12, jobCap: 15 },
   "ci.yml:source-contracts": { stepCaps: 27, needed: 28, jobCap: 35 },
   "ci.yml:unit-shards": { stepCaps: 21, needed: 22, jobCap: 30 },
@@ -87,7 +93,7 @@ function numericCap(value: unknown): number | null {
 }
 
 describe("workflow timeout contract", () => {
-  test("all jobs and the exact 16 run plus 3 action steps use static native caps", async () => {
+  test("all jobs and the exact 20 run plus 4 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
     const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
@@ -127,8 +133,8 @@ describe("workflow timeout contract", () => {
       right: readonly [string, string, string, number, "run" | "action"],
     ) => left.slice(0, 3).join("\0").localeCompare(right.slice(0, 3).join("\0"));
     expect(capped.toSorted(byIdentity)).toEqual(EXPECTED_CAPS.toSorted(byIdentity));
-    expect(capped.filter((row) => row[4] === "run")).toHaveLength(16);
-    expect(capped.filter((row) => row[4] === "action")).toHaveLength(3);
+    expect(capped.filter((row) => row[4] === "run")).toHaveLength(20);
+    expect(capped.filter((row) => row[4] === "action")).toHaveLength(4);
     for (const [job, expected] of Object.entries(EXPECTED_JOB_BUDGETS)) {
       expect(budgets[job], job).toEqual(expected);
     }
@@ -143,7 +149,7 @@ describe("workflow timeout contract", () => {
           .map((step) => ({ file, job, step })),
       ),
     );
-    expect(callers).toHaveLength(3);
+    expect(callers).toHaveLength(4);
     expect(callers.find(({ job }) => job === "browser-acceptance")?.step.with?.browsers).toBe(
       "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}",
     );

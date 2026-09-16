@@ -1270,7 +1270,7 @@ export function logStartupDependencyRetry(
 ): void {
   const dependency = PUBLIC_STARTUP_DEPENDENCIES.has(event.label) ? event.label : "Dependency";
   observability.warn(
-    `Startup dependency ${dependency} connection failed; retrying (${event.attempt}/${event.attempts} in ${event.delayMs}ms)`,
+    `Startup dependency ${dependency} check failed; retrying (${event.attempt}/${event.attempts} in ${event.delayMs}ms)`,
     {
       dependency,
       attempt: event.attempt,

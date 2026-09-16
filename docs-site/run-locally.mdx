@@ -8,7 +8,11 @@ Use this to develop against OpenGeni or to evaluate it before self-hosting. For 
 
 ## Prerequisites
 
-- [Bun](https://bun.sh)
+- macOS or Linux (use WSL2 on Windows).
+- [Bun](https://bun.com/docs/installation) at the exact version in the checkout's `.bun-version`.
+- Git and curl.
+- [rustup](https://rustup.rs); startup installs and uses the checked-in Rust toolchain without changing your default toolchain.
+- A C build toolchain: Xcode Command Line Tools on macOS (`xcode-select --install`), or `build-essential` on Debian/Ubuntu.
 - Docker with a running daemon. The default sandbox backend and the local infrastructure use it.
 - Model credentials: an OpenAI API key, or another provider configured through the model provider settings.
 
@@ -35,6 +39,15 @@ The local stack runs in `local` access mode: a bootstrap account and workspace w
   Ports are chosen per checkout. If a default port is busy, the launcher picks a nearby free one and
   prints the URLs it actually used.
 </Note>
+
+Wait for `OpenGeni dev stack ready` before opening the printed web URL. Infrastructure health and successful migrations are intermediate milestones; the first sandbox build can take several minutes. Keep the launcher running. Only one launcher may own a given project; use its existing URL or stop it before restarting.
+
+## Troubleshooting
+
+- **Bun version mismatch / `Bun.Archive` unavailable:** install the pinned host binary. Docker's Bun version does not update the host. From the checkout, use `curl -fsSL https://bun.com/install | bash -s "bun-v$(cat .bun-version)"`, then verify `bun --version` and your PATH.
+- **Database posture failure:** read the diagnostic emitted after role provisioning. The database schema and roles must match the checkout. Back up data before repairs; do not reuse an experimental branch's database with an incompatible branch or disable RLS to start it.
+- **Matching sandbox artifact runtime unavailable:** modifications to runtime source or an unavailable matching CI artifact can disable local Office operations. Use a clean matching revision and the documented artifact runtime setup; ordinary app readiness is separate from this optional capability.
+- **Model configuration:** a local OpenGeni deployment can use a configured remote model route. It does not require locally hosted inference. Sites use the authenticated OpenGeni client and bridge; model credentials do not belong in generated browser code.
 
 ## Configure
 

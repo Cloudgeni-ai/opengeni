@@ -209,7 +209,7 @@ describe("workflow execution graph manifest", () => {
 
     expect(inspection.violations).toEqual([]);
     expect(compareWorkflowExecutionManifest(committed, inspection.manifest)).toEqual([]);
-    expect(inspection.manifest.workflows).toHaveLength(22);
+    expect(inspection.manifest.workflows).toHaveLength(23);
     expect(inspection.manifest.actions).toHaveLength(2);
     expect(inspection.manifest.uncappedRuns).toHaveLength(204);
     expect(inspection.manifest.generatedLocalTargets).toHaveLength(3);
@@ -1381,7 +1381,7 @@ describe("workflow execution graph manifest", () => {
     ).not.toEqual([]);
   });
 
-  test("removing any one of the 19 approved caps invalidates the committed graph", async () => {
+  test("removing any one of the 24 approved caps invalidates the committed graph", async () => {
     type MutableStep = { "timeout-minutes"?: unknown; run?: unknown; uses?: unknown };
     type MutableWorkflow = { jobs?: Record<string, { steps?: MutableStep[] }> };
     const sources = await loadWorkflowExecutionSources(root);
@@ -1398,7 +1398,7 @@ describe("workflow execution graph manifest", () => {
         }
       }
     }
-    expect(capped).toHaveLength(19);
+    expect(capped).toHaveLength(24);
 
     for (const [path, jobIndex, stepIndex] of capped) {
       const mutatedSources = { ...sources };

@@ -1689,6 +1689,27 @@ export class RuntimeDatabasePostureError extends Error {
   }
 }
 
+/** Posture/configuration mismatches cannot heal through connection backoff. */
+export function isRetryableRuntimeDatabaseStartupError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof RuntimeDatabasePostureError) return false;
+    const code = (current as Error & { code?: unknown }).code;
+    // PostgreSQL authentication, missing database, permission, and schema errors.
+    // Network failures and server-starting states retain the existing retry path.
+    if (
+      typeof code === "string" &&
+      ["28P01", "28000", "3D000", "42501", "42P01", "42703"].includes(code)
+    ) {
+      return false;
+    }
+    current = current.cause;
+  }
+  return true;
+}
+
 type IdentityRow = {
   current_user: string;
   session_user: string;

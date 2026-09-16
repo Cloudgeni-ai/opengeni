@@ -4,7 +4,7 @@ Thanks for considering a contribution.
 
 ## Development Setup
 
-1. Install Bun and Docker.
+1. Install the exact Bun version in [`.bun-version`](.bun-version), Git, curl, rustup, a C build toolchain, and Docker. See the [local prerequisites](README.md#quick-start).
 2. Copy `.env.example` to `.env`.
 3. Fill in the required `OPENGENI_*` values for the workflow you want to test.
 4. Start the full local stack:

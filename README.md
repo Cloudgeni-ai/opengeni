@@ -54,7 +54,7 @@ Prefer to run it yourself? Everything is open source. Jump to [Run it locally](#
 
 ## Run it locally
 
-For development, or to evaluate Opengeni before self-hosting. You need [Bun](https://bun.sh), Docker, [rustup](https://rustup.rs), and an OpenAI or Azure OpenAI key.
+For development, or to evaluate Opengeni before self-hosting. You need [Bun at the exact version in `.bun-version`](.bun-version), Git, curl, Docker, [rustup](https://rustup.rs), a C compiler (Xcode Command Line Tools on macOS or `build-essential` on Debian/Ubuntu), and an OpenAI or Azure OpenAI key.
 
 ```bash
 git clone https://github.com/Cloudgeni-ai/opengeni.git

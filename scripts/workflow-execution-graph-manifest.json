@@ -25,6 +25,10 @@
       "sha256": "a739913b5470819b147f4d94633cdbbb7edbe89decfa98888aefa7d24ef3a9e7"
     },
     {
+      "path": ".github/workflows/local-startup.yml",
+      "sha256": "3871e7efe7ffc8ba1603a4c657eaa27c0e8becfe9ca4deb5599ae53e7c82fae5"
+    },
+    {
       "path": ".github/workflows/open-version-pr.yml",
       "sha256": "62238197b7ad8ac2dbb1c188692d70ab658c993ef5087a491a73cd6e8e19da22"
     },

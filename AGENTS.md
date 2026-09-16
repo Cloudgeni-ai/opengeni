@@ -16,7 +16,7 @@ The stack means everything needed to run the Hono API, React web app, Temporal w
    bun run dev
    ```
 
-   This installs dependencies, starts the Docker infrastructure, runs migrations, builds the local sandbox image, and starts API, worker, and web processes.
+   This first validates the pinned host Bun and native build prerequisites, then installs dependencies, starts infrastructure, runs migrations and the runtime posture check, builds the local sandbox image, and starts API, worker, and web processes. `scripts/run-development-stack.ts` owns a per-project OS-backed lock before generated environment or role changes; a second launcher must use the existing run or stop it first. The first launch may spend several minutes building; wait for the aggregate readiness message.
 
 Manual equivalent:
 
