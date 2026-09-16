@@ -1204,6 +1204,7 @@ describe("provider-proof compaction transcript", () => {
         responseId: null,
         code: "server_error",
         type: "server_error",
+        param: null,
         requestId: "req_compaction_failed",
       });
       expect(JSON.stringify(error)).not.toContain("deploy it");
