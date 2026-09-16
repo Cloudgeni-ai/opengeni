@@ -2167,17 +2167,18 @@ describe("runtime event normalization", () => {
     // agent's MCP tools and reports which prefixed tool names need approval.
     async function mcpToolApprovalMap(
       requireApproval: boolean | string[] | undefined,
+      serverId = "docs",
     ): Promise<Record<string, boolean>> {
       const mcp = startTestMcpServer();
       const serverConfig = {
-        id: "docs",
+        id: serverId,
         name: "Document Search",
         url: mcp.url,
         cacheToolsList: false,
         ...(requireApproval !== undefined ? { requireApproval } : {}),
       };
       const prepared = await prepareAgentTools(testSettings({ mcpServers: [serverConfig] }), [
-        { kind: "mcp", id: "docs" },
+        { kind: "mcp", id: serverId },
       ]);
       try {
         const agent = buildOpenGeniAgent(
@@ -2191,6 +2192,37 @@ describe("runtime event normalization", () => {
         mcp.close();
       }
     }
+
+    // A hyphenated server id reaches the model through the SDK's function-tool
+    // spelling (`cendra-pms__x` → `cendra_pms__x`). The policy used to be keyed
+    // on the raw `<id>__` prefix, so for such ids no tool ever matched and the
+    // approval floor silently disappeared (a host measured 0 interruptions with
+    // `cendra-pms` against 1 with `cendrapms`, same policy).
+    test("requireApproval matches a hyphenated server id in the SDK's sanitised spelling", async () => {
+      const map = await mcpToolApprovalMap(["fetch_document"], "cendra-pms");
+      expect(map).toEqual({
+        cendra_pms__search_documents: false,
+        cendra_pms__fetch_document: true,
+      });
+    });
+
+    test("requireApproval: true covers every tool of a hyphenated server id", async () => {
+      const map = await mcpToolApprovalMap(true, "cendra-pms");
+      expect(map).toEqual({
+        cendra_pms__search_documents: true,
+        cendra_pms__fetch_document: true,
+      });
+    });
+
+    // A policy entry may be written as the raw MCP tool name or as the name the
+    // model sees; both spellings sanitise to the same function-tool name.
+    test("requireApproval entries match in either the raw MCP or the model spelling", async () => {
+      const map = await mcpToolApprovalMap(["fetch-document"], "cendra-pms");
+      expect(map).toEqual({
+        cendra_pms__search_documents: false,
+        cendra_pms__fetch_document: true,
+      });
+    });
 
     test("requireApproval: true → every tool of the server needs approval", async () => {
       const map = await mcpToolApprovalMap(true);
@@ -3198,6 +3230,147 @@ describe("runtime event normalization", () => {
       } finally {
         await allowed.prepared.close();
       }
+    });
+
+    // A host may register an in-process MCP server under a hyphenated id with its
+    // own frozen connection identity (LocalMcpServerRegistration.resolvedConnectionId).
+    // The approval must still be stamped (sanitised prefix), and the identity the
+    // policy receives must be the synthetic `session-mcp:` form the durable store
+    // requires — derived from the host identity, never the host identity itself.
+    // Before this, the host id was handed through verbatim and the store refused
+    // the approval ("session MCP approval is missing its synthetic connection
+    // identity"), failing the turn at the pause.
+    test("a host-registered local server keeps a session-mcp identity derived from its own", async () => {
+      const serverId = "cendra-pms";
+      const hostIdentity = "cendra-attempt:55555555-5555-4555-8555-555555555555";
+      const local: MCPServer = {
+        ...fakeMcpServer("cendra-local"),
+        async listTools() {
+          return [
+            {
+              name: "task_create",
+              description: "Create a task",
+              inputSchema: {
+                type: "object" as const,
+                properties: {},
+                required: [],
+                additionalProperties: true,
+              },
+            },
+          ];
+        },
+        async callTool() {
+          return [{ type: "text" as const, text: "created" }];
+        },
+      };
+      const serverConfig = {
+        id: serverId,
+        name: "Cendra PMS",
+        url: "https://cendra-local.invalid/mcp",
+        cacheToolsList: false,
+        requireApproval: ["task_create"],
+      };
+      const settings = testSettings({ sandboxBackend: "none", mcpServers: [serverConfig] });
+      const policyCalls: Array<Record<string, unknown>> = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async (call) => {
+          policyCalls.push(call);
+          return { managed: true, decision: "ask" };
+        },
+        begin: async () => ({ allowed: true, managed: true, requestId: "host-request" }),
+        complete: async () => {},
+      };
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: serverId }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        connectorActionPolicy: hooks,
+        localMcpServers: [{ id: serverId, server: local, resolvedConnectionId: hostIdentity }],
+      });
+      try {
+        expect(prepared.resolvedMcpConnectionIds.get(serverId)).toBe(hostIdentity);
+        const agent = buildOpenGeniAgent(settings, [], {
+          mcpServers: prepared.mcpServers,
+          resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
+          connectorActionPolicy: hooks,
+        });
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "cendra_pms__task_create",
+        );
+        if (!tool || tool.type !== "function") throw new Error("hyphenated local MCP tool missing");
+        expect(await tool.needsApproval(new RunContext(), { title: "x" }, "host-call")).toBe(true);
+        expect(policyCalls).toHaveLength(1);
+        expect(policyCalls[0]).toMatchObject({
+          approvalId: "host-call",
+          approvalMode: "session_mcp",
+          serverId,
+          toolName: "task_create",
+        });
+        const connectionId = policyCalls[0]!.connectionId as string;
+        expect(connectionId).toMatch(/^session-mcp:cendra-pms:[0-9a-f]{64}$/);
+        expect(connectionId).not.toContain(hostIdentity);
+        // Derived from the host identity, not the URL: the same server without a
+        // host identity yields a different synthetic id.
+        const urlOnly = createHash("sha256").update(serverConfig.url, "utf8").digest("hex");
+        const fromHost = createHash("sha256").update(hostIdentity, "utf8").digest("hex");
+        expect(connectionId).toBe(`session-mcp:${serverId}:${fromHost}`);
+        expect(connectionId).not.toBe(`session-mcp:${serverId}:${urlOnly}`);
+      } finally {
+        await prepared.close();
+      }
+    });
+
+    test("a hyphenated server id interrupts the run for an approval-gated tool", async () => {
+      const inner: MCPServer = {
+        ...fakeMcpServer("cendra-inner"),
+        async listTools() {
+          return [
+            {
+              name: "task_create",
+              inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            },
+          ];
+        },
+        async callTool() {
+          return [{ type: "text" as const, text: "created" }];
+        },
+        async callToolResult() {
+          return { content: [{ type: "text" as const, text: "created" }] };
+        },
+      };
+      const wrapped = new PrefixedMcpServer(inner, "cendra-pms");
+      const settings = testSettings({
+        sandboxBackend: "none",
+        webSearchEnabled: false,
+        mcpServers: [
+          {
+            id: "cendra-pms",
+            name: "Cendra PMS",
+            url: "https://cendra-local.invalid/mcp",
+            cacheToolsList: false,
+            requireApproval: ["task_create"],
+          },
+        ],
+      });
+      const model = new ScriptedModel([
+        { output: [scriptedFunctionCall("cendra_pms__task_create", {}, "cendra-task-call")] },
+      ]);
+      const agent = buildOpenGeniAgent(settings, [], {
+        model,
+        hostedWebSearch: false,
+        mcpServers: [wrapped],
+      });
+      const result = await runAgentStream(agent, "Create the task", settings);
+      for await (const _event of result.toStream()) {
+        // Drain to the interruption.
+      }
+      await result.completed;
+      expect(result.interruptions).toHaveLength(1);
+      expect(result.interruptions[0]?.rawItem).toMatchObject({ name: "cendra_pms__task_create" });
     });
 
     test("legacy approved MCP execution is durably admitted once and replay is denied", async () => {
