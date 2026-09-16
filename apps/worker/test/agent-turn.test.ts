@@ -627,7 +627,28 @@ describe("turn exact-content boundaries", () => {
     expect(Object.hasOwn(rawItem.providerData, "optional")).toBe(true);
   });
 
-  test("does not register a hosted image as a pending function call", () => {
+  test.each(["image_generation_call", "web_search_call", "file_search_call"])(
+    "does not register completed hosted %s as a pending function call",
+    (name) => {
+      expect(
+        pendingToolCallFromSdkEvent({
+          type: "run_item_stream_event",
+          item: {
+            type: "tool_call_item",
+            rawItem: {
+              type: "hosted_tool_call",
+              id: "ig_1",
+              name,
+              status: "completed",
+              output: "opaque",
+            },
+          },
+        }),
+      ).toBeNull();
+    },
+  );
+
+  test("preserves hosted approval requests instead of treating them as completed provider work", () => {
     expect(
       pendingToolCallFromSdkEvent({
         type: "run_item_stream_event",
@@ -635,14 +656,14 @@ describe("turn exact-content boundaries", () => {
           type: "tool_call_item",
           rawItem: {
             type: "hosted_tool_call",
-            id: "ig_1",
-            name: "image_generation_call",
+            id: "approval_1",
+            name: "mcp_approval_request",
             status: "completed",
-            output: "opaque",
+            providerData: { type: "mcp_approval_request" },
           },
         },
-      }),
-    ).toBeNull();
+      })?.callId,
+    ).toBe("approval_1");
   });
 
   test("retains intentional screenshot and view-image outputs, not incidental action frames", () => {

@@ -134,7 +134,6 @@ export type PrepareTurnToolRuntimeDeps = {
   objectStorage: ActivityServices["objectStorage"];
   observability: ActivityServices["observability"];
   cancellationSignal: AbortSignal | undefined;
-  connectionCredentials: ActivityServices["connectionCredentials"];
   eventing: EventingState;
   attempt: AttemptIdentityState;
   sandboxState: SandboxRuntimeState;
@@ -152,7 +151,6 @@ export type PrepareTurnToolRuntimeDeps = {
   lazyToolTransport: GovernanceModelOk["lazyToolTransport"];
   turnTools: ReturnType<typeof withFirstPartyTools>;
   connectionScope: { accountId: string; workspaceId: string };
-  hostCredentialRootSessionId: string | null;
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
@@ -357,7 +355,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     objectStorage,
     observability,
     cancellationSignal,
-    connectionCredentials,
     eventing,
     attempt,
     sandboxState,
@@ -372,7 +369,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     runSettings,
     lazyToolTransport,
     turnTools,
-    hostCredentialRootSessionId,
     sandboxArtifactRuntime,
     activeSandboxBackend,
     groupBoxBackend,
@@ -388,20 +384,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const toolContextPreparationStartedAt = performance.now();
   throwIfWorkerShuttingDown();
   throwIfTurnCancelled();
-  const mcpCredentialRootSessionId =
-    connectionCredentials?.mcpCredentials && hostCredentialRootSessionId
-      ? hostCredentialRootSessionId
-      : input.sessionId;
   // Connection credentials and the optional Apps credential are resolved
   // independently. Inference auth is never an Apps fallback.
   const rawResolveCredential = connectionTokenResolverForTurn({
     db,
     settings: runSettings,
-    connectionCredentials: connectionCredentials ?? null,
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
-    rootSessionId: mcpCredentialRootSessionId,
     attemptId: input.attemptId,
     turn,
     observability,

@@ -20,7 +20,6 @@ import {
   SANDBOX_SURFACING_PASSTHROUGH_ENV,
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
-  HOST_MCP_AUTHORITY_SOURCE_ADMISSION_PASSTHROUGH_ENV,
   MCP_OAUTH_PASSTHROUGH_ENV,
   SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV,
   SecretDeliveryMode,
@@ -937,7 +936,7 @@ describe("deployment contract", () => {
   });
 
   test("renders managed SaaS product posture without conflating it with the Azure infrastructure profile", () => {
-    const contract = contractForProfile("azure-managed", "managed-saas-staging");
+    const contract = contractForProfile("azure-managed", "managed-saas-staging", {});
     const vars = requiredRuntimeEnvVars(contract);
     const plan = stackPlanFor(contract, "managed-saas-staging");
 
@@ -1062,7 +1061,7 @@ describe("deployment contract", () => {
   });
 
   test("renders production managed SaaS posture without deployment shared key", () => {
-    const contract = contractForProfile("azure-managed", "managed-saas-production");
+    const contract = contractForProfile("azure-managed", "managed-saas-production", {});
     const vars = requiredRuntimeEnvVars(contract);
     const plan = stackPlanFor(contract, "managed-saas-production");
 
@@ -1482,9 +1481,6 @@ describe("deployment contract", () => {
     expect(CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV).toEqual([
       "OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED",
     ]);
-    expect(HOST_MCP_AUTHORITY_SOURCE_ADMISSION_PASSTHROUGH_ENV).toEqual([
-      "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED",
-    ]);
     expect(SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV).toEqual([
       "OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED",
     ]);
@@ -1655,7 +1651,7 @@ describe("deployment contract", () => {
       OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED: "true",
     });
     expect(configured.runtimeEnv).toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED=true");
-    expect(configured.runtimeEnv).toContain(
+    expect(configured.runtimeEnv).not.toContain(
       "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED=true",
     );
     expect(configured.runtimeEnv).toContain("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED=true");

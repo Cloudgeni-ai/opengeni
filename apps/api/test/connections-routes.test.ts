@@ -27,6 +27,7 @@ import {
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   getConnectionMetadata,
+  getSessionTurnPersonalConnectionDelegations,
   listConnectionsMetadata,
   loadIntegrationOAuthClient,
   loadConnectionCredentialForBroker,
@@ -57,7 +58,6 @@ import {
   preferredOAuthSelfRegistration,
 } from "../src/integrations/oauth-client";
 import { builtInOAuthProfileByKey } from "../src/integrations/oauth-profiles";
-import { createRemoteMcpCredentialsPort } from "@opengeni/core/remote-mcp-credentials";
 
 const DELEGATION_SECRET = "connections-routes-delegation-secret";
 const STATE_SECRET = "connections-routes-state-secret";
@@ -512,6 +512,38 @@ describe("official Gmail MCP OAuth compatibility", () => {
 });
 
 describe("connections routes", () => {
+  test("superseded host registration routes are absent", async () => {
+    if (!available) throw new Error("Real database required");
+    const workspace = await freshWorkspace();
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", [
+        "connections:read",
+        "connections:write",
+      ]),
+      "content-type": "application/json",
+    };
+    const api = app();
+    const id = crypto.randomUUID();
+    for (const path of [
+      `/v1/workspaces/${workspace.workspaceId}/host-mcp-bindings`,
+      `/v1/workspaces/${workspace.workspaceId}/host-mcp-bindings/${id}`,
+      `/v1/workspaces/${workspace.workspaceId}/host-mcp-delegations`,
+      `/v1/workspaces/${workspace.workspaceId}/host-mcp-delegations/${id}`,
+      `/v1/organizations/${workspace.accountId}/mcp-credential-resolvers/example`,
+    ]) {
+      for (const method of ["GET", "POST", "PUT"] as const) {
+        expect(
+          (
+            await api.request(path, {
+              method,
+              headers,
+              ...(method === "GET" ? {} : { body: "{}" }),
+            })
+          ).status,
+        ).toBe(404);
+      }
+    }
+  });
   test("rejects workspace-owned Gmail OAuth before contacting Google", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1003,7 +1035,11 @@ describe("connections routes", () => {
     });
     expect(first.status).toBe(201);
     const firstConnection = (await first.json()) as {
-      connection: { id: string; version: number; metadata: Record<string, unknown> };
+      connection: {
+        id: string;
+        version: number;
+        metadata: Record<string, unknown>;
+      };
     };
     expect(
       firstConnection.connection.metadata[VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY],
@@ -1040,7 +1076,9 @@ describe("connections routes", () => {
       body: body("gateway-first", firstOperationId),
     });
     expect(retried.status).toBe(201);
-    const retriedConnection = (await retried.json()) as { connection: { id: string } };
+    const retriedConnection = (await retried.json()) as {
+      connection: { id: string };
+    };
     expect(retriedConnection.connection.id).toBe(firstConnection.connection.id);
     expect(
       (
@@ -1150,7 +1188,11 @@ describe("connections routes", () => {
     );
     expect(patched.status).toBe(200);
     const patchedConnection = (await patched.json()) as {
-      connection: { id: string; version: number; metadata: Record<string, unknown> };
+      connection: {
+        id: string;
+        version: number;
+        metadata: Record<string, unknown>;
+      };
     };
     expect(patchedConnection.connection.id).not.toBe(firstConnection.connection.id);
     expect(
@@ -1309,7 +1351,11 @@ describe("connections routes", () => {
     });
     expect(created.status).toBe(201);
     const createdConnection = (await created.json()) as {
-      connection: { id: string; version: number; metadata: Record<string, unknown> };
+      connection: {
+        id: string;
+        version: number;
+        metadata: Record<string, unknown>;
+      };
     };
     expect(
       createdConnection.connection.metadata[OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY],
@@ -1366,7 +1412,11 @@ describe("connections routes", () => {
     );
     expect(rotated.status).toBe(200);
     const rotatedConnection = (await rotated.json()) as {
-      connection: { id: string; version: number; metadata: Record<string, unknown> };
+      connection: {
+        id: string;
+        version: number;
+        metadata: Record<string, unknown>;
+      };
     };
     expect(rotatedConnection.connection.id).not.toBe(createdConnection.connection.id);
     expect(
@@ -1721,15 +1771,15 @@ describe("connections routes", () => {
   });
 
   test.each(["external_user", "organization_service"] as const)(
-    "host gateway uses remote credentials and denies key revocation during resolution for %s",
+    "native gateway uses connections and rejects revoked keys for %s",
     async (kind) => {
-      if (!available) throw new Error("Real database required for host gateway verification");
+      if (!available) throw new Error("Real database required for native gateway verification");
       const workspace = await freshWorkspace();
       const token = randomUUID();
       const permissions: Permission[] = ["workspace:read"];
       const key = await createOrganizationApiKey(client.db, {
         accountId: workspace.accountId,
-        name: "Host gateway fixture",
+        name: "Native gateway fixture",
         prefix: "test",
         keyHash: createHash("sha256").update(token).digest("hex"),
         permissions,
@@ -1744,67 +1794,37 @@ describe("connections routes", () => {
         permissions,
       });
       const mcp = startTestMcpServer({ requiredAuthorization: "Bearer synthetic-gateway" });
-      let revoke = false;
-      let resolutions = 0;
-      const connectionCredentials = createRemoteMcpCredentialsPort(
-        {
-          ...settings,
-          hostMcpCredentialResolversJson: JSON.stringify([
-            {
-              accountId: workspace.accountId,
-              url: "https://host.fixture.invalid/credentials",
-              bearerToken: "synthetic-host-secret",
-            },
-          ]),
-        },
-        async (_url, init) => {
-          resolutions++;
-          const envelope = JSON.parse(String(init?.body));
-          expect(envelope.request.surface).toBe("workspace_gateway");
-          expect(envelope.request).not.toHaveProperty("sessionId");
-          expect(envelope.request.authority).toMatchObject({
-            kind,
-            subjectId: kind === "external_user" ? identity.subjectId : `api_key:${key.id}`,
-            permissions,
-          });
-          if (revoke)
-            await shared!
-              .admin`update api_keys set revoked_at = clock_timestamp() where id = ${key.id}`;
-          return Response.json({
-            version: 1,
-            requestId: envelope.requestId,
-            destinationUrl: mcp.url,
-            resolution: {
-              status: "ok",
-              ...workspace,
-              requestId: envelope.request.requestId,
-              connectionId: "host-account",
-              providerDomain: new URL(mcp.url).hostname,
-              headers: { Authorization: "Bearer synthetic-gateway" },
-              expiresAt: new Date(Date.now() + 60_000).toISOString(),
-            },
-          });
-        },
-      );
+      const connection = await createConnection(client.db, {
+        ...workspace,
+        subjectId: kind === "external_user" ? identity.subjectId : null,
+        providerDomain: new URL(mcp.url).hostname,
+        kind: "oauth2",
+        credentialEncrypted: encryptEnvironmentValue(
+          rawKey,
+          JSON.stringify({ access_token: "synthetic-gateway", token_type: "Bearer" }),
+        ),
+        metadata: { mcpUrl: mcp.url },
+        createdBySubjectId: identity.subjectId,
+      });
       const gatewayApi = (requireApproval = false) =>
         appWithDeps(
           {
             mcpServers: [
               {
-                id: "host-fixture",
-                name: "Host fixture",
+                id: "native-fixture",
+                name: "Native fixture",
                 url: mcp.url,
                 cacheToolsList: false,
                 requireApproval,
                 connectionRef: {
-                  authoritySource: "host",
-                  connectionId: "host-account",
+                  connectionId: connection.id,
+                  subjectScope: kind === "external_user" ? "subject" : "workspace",
                   providerDomain: new URL(mcp.url).hostname,
                 },
               },
             ],
           },
-          { connectionCredentials },
+          {},
         );
       const api = gatewayApi();
       const headers = {
@@ -1822,13 +1842,12 @@ describe("connections routes", () => {
         const response = await api.request(path, { headers });
         expect(response.status).toBe(200);
         const catalog = await response.json();
-        expect(JSON.stringify(catalog)).toContain("host-fixture");
-        expect(resolutions).toBeGreaterThan(0);
+        expect(JSON.stringify(catalog)).toContain("native-fixture");
         expect(mcp.requests.some((request) => request.jsonRpcMethod === "tools/list")).toBe(true);
         const call = {
           operationId: randomUUID(),
           catalogDigest: catalog.digest,
-          identity: { serverId: "host-fixture", toolName: "search_documents" },
+          identity: { serverId: "native-fixture", toolName: "search_documents" },
           arguments: { query: "embedding fixture" },
         };
         const post = (route: string, body: unknown) =>
@@ -1846,7 +1865,7 @@ describe("connections routes", () => {
         expect(guardedCatalog.status).toBe(200);
         expect((await guardedCatalog.json()).entries).toEqual([]);
         expect(mcp.calls).toHaveLength(1);
-        const resolvedBeforeOutsider = resolutions;
+        const requestsBeforeOutsider = mcp.requests.length;
         const outsider = await api.request(path, {
           headers: {
             ...headers,
@@ -1859,440 +1878,20 @@ describe("connections routes", () => {
           },
         });
         expect(outsider.status).toBe(403);
-        expect(resolutions).toBe(resolvedBeforeOutsider);
+        expect(mcp.requests).toHaveLength(requestsBeforeOutsider);
         const before = mcp.requests.length;
-        revoke = true;
-        expect((await post("calls", { ...call, operationId: randomUUID() })).status).toBe(403);
+        await shared!
+          .admin`update api_keys set revoked_at = clock_timestamp() where id = ${key.id}`;
+        expect((await post("calls", { ...call, operationId: randomUUID() })).status).toBe(401);
         expect(mcp.requests).toHaveLength(before);
         expect(mcp.calls).toHaveLength(1);
-        const resolved = resolutions;
         expect((await api.request(path, { headers })).status).toBe(401);
-        expect(resolutions).toBe(resolved);
+        expect(mcp.requests).toHaveLength(before);
       } finally {
         mcp.close();
       }
     },
   );
-
-  test("external host binding registration survives key replacement and denies service or other-owner access", async () => {
-    if (!available) return;
-    const workspace = await freshWorkspace();
-    const token = randomUUID();
-    const key = await createOrganizationApiKey(client.db, {
-      accountId: workspace.accountId,
-      name: "Binding fixture",
-      prefix: "test",
-      keyHash: createHash("sha256").update(token).digest("hex"),
-      permissions: [
-        "connections:read",
-        "connections:write",
-        "sessions:create",
-        "sessions:read",
-        "sessions:control",
-        "scheduled_tasks:manage",
-        "scheduled_tasks:run",
-      ],
-    });
-    const identity = await ensureExternalIdentity(client.db, {
-      accountId: workspace.accountId,
-      externalId: "binding-owner",
-    });
-    const other = await ensureExternalIdentity(client.db, {
-      accountId: workspace.accountId,
-      externalId: "binding-other",
-    });
-    for (const owner of [identity, other])
-      await grantWorkspaceAccess(client.db, {
-        ...workspace,
-        subjectId: owner.subjectId,
-        permissions: [
-          "connections:read",
-          "connections:write",
-          "sessions:create",
-          "sessions:read",
-          "sessions:control",
-          "scheduled_tasks:manage",
-          "scheduled_tasks:run",
-        ],
-      });
-    const headers = (externalId: string | null = identity.externalId, apiKey = token) => ({
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
-      ...(externalId
-        ? {
-            "x-opengeni-external-actor": encodeURIComponent(
-              JSON.stringify({ mode: "external", identity: { externalId } }),
-            ),
-          }
-        : {}),
-    });
-    const api = app();
-    const path = `/v1/workspaces/${workspace.workspaceId}/host-mcp-bindings`;
-    const input = {
-      operationId: randomUUID(),
-      definition: {
-        serverId: "fixture",
-        destinationUrl: "https://mcp.fixture.invalid/tools",
-        connectionRef: {
-          authoritySource: "host",
-          providerDomain: "mcp.fixture.invalid",
-          connectionId: "host-connection",
-        },
-      },
-    };
-    const create = () =>
-      api.request(path, { method: "POST", headers: headers(), body: JSON.stringify(input) });
-    const response = await create();
-    expect(response.status).toBe(201);
-    const binding = await response.json();
-    expect(binding).toMatchObject({
-      ownerSubjectId: identity.subjectId,
-      generation: 1,
-      status: "active",
-    });
-    expect(await (await create()).json()).toEqual(binding);
-    const delegationPath = `/v1/workspaces/${workspace.workspaceId}/host-mcp-delegations`;
-    const delegationInput = {
-      operationId: randomUUID(),
-      bindingId: binding.id,
-      expectedBindingGeneration: 1,
-      grant: {
-        scope: "user",
-        mode: "always",
-        context: "workspace_shared",
-        workspaceSharedAcknowledged: true,
-      },
-    };
-    const issue = (body = delegationInput, actor: string | null = identity.externalId) =>
-      api.request(delegationPath, {
-        method: "POST",
-        headers: headers(actor),
-        body: JSON.stringify(body),
-      });
-    const issued = await issue();
-    expect(issued.status).toBe(201);
-    const delegation = await issued.json();
-    expect(delegation).toMatchObject({
-      ownerSubjectId: identity.subjectId,
-      bindingId: binding.id,
-      generation: 1,
-    });
-    expect(await (await issue()).json()).toEqual(delegation);
-    const sessionApi = appWithDeps(
-      {
-        sandboxBackend: "none",
-        hostMcpAuthoritySourceAdmissionEnabled: true,
-        mcpServers: [
-          {
-            id: "fixture",
-            url: binding.definition.destinationUrl,
-            transport: "streamable_http",
-            connectionRef: {
-              ...binding.definition.connectionRef,
-              hostBinding: { bindingId: binding.id, generation: 1 },
-            },
-          },
-        ],
-      },
-      {
-        bus: new MemoryEventBus(),
-        workflowClient: {
-          wakeSessionWorkflow: async () => {},
-          requestSessionWorkflowWakeDispatch: async () => {},
-          syncScheduledTask: async () => {},
-        },
-      },
-    );
-    const sessionInput = {
-      initialMessage: "Host initial authority",
-      idempotencyKey: randomUUID(),
-      tools: [{ kind: "mcp", id: "fixture" }],
-      sandboxBackend: "none",
-      selectedHostMcpDelegations: [
-        { serverId: "fixture", delegationId: delegation.id, generation: 1 },
-      ],
-    };
-    const start = (
-      body: unknown = sessionInput,
-      actor: string | null = identity.externalId,
-      apiKey = token,
-    ) =>
-      sessionApi.request(`/v1/workspaces/${workspace.workspaceId}/sessions`, {
-        method: "POST",
-        headers: headers(actor, apiKey),
-        body: JSON.stringify(body),
-      });
-    expect((await start(sessionInput, null)).status).toBe(403);
-    expect(
-      (await start({ ...sessionInput, initialMessage: undefined, startMode: "realtime" })).status,
-    ).toBe(403);
-    const started = await start();
-    expect(started.status).toBe(202);
-    const captured = await shared!
-      .admin`select a.canonical_snapshot from host_mcp_turn_authorities a where a.workspace_id = ${workspace.workspaceId} and a.delegation_id = ${delegation.id}`;
-    expect(captured).toHaveLength(1);
-    expect(captured[0]!.canonical_snapshot.ownerSubjectId).toBe(identity.subjectId);
-    const acceptedSessionId = captured[0]!.canonical_snapshot.targetSessionId;
-    const scheduledInput = {
-      name: "Host schedule",
-      schedule: { type: "manual" },
-      runMode: "existing_session",
-      targetSessionId: acceptedSessionId,
-      agentConfig: { prompt: "Use the selected host", tools: [{ kind: "mcp", id: "fixture" }] },
-      selectedHostMcpDelegations: sessionInput.selectedHostMcpDelegations,
-    };
-    const scheduleResponse = await sessionApi.request(
-      `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks`,
-      {
-        method: "POST",
-        headers: headers(),
-        body: JSON.stringify(scheduledInput),
-      },
-    );
-    expect(scheduleResponse.status).toBe(201);
-    const hostTask = await scheduleResponse.json();
-    const taskSnapshots = await shared!
-      .admin`select canonical_snapshot from host_mcp_task_authorities where task_id = ${hostTask.id}`;
-    expect(taskSnapshots).toHaveLength(1);
-    expect(taskSnapshots[0]!.canonical_snapshot.ownerSubjectId).toBe(identity.subjectId);
-    const renameTask = await sessionApi.request(
-      `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${hostTask.id}`,
-      {
-        method: "PATCH",
-        headers: headers(),
-        body: JSON.stringify({ name: "Renamed host schedule" }),
-      },
-    );
-    expect(renameTask.status).toBe(200);
-    const renamedTask = await renameTask.json();
-    expect(renamedTask.authorityRevision).toBeGreaterThan(hostTask.authorityRevision);
-    expect(
-      await shared!
-        .admin`select task_id from host_mcp_task_authorities where task_id = ${hostTask.id}
-      and task_authority_revision = ${renamedTask.authorityRevision}`,
-    ).toHaveLength(1);
-    const clearTask = await sessionApi.request(
-      `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${hostTask.id}`,
-      {
-        method: "PATCH",
-        headers: headers(),
-        body: JSON.stringify({ selectedHostMcpDelegations: [] }),
-      },
-    );
-    expect(clearTask.status).toBe(200);
-    const clearedTask = await clearTask.json();
-    expect(
-      await shared!
-        .admin`select task_id from host_mcp_task_authorities where task_id = ${hostTask.id}
-      and task_authority_revision = ${clearedTask.authorityRevision}`,
-    ).toHaveLength(0);
-    const followup = {
-      type: "user.message",
-      clientEventId: randomUUID(),
-      payload: {
-        text: "Use the explicitly selected host account again",
-        selectedHostMcpDelegations: sessionInput.selectedHostMcpDelegations,
-      },
-    };
-    const sendFollowup = (body: unknown = followup, apiKey = token) =>
-      sessionApi.request(
-        `/v1/workspaces/${workspace.workspaceId}/sessions/${acceptedSessionId}/events`,
-        {
-          method: "POST",
-          headers: headers(identity.externalId, apiKey),
-          body: JSON.stringify(body),
-        },
-      );
-    expect((await sendFollowup()).status).toBe(202);
-    expect((await sendFollowup()).status).toBe(202);
-    expect(
-      (
-        await sendFollowup({
-          ...followup,
-          payload: { ...followup.payload, selectedHostMcpDelegations: [] },
-        })
-      ).status,
-    ).toBe(409);
-    expect(
-      (
-        await sendFollowup({
-          ...followup,
-          clientEventId: randomUUID(),
-          payload: {
-            ...followup.payload,
-            selectedHostMcpDelegations: [
-              { ...sessionInput.selectedHostMcpDelegations[0], generation: 2 },
-            ],
-          },
-        })
-      ).status,
-    ).toBe(403);
-    const steer = await sessionApi.request(
-      `/v1/workspaces/${workspace.workspaceId}/sessions/${acceptedSessionId}/steer`,
-      {
-        method: "POST",
-        headers: headers(),
-        body: JSON.stringify({ ...followup.payload, clientEventId: randomUUID() }),
-      },
-    );
-    expect(steer.status).toBe(202);
-    expect(
-      await shared!
-        .admin`select turn_id from host_mcp_turn_authorities where workspace_id = ${workspace.workspaceId} and delegation_id = ${delegation.id}`,
-    ).toHaveLength(3);
-    expect(
-      (await start({ ...sessionInput, idempotencyKey: randomUUID() }, other.externalId)).status,
-    ).toBe(403);
-    expect((await start({ ...sessionInput, idempotencyKey: randomUUID(), tools: [] })).status).toBe(
-      422,
-    );
-    expect(
-      (
-        await start({
-          ...sessionInput,
-          idempotencyKey: randomUUID(),
-          selectedHostMcpDelegations: [
-            { ...sessionInput.selectedHostMcpDelegations[0], generation: 2 },
-          ],
-        })
-      ).status,
-    ).toBe(403);
-    expect((await start()).status).toBe(202);
-    expect((await start({ ...sessionInput, selectedHostMcpDelegations: [] })).status).toBe(409);
-    expect(
-      (
-        await start({
-          ...sessionInput,
-          selectedHostMcpDelegations: [
-            { ...sessionInput.selectedHostMcpDelegations[0], generation: 2 },
-          ],
-        })
-      ).status,
-    ).toBe(409);
-    expect(
-      (
-        await issue({
-          ...delegationInput,
-          grant: { ...delegationInput.grant, context: "user_private" },
-        })
-      ).status,
-    ).toBe(409);
-    expect((await issue(delegationInput, null)).status).toBe(403);
-    expect(
-      (
-        await api.request(`${delegationPath}/${delegation.id}`, {
-          headers: headers(other.externalId),
-        })
-      ).status,
-    ).toBe(404);
-    expect(
-      (
-        await api.request(`${delegationPath}/${delegation.id}/revoke`, {
-          method: "GET",
-          headers: headers(),
-        })
-      ).status,
-    ).toBe(404);
-    const badSession = await api.request(delegationPath, {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify({
-        ...delegationInput,
-        operationId: randomUUID(),
-        grant: {
-          scope: "user",
-          mode: "session",
-          context: "user_private",
-          sessionId: randomUUID(),
-          expectedAuthorityEpoch: 1,
-        },
-      }),
-    });
-    expect(badSession.status).toBe(403);
-    expect(
-      (await api.request(`${path}/${binding.id}`, { headers: headers(other.externalId) })).status,
-    ).toBe(404);
-    expect((await api.request(`${path}/${binding.id}`, { headers: headers(null) })).status).toBe(
-      403,
-    );
-    const replacement = randomUUID();
-    await createOrganizationApiKey(client.db, {
-      accountId: workspace.accountId,
-      name: "Replacement fixture",
-      prefix: "test",
-      keyHash: createHash("sha256").update(replacement).digest("hex"),
-      permissions: [
-        "connections:read",
-        "connections:write",
-        "sessions:create",
-        "sessions:read",
-        "sessions:control",
-        "scheduled_tasks:manage",
-        "scheduled_tasks:run",
-      ],
-    });
-    await shared!.admin`update api_keys set revoked_at = clock_timestamp() where id = ${key.id}`;
-    expect((await api.request(`${path}/${binding.id}`, { headers: headers() })).status).toBe(401);
-    const restored = await api.request(`${path}/${binding.id}`, {
-      headers: headers(identity.externalId, replacement),
-    });
-    expect(restored.status).toBe(200);
-    expect(await restored.json()).toEqual(binding);
-    expect(
-      (await api.request(`${delegationPath}/${delegation.id}`, { headers: headers() })).status,
-    ).toBe(401);
-    expect(
-      await (
-        await api.request(`${delegationPath}/${delegation.id}`, {
-          headers: headers(identity.externalId, replacement),
-        })
-      ).json(),
-    ).toEqual(delegation);
-    const revokeDelegation = () =>
-      api.request(`${delegationPath}/${delegation.id}/revoke`, {
-        method: "POST",
-        headers: headers(identity.externalId, replacement),
-        body: JSON.stringify({ expectedGeneration: 1 }),
-      });
-    const retiredDelegationResponse = await revokeDelegation();
-    expect(retiredDelegationResponse.status).toBe(200);
-    const retiredDelegation = await retiredDelegationResponse.json();
-    expect(retiredDelegation).toMatchObject({
-      id: delegation.id,
-      status: "revoked",
-      generation: 2,
-    });
-    expect((await start(sessionInput, identity.externalId, replacement)).status).toBe(202);
-    expect((await sendFollowup(followup, replacement)).status).toBe(202);
-    expect(
-      (await sendFollowup({ ...followup, clientEventId: randomUUID() }, replacement)).status,
-    ).toBe(403);
-    expect(
-      (
-        await start(
-          { ...sessionInput, idempotencyKey: randomUUID() },
-          identity.externalId,
-          replacement,
-        )
-      ).status,
-    ).toBe(403);
-    expect(
-      await shared!
-        .admin`select turn_id from host_mcp_turn_authorities where workspace_id = ${workspace.workspaceId} and delegation_id = ${delegation.id}`,
-    ).toHaveLength(3);
-    expect(await (await revokeDelegation()).json()).toEqual(retiredDelegation);
-    const revoke = () =>
-      api.request(`${path}/${binding.id}/revoke`, {
-        method: "POST",
-        headers: headers(identity.externalId, replacement),
-        body: JSON.stringify({ expectedGeneration: 1 }),
-      });
-    const revoked = await revoke();
-    expect(revoked.status).toBe(200);
-    const retired = await revoked.json();
-    expect(retired).toMatchObject({ id: binding.id, generation: 2, status: "revoked" });
-    expect(await (await revoke()).json()).toEqual(retired);
-  });
 
   test("external generic MCP OAuth preserves exact return and rechecks key authority before exchange and persistence", async () => {
     if (!available) return;
@@ -2303,7 +1902,15 @@ describe("connections routes", () => {
       name: "External MCP fixture",
       prefix: "test",
       keyHash: createHash("sha256").update(token).digest("hex"),
-      permissions: ["workspace:read", "connections:read", "connections:write"],
+      permissions: [
+        "workspace:read",
+        "connections:read",
+        "connections:write",
+        "sessions:create",
+        "sessions:read",
+        "sessions:control",
+        "scheduled_tasks:manage",
+      ],
     });
     const identity = await ensureExternalIdentity(client.db, {
       accountId: workspace.accountId,
@@ -2312,7 +1919,15 @@ describe("connections routes", () => {
     await grantWorkspaceAccess(client.db, {
       ...workspace,
       subjectId: identity.subjectId,
-      permissions: ["workspace:read", "connections:read", "connections:write"],
+      permissions: [
+        "workspace:read",
+        "connections:read",
+        "connections:write",
+        "sessions:create",
+        "sessions:read",
+        "sessions:control",
+        "scheduled_tasks:manage",
+      ],
     });
     let revokeDuringExchange = false;
     const as = startFakeAuthorizationServer({
@@ -2375,6 +1990,415 @@ describe("connections routes", () => {
       const directBody = await direct.json();
       expect(directBody.connection.subjectId).toBe(identity.subjectId);
       expect(JSON.stringify(directBody)).not.toContain("synthetic-never-returned");
+      const oauthCredential = {
+        access_token: "synthetic-provisioned-access",
+        refresh_token: "synthetic-provisioned-refresh",
+        token_endpoint: `${as.url}/token`,
+        client_id: "synthetic-application-client",
+        token_endpoint_auth_method: "none",
+      };
+      const provisioningOperationId = randomUUID();
+      const provisioningPayload = {
+        providerDomain: "provisioned-mcp.example",
+        kind: "oauth2",
+        ownership: "personal",
+        credential: oauthCredential,
+        grantedScopes: ["documents:read"],
+        operationId: provisioningOperationId,
+        initialUseContexts: ["user_private", "workspace_shared"],
+      };
+      const provision = (payload = provisioningPayload) =>
+        api.request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+        });
+      const rejectedSetup = await provision();
+      expect(rejectedSetup.status).toBe(403);
+      expect(
+        (
+          await api.request(
+            `/v1/workspaces/${workspace.workspaceId}/connections/operations/${provisioningOperationId}`,
+            { headers },
+          )
+        ).status,
+      ).toBe(404);
+      expect(
+        (
+          await listConnectionsMetadata(client.db, workspace.workspaceId, identity.subjectId)
+        ).filter((row) => row.providerDomain === provisioningPayload.providerDomain),
+      ).toHaveLength(0);
+      await shared!.admin`
+        insert into session_tenancy_activations (
+          account_id, activation_version, inventory_digest, parity_digest, activated_by
+        ) values (${workspace.accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'oauth-admission-fixture')
+        on conflict do nothing
+      `;
+      expect((await provision({ ...provisioningPayload, ownership: "workspace" })).status).toBe(
+        422,
+      );
+      expect(
+        (
+          await provision({
+            ...provisioningPayload,
+            initialUseContexts: ["user_private", "user_private"],
+          })
+        ).status,
+      ).toBe(422);
+      const [provisioned, simultaneousProvision] = await Promise.all([provision(), provision()]);
+      expect(provisioned.status).toBe(201);
+      const provisionedBody = await provisioned.json();
+      expect(simultaneousProvision.status).toBe(201);
+      expect((await simultaneousProvision.json()).connection.id).toBe(
+        provisionedBody.connection.id,
+      );
+      expect(provisionedBody.connection).toMatchObject({
+        subjectId: identity.subjectId,
+        kind: "oauth2",
+        grantedScopes: ["documents:read"],
+      });
+      expect(JSON.stringify(provisionedBody)).not.toContain(oauthCredential.access_token);
+      expect(JSON.stringify(provisionedBody)).not.toContain(oauthCredential.refresh_token);
+      const recoveryPath = `/v1/workspaces/${workspace.workspaceId}/connections/operations/${provisioningOperationId}`;
+      const recovered = await api.request(recoveryPath, { headers });
+      expect(recovered.status).toBe(200);
+      expect(await recovered.json()).toEqual(provisionedBody);
+      const administratorRecovery = await api.request(recoveryPath, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(administratorRecovery.status).toBe(404);
+      expect(
+        (
+          await api.request(
+            `/v1/workspaces/${workspace.workspaceId}/connections/operations/${randomUUID()}`,
+            { headers },
+          )
+        ).status,
+      ).toBe(404);
+      const provisionedCredential = await loadConnectionCredentialForBroker(client.db, settings, {
+        workspaceId: workspace.workspaceId,
+        connectionId: provisionedBody.connection.id,
+        providerDomain: "provisioned-mcp.example",
+        subjectId: identity.subjectId,
+        allowSubjectOwned: true,
+      });
+      expect(provisionedCredential?.credential).toEqual(oauthCredential);
+      const initialGrants = await shared!.admin`
+        select id, context, status from organization_user_resource_grants
+        where authority_id = ${provisionedBody.connection.authorityId}
+      `;
+      expect(initialGrants).toHaveLength(2);
+      expect(initialGrants.map((row) => row.context).sort()).toEqual([
+        "user_private",
+        "workspace_shared",
+      ]);
+      expect(initialGrants.every((row) => row.status === "active")).toBe(true);
+      const granted = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connection-authorities/${provisionedBody.connection.authorityId}/grants`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            scope: "user",
+            mode: "always",
+            context: "workspace_shared",
+            workspaceSharedAcknowledged: true,
+          }),
+        },
+      );
+      expect(granted.status).toBe(200);
+      const sessionApi = appWithDeps(
+        {
+          sandboxBackend: "none",
+          mcpServers: [
+            {
+              id: "provisioned",
+              url: mcp.url,
+              transport: "streamable_http",
+              connectionRef: {
+                subjectScope: "subject",
+                providerDomain: "provisioned-mcp.example",
+                kind: "oauth2",
+              },
+            },
+          ],
+        },
+        {
+          bus: new MemoryEventBus(),
+          workflowClient: {
+            wakeSessionWorkflow: async () => {},
+            requestSessionWorkflowWakeDispatch: async () => {},
+            syncScheduledTask: async () => {},
+          },
+        },
+      );
+      const started = await sessionApi.request(`/v1/workspaces/${workspace.workspaceId}/sessions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          initialMessage: "Use the connected service",
+          idempotencyKey: randomUUID(),
+          visibility: "workspace",
+          tools: [{ kind: "mcp", id: "provisioned" }],
+          sandboxBackend: "none",
+        }),
+      });
+      expect(started.status).toBe(202);
+      const admitted = await started.json();
+      expect(admitted.id).toBeString();
+      expect(admitted.initialTurnId).toBeString();
+      const capturedOAuth = await shared!.admin`
+        select personal_connection_delegations from session_turns
+        where workspace_id = ${workspace.workspaceId} and session_id = ${admitted.id}
+          and id = ${admitted.initialTurnId}
+      `;
+      expect(capturedOAuth[0]?.personal_connection_delegations).toMatchObject([
+        {
+          serverId: "provisioned",
+          connectionId: provisionedBody.connection.id,
+          ownerSubjectId: identity.subjectId,
+        },
+      ]);
+      expect(
+        await getSessionTurnPersonalConnectionDelegations(
+          client.db,
+          workspace.workspaceId,
+          admitted.id,
+          admitted.initialTurnId,
+        ),
+      ).toMatchObject([
+        {
+          serverId: "provisioned",
+          connectionId: provisionedBody.connection.id,
+          ownerSubjectId: identity.subjectId,
+        },
+      ]);
+      const retries = await Promise.all([provision(), provision()]);
+      const continued = await sessionApi.request(
+        `/v1/workspaces/${workspace.workspaceId}/sessions/${admitted.id}/events`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            type: "user.message",
+            clientEventId: randomUUID(),
+            payload: { text: "Continue with my connection" },
+          }),
+        },
+      );
+      expect(continued.status).toBe(202);
+      const continuedCaptures = await shared!.admin`
+        select personal_connection_delegations from session_turns
+        where workspace_id = ${workspace.workspaceId} and session_id = ${admitted.id}
+      `;
+      expect(continuedCaptures).toHaveLength(2);
+      for (const captured of continuedCaptures) {
+        expect(captured.personal_connection_delegations).toMatchObject([
+          {
+            serverId: "provisioned",
+            connectionId: provisionedBody.connection.id,
+            ownerSubjectId: identity.subjectId,
+          },
+        ]);
+      }
+      for (const runMode of ["existing_session", "new_session_per_run"] as const) {
+        const scheduled = await sessionApi.request(
+          `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              name: "Connected service task",
+              schedule: { type: "manual" },
+              runMode,
+              ...(runMode === "existing_session" ? { targetSessionId: admitted.id } : {}),
+              agentConfig: {
+                prompt: "Use my connected service",
+                tools: [{ kind: "mcp", id: "provisioned" }],
+              },
+            }),
+          },
+        );
+        expect(scheduled.status).toBe(201);
+        const task = await scheduled.json();
+        const capturedTask = await shared!.admin`
+          select personal_connection_delegations from scheduled_tasks
+          where workspace_id = ${workspace.workspaceId} and id = ${task.id}
+        `;
+        expect(capturedTask[0]?.personal_connection_delegations).toMatchObject([
+          {
+            serverId: "provisioned",
+            connectionId: provisionedBody.connection.id,
+            ownerSubjectId: identity.subjectId,
+          },
+        ]);
+      }
+      for (const retry of retries) {
+        expect(retry.status).toBe(201);
+        expect((await retry.json()).connection.id).toBe(provisionedBody.connection.id);
+      }
+      const conflictingRetry = await provision({
+        ...provisioningPayload,
+        grantedScopes: ["documents:write"],
+      });
+      expect(conflictingRetry.status).toBe(409);
+      const otherUser = await ensureExternalIdentity(client.db, {
+        accountId: workspace.accountId,
+        externalId: "second-connected-user",
+      });
+      await grantWorkspaceAccess(client.db, {
+        ...workspace,
+        subjectId: otherUser.subjectId,
+        permissions: [
+          "workspace:read",
+          "connections:read",
+          "connections:write",
+          "sessions:read",
+          "sessions:create",
+          "sessions:control",
+        ],
+      });
+      const otherHeaders = {
+        ...headers,
+        "x-opengeni-external-actor": encodeURIComponent(
+          JSON.stringify({
+            mode: "external",
+            identity: { externalId: otherUser.externalId },
+          }),
+        ),
+      };
+      const otherProvision = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connections`,
+        {
+          method: "POST",
+          headers: otherHeaders,
+          body: JSON.stringify({
+            ...provisioningPayload,
+            operationId: randomUUID(),
+            credential: { ...oauthCredential, access_token: "second-synthetic-token" },
+          }),
+        },
+      );
+      expect(otherProvision.status).toBe(201);
+      const otherConnection = (await otherProvision.json()).connection;
+      const otherGrant = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connection-authorities/${otherConnection.authorityId}/grants`,
+        {
+          method: "POST",
+          headers: otherHeaders,
+          body: JSON.stringify({
+            scope: "user",
+            mode: "always",
+            context: "workspace_shared",
+            workspaceSharedAcknowledged: true,
+          }),
+        },
+      );
+      expect(otherGrant.status).toBe(200);
+      const switchedUser = await sessionApi.request(
+        `/v1/workspaces/${workspace.workspaceId}/sessions/${admitted.id}/events`,
+        {
+          method: "POST",
+          headers: otherHeaders,
+          body: JSON.stringify({
+            type: "user.message",
+            clientEventId: randomUUID(),
+            payload: { text: "Use my own connected account" },
+          }),
+        },
+      );
+      expect(switchedUser.status).toBe(202);
+      const sharedCaptures = await shared!.admin`
+        select personal_connection_delegations from session_turns
+        where workspace_id = ${workspace.workspaceId} and session_id = ${admitted.id}
+      `;
+      expect(sharedCaptures).toHaveLength(3);
+      expect(sharedCaptures.map((row) => row.personal_connection_delegations)).toContainEqual([
+        expect.objectContaining({
+          serverId: "provisioned",
+          connectionId: otherConnection.id,
+          ownerSubjectId: otherUser.subjectId,
+        }),
+      ]);
+      const draftPath = `/v1/workspaces/${workspace.workspaceId}/sessions/${admitted.id}/composer-draft`;
+      const currentDraftResponse = await sessionApi.request(draftPath, { headers: otherHeaders });
+      expect(currentDraftResponse.status).toBe(200);
+      const currentDraft = await currentDraftResponse.json();
+      const savedResponse = await sessionApi.request(draftPath, {
+        method: "PUT",
+        headers: otherHeaders,
+        body: JSON.stringify({
+          expectedRevision: currentDraft.revision,
+          text: "Continue from the browser composer",
+          annotations: [],
+          resources: [],
+          model: admitted.model,
+          reasoningEffort: admitted.reasoningEffort,
+          latencyMode: "standard",
+        }),
+      });
+      expect(savedResponse.status).toBe(200);
+      const savedDraft = await savedResponse.json();
+      const submitResponse = await sessionApi.request(`${draftPath}/submit`, {
+        method: "POST",
+        headers: otherHeaders,
+        body: JSON.stringify({
+          expectedDraftRevision: savedDraft.revision,
+          clientEventId: randomUUID(),
+          delivery: "send",
+          text: savedDraft.text,
+          annotations: savedDraft.annotations,
+          resources: savedDraft.resources,
+          model: savedDraft.model,
+          reasoningEffort: savedDraft.reasoningEffort,
+          latencyMode: savedDraft.latencyMode,
+        }),
+      });
+      expect(submitResponse.status).toBe(202);
+      const composerCaptures = await shared!.admin`
+        select personal_connection_delegations from session_turns
+        where workspace_id = ${workspace.workspaceId} and session_id = ${admitted.id}
+      `;
+      expect(composerCaptures).toHaveLength(4);
+      expect(
+        composerCaptures.filter(
+          (row) => row.personal_connection_delegations[0]?.connectionId === otherConnection.id,
+        ),
+      ).toHaveLength(2);
+      const privateGrant = initialGrants.find((row) => row.context === "user_private")!;
+      const revokeUse = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connection-authorities/grants/${privateGrant.id}?scope=user`,
+        { method: "DELETE", headers },
+      );
+      expect(revokeUse.status).toBe(200);
+      expect((await provision()).status).toBe(201);
+      const grantsAfterReplay = await shared!.admin`
+        select id, context, status from organization_user_resource_grants
+        where authority_id = ${provisionedBody.connection.authorityId}
+      `;
+      expect(grantsAfterReplay).toHaveLength(2);
+      expect(grantsAfterReplay.find((row) => row.id === privateGrant.id)?.status).toBe("revoked");
+      expect(
+        (await provision({ ...provisioningPayload, initialUseContexts: ["workspace_shared"] }))
+          .status,
+      ).toBe(409);
+      const disconnected = await api.request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/${provisionedBody.connection.id}`,
+        { method: "DELETE", headers },
+      );
+      expect(disconnected.status).toBe(200);
+      const replayAfterDisconnect = await provision();
+      expect(replayAfterDisconnect.status).toBe(201);
+      expect((await replayAfterDisconnect.json()).connection).toMatchObject({
+        id: provisionedBody.connection.id,
+        status: "revoked",
+      });
+      const recoveredAfterDisconnect = await api.request(recoveryPath, { headers });
+      expect(recoveredAfterDisconnect.status).toBe(200);
+      expect((await recoveredAfterDisconnect.json()).connection).toMatchObject({
+        id: provisionedBody.connection.id,
+        status: "revoked",
+      });
       const first = await begin();
       expect((await callback(first)).headers.get("location")).toBe(returnUrl);
       expect(as.tokenRequests).toHaveLength(1);
@@ -2902,7 +2926,10 @@ describe("connections routes", () => {
       );
       const responseText = await response.clone().text();
       expect(response.status, responseText).toBe(200);
-      const body = (await response.json()) as { state: string; authorizationUrl: string };
+      const body = (await response.json()) as {
+        state: string;
+        authorizationUrl: string;
+      };
       const authorizationUrl = new URL(body.authorizationUrl);
       expect(authorizationUrl.searchParams.get("resource")).toBeNull();
       expect(authorizationUrl.searchParams.get("scope")).toBe("documents:read");
@@ -3872,7 +3899,10 @@ describe("connections routes", () => {
 
       const responseText = await response.clone().text();
       expect(response.status, responseText).toBe(200);
-      const body = (await response.json()) as { state: string; authorizationUrl: string };
+      const body = (await response.json()) as {
+        state: string;
+        authorizationUrl: string;
+      };
       const authUrl = new URL(body.authorizationUrl);
       expect(authUrl.searchParams.get("client_id")).toBe("slack-client-id");
       expect(authUrl.searchParams.get("scope")).toBe("search:read.public chat:write");

@@ -1478,9 +1478,7 @@ export function useComposer(
               ...(wireInput.connectionAuthorities
                 ? { connectionAuthorities: wireInput.connectionAuthorities }
                 : {}),
-              ...(wireInput.selectedHostMcpDelegations
-                ? { selectedHostMcpDelegations: wireInput.selectedHostMcpDelegations }
-                : {}),
+
               ...(wireInput.personalResourceAttachment
                 ? { personalResourceAttachment: wireInput.personalResourceAttachment }
                 : {}),
@@ -1757,9 +1755,7 @@ export function useComposer(
             ...(input.connectionAuthorities
               ? { connectionAuthorities: input.connectionAuthorities }
               : {}),
-            ...(input.selectedHostMcpDelegations
-              ? { selectedHostMcpDelegations: input.selectedHostMcpDelegations }
-              : {}),
+
             ...(input.personalResourceAttachment
               ? { personalResourceAttachment: input.personalResourceAttachment }
               : {}),

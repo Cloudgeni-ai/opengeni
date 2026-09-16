@@ -42,10 +42,10 @@ revisions, child sessions and causal continuations retain the link restriction;
 revocation denies later execution without requiring the original API key to stay
 active. This is an execution-time check, not a promise to undo a remote operation
 already started. Native access to native-owned resources remains intact. Do not
-assume external-owned host MCP bindings transfer to the native owner through a
-link: create a separate binding while explicitly acting as the native user.
-Its owner revision is the native member's revision; linked work independently
-retains the live link restriction. `listIdentityLinks(workspaceId, cursor?)`
+assume an external user's personal connection transfers to the native owner
+through a link: provision or connect separately while explicitly acting as that
+user. Linked work independently retains the live link restriction.
+`listIdentityLinks(workspaceId, cursor?)`
 provides a participant-only inventory, and native workspace settings expose the
 same list/revoke behavior without retaining the original consent URL.
 
@@ -205,9 +205,8 @@ Wire session timeline `onReconnect` to the host's connection experience. Use
 `findConnectRecoveryAccount` from `@opengeni/connect` with fresh account metadata
 and the event's exact connection ID, then begin setup for that account. A missing
 ID or deleted account requires an explicit user choice, not a provider-name match.
-Host-owned credential recovery stays in the product's account flow rather than
-being sent to an OpenGeni credential setup page. The native session and runnable
-host example use this same exact-account lookup.
+The product can host the ordinary Connect experience in its own UI. The native
+session and runnable host example use this same exact-account lookup.
 
 ## Durable OAuth and explicit installation
 
@@ -312,105 +311,39 @@ start a new authorized setup rather than expecting a new key to revive the old
 attempt. This short-lived setup rule is separate from accepted agent/scheduled
 work, which does not depend on the original API key remaining active.
 
-Short-lived inline MCP credentials remain a valid simple choice. Durable host
-renewal is opt-in through the existing host credential port and explicit host
-binding provenance; it is not required to use `asUser` or Connect. See
-`docs/remote-mcp-credentials.md` when source is available. The host must validate
-live actor/binding authority; the remote adapter alone does not implement
-offboarding, native linking or a complete external execution gateway.
+Use ordinary native connections for both backend provisioning and interactive
+OAuth. An organization-admin backend uses `asUser` to provision a personal
+connection for its canonical user; no separate signup or host binding is needed.
+Persist provisioning operation IDs before requests and reuse them on uncertain
+retries. Select the resulting connection through the native connection authority
+fields; connection visibility is not permission for another participant to use
+its credentials. OAuth refresh remains in the native connection engine.
 
-For independent backend instances, the server-only organization admin client
-can use `putHostMcpResolver(organizationId, externalSource, request)` once per
-stable workspace source. Future `ensureWorkspace` calls use the exact registered
-source without workspace-specific resolver setup. PUT requires `operationId`,
-`expectedGeneration` (0 for create), `url`, and a complete `bearerToken`.
-`getHostMcpResolver` returns metadata only; `revokeHostMcpResolver` requires an
-operation ID/current generation. `asUser`, `asLinkedUser`, workspace keys and
-browser cookies cannot administer routes. Existing bindings/grants and accepted
-initiators do not change when an admin rotates transport.
-
-The first registration opts the whole organization into namespace routing; a
-configured legacy resolver requires `acknowledgeLegacyRoutingReplacement: true`.
-Any retained row, even revoked, prevents static fallback. Missing/inactive
-sources deny rather than choosing another instance. Retried operations return
-historical metadata without restoring old configuration. Always GET current
-state before a new CAS update, and explicitly supply the secret for a new URL.
-Generation checks invalidate old resolved credentials before physical use;
-already-dispatched requests cannot be recalled. Keep every secret server-side.
+The former host resolver, binding and delegation APIs and selected-host fields
+are removed. Do not build against them or reinterpret their IDs as native
+connection IDs. An optional external credential supplier is future work behind
+the same connection model, not a second setup requirement. See
+`docs/remote-mcp-credentials.md` for the cutover boundary.
 
 The request-time workspace tool gateway accepts verified external users and
 organization service keys. Tool catalog/operation permission filtering and
 existing approval semantics still apply. The new lanes recheck current key and
 identity/membership permission ceilings around provider preparation and invocation;
 they do not authorize an agent attempt as a service or inherit a creator's rights.
-This request-time path is not a scheduled-delegation/binding-generation guarantee.
-For explicit host references, it uses the separate optional `mcpGatewayCredentials`
-callback (also implemented by the configured remote adapter). Its request has
-`surface: "workspace_gateway"`, a request ID and verified actor/permissions, not
-session/turn IDs. Gateway responses echo that request ID instead of a session ID.
-Existing in-process `mcpCredentials` callbacks remain turn-only. Do not send
-durable `hostBinding` references to this gateway; they still fail closed.
-The SDK also exposes actor-scoped `createHostMcpBinding`, `getHostMcpBinding`, and
-`revokeHostMcpBinding` registry operations. Registration takes an operation ID and
-a credential-free `{ serverId, destinationUrl, connectionRef }` definition with
-explicit host authority. Revocation takes the observed generation and is terminal.
-Bindings survive organization-key replacement for the same authorized external
-owner. These operations manage metadata only: no worker or scheduled execution
-currently consumes the registration ID as execution authority. The reserved
-`connectionRef.hostBinding` shape is `{ bindingId, generation }`; it fails closed
-unless the backend installs a live execution validator. The broker revalidates
-after resolution and discards credentials after revocation. The worker's direct-turn
-validator requires an immutable accepted-work snapshot. Direct external-user
-creates capture one through explicit selection; later turns do not inherit it.
-The actor-bound SDK also exposes `issueHostMcpDelegation`, `getHostMcpDelegation`,
-and `revokeHostMcpDelegation`. Issuance takes an operation ID, binding ID, expected
-binding generation, and a native-shaped user grant (`session` or `always`).
-Session grants require a session ID and expected authority epoch; shared-output
-grants require acknowledgement. Read/write connection permissions and live
-external-owner checks apply, including at transaction commit. Revocation uses
-the observed delegation generation. These operations persist grant metadata;
-select them explicitly on `createSession` with
-`selectedHostMcpDelegations: [{serverId, delegationId, generation}]`. The selected
-tool's configured URL and host binding selection must match; the operator's host
-authority admission switch must be enabled. This does not auto-install or rewrite
-tools. New sessions use reusable (`always`) grants with matching visibility.
-Selections participate in idempotency: changed or omitted replay selections
-conflict, and replay never recaptures. Capture rechecks external authority inside
-the initial-turn transaction. `sendMessage` and `steerMessage` accept the same
-explicit selection for each direct follow-up. Session-bound grants can be used
-there; they must match that session and its authority epoch. The selected MCP
-server must already belong to the session. Each message captures atomically and
-its operation ID binds the selection; omission does not inherit a prior grant.
-Same-session goal continuations and child-result resumptions inherit only the
-exact causal turn's accepted selection. Live revocation still blocks use; a
-revoked selection is not revived by resumption. Children inherit only the exact
-spawning turn's `always` grants for servers they select with unchanged visibility;
-session-bound grants never cross to a child. Fixed `{bindingId,generation}`
-references remain exact-match. Shared per-participant tools can explicitly use
-`connectionRef.hostBinding:{selection:"accepted_turn"}` with host authority,
-subject scope and no configured connectionId. The complete configured
-destination/provider/scope/resource definition remains exact; only the account
-identifier comes from each accepted owner's selected binding. Registry bindings
-still contain a concrete connectionId and no hostBinding. The worker resolves
-only immutable accepted snapshots and revalidates at every physical use, including
-scheduled and child work. Missing selections never borrow creator credentials.
-Realtime empty-shell creation still takes no selection: call createSession with
-`startMode:"realtime"` and no initialMessage or selectedHostMcpDelegations, then
-send the first text with its authenticated participant's explicit selection and
-clientEventId. The first real text turn captures normally; this grants no voice
-provider authority.
-Use the same `selectedHostMcpDelegations` field on `createScheduledTask` or
-`updateScheduledTask` for browser-independent jobs. Omitted update selections
-preserve existing choices; `[]` clears them for future revisions. New/reusable
-sessions require `always` grants and shared-output acknowledgement; an existing
-session can use its exact session-bound grant. Native task revisions, including
-first reusable-session materialization, freeze the selection. Runs and their
-successors keep the scheduled origin and recheck live authority before credential
-resolution and physical use. The original API key is not a durable credential.
-Agent-created tasks automatically derive only eligible selections from their
-live accepted turn when the selection field is omitted; do not assert an owner's
-unselected grant through an agent call. Explicit `[]` disables this inheritance.
-Ordinary inline credentials retain their existing behavior.
+The gateway uses the native resolver and rechecks the caller before physical
+requests. It does not call an embedding-product credential callback.
+
+Accepted native turn/task selection retains the named actor and exact connection
+authority. A shared conversation does not borrow its creator's credentials for
+another participant. Scheduled occurrences and supported child work consume the
+captured native selection and recheck live authority; token refresh does not
+change the selected account. Existing-session schedules use the target session's
+tools and persisted MCP definitions. Do not add per-endpoint host delegation.
+
+Realtime empty-shell creation captures no connection authority. Send its first
+text under the authenticated participant with the native connection selection
+and `clientEventId`; this grants no voice-provider authority.
+
 Legacy OAuth starts without verified external continuations fail closed. Curated
 OAuth uses the shared Connect panel. Generic MCP OAuth is also available through
 `actor.startConnectionOAuth(workspaceId, { mcpUrl, returnUrl, ... })`: the trusted

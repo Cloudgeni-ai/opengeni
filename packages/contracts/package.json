@@ -22,10 +22,6 @@
       "types": "./src/managed-sign-in-methods.ts",
       "default": "./src/managed-sign-in-methods.ts"
     },
-    "./host-mcp-resolvers": {
-      "types": "./src/host-mcp-resolvers.ts",
-      "default": "./src/host-mcp-resolvers.ts"
-    },
     "./mcp-endpoint": {
       "types": "./src/mcp-endpoint.ts",
       "default": "./src/mcp-endpoint.ts"

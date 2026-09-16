@@ -1,4 +1,10 @@
-import type { AccessGrantAuthorization } from "@opengeni/core";
+import {
+  type AccessGrantAuthorization,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
+  SessionTenancyManagedHumanRequiredError,
+} from "@opengeni/core";
+import { nestedPostgresSqlState, SessionTenancyNotActivatedError } from "@opengeni/db";
 import type { UserResourceAuthoritySummary } from "@opengeni/db";
 import {
   IssueConnectionUseGrantRequest,
@@ -6,6 +12,21 @@ import {
   type IssueConnectionUseGrantRequest as IssueConnectionUseGrantRequestValue,
 } from "@opengeni/contracts/connection-authority";
 import { HTTPException } from "hono/http-exception";
+
+export function connectionAuthorityLifecycleError(error: unknown): never {
+  if (
+    error instanceof SessionAuthorizationDeniedError ||
+    error instanceof SessionTenancyManagedHumanRequiredError ||
+    error instanceof SessionTenancyNotActivatedError ||
+    nestedPostgresSqlState(error) === "42501"
+  )
+    throw new HTTPException(403, { message: "connection authority denied" });
+  if (error instanceof SessionAuthorizationUnavailableError)
+    throw new HTTPException(503, { message: "session authorization unavailable" });
+  if (nestedPostgresSqlState(error) === "22023")
+    throw new HTTPException(422, { message: "invalid connection authority" });
+  throw error;
+}
 
 /**
  * Personal connection authority is available only to the exact authenticated

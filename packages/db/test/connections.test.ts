@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
+import { Worker } from "node:worker_threads";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import type { McpCredentialsRequest } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import {
   acquireSharedTestDatabase,
@@ -9,14 +9,12 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
+import { createConnectionIdempotently, ConnectionCreateIdempotencyError } from "../src/index";
 import {
   buildConnectionTokenResolver,
-  buildHostConnectionTokenResolver,
   ConnectionDisconnectGenerationError,
   ConnectionDisconnectIdempotencyError,
   ConnectionRefreshHttpError,
-  HostMcpCredentialBindingError,
-  HostMcpCredentialScopeError,
   normalizeBearerScheme,
   createConnection,
   createDb,
@@ -171,6 +169,7 @@ function resolverDeps(overrides: Partial<ConnectionBrokerDeps> = {}): {
     refreshInputs: [],
   };
   const deps: ConnectionBrokerDeps = {
+    withRefreshLock: async (database, _credential, work) => work(database),
     loadCredential: async (_db, _settings, input) => {
       counts.load += 1;
       counts.loadInputs.push(input);
@@ -500,6 +499,155 @@ describe("connections table and helpers", () => {
       await getConnectionMetadata(db, ws.workspaceId, alice.id, "subject-alice"),
     ).toMatchObject({ status: "needs_reauth", lastError: "expired", subjectId: "subject-alice" });
   });
+
+  test("provisioning replay survives token rotation, a new database client, and disconnect", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const input = {
+      ...ws,
+      providerDomain: "provisioned.example",
+      kind: "oauth2" as const,
+      createdBySubjectId: "subject-a",
+      operation: { id: "stable-provisioning-operation", requestDigest: "fixture-request-digest" },
+      credentialEncrypted: enc({ access_token: "original", refresh_token: "original-refresh" }),
+      grantedScopes: ["read"],
+    };
+    const [first, concurrent] = await Promise.all([
+      createConnectionIdempotently(db, input),
+      createConnectionIdempotently(db, input),
+    ]);
+    expect(concurrent.id).toBe(first.id);
+    expect(
+      await recordConnectionTokenRefresh(db, {
+        id: first.id,
+        version: first.version,
+        workspaceId: ws.workspaceId,
+        credentialEncrypted: enc({ access_token: "rotated", refresh_token: "rotated-refresh" }),
+        expiresAt: new Date(Date.now() + 3_600_000),
+        grantedScopes: ["read"],
+        lastRefreshAt: new Date(),
+      }),
+    ).toBe(true);
+    const restarted = createDb(shared!.appUrl);
+    try {
+      const replay = await createConnectionIdempotently(restarted.db, input);
+      expect(replay.id).toBe(first.id);
+      expect(replay.version).toBe(first.version + 1);
+      const credential = await loadConnectionCredentialForBroker(restarted.db, settings, {
+        workspaceId: ws.workspaceId,
+        connectionId: first.id,
+        providerDomain: input.providerDomain,
+      });
+      expect(credential?.credential).toMatchObject({
+        access_token: "rotated",
+        refresh_token: "rotated-refresh",
+      });
+      expect(JSON.stringify(replay)).not.toContain("fixture-request-digest");
+      await expect(
+        createConnectionIdempotently(restarted.db, {
+          ...input,
+          operation: { ...input.operation, requestDigest: "different-request" },
+        }),
+      ).rejects.toBeInstanceOf(ConnectionCreateIdempotencyError);
+      await revokeConnection(restarted.db, ws.workspaceId, first.id);
+      expect((await createConnectionIdempotently(restarted.db, input)).status).toBe("revoked");
+    } finally {
+      await restarted.close();
+    }
+  });
+
+  test("provisioning operation IDs are isolated by workspace and initiating subject", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const otherWorkspace = await freshWorkspace();
+    const input = {
+      ...workspace,
+      providerDomain: "provisioned.example",
+      kind: "oauth2" as const,
+      createdBySubjectId: "subject-a",
+      operation: { id: "shared-operation-id", requestDigest: "same-request-digest" },
+      credentialEncrypted: enc({ access_token: "fixture-token" }),
+      grantedScopes: ["read"],
+    };
+    const first = await createConnectionIdempotently(db, input);
+    const otherActor = await createConnectionIdempotently(db, {
+      ...input,
+      createdBySubjectId: "subject-b",
+    });
+    const otherScope = await createConnectionIdempotently(db, { ...input, ...otherWorkspace });
+    expect(new Set([first.id, otherActor.id, otherScope.id]).size).toBe(3);
+    expect((await createConnectionIdempotently(db, input)).id).toBe(first.id);
+  });
+
+  test("independent resolver workers exchange a rotating token only once", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const connection = await createConnection(db, {
+      ...ws,
+      providerDomain: "oauth.example.com",
+      kind: "oauth2",
+      credentialEncrypted: enc({ access_token: "old-access", refresh_token: "single-use-refresh" }),
+      expiresAt: new Date(Date.now() - 1_000),
+      grantedScopes: ["read"],
+    });
+    const workers = Array.from(
+      { length: 2 },
+      () =>
+        new Worker(new URL("./fixtures/connection-refresh-worker.ts", import.meta.url), {
+          workerData: {
+            appUrl: shared!.appUrl,
+            encryptionKey: rawKey.toString("base64"),
+            workspaceId: ws.workspaceId,
+            connectionId: connection.id,
+          },
+        }),
+    );
+    let ready = 0;
+    let exchanges = 0;
+    try {
+      const results = await Promise.all(
+        workers.map(
+          (worker) =>
+            new Promise<unknown>((resolve, reject) => {
+              let settled = false;
+              worker.on("error", reject);
+              worker.on("exit", (code) => {
+                if (!settled) reject(new Error(`Refresh worker exited before result: ${code}`));
+              });
+              worker.on("message", (message) => {
+                if (message.type === "ready") {
+                  ready += 1;
+                  if (ready === workers.length)
+                    workers.forEach((entry) => entry.postMessage({ type: "proceed" }));
+                } else if (message.type === "exchange") {
+                  exchanges += 1;
+                  worker.postMessage({ type: "exchange-result", allowed: exchanges === 1 });
+                } else if (message.type === "result") {
+                  settled = true;
+                  resolve(message.result);
+                } else if (message.type === "failure") {
+                  settled = true;
+                  reject(new Error(message.message));
+                }
+              });
+            }),
+        ),
+      );
+      expect(exchanges).toBe(1);
+      for (const result of results)
+        expect(result).toMatchObject({
+          status: "ok",
+          connectionId: connection.id,
+          headers: { authorization: "Bearer fresh-access" },
+          connectionVersion: connection.version + 1,
+        });
+      expect((await getConnectionMetadata(db, ws.workspaceId, connection.id))?.status).toBe(
+        "active",
+      );
+    } finally {
+      await Promise.all(workers.map((worker) => worker.terminate()));
+    }
+  }, 20_000);
 
   test("token refresh and status updates are compare-and-set on id plus version", async () => {
     if (!available) return;
@@ -918,392 +1066,6 @@ describe("connections table and helpers", () => {
       now,
     });
     expect(afterCleanup).toBe(true);
-  });
-});
-
-describe("buildHostConnectionTokenResolver", () => {
-  const context = {
-    accountId: "acct_1",
-    workspaceId: "ws_1",
-    sessionId: "session_1",
-    rootSessionId: "session_root",
-    turnId: "turn_1",
-    attemptId: "attempt_1",
-    executionGeneration: 4,
-    initiator: { kind: "subject" as const, subjectId: "host:user:42", label: "Ada" },
-    initiatorContext: { source: "host", via: [{ kind: "agent" }] },
-    surface: "model" as const,
-  };
-
-  test("forwards frozen turn authority and returns a scope-checked header snapshot", async () => {
-    let received: unknown;
-    const headers = { Authorization: "Bearer host-token" };
-    const resolver = buildHostConnectionTokenResolver(async (request) => {
-      received = request;
-      return {
-        status: "ok",
-        accountId: request.accountId,
-        workspaceId: request.workspaceId,
-        sessionId: request.sessionId,
-        headers,
-        connectionId: "host-connection-7",
-        providerDomain: request.connectionRef.providerDomain,
-        ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
-        ...(request.connectionRef.scopes ? { scopes: request.connectionRef.scopes } : {}),
-        ...(request.connectionRef.selectedResources
-          ? { selectedResources: request.connectionRef.selectedResources }
-          : {}),
-        expiresAt: "2026-07-21T23:00:00.000Z",
-      };
-    }, context);
-
-    const result = await resolver({
-      workspaceId: "ws_1",
-      subjectId: "worker:first-party-mcp",
-      serverId: "github",
-      destinationUrl: "https://GitHub.com/mcp/",
-      toolName: "create_pull_request",
-      connectionRef: {
-        provider: "github",
-        providerDomain: "github.com",
-        kind: "app_install",
-        connectionId: "host-connection-7",
-        scopes: ["repo"],
-        selectedResources: [
-          { kind: "repository", id: "101" },
-          { kind: "repository", id: "202" },
-        ],
-      },
-      forceRefresh: true,
-    });
-
-    expect(received).toEqual({
-      ...context,
-      callerSubjectId: "worker:first-party-mcp",
-      serverId: "github",
-      toolName: "create_pull_request",
-      destinationUrl: "https://github.com/mcp",
-      credentialTarget: "mcp",
-      connectionRef: {
-        provider: "github",
-        providerDomain: "github.com",
-        kind: "app_install",
-        connectionId: "host-connection-7",
-        scopes: ["repo"],
-        selectedResources: [
-          { kind: "repository", id: "101" },
-          { kind: "repository", id: "202" },
-        ],
-      },
-      forceRefresh: true,
-    });
-    expect(result).toEqual({
-      status: "ok",
-      headers: { Authorization: "Bearer host-token" },
-      authoritySource: "host",
-      connectionId: "host-connection-7",
-      expiresAt: new Date("2026-07-21T23:00:00.000Z"),
-    });
-    headers.Authorization = "Bearer mutated-after-return";
-    expect(result).toMatchObject({ headers: { Authorization: "Bearer host-token" } });
-  });
-
-  test("accepts consistent query/cookie placements only for a local HTTP API target", async () => {
-    const resolver = buildHostConnectionTokenResolver(
-      async (request) => ({
-        status: "ok",
-        accountId: request.accountId,
-        workspaceId: request.workspaceId,
-        sessionId: request.sessionId,
-        headers: { "X-Client": "client-secret" },
-        placements: [
-          { carrier: "header", name: "X-Client", value: "client-secret" },
-          { carrier: "query", name: "api_key", value: "query-secret" },
-          { carrier: "cookie", name: "session_key", value: "cookie-secret" },
-        ],
-        connectionId: "host-api-connection",
-        providerDomain: request.connectionRef.providerDomain,
-      }),
-      context,
-    );
-
-    const result = await resolver({
-      workspaceId: "ws_1",
-      serverId: "inventory-api",
-      destinationUrl: "https://api.example.com/v1/items",
-      credentialTarget: "http_api",
-      connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
-    });
-    expect(result).toEqual({
-      status: "ok",
-      headers: { "X-Client": "client-secret" },
-      authoritySource: "host",
-      placements: [
-        { carrier: "header", name: "X-Client", value: "client-secret" },
-        { carrier: "query", name: "api_key", value: "query-secret" },
-        { carrier: "cookie", name: "session_key", value: "cookie-secret" },
-      ],
-      connectionId: "host-api-connection",
-    });
-
-    await expect(
-      resolver({
-        workspaceId: "ws_1",
-        serverId: "inventory-mcp",
-        destinationUrl: "https://api.example.com/mcp",
-        connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
-      }),
-    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
-  });
-
-  test("rejects inconsistent or unsafe host placement echoes", async () => {
-    const mismatched = buildHostConnectionTokenResolver(
-      async (request) => ({
-        status: "ok",
-        accountId: request.accountId,
-        workspaceId: request.workspaceId,
-        sessionId: request.sessionId,
-        headers: { Authorization: "Bearer one" },
-        placements: [{ carrier: "header", name: "Authorization", value: "Bearer two" }],
-        connectionId: "host-api-connection",
-        providerDomain: request.connectionRef.providerDomain,
-      }),
-      context,
-    );
-    await expect(
-      mismatched({
-        workspaceId: "ws_1",
-        serverId: "inventory-api",
-        destinationUrl: "https://api.example.com/v1/items",
-        credentialTarget: "http_api",
-        connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
-      }),
-    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
-
-    const injected = buildHostConnectionTokenResolver(
-      async (request) => ({
-        status: "ok",
-        accountId: request.accountId,
-        workspaceId: request.workspaceId,
-        sessionId: request.sessionId,
-        headers: {},
-        placements: [{ carrier: "query", name: "api_key", value: "secret\r\nleak" }],
-        connectionId: "host-api-connection",
-        providerDomain: request.connectionRef.providerDomain,
-      }),
-      context,
-    );
-    await expect(
-      injected({
-        workspaceId: "ws_1",
-        serverId: "inventory-api",
-        destinationUrl: "https://api.example.com/v1/items",
-        credentialTarget: "http_api",
-        connectionRef: { providerDomain: "api.example.com", kind: "api_key" },
-      }),
-    ).rejects.toThrow("invalid placement");
-  });
-
-  test("rejects a mismatched host scope before returning credential material", async () => {
-    const resolver = buildHostConnectionTokenResolver(
-      async () => ({
-        status: "ok",
-        accountId: "acct_1",
-        workspaceId: "other-workspace",
-        sessionId: "session_1",
-        headers: { Authorization: "Bearer wrong-tenant" },
-        connectionId: "host-connection-7",
-        providerDomain: "github.com",
-      }),
-      context,
-    );
-
-    expect(
-      resolver({
-        workspaceId: "ws_1",
-        serverId: "github",
-        destinationUrl: "https://github.com/mcp",
-        connectionRef: { providerDomain: "github.com" },
-      }),
-    ).rejects.toBeInstanceOf(HostMcpCredentialScopeError);
-  });
-
-  test("rejects a destination/provider mismatch before invoking the host", async () => {
-    let calls = 0;
-    const resolver = buildHostConnectionTokenResolver(async () => {
-      calls += 1;
-      return {
-        status: "ok",
-        accountId: "acct_1",
-        workspaceId: "ws_1",
-        sessionId: "session_1",
-        headers: { Authorization: "Bearer must-not-escape" },
-        connectionId: "host-connection-7",
-        providerDomain: "github.com",
-      };
-    }, context);
-
-    await expect(
-      resolver({
-        workspaceId: "ws_1",
-        serverId: "github",
-        destinationUrl: "https://attacker.example/mcp",
-        connectionRef: { provider: "github", providerDomain: "github.com" },
-      }),
-    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
-    expect(calls).toBe(0);
-  });
-
-  test("permits only the canonical Gmail users/me REST lane for the Gmail MCP grant", async () => {
-    const received: string[] = [];
-    const ref = {
-      providerDomain: "gmailmcp.googleapis.com",
-      kind: "oauth2" as const,
-      subjectScope: "subject" as const,
-    };
-    const resolveHost = async (request: McpCredentialsRequest) => {
-      received.push(request.destinationUrl);
-      return {
-        status: "ok" as const,
-        accountId: request.accountId,
-        workspaceId: request.workspaceId,
-        sessionId: request.sessionId,
-        headers: { Authorization: "Bearer gmail-token" },
-        connectionId: "gmail-connection",
-        providerDomain: "gmailmcp.googleapis.com",
-      };
-    };
-    // The Gmail REST bridge is the unconditional sole execution path (no
-    // deployment flag): the host resolver allows the exact users/me exception
-    // by default.
-    const resolver = buildHostConnectionTokenResolver(resolveHost, context);
-
-    await expect(
-      resolver({
-        workspaceId: "ws_1",
-        subjectId: "subject-a",
-        serverId: "gmail",
-        toolName: "list_labels",
-        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
-        connectionRef: ref,
-      }),
-    ).resolves.toMatchObject({ status: "ok", connectionId: "gmail-connection" });
-    expect(received).toEqual(["https://gmail.googleapis.com/gmail/v1/users/me/labels"]);
-
-    await expect(
-      resolver({
-        workspaceId: "ws_1",
-        subjectId: "subject-a",
-        serverId: "gmail",
-        destinationUrl: "https://gmail.googleapis.com/gmail/v1/users/me/labels",
-        connectionRef: { ...ref, subjectScope: "workspace" },
-      }),
-    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
-
-    for (const destinationUrl of [
-      "https://gmail.googleapis.com/gmail/v1/users/someone-else/labels",
-      "https://gmail.googleapis.com/drive/v3/files",
-      "https://attacker.example/gmail/v1/users/me/labels",
-    ]) {
-      await expect(
-        resolver({
-          workspaceId: "ws_1",
-          subjectId: "subject-a",
-          serverId: "gmail",
-          destinationUrl,
-          connectionRef: ref,
-        }),
-      ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
-    }
-    expect(received).toHaveLength(1);
-  });
-
-  test("rejects host credential material routed from a different binding or repository set", async () => {
-    const resolver = buildHostConnectionTokenResolver(
-      async (request) => ({
-        status: "ok",
-        accountId: request.accountId,
-        workspaceId: request.workspaceId,
-        sessionId: request.sessionId,
-        headers: { Authorization: "Bearer wrong-binding" },
-        connectionId: "host-connection-other",
-        provider: "github",
-        providerDomain: "github.com",
-        selectedResources: [{ kind: "repository", id: "999" }],
-      }),
-      context,
-    );
-
-    expect(
-      resolver({
-        workspaceId: "ws_1",
-        serverId: "github",
-        destinationUrl: "https://github.com/mcp",
-        connectionRef: {
-          connectionId: "host-connection-7",
-          provider: "github",
-          providerDomain: "github.com",
-          selectedResources: [{ kind: "repository", id: "101" }],
-        },
-      }),
-    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
-  });
-
-  test("passes through reconnect metadata without credential headers", async () => {
-    const resolver = buildHostConnectionTokenResolver(
-      async (request) => ({
-        status: "auth_needed",
-        accountId: request.accountId,
-        workspaceId: request.workspaceId,
-        sessionId: request.sessionId,
-        reason: "expired",
-        providerDomain: "gitlab.com",
-        connectionId: "gitlab-connection",
-        scopes: ["api"],
-        authorizationUrl: "https://host.example/reconnect/gitlab-connection",
-      }),
-      { ...context, surface: "codemode" },
-    );
-
-    const result = await resolver({
-      workspaceId: "ws_1",
-      serverId: "gitlab",
-      destinationUrl: "https://gitlab.com/mcp",
-      connectionRef: { providerDomain: "gitlab.com" },
-    });
-    expect(result).toEqual({
-      status: "auth_needed",
-      reason: "expired",
-      providerDomain: "gitlab.com",
-      authoritySource: "host",
-      connectionId: "gitlab-connection",
-      scopes: ["api"],
-      authorizationUrl: "https://host.example/reconnect/gitlab-connection",
-    });
-    expect(JSON.stringify(result)).not.toContain("Bearer");
-  });
-
-  test("rejects insecure non-loopback reconnect URLs", async () => {
-    const resolver = buildHostConnectionTokenResolver(
-      async (request) => ({
-        status: "auth_needed",
-        accountId: request.accountId,
-        workspaceId: request.workspaceId,
-        sessionId: request.sessionId,
-        reason: "expired",
-        providerDomain: "gitlab.com",
-        authorizationUrl: "http://host.example/reconnect",
-      }),
-      context,
-    );
-    expect(
-      resolver({
-        workspaceId: "ws_1",
-        serverId: "gitlab",
-        destinationUrl: "https://gitlab.com/mcp",
-        connectionRef: { providerDomain: "gitlab.com" },
-      }),
-    ).rejects.toThrow("invalid authorizationUrl");
   });
 });
 
@@ -1924,7 +1686,7 @@ describe("buildConnectionTokenResolver", () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    let loadCalls = 0;
+    let persisted = false;
     const stale = brokerCredential({
       id: "conn_oauth",
       providerDomain: "oauth.example.com",
@@ -1942,8 +1704,13 @@ describe("buildConnectionTokenResolver", () => {
     });
     const { deps, counts } = resolverDeps({
       loadCredential: async () => {
-        loadCalls += 1;
-        return loadCalls <= 2 ? stale : refreshed;
+        return persisted ? refreshed : stale;
+      },
+      recordRefresh: async (_db, input) => {
+        counts.recordRefresh += 1;
+        counts.refreshInputs.push({ id: input.id, version: input.version });
+        persisted = true;
+        return true;
       },
       refresh: async (cred) => {
         counts.refresh += 1;
@@ -1994,6 +1761,50 @@ describe("buildConnectionTokenResolver", () => {
       },
     ]);
   });
+
+  test.each(["revoked", "replaced"] as const)(
+    "refresh does not exchange credentials %s while waiting for the lock",
+    async (change) => {
+      const stale = brokerCredential({
+        id: `waiting-${change}`,
+        providerDomain: "oauth.example.com",
+        kind: "oauth2",
+        credential: { access_token: "old", refresh_token: "old-refresh" },
+        expiresAt: new Date(Date.now() - 1_000),
+        authorityGeneration: 1,
+      });
+      let current = stale;
+      const { deps, counts } = resolverDeps({
+        loadCredential: async () => current,
+        withRefreshLock: async (database, _credential, work) => {
+          current =
+            change === "revoked"
+              ? { ...stale, status: "revoked" }
+              : { ...stale, authorityGeneration: 2, version: stale.version + 1 };
+          return work(database);
+        },
+      });
+      const result = await buildConnectionTokenResolver(
+        {} as Database,
+        settings,
+        deps,
+      )({
+        workspaceId: "ws_1",
+        serverId: "srv_1",
+        destinationUrl: "https://oauth.example.com/mcp",
+        connectionRef: {
+          providerDomain: "oauth.example.com",
+          kind: "oauth2",
+          connectionId: stale.id,
+        },
+        forceRefresh: true,
+      });
+      expect(result.status).toBe("auth_needed");
+      expect(counts.refresh).toBe(0);
+      expect(counts.recordRefresh).toBe(0);
+      expect(counts.recordUsed).toBe(0);
+    },
+  );
 
   test("a transient refresh failure (AS 5xx / network) does not poison the connection", async () => {
     const stale = brokerCredential({
@@ -2501,6 +2312,73 @@ describe("buildConnectionTokenResolver", () => {
       connectionId: "conn_oauth",
     });
     expect(counts.status).toBe(1);
+  });
+
+  test("permanent refresh failure updates the exact personal connection in its origin workspace", async () => {
+    const authority = { ...personalConnectionUseAuthority(), connectionKind: "oauth2" as const };
+    const stale = brokerCredential({
+      id: authority.connectionId,
+      accountId: authority.organizationId,
+      workspaceId: authority.originWorkspaceId,
+      subjectId: authority.ownerSubjectId,
+      kind: "oauth2",
+      credential: { access_token: "expired", refresh_token: "rejected" },
+      expiresAt: new Date(Date.now() - 1_000),
+      authorityGeneration: authority.connectionGeneration,
+      version: 13,
+    });
+    const writes: Array<Parameters<ConnectionBrokerDeps["setStatus"]>> = [];
+    const { deps, counts } = resolverDeps({
+      authorizeUse: async () => ({
+        status: "authorized",
+        attribution: {
+          organizationId: authority.organizationId,
+          workspaceId: authority.targetWorkspaceId,
+          sessionId: authority.targetSessionId,
+          connectionId: authority.connectionId,
+          connectionGeneration: authority.connectionGeneration,
+          scope: "user",
+          ownerSubjectId: authority.ownerSubjectId,
+          authorityId: authority.userDelegation.authorityId,
+          grantId: authority.userDelegation.grantId,
+        },
+      }),
+      loadCredential: async () => stale,
+      refresh: async () => {
+        throw new ConnectionRefreshHttpError(400, "invalid_grant");
+      },
+      setStatus: async (...args) => {
+        writes.push(args);
+        return true;
+      },
+    });
+    const database = {} as Database;
+    const result = await buildConnectionTokenResolver(
+      database,
+      settings,
+      deps,
+    )({
+      workspaceId: authority.targetWorkspaceId,
+      serverId: "personal-cross-workspace",
+      destinationUrl: "https://api.example.com/mcp",
+      connectionRef: {
+        connectionId: authority.connectionId,
+        providerDomain: authority.providerDomain,
+        kind: "oauth2",
+        subjectScope: "subject",
+      },
+      connectionUseAuthority: authority,
+    });
+    expect(result).toMatchObject({ status: "auth_needed", connectionId: stale.id });
+    expect(writes).toHaveLength(1);
+    expect(writes[0]![1]).toBe(authority.originWorkspaceId);
+    expect(writes[0]![2]).toBe("needs_reauth");
+    expect(writes[0]![4]).toEqual({
+      id: stale.id,
+      version: 13,
+      subjectId: authority.ownerSubjectId,
+    });
+    expect(counts.recordUsed).toBe(0);
   });
 
   test("a provider adapter owns a bounded permanent-refresh lifecycle transition", async () => {

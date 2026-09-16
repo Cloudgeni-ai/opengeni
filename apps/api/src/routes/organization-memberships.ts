@@ -38,6 +38,8 @@ import {
 } from "@opengeni/contracts";
 import {
   getManagedSession,
+  accountScopedApiKeyWorkspaceAuthority,
+  requireAccessContext,
   organizationMembershipHttpStatus,
   requireCanonicalLocalAccountAdministrator,
   updateExternalIdentityMembershipForRequest,
@@ -87,6 +89,24 @@ const OrganizationId = z.string().uuid();
 const WorkspaceId = z.string().uuid();
 const MembershipId = z.string().uuid();
 const InvitationId = z.string().uuid();
+
+// Organization keys administer settings, not another person's session contents.
+// The database independently fences current key authority, including on replay.
+async function requirePrivateSessionAdministrator(
+  context: Context,
+  deps: ApiRouteDeps,
+  organizationId: string,
+): Promise<{ subjectId: string }> {
+  if (!context.req.header("authorization")) return requireManagedHuman(context, deps);
+  const access = await requireAccessContext(context, deps);
+  const key = accountScopedApiKeyWorkspaceAuthority(access);
+  if (!key || key.accountId !== organizationId || !key.permissions.includes("workspace:admin")) {
+    throw new HTTPException(403, {
+      message: "organization administration required",
+    });
+  }
+  return { subjectId: access.subjectId };
+}
 
 async function requireManagedHuman(context: Context, deps: ApiRouteDeps) {
   if (
@@ -527,12 +547,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   );
 
   app.get("/v1/organizations/:organizationId/private-session-settings", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
     const organizationId = parseId(
       OrganizationId,
       context.req.param("organizationId"),
       "organization id",
     );
+    const { subjectId } = await requirePrivateSessionAdministrator(context, deps, organizationId);
     try {
       return context.json(
         OrganizationPrivateSessionSettings.parse(
@@ -548,12 +568,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 
   app.patch("/v1/organizations/:organizationId/private-session-settings", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
     const organizationId = parseId(
       OrganizationId,
       context.req.param("organizationId"),
       "organization id",
     );
+    const { subjectId } = await requirePrivateSessionAdministrator(context, deps, organizationId);
     const payload = await parseBody(context, UpdateOrganizationPrivateSessionSettingsRequest);
     try {
       return context.json(

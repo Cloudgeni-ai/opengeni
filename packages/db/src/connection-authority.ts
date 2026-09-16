@@ -16,6 +16,7 @@ import {
 import { sql } from "drizzle-orm";
 import { getExternalLinkTurnAuthorization } from "./external-link-work";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
+import { nestedPostgresSqlState } from "./persistence-errors";
 import {
   issueSelfUserResourceGrant,
   listSelfUserResourceAuthorities,
@@ -97,17 +98,18 @@ export async function resolvePersonalConnectionAuthoritySelectionOrigin(
     delegation: UserResourceDelegation;
   },
 ): Promise<string | null> {
-  return await withOwnerContext(
-    db,
-    {
-      accountId: input.accountId,
-      workspaceId: input.targetWorkspaceId,
-      subjectId: input.subjectId,
-    },
-    async (scopedDb) => {
-      const [row] = await rawRows<{ originWorkspaceId: string }>(
-        scopedDb,
-        sql`
+  try {
+    return await withOwnerContext(
+      db,
+      {
+        accountId: input.accountId,
+        workspaceId: input.targetWorkspaceId,
+        subjectId: input.subjectId,
+      },
+      async (scopedDb) => {
+        const [row] = await rawRows<{ originWorkspaceId: string }>(
+          scopedDb,
+          sql`
           select origin_workspace_id as "originWorkspaceId"
           from resolve_personal_connection_authority_selection(
             ${input.accountId}::uuid, ${input.targetWorkspaceId}::uuid,
@@ -115,10 +117,18 @@ export async function resolvePersonalConnectionAuthoritySelectionOrigin(
             ${JSON.stringify(input.delegation)}::text::jsonb
           )
         `,
-      );
-      return row?.originWorkspaceId ?? null;
-    },
-  );
+        );
+        return row?.originWorkspaceId ?? null;
+      },
+    );
+  } catch (error) {
+    // The owner-only SQL boundary uses STRICT selects for absent/revoked
+    // authority and explicit denial for mismatched scope. Neither exposes an
+    // origin. Infrastructure and other unexpected failures must still throw.
+    const state = nestedPostgresSqlState(error);
+    if (state === "P0002" || state === "42501") return null;
+    throw error;
+  }
 }
 
 export async function resolveConnectionUseAuthority(

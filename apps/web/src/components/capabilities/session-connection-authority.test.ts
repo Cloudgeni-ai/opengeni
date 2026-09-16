@@ -58,7 +58,7 @@ function harness(grants: unknown[] = []) {
   } as unknown as OpenGeniBrowserClient;
   return { client, issueUserResourceGrant };
 }
-test("private IDs resolve from owner metadata and only exact active session grants enter messages", async () => {
+test("private IDs resolve from owner metadata and unrelated or malformed grants are excluded", async () => {
   const h = harness([
     { ...grant, mode: "always" },
     { ...grant, targetSessionId: "other" },
@@ -87,6 +87,42 @@ test("personal use requires explicit shared-results acknowledgement", async () =
     ),
   ).rejects.toThrow("Acknowledge");
   expect(h.issueUserResourceGrant).not.toHaveBeenCalled();
+});
+
+test("an existing always grant restores its exact account without issuing another grant", async () => {
+  const always = { ...grant, mode: "always", targetSessionId: null, authorityEpoch: null };
+  const h = harness([always]);
+  expect(await sessionConnectionAuthorities(h.client, session, [item])).toEqual([
+    { serverId: "example", connectionId: "connection", userDelegation: always.delegation },
+  ]);
+  expect(h.issueUserResourceGrant).not.toHaveBeenCalled();
+});
+
+test("always grants cannot cross workspace, visibility or revocation boundaries", async () => {
+  const always = { ...grant, mode: "always", targetSessionId: null, authorityEpoch: null };
+  const h = harness([
+    { ...always, targetWorkspaceId: "other" },
+    { ...always, context: "user_private" },
+    { ...always, status: "revoked" },
+    { ...always, expiresAt: "2020-01-01T00:00:00Z" },
+    { ...always, targetSessionId: "other" },
+    { ...always, authorityEpoch: 4 },
+  ]);
+  expect(await sessionConnectionAuthorities(h.client, session, [item])).toEqual([]);
+});
+
+test("a session grant takes precedence over an always grant for the same account", async () => {
+  const always = {
+    ...grant,
+    mode: "always",
+    targetSessionId: null,
+    authorityEpoch: null,
+    delegation: { ...grant.delegation, grantId: "always-grant" },
+  };
+  const h = harness([always, grant]);
+  expect(await sessionConnectionAuthorities(h.client, session, [item])).toEqual([
+    { serverId: "example", connectionId: "connection", userDelegation: grant.delegation },
+  ]);
 });
 test("visibility changes and navigation prevent granting", async () => {
   const h = harness();

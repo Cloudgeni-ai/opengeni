@@ -155,6 +155,12 @@ if [ "$OPENGENI_INTEGRATIONS_ENABLED" = "true" ] &&
   echo "Generated and persisted a local integration state secret in .env."
 fi
 
+# Managed-mode integration development uses the same organization-key/asUser
+# path as deployment. Persist signing secrets only for local/test environments;
+# deployed environments must continue to supply their own configuration.
+. ./scripts/dev-managed-auth.sh
+opengeni_ensure_local_managed_auth .env
+
 # Connected-machine enrollment and streaming are ordinary local-development
 # capabilities. A clean checkout must not require the operator to invent and
 # repeatedly export signing secrets before the Machines dialog can work. Keep

@@ -771,7 +771,8 @@ export const organizationPrivateSessionSettingEvents = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    actorMembershipId: uuid("actor_membership_id").notNull(),
+    actorMembershipId: uuid("actor_membership_id"),
+    actorSubjectId: text("actor_subject_id"),
     requestedEnabled: boolean("requested_enabled").notNull(),
     expectedVersion: bigint("expected_version", { mode: "number" }).notNull(),
     resultEnabled: boolean("result_enabled").notNull(),
@@ -791,6 +792,10 @@ export const organizationPrivateSessionSettingEvents = pgTable(
     versionsValid: check(
       "organization_private_session_setting_events_versions_check",
       sql`${table.expectedVersion} >= 0 and ${table.resultVersion} > 0`,
+    ),
+    actorValid: check(
+      "organization_private_session_setting_events_actor_check",
+      sql`${table.actorMembershipId} is not null or (${table.actorSubjectId} is not null and ${table.actorSubjectId} like 'api_key:%')`,
     ),
   }),
 );
@@ -1747,6 +1752,8 @@ export const connections = pgTable(
     kind: text("kind").notNull(),
     status: text("status").notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
+    createOperationId: text("create_operation_id"),
+    createRequestDigest: text("create_request_digest"),
     grantedScopes: jsonb("granted_scopes").$type<string[]>().notNull().default([]),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     lastRefreshAt: timestamp("last_refresh_at", { withTimezone: true }),
@@ -1785,6 +1792,15 @@ export const connections = pgTable(
       table.workspaceId,
       table.providerDomain,
       table.status,
+    ),
+    createOperation: uniqueIndex("connections_create_operation_uq")
+      .on(table.workspaceId, table.createdBySubjectId, table.createOperationId)
+      .where(sql`${table.createOperationId} is not null`),
+    createOperationPair: check(
+      "connections_create_operation_pair_check",
+      sql`(${table.createOperationId} is null and ${table.createRequestDigest} is null)
+        or (${table.createOperationId} is not null and ${table.createRequestDigest} is not null
+          and ${table.createdBySubjectId} is not null)`,
     ),
     workspaceSubjectProvider: index("connections_workspace_subject_provider_idx").on(
       table.workspaceId,

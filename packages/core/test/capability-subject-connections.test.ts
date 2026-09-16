@@ -619,13 +619,9 @@ describe("subject-owned capability connection references", () => {
     expect(projected).not.toContain(bob.id);
   });
 
-  test("round-trips opaque and UUID-shaped host capability bindings without native lookup", async () => {
+  test("rejects opaque and UUID-shaped retired host capability bindings", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const activatedSettings = {
-      ...settings,
-      hostMcpAuthoritySourceAdmissionEnabled: true,
-    };
     const cases = [
       {
         suffix: "opaque-workspace",
@@ -668,33 +664,9 @@ describe("subject-owned capability connection references", () => {
             connectionRef: testCase.connectionRef,
           },
         }),
-      ).rejects.toThrow(/OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED=true/);
-      await enableCapability({
-        db,
-        grant: grant(workspace, "subject-alice"),
-        ...workspace,
-        settings: activatedSettings,
-        capabilityId,
-        payload: {
-          config: {},
-          metadata: {},
-          headers: {},
-          connectionRef: testCase.connectionRef,
-        },
-      });
-
-      const installation = await getCapabilityInstallation(db, workspace.workspaceId, capabilityId);
-      expect(installation?.config.connectionRef).toEqual(testCase.connectionRef);
+      ).rejects.toThrow(/host-owned MCP connection refs are no longer supported/);
       const servers = await listEnabledMcpCapabilityServers(db, workspace.workspaceId);
-      expect(servers.find((server) => server.capabilityId === capabilityId)?.connectionRef).toEqual(
-        testCase.connectionRef,
-      );
-      const catalog = await buildCapabilityCatalog({
-        db,
-        workspaceId: workspace.workspaceId,
-        settings: activatedSettings,
-      });
-      expect(catalog.items.find((item) => item.id === capabilityId)?.connectionRef).toBeNull();
+      expect(servers.find((server) => server.capabilityId === capabilityId)).toBeUndefined();
     }
   });
 

@@ -4,18 +4,7 @@ import { withSessionRlsActorContext } from "@opengeni/db";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import { sessionCreationMetadata } from "../site-session-origin";
-import {
-  hostMcpBindingMatchesSelection,
-  HostMcpCreateSelections,
-  type HostMcpCreateSelection,
-} from "@opengeni/contracts/host-mcp-bindings";
-import {
-  captureDirectHostMcpAuthority,
-  HostMcpDelegationAuthorityError,
-  HostMcpBindingConflictError,
-  getHostMcpBinding,
-  getHostMcpDelegation,
-} from "@opengeni/db";
+
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -153,7 +142,7 @@ import { hasPermission, requirePermission, type AccessGrantAuthorization } from 
 import { externalCreationMetadata } from "./external-creation-attribution";
 import { prepareExternalLinkTurnAdmission } from "../application/external-link-work-admission";
 import { externalContinuationCommitAuthorizer } from "../application/external-continuation";
-import { prepareHostMcpOwnerAuthorization } from "../application/host-mcp-owner";
+
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type {
   AcceptSessionUserMessageDependencies,
@@ -166,7 +155,7 @@ import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
 } from "../session-authorization";
-import { assertHostMcpAuthoritySourceAdmissionEnabled } from "./host-mcp-authority-source-admission";
+import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
 import {
   preflightCreateTimeSandboxTarget,
   swapActiveSandbox,
@@ -586,7 +575,7 @@ function validateSessionMcpServersForCreate(
   const dbServers: CreateSessionMcpServerInput[] = [];
   const metadata: SessionMcpServerMetadata[] = [];
   for (const server of servers) {
-    assertHostMcpAuthoritySourceAdmissionEnabled(settings, server.connectionRef);
+    assertNativeMcpConnectionRef(server.connectionRef);
     if (seenIds.has(server.id)) {
       throw new HTTPException(422, {
         message: `duplicate session MCP server id: ${server.id}`,
@@ -780,7 +769,7 @@ export async function createAndStartSessionWithOutcome(input: {
   captureInitialTurnAuthority?: (tx: Database, sessionId: string, turnId: string) => Promise<void>;
   /** Internal replay identity; the verified caller must also capture authority.
    * Supplying selection metadata alone never grants runtime use. */
-  selectedHostMcpDelegations?: HostMcpCreateSelection[];
+
   /** The custom workspace model was frozen by an earlier accepted boundary or
    * inherited from an existing session, so retirement must not invalidate it. */
   retainWorkspaceGatewayModel?: boolean;
@@ -1054,7 +1043,7 @@ export async function createAndStartSessionWithOutcome(input: {
       toolPolicy: input.toolPolicy,
       metadata: sessionMetadata,
       initialAgentLearning: input.initialAgentLearning,
-      selectedHostMcpDelegations: input.selectedHostMcpDelegations ?? [],
+
       ...(input.createdBy ? { createdBy: input.createdBy } : {}),
       ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
       createdByActor: input.createdByActor ?? null,
@@ -1151,7 +1140,7 @@ export async function createAndStartSessionWithOutcome(input: {
       metadata: sessionMetadata,
       initialAgentLearning: input.initialAgentLearning,
       ...(input.createdBy ? { createdBy: input.createdBy } : {}),
-      selectedHostMcpDelegations: input.selectedHostMcpDelegations ?? [],
+
       ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
       createdByActor: input.createdByActor ?? null,
       model: input.model,
@@ -1570,7 +1559,7 @@ type PostUserMessageTurnInput = {
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
-  selectedHostMcpDelegations?: HostMcpCreateSelection[];
+
   captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
   delivery?: "send" | "steer";
@@ -1778,9 +1767,7 @@ export async function postUserMessageTurn(
                 ? { recordAgentRunUsage: input.recordAgentRunUsage }
                 : {}),
               personalConnectionDelegations: input.personalConnectionDelegations ?? [],
-              ...(input.selectedHostMcpDelegations?.length
-                ? { selectedHostMcpDelegations: input.selectedHostMcpDelegations }
-                : {}),
+
               ...(input.captureTurnAuthority
                 ? { captureTurnAuthority: input.captureTurnAuthority }
                 : {}),
@@ -2050,24 +2037,7 @@ async function createSessionForRequestInFileScope(
   payload.metadata = sessionCreationMetadata(payload.metadata);
   const creationMetadata = externalCreationMetadata(payload.metadata, authorization, grant);
   const externalBeforeCreateCommit = externalContinuationCommitAuthorizer(authorization);
-  const hostSelections = payload.selectedHostMcpDelegations ?? [];
-  if (
-    hostSelections.length &&
-    (!authorization ||
-      authorization.grant.accountId !== grant.accountId ||
-      authorization.grant.subjectId !== grant.subjectId ||
-      authorization?.grant.workspaceId !== workspaceId ||
-      !hasPermission(authorization?.grant.permissions ?? [], "connections:read") ||
-      !hasPermission(grant.permissions, "connections:read") ||
-      grant.metadata?.["sessionId"] ||
-      payload.startMode === "realtime")
-  ) {
-    throw new HTTPException(403, {
-      message: "Host selection requires a verified direct owner and non-realtime start",
-    });
-  }
-  if (hostSelections.length)
-    prepareHostMcpOwnerAuthorization(authorization!, workspaceId, "connections:read");
+
   if (hasReservedOpenGeniSlackBotSessionMetadata(payload.metadata)) {
     throw new HTTPException(422, {
       message: `${OPENGENI_SLACK_BOT_SESSION_METADATA_KEY} is reserved for scheduler routing`,
@@ -2216,7 +2186,7 @@ async function createSessionForRequestInFileScope(
         selectedInstalledSkillIds: payload.installedSkillIds ?? [],
         initialAgentLearning: payload.agentLearning,
         ...sessionScope,
-        selectedHostMcpDelegations: hostSelections,
+
         ...(payload.requestedSessionId ? { requestedSessionId: payload.requestedSessionId } : {}),
         visibility: effectiveVisibility,
         variableSetIds: payload.variableSetIds ?? [],
@@ -2500,14 +2470,7 @@ async function createSessionForRequestInFileScope(
   // tool's permission/target authorization predicate, so attachment alone
   // exposes nothing.
   const tools = withFirstPartyTools(selectedTools, runtimeSettings);
-  const captureSelectedHostAuthority = prepareSelectedHostTurnAuthority(
-    runtimeSettings,
-    tools,
-    grant,
-    workspaceId,
-    hostSelections,
-    authorization,
-  );
+
   const captureLinkedAuthority = prepareExternalLinkTurnAdmission(authorization);
   await validateGitHubRepositorySelection(db, workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
@@ -2788,6 +2751,7 @@ async function createSessionForRequestInFileScope(
     resources,
     source: connectionDelegationSource,
     authoritySelections: payload.connectionAuthorities,
+    visibility: effectiveVisibility,
     googleDrivePublicationEnabled,
     atlassianEnabled,
   });
@@ -3168,8 +3132,8 @@ async function createSessionForRequestInFileScope(
       sandboxGroupId,
       metadata: creationMetadata ?? {},
       ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
-      selectedHostMcpDelegations: hostSelections,
-      ...(captureSelectedHostAuthority || captureLinkedAuthority
+
+      ...(captureLinkedAuthority
         ? {
             captureInitialTurnAuthority: async (
               tx: Database,
@@ -3177,7 +3141,6 @@ async function createSessionForRequestInFileScope(
               turnId: string,
             ) => {
               await captureLinkedAuthority?.(tx, sessionId, turnId);
-              await captureSelectedHostAuthority?.(tx, sessionId, turnId);
             },
           }
         : {}),
@@ -3263,18 +3226,7 @@ async function createSessionForRequestInFileScope(
         { message: error.message, cause: error },
       );
     }
-    if (error instanceof HostMcpDelegationAuthorityError) {
-      throw new HTTPException(403, {
-        message: "Host delegation authority unavailable",
-        cause: error,
-      });
-    }
-    if (error instanceof HostMcpBindingConflictError) {
-      throw new HTTPException(409, {
-        message: "Host delegation selection conflicts",
-        cause: error,
-      });
-    }
+
     if (error instanceof AgentCommandAuthorityError) {
       throw new HTTPException(403, { message: error.message });
     }
@@ -3329,89 +3281,6 @@ export async function createSessionForRequest(
   ).session;
 }
 
-/** Snapshot the selected destination, then recheck live actor, binding and grant
- * inside the transaction which accepts the turn. Neither selection nor a
- * registered binding alone is execution authority. Shared by create/send/steer. */
-function prepareSelectedHostTurnAuthority(
-  settings: Settings,
-  tools: ToolRef[],
-  grant: AccessGrant,
-  workspaceId: string,
-  selections: HostMcpCreateSelection[],
-  authorization?: AccessGrantAuthorization,
-): ((tx: Database, sessionId: string, turnId: string) => Promise<void>) | undefined {
-  if (!selections.length) return undefined;
-  if (
-    !authorization ||
-    authorization.grant.accountId !== grant.accountId ||
-    authorization.grant.subjectId !== grant.subjectId ||
-    authorization?.grant.workspaceId !== workspaceId ||
-    !hasPermission(authorization?.grant.permissions ?? [], "connections:read") ||
-    !hasPermission(grant.permissions, "connections:read") ||
-    grant.metadata?.["sessionId"]
-  )
-    throw new HTTPException(403, {
-      message: "Host selection requires a verified direct owner",
-    });
-  const beforeCommit = prepareHostMcpOwnerAuthorization(
-    authorization,
-    workspaceId,
-    "connections:read",
-  );
-  const configs = new Map(
-    selections.map((selection) => {
-      const configured = settings.mcpServers.find((server) => server.id === selection.serverId);
-      if (
-        !configured ||
-        !tools.some((tool) => tool.kind === "mcp" && tool.id === selection.serverId) ||
-        configured.connectionRef?.authoritySource !== "host" ||
-        !configured.connectionRef.hostBinding ||
-        !configured.url
-      )
-        throw new HTTPException(422, {
-          message: "Host delegation must match a selected configured host server",
-        });
-      assertHostMcpAuthoritySourceAdmissionEnabled(settings, configured.connectionRef);
-      return [selection.serverId, structuredClone(configured)] as const;
-    }),
-  );
-  return async (tx, sessionId, turnId) => {
-    const owner = await beforeCommit(tx);
-    for (const selection of selections) {
-      const delegation = await getHostMcpDelegation(tx, owner, selection.delegationId);
-      const binding = delegation ? await getHostMcpBinding(tx, owner, delegation.bindingId) : null;
-      const configured = configs.get(selection.serverId)!;
-      if (
-        !delegation ||
-        !binding ||
-        delegation.status !== "active" ||
-        binding.status !== "active" ||
-        delegation.generation !== selection.generation ||
-        !hostMcpBindingMatchesSelection(binding, {
-          serverId: selection.serverId,
-          destinationUrl: configured.url!,
-          connectionRef: configured.connectionRef!,
-        })
-      )
-        throw new HTTPException(403, { message: "Host delegation selection changed" });
-      try {
-        await captureDirectHostMcpAuthority(tx, owner, {
-          sessionId,
-          turnId,
-          delegationId: delegation.id,
-          expectedDelegationGeneration: selection.generation,
-        });
-      } catch (error) {
-        if (error instanceof HostMcpDelegationAuthorityError)
-          throw new HTTPException(403, { message: "Host delegation authority unavailable" });
-        if (error instanceof HostMcpBindingConflictError)
-          throw new HTTPException(409, { message: "Host delegation selection conflicts" });
-        throw error;
-      }
-    }
-  };
-}
-
 function sessionPromptBoundaryRequestHash(input: {
   delivery: "send" | "steer";
   controlEtag: string | null;
@@ -3426,8 +3295,8 @@ function sessionPromptBoundaryRequestHash(input: {
   latencyMode: "standard" | "priority" | "fast" | null;
   source: "user" | "api";
   mcpCredentialUpdates: SessionMcpCredentialUpdateInput[];
-  connectionAuthorities?: McpConnectionAuthoritySelection[];
-  selectedHostMcpDelegations?: HostMcpCreateSelection[];
+  connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
+
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
   commandActor: SessionCommandActor;
 }): string {
@@ -3447,9 +3316,7 @@ function sessionPromptBoundaryRequestHash(input: {
     source: input.source,
     mcpCredentialUpdates: input.mcpCredentialUpdates,
     connectionAuthorities: input.connectionAuthorities ?? [],
-    ...(input.selectedHostMcpDelegations?.length
-      ? { selectedHostMcpDelegations: input.selectedHostMcpDelegations }
-      : {}),
+
     personalResourceAttachment: input.personalResourceAttachment ?? null,
     ...(input.commandActor.type === "service"
       ? {
@@ -3487,8 +3354,8 @@ async function acceptSessionUserMessageInFileScope(
     latencyMode?: "standard" | "priority" | "fast" | null;
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
-    connectionAuthorities?: McpConnectionAuthoritySelection[];
-    selectedHostMcpDelegations?: HostMcpCreateSelection[];
+    connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
+
     delivery?: "send" | "steer";
     origin?: "human" | "operator";
     controlEtag?: string | null;
@@ -3506,24 +3373,7 @@ async function acceptSessionUserMessageInFileScope(
   replay: boolean;
 }> {
   const { db, bus, workflowClient, objectStorage } = deps;
-  const hostSelections = HostMcpCreateSelections.parse(input.selectedHostMcpDelegations ?? []).sort(
-    (a, b) => (a.serverId < b.serverId ? -1 : a.serverId > b.serverId ? 1 : 0),
-  );
-  if (
-    hostSelections.length &&
-    (!input.authorization ||
-      input.authorization.grant.accountId !== grant.accountId ||
-      input.authorization.grant.subjectId !== grant.subjectId ||
-      input.authorization?.grant.workspaceId !== workspaceId ||
-      !hasPermission(input.authorization?.grant.permissions ?? [], "connections:read") ||
-      !hasPermission(grant.permissions, "connections:read") ||
-      grant.metadata?.["sessionId"])
-  )
-    throw new HTTPException(403, {
-      message: "Host selection requires a verified direct owner",
-    });
-  if (hostSelections.length)
-    prepareHostMcpOwnerAuthorization(input.authorization!, workspaceId, "connections:read");
+
   const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
   const delivery = input.delivery ?? "send";
   const source = delegatedServiceInitiator || input.origin === "operator" ? "api" : "user";
@@ -3561,7 +3411,7 @@ async function acceptSessionUserMessageInFileScope(
         latencyMode: input.latencyMode ?? null,
         source,
         mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
-        selectedHostMcpDelegations: hostSelections,
+
         ...(input.connectionAuthorities
           ? { connectionAuthorities: input.connectionAuthorities }
           : {}),
@@ -3725,15 +3575,18 @@ async function acceptSessionUserMessageInFileScope(
             connectionDelegationSource.turnId,
           )
         : null;
-    const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
-      db,
-      workspaceId,
-      settings,
-      inheritedPersonalConnectionDelegations
-        ? {
-            personalConnectionDelegations: inheritedPersonalConnectionDelegations,
-          }
-        : { subjectId: grant.subjectId },
+    const runtimeSettings = settingsWithSessionMcpServerMetadata(
+      await settingsWithEnabledCapabilityMcpServers(
+        db,
+        workspaceId,
+        settings,
+        inheritedPersonalConnectionDelegations
+          ? {
+              personalConnectionDelegations: inheritedPersonalConnectionDelegations,
+            }
+          : { subjectId: grant.subjectId },
+      ),
+      existingSession.mcpServers,
     );
     const personalConnectionDelegations = await freezePersonalConnectionDelegations({
       db,
@@ -3743,6 +3596,7 @@ async function acceptSessionUserMessageInFileScope(
       resources: [...existingSession.resources, ...requestedResources],
       source: connectionDelegationSource,
       targetSessionId: sessionId,
+      visibility: (await getSessionAuthorityProjection(db, workspaceId, sessionId))?.visibility,
       googleDrivePublicationEnabled:
         existingSession.firstPartyMcpTools.includes("editable_artifact_export") &&
         existingSession.firstPartyMcpTools.includes("editable_artifact_export_status") &&
@@ -3755,14 +3609,7 @@ async function acceptSessionUserMessageInFileScope(
           existingSession.firstPartyMcpPermissions.includes("connections:read")),
       ...(input.connectionAuthorities ? { authoritySelections: input.connectionAuthorities } : {}),
     });
-    const captureSelectedHostAuthority = prepareSelectedHostTurnAuthority(
-      settingsWithSessionMcpServerMetadata(runtimeSettings, existingSession.mcpServers),
-      existingSession.tools,
-      grant,
-      workspaceId,
-      hostSelections,
-      input.authorization,
-    );
+
     const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);
     const { accepted, turn, draft, receipt, routing, interruptionCount, replay } =
       await postUserMessageTurn({
@@ -3785,12 +3632,11 @@ async function acceptSessionUserMessageInFileScope(
         turnExecutionPolicy,
         mcpCredentialUpdates,
         personalConnectionDelegations,
-        selectedHostMcpDelegations: hostSelections,
-        ...(captureSelectedHostAuthority || captureLinkedAuthority
+
+        ...(captureLinkedAuthority
           ? {
               captureTurnAuthority: async (tx: Database, turnId: string) => {
                 await captureLinkedAuthority?.(tx, sessionId, turnId);
-                await captureSelectedHostAuthority?.(tx, sessionId, turnId);
               },
             }
           : {}),

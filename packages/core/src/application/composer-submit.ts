@@ -48,10 +48,10 @@ export async function submitComposerDraftForRequest(
     reasoningEffort: input.reasoningEffort,
     latencyMode: input.latencyMode,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
-    connectionAuthorities: input.connectionAuthorities,
-    ...(input.selectedHostMcpDelegations
-      ? { selectedHostMcpDelegations: input.selectedHostMcpDelegations }
+    ...(input.connectionAuthorities !== undefined
+      ? { connectionAuthorities: input.connectionAuthorities }
       : {}),
+
     ...(input.personalResourceAttachment
       ? { personalResourceAttachment: input.personalResourceAttachment }
       : {}),

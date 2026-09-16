@@ -64,7 +64,7 @@ import { hasPermission } from "../access";
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { listCapabilityPacks, listWorkspaceCapabilityPacks } from "./packs";
-import { assertHostMcpAuthoritySourceAdmissionEnabled } from "./host-mcp-authority-source-admission";
+import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -560,7 +560,7 @@ async function validateMcpCapabilityConnectionRef(
     });
   }
   if (normalized.authoritySource === "host") {
-    assertHostMcpAuthoritySourceAdmissionEnabled(input.settings, normalized);
+    assertNativeMcpConnectionRef(normalized);
     return normalized;
   }
 

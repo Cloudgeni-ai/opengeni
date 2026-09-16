@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { act } from "react";
 
 import { ChatComposer } from "../src/components/chat-composer";
+import * as Composer from "../src/composer";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { EffectiveSessionControl } from "@opengeni/sdk";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
@@ -73,6 +74,30 @@ async function press(textarea: HTMLTextAreaElement, init: KeyboardEventInit): Pr
 }
 
 describe("ChatComposer delivery and lifecycle controls", () => {
+  test("a custom footer keeps native input, focus and keyboard delivery", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    const focusRef = { current: null as { focusInput: () => void } | null };
+    mounted = await renderComponent(
+      <ChatComposer
+        composer={composer(spy)}
+        focusRef={focusRef}
+        footer={
+          <Composer.Footer>
+            <span>Business controls</span>
+            <Composer.SendButton />
+          </Composer.Footer>
+        }
+      />,
+    );
+    const input = mounted.container.querySelector("textarea")!;
+    focusRef.current?.focusInput();
+    expect(document.activeElement).toBe(input);
+    expect(mounted.container.textContent).toContain("Business controls");
+    expect(mounted.container.querySelectorAll("textarea")).toHaveLength(1);
+    await press(input, {});
+    await press(input, { metaKey: true });
+    expect(spy.sends).toEqual(["send", "steer"]);
+  });
   test("keeps the mobile footer on one nowrap row when controls and actions share the bar", async () => {
     const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
     mounted = await renderComponent(
@@ -237,11 +262,18 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     expect(spy.sends).toEqual(["send"]);
   });
 
-  test("Enter explains missing annotation notes instead of failing silently", async () => {
+  test.each([false, true])("annotation review survives custom footer: %s", async (customFooter) => {
     const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
     let reviewRequests = 0;
     mounted = await renderComponent(
       <ChatComposer
+        footer={
+          customFooter ? (
+            <Composer.Footer>
+              <Composer.SendButton />
+            </Composer.Footer>
+          ) : undefined
+        }
         composer={{
           ...composer(spy),
           canSend: false,

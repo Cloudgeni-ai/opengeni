@@ -7,7 +7,7 @@ import type { SessionTurn } from "@opengeni/contracts";
 import type { Database, resolveAcceptedConnectionUse } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
-import { connectionTokenResolverForTurn } from "../src/activities/mcp-credentials";
+import { bindNativeConnectionCredentialsToTurn } from "../src/activities/mcp-credentials";
 
 type AuthorizeInput = Parameters<typeof resolveAcceptedConnectionUse>[1];
 type Authorization = Awaited<ReturnType<typeof resolveAcceptedConnectionUse>>;
@@ -52,36 +52,55 @@ async function laneCount(
 }
 
 function resolverFor(input: {
-  obs: ReturnType<typeof observability>;
+  obs?: ReturnType<typeof observability>;
   authorize?: (authority: AuthorizeInput) => Authorization;
 }) {
-  return connectionTokenResolverForTurn({
-    db: {} as Database,
-    settings: testSettings(),
-    accountId: "account-1",
-    workspaceId: "workspace-1",
-    sessionId: "session-1",
-    rootSessionId: "session-root",
-    attemptId: "attempt-1",
-    turn,
-    observability: input.obs,
-    isSessionTenancyProductActivated: async () => false,
-    ...(input.authorize
-      ? { authorizeAcceptedUse: async (_db, authority) => input.authorize!(authority) }
-      : {}),
-    connectionCredentials: {
-      mcpCredentials: async (request) => ({
-        status: "ok",
-        accountId: request.accountId,
-        workspaceId: request.workspaceId,
-        sessionId: request.sessionId,
-        headers: { Authorization: "Bearer resolved" },
-        connectionId: request.connectionRef.connectionId ?? WORKSPACE_CONNECTION_ID,
-        providerDomain: request.connectionRef.providerDomain,
-        ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
-      }),
+  return bindNativeConnectionCredentialsToTurn(
+    {
+      db: {} as Database,
+      settings: testSettings(),
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      attemptId: "attempt-1",
+      turn,
+      observability: input.obs,
+      isSessionTenancyProductActivated: async () => false,
+      ...(input.authorize
+        ? { authorizeAcceptedUse: async (_db, authority) => input.authorize!(authority) }
+        : {}),
     },
-  });
+    async (request) => {
+      // The native engine owns acquisition authorization; this composition test
+      // supplies its result and verifies only the worker's metadata-only counter.
+      const use = request.connectionUseContext;
+      const authority =
+        use && input.authorize
+          ? input.authorize({
+              ...use,
+              serverId: request.serverId,
+              connectionId: WORKSPACE_CONNECTION_ID,
+              providerDomain: request.connectionRef.providerDomain,
+              connectionKind: "oauth2",
+              subjectScope: "workspace",
+            })
+          : undefined;
+      if (authority?.status === "denied")
+        return {
+          status: "auth_needed",
+          reason: "missing_connection",
+          providerDomain: request.connectionRef.providerDomain,
+        };
+      return {
+        status: "ok",
+        headers: { Authorization: "Bearer synthetic" },
+        connectionId: request.connectionRef.connectionId ?? WORKSPACE_CONNECTION_ID,
+        ...(authority?.status === "authorized"
+          ? { connectionUseAttribution: authority.attribution }
+          : {}),
+      };
+    },
+  );
 }
 
 const request = {
@@ -170,31 +189,7 @@ describe("tenancy compatibility lane telemetry", () => {
   });
 
   test("resolution still succeeds with no observability wired at all", async () => {
-    const resolver = connectionTokenResolverForTurn({
-      db: {} as Database,
-      settings: testSettings(),
-      accountId: "account-1",
-      workspaceId: "workspace-1",
-      sessionId: "session-1",
-      rootSessionId: "session-root",
-      attemptId: "attempt-1",
-      turn,
-      isSessionTenancyProductActivated: async () => false,
-      connectionCredentials: {
-        mcpCredentials: async (hostRequest) => ({
-          status: "ok",
-          accountId: hostRequest.accountId,
-          workspaceId: hostRequest.workspaceId,
-          sessionId: hostRequest.sessionId,
-          headers: { Authorization: "Bearer resolved" },
-          connectionId: WORKSPACE_CONNECTION_ID,
-          providerDomain: hostRequest.connectionRef.providerDomain,
-          ...(hostRequest.connectionRef.provider
-            ? { provider: hostRequest.connectionRef.provider }
-            : {}),
-        }),
-      },
-    });
+    const resolver = resolverFor({});
     const result = await resolver({
       ...request,
       connectionRef: {

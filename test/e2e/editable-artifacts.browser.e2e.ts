@@ -364,6 +364,7 @@ function artifactApiEnvironment(
 ): Record<string, string | undefined> {
   return {
     OPENGENI_ENVIRONMENT: "test",
+    OPENGENI_PRODUCT_ACCESS_MODE: "local",
     NODE_ENV: "test",
     OPENGENI_DATABASE_URL: services.runtimeDatabaseUrl,
     OPENGENI_NATS_URL: services.natsUrl,

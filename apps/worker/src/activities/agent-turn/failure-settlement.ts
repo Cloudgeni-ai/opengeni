@@ -225,6 +225,16 @@ function acceptedCodexPolicySnapshot(
 }
 
 export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgentTurnResult> {
+  if (deps.settings.environment === "local" && deps.error instanceof Error) {
+    // Keep local startup failures diagnosable without logging error messages,
+    // absolute host paths, prompts, credentials, or provider response bodies.
+    const locations = (deps.error.stack ?? "")
+      .split("\n")
+      .slice(1)
+      .flatMap((line) => line.match(/(?:apps|packages)\/[A-Za-z0-9_./-]+:\d+:\d+/g) ?? [])
+      .slice(0, 8);
+    console.error(JSON.stringify({ message: "Local turn failure source locations", locations }));
+  }
   const {
     error,
     input,

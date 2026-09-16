@@ -18,10 +18,6 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
-    "./remote-mcp-credentials": {
-      "types": "./src/remote-mcp-credentials.ts",
-      "default": "./src/remote-mcp-credentials.ts"
-    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

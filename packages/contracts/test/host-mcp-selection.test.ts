@@ -25,7 +25,7 @@ const binding = (connectionId: string) => ({
   },
 });
 
-test("durable composer submission preserves and validates explicit host selections", () => {
+test("durable composer submission rejects retired host selections", () => {
   const request = {
     text: "Use my selected account",
     annotations: [],
@@ -41,8 +41,8 @@ test("durable composer submission preserves and validates explicit host selectio
     { serverId: "host-tools", delegationId: crypto.randomUUID(), generation: 1 },
   ];
   expect(
-    SubmitComposerDraftRequest.parse({ ...request, selectedHostMcpDelegations }),
-  ).toMatchObject({ selectedHostMcpDelegations });
+    SubmitComposerDraftRequest.safeParse({ ...request, selectedHostMcpDelegations }).success,
+  ).toBe(false);
   expect(
     SubmitComposerDraftRequest.safeParse({
       ...request,

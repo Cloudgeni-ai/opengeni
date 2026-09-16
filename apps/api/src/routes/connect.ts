@@ -32,7 +32,7 @@ import {
   createConnection,
   updateConnection,
   encryptEnvironmentValue,
-  normalizedHostCredentialHeaders,
+  normalizedCredentialHeaders,
   listGitHubInstallationAccessForWorkspace,
   getPackInstallation,
   listPrReviewAppRegistrations,
@@ -923,7 +923,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       try {
         credentialHeaders =
           "headers" in values
-            ? normalizedHostCredentialHeaders(
+            ? normalizedCredentialHeaders(
                 z.record(z.string(), z.string()).parse(JSON.parse(values.headers)),
               )
             : { authorization: `Bearer ${values.token}` };

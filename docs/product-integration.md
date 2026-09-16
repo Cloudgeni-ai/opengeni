@@ -207,6 +207,14 @@ claim that provenance. External identity admission does not create an OpenGeni
 login. Broader personal-resource and durable external execution guarantees must
 be verified separately from core private-session access.
 
+An organization-admin backend may read and update
+`/v1/organizations/:organizationId/private-session-settings` with its organization
+key (`workspace:admin`), without a browser login or synthetic membership. Enabling
+the setting still requires platform readiness. Updates require `expectedVersion`
+and `operationId`; retries preserve their result and recheck live key authority.
+This product setting grants no private-session access: create and use sessions
+through the intended user's `asUser` context.
+
 `firstPartyMcpTools` and `firstPartyMcpPermissions` still narrow what a session
 can do, and narrowing is monotone: a child session, an agent updating its own
 tool policy, a scheduled task created by an agent, and the Codemode SDK proxy
@@ -616,6 +624,24 @@ An ambiguous network result is not itself a provisioning failure. Retry
 `ensureWorkspace` with the exact same external source/id pair; a successful
 replay returns the original workspace with `created: false` and preserves its
 settings.
+
+Connection creation accepts an `operationId`. After an ambiguous response,
+`getConnectionCreationResult(workspaceId, operationId)` recovers that initiating
+actor's committed, secret-free connection metadata. Use the same `asUser` identity;
+an organization administrator does not inherit another actor's creation receipt.
+The lookup does not refresh, reconnect, or restore a revoked connection. A `404`
+is not proof that an earlier request is no longer in flight. Exact creation
+retries still require the original payload; changed credentials with the same
+operation ID are rejected instead of overwriting accepted credentials.
+
+For initial personal-connection setup, `initialUseContexts` can select
+`user_private`, `workspace_shared`, or both. This requires an `operationId` and
+the same native owner permissions as issuing ordinary standing connection-use
+grants. Selecting `workspace_shared` explicitly acknowledges shared output; it
+does not share ownership of the credential. The connection and its initial native
+grants commit atomically. Replaying creation never issues another grant, including
+after a grant was revoked. Omission preserves connection-only setup. Later changes
+use the ordinary native grant lifecycle, not another connection-creation request.
 
 ## Delivery checklist
 

@@ -221,7 +221,6 @@ export function ScenarioStack({
 
   const chrome = (
     <SessionChrome
-      compact
       key={`${scenario.id}-${scenario.defaultActive ?? "none"}`}
       queue={queue}
       composer={composer}

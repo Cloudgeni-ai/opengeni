@@ -10,44 +10,21 @@ import {
   listManagedHumanUserResourceAuthorities,
   requireAccessGrantAuthorization,
   revokeManagedHumanUserResourceGrant,
-  SessionAuthorizationDeniedError,
-  SessionAuthorizationUnavailableError,
-  SessionTenancyManagedHumanRequiredError,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import { nestedPostgresSqlState, SessionTenancyNotActivatedError } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import {
   connectionUseGrantLifecycleInput,
   projectSelfConnectionAuthorities,
+  connectionAuthorityLifecycleError as lifecycleError,
 } from "../connection-authority-owner";
 
 async function body<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
   const parsed = schema.safeParse(await context.req.json().catch(() => null));
   if (!parsed.success) throw new HTTPException(422, { message: "invalid connection authority" });
   return parsed.data;
-}
-
-function lifecycleError(error: unknown): never {
-  if (
-    error instanceof SessionAuthorizationDeniedError ||
-    error instanceof SessionTenancyManagedHumanRequiredError ||
-    error instanceof SessionTenancyNotActivatedError
-  ) {
-    throw new HTTPException(403, { message: "connection authority denied" });
-  }
-  if (error instanceof SessionAuthorizationUnavailableError) {
-    throw new HTTPException(503, { message: "session authorization unavailable" });
-  }
-  if (nestedPostgresSqlState(error) === "42501") {
-    throw new HTTPException(403, { message: "connection authority denied" });
-  }
-  if (nestedPostgresSqlState(error) === "22023") {
-    throw new HTTPException(422, { message: "invalid connection authority" });
-  }
-  throw error;
 }
 
 export function registerConnectionAuthorityRoutes(app: Hono, deps: ApiRouteDeps): void {

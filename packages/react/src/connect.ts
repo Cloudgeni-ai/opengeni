@@ -20,6 +20,11 @@ export { ConnectSetup, type ConnectSetupProps } from "./connect-setup";
 export { ConnectChooser, type ConnectChooserProps } from "./connect-chooser";
 export { ConnectAccounts, type ConnectAccountsProps } from "./connect-accounts";
 export { ConnectPanel, type ConnectPanelProps } from "./connect-panel";
+export { ConnectionDiscovery, type ConnectionDiscoveryProps } from "./connection-discovery";
+export {
+  McpConnectionCard,
+  type McpConnectionCardProps,
+} from "./components/session-mcp-capability-card";
 export { DeviceAuthorization, type DeviceAuthorizationProps } from "./device-authorization";
 export {
   IdentityLinkConsent,
@@ -71,5 +76,6 @@ export {
 export { ConnectionInstalled, type ConnectionInstalledItem } from "./connection-installed";
 export { ConnectionTypePicker, type ConnectionType } from "./connection-type-picker";
 export { ConnectionLogo } from "./connection-logo";
+export { capabilityLogoFallback } from "./capability-logo-fallback";
 export { PluginDiscovery, type PluginDiscoveryProps } from "./plugin-discovery";
 export { PluginDetails } from "./plugin-details";

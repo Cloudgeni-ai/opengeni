@@ -1,7 +1,7 @@
 import { authorizeSessionPersonalConnection } from "./session-connection-authority";
 import { attachSessionCapability } from "./attach-session-capability";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import type { AuthNeededItem } from "@opengeni/react";
+import { SessionMcpCapabilityCard, type AuthNeededItem } from "@opengeni/react";
 import { CheckIcon, Loader2Icon } from "lucide-react";
 import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
@@ -30,6 +30,23 @@ type SessionCapabilityCardProps = {
 };
 
 export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
+  const context = useAppContext();
+  const capability = props.item.capability;
+  const resolved = context.workspaceCapabilityCatalog.find((entry) => entry.id === capability?.id);
+  if (capability && resolved?.kind === "mcp" && resolved.authKind === "oauth2") {
+    return (
+      <SessionMcpCapabilityCard
+        client={context.client}
+        workspaceId={props.workspaceId}
+        sessionId={props.sessionId}
+        capabilityId={capability.id}
+        name={capability.name}
+        rationale={capability.rationale}
+        returnUrl={window.location.href}
+        onConfigured={props.onConfigured}
+      />
+    );
+  }
   return (
     <ScopedSessionCapabilityCard
       key={`${props.workspaceId}:${props.sessionId}:${props.item.capability!.id}`}

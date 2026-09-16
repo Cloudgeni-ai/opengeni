@@ -51,5 +51,6 @@ export default defineConfig({
   external,
   esbuildOptions(options) {
     options.jsx = "automatic";
+    options.loader = { ...options.loader, ".ico": "dataurl" };
   },
 });

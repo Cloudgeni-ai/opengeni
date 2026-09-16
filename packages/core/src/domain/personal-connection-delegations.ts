@@ -1,4 +1,5 @@
 import type { McpServerConfig, Settings } from "@opengeni/config";
+import { HTTPException } from "hono/http-exception";
 import type {
   AccessGrant,
   ConnectionMetadata,
@@ -9,6 +10,8 @@ import type {
   SessionTurn,
   SocialConnection,
   ToolRef,
+  UserResourceAuthoritySummary,
+  SessionTenancyVisibility,
 } from "@opengeni/contracts";
 import {
   GOOGLE_DRIVE_PROVIDER_DOMAIN,
@@ -24,10 +27,13 @@ import {
 import {
   getPersonalGitHubRepositorySelectionState,
   getSessionTurnPersonalConnectionDelegations,
+  getSessionAuthorityEpoch,
   getConnectionMetadata,
   getSocialConnection,
   listConnectionsMetadata,
   listSocialConnections,
+  listSelfUserResourceAuthorities,
+  sessionTenancyProductActivated,
   resolvePersonalConnectionAuthoritySelectionOrigin,
   namedSubjectHasLiveWorkspaceAuthority,
   type Database,
@@ -315,6 +321,69 @@ function canonicalPersonalConnections(connections: ConnectionMetadata[]): Connec
 
 function sameProviderDomain(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase();
+}
+
+/** Restore existing owner grants; this never creates permission or chooses between accounts. */
+export function defaultPersonalConnectionSelections(input: {
+  servers: McpServerConfig[];
+  connections: ConnectionMetadata[];
+  authorities: UserResourceAuthoritySummary[];
+  subjectId: string;
+  workspaceId: string;
+  visibility: SessionTenancyVisibility;
+  /** Current server-read target; never infer a session grant from its owner alone. */
+  session?: { id: string; authorityEpoch: number } | undefined;
+  now?: number;
+}): McpConnectionAuthoritySelection[] {
+  return input.servers.flatMap((server) => {
+    const ref = server.connectionRef;
+    if (!isNativeSubjectConnectionRef(ref)) return [];
+    const matches = input.connections.flatMap((connection) => {
+      if (
+        connection.subjectId !== input.subjectId ||
+        connection.workspaceId !== input.workspaceId ||
+        connection.status !== "active" ||
+        !connection.authorityId ||
+        !sameProviderDomain(connection.providerDomain, ref.providerDomain) ||
+        (ref.kind && connection.kind !== ref.kind) ||
+        (ref.connectionId && connection.id !== ref.connectionId)
+      )
+        return [];
+      const authority = input.authorities.find(
+        (entry) =>
+          entry.resourceKind === "connection" &&
+          entry.resourceId === connection.id &&
+          entry.authorityId === connection.authorityId &&
+          entry.status === "active",
+      );
+      const grants = authority?.grants.filter(
+        (entry) =>
+          ((entry.mode === "always" &&
+            entry.targetSessionId === null &&
+            entry.authorityEpoch === null) ||
+            (entry.mode === "session" &&
+              input.session !== undefined &&
+              entry.targetSessionId === input.session.id &&
+              entry.authorityEpoch === input.session.authorityEpoch)) &&
+          entry.status === "active" &&
+          entry.action === "connection.use" &&
+          entry.targetWorkspaceId === input.workspaceId &&
+          entry.context === input.visibility &&
+          (!entry.expiresAt || Date.parse(entry.expiresAt) > (input.now ?? Date.now())),
+      );
+      // Prefer the narrower grant for the same account, regardless of list order.
+      const grant = grants?.find((entry) => entry.mode === "session") ?? grants?.[0];
+      return grant
+        ? [{ serverId: server.id, connectionId: connection.id, userDelegation: grant.delegation }]
+        : [];
+    });
+    if (matches.length > 1) {
+      throw new Error(
+        `multiple personal accounts are authorized for server ${server.id}; select one explicitly`,
+      );
+    }
+    return matches;
+  });
 }
 
 export function personalConnectionDelegationsFromVisibleConnections(input: {
@@ -809,7 +878,9 @@ export async function freezePersonalConnectionDelegations(input: {
   tools: ToolRef[];
   resources?: ResourceRef[];
   source: PersonalConnectionDelegationSource;
-  authoritySelections?: McpConnectionAuthoritySelection[];
+  authoritySelections?: McpConnectionAuthoritySelection[] | undefined;
+  /** Server-derived visibility; omission does not infer a default grant. */
+  visibility?: SessionTenancyVisibility | undefined;
   rejectUnselectedActivatedConnections?: boolean;
   /** Exact first-party export tool + permission gate, not broad opengeni attachment. */
   googleDrivePublicationEnabled?: boolean;
@@ -881,8 +952,49 @@ export async function freezePersonalConnectionDelegations(input: {
     input.workspaceId,
     ownerSubjectId,
   );
+  let authoritySelections = input.authoritySelections;
+  if (
+    authoritySelections === undefined &&
+    membership &&
+    input.visibility &&
+    servers.length > 0 &&
+    (await sessionTenancyProductActivated(input.db, input.workspaceId))
+  ) {
+    const authorities: UserResourceAuthoritySummary[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await listSelfUserResourceAuthorities(input.db, {
+        accountId: input.source.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: ownerSubjectId,
+        resourceKind: "connection",
+        limit: 100,
+        cursor,
+      });
+      authorities.push(...page.authorities);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    const authorityEpoch = input.targetSessionId
+      ? await getSessionAuthorityEpoch(input.db, {
+          accountId: input.source.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.targetSessionId,
+        })
+      : null;
+    authoritySelections = defaultPersonalConnectionSelections({
+      servers,
+      connections: targetLocalConnections,
+      authorities,
+      subjectId: ownerSubjectId,
+      workspaceId: input.workspaceId,
+      visibility: input.visibility,
+      ...(input.targetSessionId && authorityEpoch !== null
+        ? { session: { id: input.targetSessionId, authorityEpoch } }
+        : {}),
+    });
+  }
   const portableSelections = await Promise.all(
-    (input.authoritySelections ?? []).map(async (selection) => {
+    (authoritySelections ?? []).map(async (selection) => {
       const originWorkspaceId = await resolvePersonalConnectionAuthoritySelectionOrigin(input.db, {
         accountId: selection.userDelegation.organizationId,
         targetWorkspaceId: input.workspaceId,
@@ -891,7 +1003,9 @@ export async function freezePersonalConnectionDelegations(input: {
         delegation: selection.userDelegation,
       });
       if (!originWorkspaceId) {
-        throw new Error(`connection authority selection is unavailable: ${selection.serverId}`);
+        throw new HTTPException(403, {
+          message: `connection authority selection is unavailable: ${selection.serverId}`,
+        });
       }
       const connection = await getConnectionMetadata(
         input.db,
@@ -905,7 +1019,9 @@ export async function freezePersonalConnectionDelegations(input: {
         connection.subjectId !== ownerSubjectId ||
         connection.authorityId !== selection.userDelegation.authorityId
       ) {
-        throw new Error(`connection authority selection is unavailable: ${selection.serverId}`);
+        throw new HTTPException(403, {
+          message: `connection authority selection is unavailable: ${selection.serverId}`,
+        });
       }
       return connection;
     }),
@@ -932,7 +1048,7 @@ export async function freezePersonalConnectionDelegations(input: {
   if (personalGitHubResources.length > 0) {
     supportedSelectionIds.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
   }
-  const unsupportedSelections = (input.authoritySelections ?? []).filter(
+  const unsupportedSelections = (authoritySelections ?? []).filter(
     (selection) => !supportedSelectionIds.has(selection.serverId),
   );
   if (unsupportedSelections.length > 0) {
@@ -946,7 +1062,7 @@ export async function freezePersonalConnectionDelegations(input: {
     servers,
     subjectId: ownerSubjectId,
     connections: visibleConnections,
-    authoritySelections: (input.authoritySelections ?? []).filter((selection) =>
+    authoritySelections: (authoritySelections ?? []).filter((selection) =>
       selectedMcpServerIds.has(selection.serverId),
     ),
     ...(input.rejectUnselectedActivatedConnections !== undefined

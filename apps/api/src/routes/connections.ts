@@ -1,5 +1,11 @@
 import { createHash, createHmac } from "node:crypto";
+import {
+  createConnectionIdempotently,
+  getConnectionCreationResult,
+  ConnectionCreateIdempotencyError,
+} from "@opengeni/db";
 import { sql } from "drizzle-orm";
+import { connectionAuthorityLifecycleError } from "../connection-authority-owner";
 import { assertOrganizationIntegrationAllowed } from "@opengeni/contracts";
 import {
   withOrganizationIntegrationAcquisition,
@@ -73,6 +79,7 @@ import {
   requireAccessGrantAuthorization,
   requireEnvironmentEncryption,
   externalContinuationCommitAuthorizer,
+  issueManagedHumanUserResourceGrant,
 } from "@opengeni/core";
 import {
   consumeIntegrationOAuthStateNonce,
@@ -80,7 +87,6 @@ import {
   finishConnectOperation,
   getConnectAttempt,
   decryptEnvironmentValue,
-  createConnection,
   withWorkspaceSubjectRls,
   type Database,
   encryptEnvironmentValue,
@@ -204,6 +210,22 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  app.get("/v1/workspaces/:workspaceId/connections/operations/:operationId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    const operationId = CreateConnectionRequest.shape.operationId
+      .unwrap()
+      .parse(c.req.param("operationId"));
+    const connection = await getConnectionCreationResult(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      operationId,
+    });
+    if (!connection) throw new HTTPException(404, { message: "Connection operation not found" });
+    return c.json(ConnectionResponse.parse({ connection }));
+  });
+
   app.post("/v1/workspaces/:workspaceId/connections", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
@@ -219,6 +241,16 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       assertNotReservedPersonalGitHubMetadata(payload.metadata);
       const key = requireEnvironmentEncryption(settings);
       const subjectId = createConnectionSubjectId(payload, grant.subjectId);
+      if (
+        payload.initialUseContexts &&
+        (!subjectId ||
+          !payload.operationId ||
+          new Set(payload.initialUseContexts).size !== payload.initialUseContexts.length)
+      ) {
+        throw new HTTPException(422, {
+          message: "initialUseContexts requires a keyed personal connection and unique contexts",
+        });
+      }
       if (subjectId !== null) {
         assertPersonalConnectionOwnerPrincipal(access);
       }
@@ -278,7 +310,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             }
             return created;
           })()
-        : await createConnection(db, {
+        : await createConnectionIdempotently(db, {
             accountId: grant.accountId,
             workspaceId,
             subjectId,
@@ -289,6 +321,63 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null,
             metadata: payload.metadata,
             createdBySubjectId: grant.subjectId,
+            ...(payload.initialUseContexts
+              ? {
+                  onCreated: async (
+                    tx: Database,
+                    created: Awaited<ReturnType<typeof createConnectionIdempotently>>,
+                  ) => {
+                    if (!created.authorityId) {
+                      throw new HTTPException(409, {
+                        message: "Native personal connection authority is unavailable",
+                      });
+                    }
+                    for (const context of payload.initialUseContexts!) {
+                      await issueManagedHumanUserResourceGrant(
+                        { ...deps, db: tx },
+                        access,
+                        workspaceId,
+                        created.authorityId,
+                        {
+                          scope: "user",
+                          resourceKind: "connection",
+                          mode: "always",
+                          context,
+                          workspaceSharedAcknowledged: context === "workspace_shared",
+                        },
+                        "http",
+                      ).catch(connectionAuthorityLifecycleError);
+                    }
+                  },
+                }
+              : {}),
+            ...(payload.operationId
+              ? {
+                  operation: {
+                    id: payload.operationId,
+                    requestDigest: workspaceProviderCredentialRequestDigest(key, {
+                      action: "create",
+                      providerDomain,
+                      kind: payload.kind,
+                      subjectId,
+                      credential: payload.credential,
+                      grantedScopes: payload.grantedScopes,
+                      expiresAt: payload.expiresAt
+                        ? new Date(payload.expiresAt).toISOString()
+                        : null,
+                      metadata: payload.metadata,
+                      ...(payload.initialUseContexts
+                        ? { initialUseContexts: [...payload.initialUseContexts].sort() }
+                        : {}),
+                    }),
+                  },
+                }
+              : {}),
+          }).catch((error: unknown) => {
+            if (error instanceof ConnectionCreateIdempotencyError) {
+              throw new HTTPException(409, { message: error.message });
+            }
+            throw error;
           });
       return c.json(ConnectionResponse.parse({ connection }), 201);
     };
