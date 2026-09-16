@@ -120,43 +120,6 @@ Opengeni is built as those layers.
 
 **Rent the edges, own the middle.** Models, provider APIs, and the raw compute box change too fast to own, so every one of them is a swappable boundary. Durable state, governance, and knowledge are where your workflows, permissions, audit record, and institutional memory actually live, so they sit in a Postgres database you operate, export, and can leave with.
 
-```mermaid
-flowchart LR
-  Client["Console · SDK · your product · Slack · voice"]
-
-  subgraph Opengeni
-    direction LR
-    API["API<br/>authorizes every request"]
-    DB[("Postgres<br/>durable truth, written first")]
-    Temporal["Temporal<br/>coordinates, never holds the conversation"]
-    NATS["NATS<br/>live fanout, never the source of truth"]
-    Worker["Worker<br/>runs the agent loop"]
-  end
-
-  Sandbox["Managed sandbox<br/>Docker · Modal · cloud providers"]
-  Machine["Connected Machine<br/>your laptop, build server, GPU box"]
-
-  Client --> API
-  API <--> DB
-  API --> Temporal
-  API <--> NATS
-  Temporal --> Worker
-  Worker <--> DB
-  Worker --> NATS
-  Worker <--> Sandbox
-  Machine -. dials out, no platform credentials .-> Worker
-```
-
-### A session that can run for days
-
-The backbone is **session → turn → attempt**. A session is the durable conversation, policy, and compute context. A turn is one accepted unit of work: a human message, a goal continuation, a schedule, an approval, a child result. An attempt is one physical try at running it, fenced by a UUID and generation. If a worker dies mid-turn, the platform checkpoints the exact conversation truth and claims the same turn with a new attempt. A new attempt never means a new prompt, and a turn is never blindly re-run against a provider when nobody knows whether the first run went through.
-
-Long runs are bounded by budget, capacity, humans, and goals, never by a cap on how many steps a loop may take. The longest goal-driven session so far ran 18 days.
-
-> Any SDK gives you the loop. The platform is everything around the loop that survives a security review.
-
-The full map is in [docs/architecture.md](docs/architecture.md); the thinking behind the layers is on the [Opengeni blog](https://opengeni.substack.com/).
-
 ## Documentation
 
 | I want to...                          | Read                                                                                                        |
@@ -173,7 +136,7 @@ The full map is in [docs/architecture.md](docs/architecture.md); the thinking be
 | Understand the internals              | [Architecture](docs/architecture.md) · [Run lifecycle](docs/run-lifecycle.md) · [Docs map](docs/README.md)  |
 | See what is planned                   | [Roadmap](docs/roadmap.md)                                                                                  |
 
-The public product docs live at [docs.opengeni.ai](https://docs.opengeni.ai). The [CloudGeni Infrastructure Agents Guide](https://github.com/Cloudgeni-ai/infrastructure-agents-guide) covers patterns for infrastructure-focused agents.
+The public product docs live at [docs.opengeni.ai](https://docs.opengeni.ai), and the thinking behind the layers above is on the [Opengeni blog](https://opengeni.substack.com/). The [CloudGeni Infrastructure Agents Guide](https://github.com/Cloudgeni-ai/infrastructure-agents-guide) covers patterns for infrastructure-focused agents.
 
 ## Built with
 
