@@ -2976,9 +2976,25 @@ function installModelMcpCallIdentity(agent: ApprovalCapableAgent): void {
   }
 }
 
+/**
+ * The approval wrap and the call-identity wrap record the SDK function-tool
+ * name (already rewritten through `toFunctionToolName`), while the physical
+ * server and the attempt tool catalogue name the same tool by its raw
+ * registry-prefixed MCP name. For a hyphenated server id the two differ
+ * (`cendra_pms__task_create` vs `cendra-pms__task_create`), and an exact string
+ * comparison silently denies the correlation: an approved resume then reaches
+ * the catalogue with no confirmed invocation and is refused as unapproved.
+ * Compare both sides through the SDK's own rewrite; nothing wider.
+ */
+function sameModelToolName(recorded: string, requested: string): boolean {
+  if (recorded === requested) return true;
+  if (recorded.length === 0 || requested.length === 0) return false;
+  return toFunctionToolName(recorded) === toFunctionToolName(requested);
+}
+
 function modelMcpSourceCallId(modelName: string): string | undefined {
   const identity = modelMcpCallIdentity.getStore();
-  return identity?.modelName === modelName ? identity.callId : undefined;
+  return identity && sameModelToolName(identity.modelName, modelName) ? identity.callId : undefined;
 }
 
 /**
@@ -3265,7 +3281,7 @@ function runWithModelToolInvocation<T>(invocation: ModelToolInvocation, execute:
 
 function activeModelToolInvocation(modelName: string): ModelToolInvocation | null {
   const invocation = modelToolInvocation.getStore();
-  return invocation?.modelName === modelName ? invocation : null;
+  return invocation && sameModelToolName(invocation.modelName, modelName) ? invocation : null;
 }
 
 /**

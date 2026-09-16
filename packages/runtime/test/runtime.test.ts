@@ -3373,6 +3373,159 @@ describe("runtime event normalization", () => {
       expect(result.interruptions[0]?.rawItem).toMatchObject({ name: "cendra_pms__task_create" });
     });
 
+    // B3 (SPEC-BLOCKER-MAINT-P09-026-001). The approval wrap records the SDK
+    // function-tool name (`cendra_pms__task_create`); the attempt tool catalogue
+    // and the physical server name the same tool by its raw registry-prefixed
+    // name (`cendra-pms__task_create`). An exact comparison between the two
+    // never matched for a hyphenated server id, so the resumed, approved call
+    // reached the catalogue with no confirmed invocation and was refused as
+    // "Tool requires human approval" on the very generation that carried the
+    // approval. The pause worked; the execution after approval did not.
+    test("an approved resume executes a hyphenated server's catalogue tool exactly once", async () => {
+      const serverId = "cendra-pms";
+      const executions: Array<Record<string, unknown>> = [];
+      const local: MCPServer = {
+        ...fakeMcpServer("cendra-local"),
+        async listTools() {
+          return [
+            {
+              name: "task_create",
+              description: "Create a task",
+              inputSchema: {
+                type: "object" as const,
+                properties: { title: { type: "string" } },
+                required: ["title"],
+                additionalProperties: false,
+              },
+            },
+          ];
+        },
+        async callTool(_name: string, args: Record<string, unknown> | null) {
+          executions.push(args ?? {});
+          return [{ type: "text" as const, text: "created" }];
+        },
+      };
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [
+          {
+            id: serverId,
+            name: "Cendra PMS",
+            url: "https://cendra-local.invalid/mcp",
+            cacheToolsList: false,
+            requireApproval: ["task_create"],
+          },
+        ],
+      });
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async () => ({ managed: true, decision: "ask" }),
+        begin: async () => ({ allowed: true, managed: true, requestId: "cendra-request" }),
+        complete: async () => {},
+      };
+      // The local server's tool is projected into the attempt tool catalogue by
+      // the runtime itself under its raw registry-prefixed name; the host adds no
+      // definition of its own (a second one would collide on the tool path).
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: serverId }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 2,
+        connectorActionPolicy: hooks,
+        localMcpServers: [{ id: serverId, server: local }],
+      });
+      const pausedArgs = { title: "Restock minibar 204" };
+      const callId = "cendra-approved-call";
+      try {
+        expect(prefixedMcpToolName(serverId, "task_create")).toBe("cendra-pms__task_create");
+        const agent = buildOpenGeniAgent(settings, [], {
+          mcpServers: prepared.mcpServers,
+          connectorActionPolicy: hooks,
+          approvedToolCallId: callId,
+        });
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "cendra_pms__task_create",
+        );
+        if (!tool || tool.type !== "function") throw new Error("hyphenated catalogue tool missing");
+        const resumed = await tool.invoke(new RunContext(), JSON.stringify(pausedArgs), {
+          toolCall: { callId },
+        } as any);
+        expect(resumed).not.toMatchObject({ isError: true });
+        expect(executions).toEqual([pausedArgs]);
+      } finally {
+        await prepared.close();
+      }
+    });
+
+    test("an approved resume does not admit a different call id on a hyphenated server", async () => {
+      const serverId = "cendra-pms";
+      let executions = 0;
+      const local: MCPServer = {
+        ...fakeMcpServer("cendra-local"),
+        async listTools() {
+          return [
+            {
+              name: "task_create",
+              inputSchema: { type: "object" as const, properties: {}, additionalProperties: true },
+            },
+          ];
+        },
+        async callTool() {
+          executions += 1;
+          return [{ type: "text" as const, text: "created" }];
+        },
+      };
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [
+          {
+            id: serverId,
+            name: "Cendra PMS",
+            url: "https://cendra-local.invalid/mcp",
+            cacheToolsList: false,
+            requireApproval: ["task_create"],
+          },
+        ],
+      });
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async () => ({ managed: true, decision: "ask" }),
+        begin: async () => ({ allowed: true, managed: true, requestId: "cendra-request" }),
+        complete: async () => {},
+      };
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: serverId }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 2,
+        connectorActionPolicy: hooks,
+        localMcpServers: [{ id: serverId, server: local }],
+      });
+      try {
+        const agent = buildOpenGeniAgent(settings, [], {
+          mcpServers: prepared.mcpServers,
+          connectorActionPolicy: hooks,
+          approvedToolCallId: "cendra-approved-call",
+        });
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "cendra_pms__task_create",
+        );
+        if (!tool || tool.type !== "function") throw new Error("hyphenated catalogue tool missing");
+        expect(
+          await tool.invoke(new RunContext(), JSON.stringify({}), {
+            toolCall: { callId: "cendra-other-call" },
+          } as any),
+        ).toMatchObject({ isError: true });
+        expect(executions).toBe(0);
+      } finally {
+        await prepared.close();
+      }
+    });
+
     test("legacy approved MCP execution is durably admitted once and replay is denied", async () => {
       const mcp = startTestMcpServer();
       const serverConfig = {
