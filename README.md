@@ -1,581 +1,160 @@
-# OpenGeni
+<p align="center">
+  <a href="https://opengeni.ai">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs-site/logo/dark.svg">
+      <img src="docs-site/logo/light.svg" alt="Opengeni" width="320">
+    </picture>
+  </a>
+</p>
 
-**An open, self-hostable agentic runtime for organizations.**
+<h3 align="center">Production-ready self-hostable agentic service.</h3>
 
-OpenGeni is the platform layer that makes long-running AI agents safe to trust with real work: durable, replayable sessions; human approvals; governed credentials and memory; and a choice of where every session runs — a managed sandbox or your own hardware. It comes out of two years of running agents against production cloud infrastructure at [CloudGeni](https://cloudgeni.ai), where the recurring lesson was that safe agent adoption at scale is a platform problem, not an agent problem. OpenGeni is that platform, extracted into an Apache-2.0 runtime you operate yourself — the control plane, the sessions API, the event history, and the audit trail all live in your deployment, not on a vendor's servers.
+<p align="center">
+  Durable sessions · human approvals · governed memory · your choice of compute
+</p>
 
-OpenGeni is the runtime, not the agent. It provides a session-based API for creating, steering, observing, interrupting, and replaying agent runs, agnostic to what the agent does. The included React app is one client for that API; your own products can call the same API directly and let OpenGeni own durable session state, event history, approvals, and final outputs.
+<p align="center">
+  <a href="https://app.opengeni.ai"><strong>Start free at app.opengeni.ai →</strong></a>
+</p>
 
-Every session picks where it runs. A **managed sandbox** (a fresh cloud box OpenGeni provisions and tears down) and a **Connected Machine** (a computer you enroll — your laptop, a build server, a GPU box) are co-equal, first-class compute targets. A machine-targeted session runs directly on your hardware, under your own files and your own git credentials, with no cloud box in the loop and no inbound network exposure — the enrolled agent only dials out.
+<p align="center">
+  <a href="https://docs.opengeni.ai/quickstart">Quickstart</a> ·
+  <a href="https://docs.opengeni.ai">Docs</a> ·
+  <a href="https://docs.opengeni.ai/guides/self-host">Self-host</a> ·
+  <a href="https://github.com/Cloudgeni-ai/opengeni/issues">Issues</a>
+</p>
 
-If you want to try the managed version, go to [app.opengeni.ai](https://app.opengeni.ai).
+<p align="center">
+  <a href="https://github.com/Cloudgeni-ai/opengeni/actions/workflows/ci.yml"><img src="https://github.com/Cloudgeni-ai/opengeni/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://www.npmjs.com/package/@opengeni/sdk"><img src="https://img.shields.io/npm/v/@opengeni/sdk?label=%40opengeni%2Fsdk" alt="npm"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
+</p>
 
-To put OpenGeni behind an existing chat in one server handler and one component, run the [chat quickstart](examples/chat-quickstart). To see how a SaaS product embeds the React timeline, proxies sessions through its backend, exposes authenticated MCP tools, and reflects agent mutations live, run the [Northstar support example](examples/northstar-support).
+---
 
-## Why OpenGeni
+Opengeni is a production-ready agentic service: it runs AI agents that do real work, keeps a session going for hours or days, records every step in a replayable event log, stops for a human when an action needs approval, and puts each session either in a managed sandbox or directly on a machine you own.
 
-Most agent products give you some of these; OpenGeni's premise is that organizations need all four in one runtime:
+Opengeni is not the agent; it is everything the agent needs around it. Give agents work from the web app and follow along, or call the same session API from your own product and let Opengeni hold the state, history, approvals, and outputs. It grew out of two years of running agents against production cloud infrastructure at [Cloudgeni](https://cloudgeni.ai).
 
-- **Self-host everything, Apache-2.0 all the way down.** The control plane, sessions API, web app, and deployment artifacts (Helm chart, reference Terraform for Azure/AWS/GCP) are open source. The durable record is a Postgres database you operate.
-- **Durable, replayable sessions as an API.** Every event lands in a Postgres event log; live streams over SSE backfill from it, so a browser reload, a new client, or an audit replays the same history.
-- **Your hardware as a first-class target.** Connected Machines run sessions on computers you enroll, with dial-out-only networking, no platform-minted credentials on your machines, loud consent-based enrollment, and one-click revocation. Off by default until an operator enables it.
-- **Agent Knowledge and learning.** Agents retain useful facts, decisions, incidents, fixes, and source content in one searchable system. Automatic publishes immediately; optional Review first stages changes without pausing work. Knowledge, Instructions, and Skills have adjacent defaults with chat and scheduled-task overrides. Personal and workspace Knowledge share the same structure while preserving ownership.
+## Get started
 
-## What It Does
+**The fastest way is the managed service.** Sign up at [app.opengeni.ai](https://app.opengeni.ai), name your organization, connect a model (a ChatGPT/Codex or SuperGrok subscription, a provider key, or prepaid credits), and start your first session. Nothing to deploy. The [quickstart](https://docs.opengeni.ai/quickstart) walks through it.
 
-- Runs OpenAI Agents SDK agents behind a durable API.
-- Streams live session events over SSE while storing the replayable event log in Postgres.
-- Coordinates long-running work with Temporal signals for follow-ups, approvals, and interrupts.
-- Lets an in-flight agent request validated text or choice input and resume that exact tool call after an answer, allowed skip, expiry, or restart. See [docs/human-input.md](docs/human-input.md).
-- Runs each session on a chosen compute target: a managed sandbox (Docker, Modal, local, cloud provider, or none) or a **Connected Machine** you enroll — with a per-session working folder on that machine.
-- Establishes a machine-targeted turn directly on the enrolled machine, using the machine's own git credentials — no cloud box is created and no OpenGeni-minted token is pushed to it.
-- Keeps sessions working until the job is actually done: a session can carry a **goal** with success criteria, and stopping becomes an explicit act (`goal_complete` with evidence, `goal_pause` with a rationale, or a human interrupt) with no-progress and budget guards. See [docs/goals.md](docs/goals.md).
-- Attaches repositories, uploaded files, and document-search tools to sessions.
-- Provides a workspace knowledge layer: document upload, indexing, hybrid/vector/keyword search with pgvector, and **reviewed agent memories** with a human/API approval gate.
-- Uses a GitHub App integration for scoped repository access.
+Prefer to run it yourself? Everything is open source. Jump to [Run it locally](#run-it-locally) for a one-command dev stack, or to [Self-host](https://docs.opengeni.ai/guides/self-host) for production.
 
-## Project Status
+## Features
 
-This repository is early, but it now includes the baseline files expected for public collaboration:
+- **Durable, replayable sessions.** Every event lands in Postgres. Live streams backfill from it, so a browser reload, a new client, or an audit replays the same history.
+- **Sessions that finish the job.** Give a session a goal with success criteria. The agent keeps working until it completes the goal with evidence, pauses with a rationale, or a human interrupts.
+- **Humans in the loop.** Tool approvals gate risky actions. Agents can ask structured questions and resume the exact tool call after the answer, even across restarts.
+- **Run anywhere.** A managed sandbox (Docker, Modal, or a cloud provider) or a **Connected Machine**: your laptop, build server, or GPU box, enrolled once and driven directly. Machines only dial out and receive no Opengeni credentials.
+- **Agent Knowledge.** Files, retained sources, and useful findings in one searchable library, with personal and workspace ownership and optional review before anything is published.
+- **Integrate in one handler.** One organization API key on your server, one chat endpoint, and React components for the timeline, composer, and approvals.
+- **Managed or self-hosted.** Use [app.opengeni.ai](https://app.opengeni.ai) with nothing to run, or deploy the same API, web app, workers, Helm chart, and reference Terraform for Azure, AWS, and GCP yourself. All of it is Apache-2.0.
 
-- Apache-2.0 license.
-- Contribution guide.
-- Security reporting guide.
-- Code of conduct.
-- Issue templates.
-- Pull request template.
-- CI for typechecks and unit tests.
+## Run it locally
 
-## Public Preview / Security Boundary
-
-OpenGeni's core API is workspace-scoped. Canonical protected routes include the workspace id in the URL, and every request resolves to an internal access grant before route code touches workspace-owned data.
-
-There are three product access modes:
-
-- `local`: local development bootstrap account/workspace, subject `dev`, broad permissions.
-- `configured`: self-hosted or embedded deployments using configured deployment keys or delegated bearer tokens from a parent product.
-- `managed`: OpenGeni owns email/password sign-up through Better Auth, workspaces, organization and workspace API keys, prepaid Stripe credits, usage, and limits.
-
-The optional deployment shared-key boundary is still available for infra smoke tests and simple self-hosting. Ordinary clients send it as `x-opengeni-access-key`; organization API keys and delegated tokens use `Authorization: Bearer ...`. Valid first-party delegated bearers can enter the `/v1` API without copying the static deployment key, then remain constrained by normal route authorization.
-
-Do not expose a production deployment without a deliberate access mode, RLS-tested database role posture, rate limits, real model/sandbox credentials, and reviewed sandbox preparation policy. Sandbox preparation profiles and env allowlists can make host credentials available to agent sandboxes, so review `.env` before running live sessions.
-
-## Architecture
-
-Public clients talk only to the Hono API. The API validates requests, creates sessions, accepts user messages and control events, exposes durable history, and streams live events.
-
-```mermaid
-flowchart LR
-  Web["React web client"]
-  Service["External service"]
-  Webhook["Webhook caller"]
-  CustomUI["Custom UI or SDK"]
-
-  subgraph Managed["Managed agent service"]
-    API["Hono API<br/>public contract"]
-    DB["Postgres<br/>sessions, events, history items, run state"]
-    Temporal["Temporal<br/>orchestration and signals"]
-    Worker["Worker<br/>OpenAI Agents SDK harness"]
-    NATS["NATS Core<br/>live fanout"]
-    Control["NATS control plane<br/>machine exec/RPC"]
-    Relay["Stream relay<br/>pty/desktop frames"]
-    Sandbox["Managed sandbox<br/>Docker, Modal, cloud, or none"]
-  end
-
-  Machine["Connected Machine<br/>your enrolled computer"]
-
-  Web --> API
-  Service --> API
-  Webhook --> API
-  CustomUI --> API
-  API <--> DB
-  API --> Temporal
-  API <--> NATS
-  Temporal --> Worker
-  Worker <--> DB
-  Worker --> NATS
-  Worker <--> Sandbox
-  Worker <--> Control
-  Machine -. dials out .-> Control
-  Machine -. dials out .-> Relay
-```
-
-Managed sandboxes are provisioned inside the deployment. A Connected Machine is a computer you own: its agent dials **out** to the NATS control plane (for exec and control RPC) and to the stream relay (for terminal and desktop frames), so nothing has to be routable to the machine. Machine-target support is off by default and gated by an operator flag; see [Connected Machines](#connected-machines).
-
-Postgres is the durable source of truth. NATS is only the realtime fanout bus. If an API instance or SSE client misses live events, the API backfills from Postgres by event sequence.
-
-Temporal coordinates the work, but token streams and tool output do not go through workflow history. Agent execution runs inside non-retryable activities because model calls, sandbox commands, GitHub operations, and cloud-provider actions are side-effectful.
-
-For a map of every app and package and how they fit together, see [docs/architecture.md](docs/architecture.md).
-
-## Stack
-
-- Bun workspace
-- Hono API
-- React and Vite web app
-- Temporal worker
-- Postgres with Drizzle and pgvector
-- NATS Core realtime bus
-- Garage for local S3-compatible file storage and Azure Blob, AWS S3, or GCS for production object storage
-- OpenAI Agents SDK
-- Two co-equal compute targets: managed sandboxes (Docker, Modal, local, cloud providers, or none) and Connected Machines — computers you enroll and run sessions on directly (see [Connected Machines](#connected-machines) and [docs/architecture.md](docs/architecture.md) for the full list)
-- A Rust agent + stream relay for Connected Machines (`agent/crates`), served to hosts by the control plane
-
-## Agent Guides
-
-Pair this README with the [CloudGeni Infrastructure Agents Guide](https://github.com/Cloudgeni-ai/infrastructure-agents-guide) for architecture patterns and operating guidance around infrastructure-focused agents, including repositories, sandbox tools, Terraform/Checkov skills, GitHub App access, and cloud credentials.
-
-The capability catalog lets operators see and enable packs, MCP tools, APIs, skills, and plugins for the same runtime. See [docs/capabilities.md](docs/capabilities.md) for the unified catalog and [docs/packs.md](docs/packs.md) for the marketing social daily analysis pack.
-
-For product integration, keep OpenGeni as a standalone service by default. The
-fastest path is `@opengeni/sdk/chat`: one organization API key on your server,
-`createChatHandler` behind your chat endpoint (or the Vercel AI SDK and OpenAI
-adapters), a custom or compatible frontend, and per-chat `agentAccess` and
-`memory` options that keep every customer's chats in one workspace. Start
-with the canonical [product integration guide](docs/product-integration.md): an
-external backend holds one organization API key, maps each product tenant to an
-organization workspace (wire `kind: "shared"`), excludes Personal workspaces,
-and passes its own selected Skills inline per session. Continue with the
-[TypeScript SDK](packages/sdk/README.md), add the
-[React surfaces](packages/react/README.md) the product needs, and use the
-[workbench guide](docs/embedding-workbench.md) only when exposing agent compute.
-The [`opengeni-client` skill](.agents/skills/opengeni-client/SKILL.md) gives
-customer-side coding agents the same decision path. The
-[in-process embedding guide](docs/embedding.md) is for advanced hosts that
-intentionally bind OpenGeni runtime infrastructure into their own process.
-
-## Quick Start
-
-Prerequisites:
-
-- Bun
-- Docker
-- rustup (the artifact kernel uses its checked-in exact Rust toolchain)
-- OpenAI or Azure OpenAI credentials for real model runs
-
-Start the full local stack:
+For development, or to evaluate Opengeni before self-hosting. You need [Bun](https://bun.sh), Docker, [rustup](https://rustup.rs), and an OpenAI or Azure OpenAI key.
 
 ```bash
+git clone https://github.com/Cloudgeni-ai/opengeni.git
+cd opengeni
+cp .env.example .env   # add your model credentials
 bun run dev
 ```
 
-`bun run dev` installs dependencies, creates `.env` from `.env.example` when
-missing, runs migrations, and starts the API, both workers (control and turn),
-artifact services, Connected Machines relay, and web app. With
-`OPENGENI_DEV_BACKEND=auto` (the default), it uses Docker when the daemon is
-reachable and otherwise starts PostgreSQL, NATS, Temporal, and MinIO as native
-processes. Set the backend explicitly to `docker` or `native` when required.
+Open http://127.0.0.1:3000, describe a task, and watch the session run.
 
-The development web server forwards `/v1` requests to `VITE_API_BASE_URL`
-(the API port selected by the launcher), matching production ingress routing.
-OAuth callbacks can therefore return to the public web origin without landing
-on the application's “Page not found” screen.
+`bun run dev` installs dependencies, starts Postgres, NATS, Temporal, and object storage, runs migrations, builds the sandbox image, and starts the API, workers, and web app. See [Local development](docs/local-development.md) for manual startup, configuration, and the native (no Docker) path.
 
-The native infrastructure path is intended for Linux sandboxes and other hosts
-without Docker. It changes a copied `OPENGENI_SANDBOX_BACKEND=docker` default to
-the in-process `local` sandbox provider, while preserving explicit remote
-providers such as Modal or OpenSandbox. It also selects MinIO instead of the
-Docker-only Garage fixture. `bun run dev:down` stops this worktree's selected
-infrastructure; `bun run dev:clean -- --yes` also removes its data and
-`.env.runtime` without touching another worktree or unrelated Docker state.
+## Use it from your code and product
 
-The first development start also prepares the current-host editable-artifact
-kernel. OpenGeni reads `packages/artifact-tool/kernel/rust-toolchain.toml` and
-invokes Cargo and rustc through `rustup run <exact-pin>`; unrelated Homebrew or
-system Rust binaries earlier on `PATH` are ignored. Cargo is also bound to the
-pinned toolchain's absolute compiler path, so ambient compiler/wrapper variables
-and user Cargo configuration cannot substitute another rustc. Missing pinned
-toolchains and declared targets are installed without changing the rustup
-default or the shell `PATH`. Set `RUSTUP_AUTO_INSTALL=0` to forbid that setup
-and receive the exact manual install command instead.
+```ts
+import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
 
-Open:
+const og = new OpenGeni({
+  apiKey: process.env.OPENGENI_API_KEY!,
+  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+});
 
-- Web app: `http://127.0.0.1:3000`
-- API health: `http://127.0.0.1:8000/healthz`
-- NATS monitor: `http://127.0.0.1:8222`
-- Object storage: Garage `http://127.0.0.1:3900` with Docker by default, or
-  MinIO `http://127.0.0.1:9000` with the native backend/explicit MinIO fixture
-- Temporal gRPC: `127.0.0.1:7233`
-- Native Temporal UI: `http://127.0.0.1:8233`
-
-## Manual Startup
-
-Use this when you want separate terminals for each long-running process:
-
-```bash
-bun install
-docker compose up -d postgres nats temporal garage garage-init
-bun run db:migrate
-docker build -f docker/sandbox.Dockerfile -t opengeni-sandbox:local .
-bun run dev:api
-bun run dev:worker:control
-bun run dev:worker:turn
-bun run dev:web
+const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
+const reply = await chat.send("Summarize open incidents from the last week.");
+console.log(reply.text);
 ```
 
-The control and turn workers poll separate Temporal task queues, so both must run.
-A stack with only the control worker serves the API and web app normally but never
-executes an agent turn.
+Start with the [product integration guide](docs/product-integration.md), then the [TypeScript SDK](packages/sdk/README.md) and [React components](packages/react/README.md). The [chat quickstart](examples/chat-quickstart) is a runnable server example, and [Northstar support](examples/northstar-support) shows a full SaaS embed.
 
-## Configuration
+## How it works
 
-Copy `.env.example` to `.env` and configure at least:
+"Agent" is one word for at least ten different jobs. A model is a function from tokens to tokens: it forgets everything between calls, has no idea what it is allowed to do, and has no obligation to keep working until the job is done. Everything above it exists to turn that into work that finishes, can be trusted with real systems, and can be explained afterwards.
 
-- `OPENGENI_DATABASE_URL`
-- `OPENGENI_NATS_URL`
-- `OPENGENI_TEMPORAL_HOST`
-- `OPENGENI_TEMPORAL_API_KEY` when using Temporal Cloud (enables TLS automatically)
-- `OPENGENI_STARTUP_DEPENDENCY_RETRY_*` if dependencies need longer startup windows
-- `OPENGENI_DEV_BACKEND` when automatic Docker/native selection is not desired
-- `OPENGENI_OPENAI_PROVIDER`
-- OpenAI or Azure OpenAI credentials
-- Extra OpenAI-compatible servers, AI Gateway, OpenRouter, Codex, and SuperGrok: see
-  [Configuring inference](docs/model-providers.md#configuring-inference)
-- `OPENGENI_SANDBOX_BACKEND`
-- `OPENGENI_SANDBOX_PREPARATION_PROFILES` when sandbox credentials or lifecycle hooks are needed
+Opengeni is built as those layers.
 
-If you are migrating from the pre-OpenGeni codebase, move the old `.env` aside and create a fresh one from `.env.example`; old `INFRA_AGENT_*` names are no longer read.
-
-For local Garage, keep S3-compatible storage and both object-storage endpoints:
-
-```bash
-OPENGENI_OBJECT_STORAGE_BACKEND=s3-compatible
-OPENGENI_OBJECT_STORAGE_ENDPOINT=http://127.0.0.1:3900
-OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT=http://garage:3900
-OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=http://garage:3900
-# Prefer unset: `bun run dev` sets OPENGENI_DOCKER_NETWORK=${COMPOSE_PROJECT_NAME}_default
+```text
+  ┌───────────────┐   ┌───────────────────────────────────────────────────────┐
+  │               │   │  10 SURFACES        console · embedded UI · Slack ·   │
+  │ 8  GOVERNANCE │   │                     voice · SDK · API                 │
+  │               │   ├───────────────────────────────────────────────────────┤
+  │ identity      │   │   9 KNOWLEDGE       scoped retrieval · reviewed       │
+  │ tenancy       │   │                     learning · never mixed with chat  │
+  │ permissions   │   ├───────────────────────────────────────────────────────┤
+  │ secrets       │   │   7 DURABLE STATE   sessions · turns · goals ·        │
+  │ approvals     │   │     & ORCHESTRATION recovery · human-in-the-loop      │
+  │ audit         │   ├───────────────────────────────────────────────────────┤
+  │               │   │   6 COMPUTE         sandboxes · browsers ·            │
+  │ +             │   │                     your own machines                 │
+  │               │   ├───────────────────────────────────────────────────────┤
+  │ OBSERVABILITY │   │   5 TOOLS           one gateway · MCP · connections · │
+  │ & COST        │   │                     credentials outside the prompt    │
+  │               │   ├───────────────────────────────────────────────────────┤
+  │ every call    │   │   4 AGENT LOOP      cache-stable prompt · gradual     │
+  │ records what  │   │                     tool disclosure · exact history   │
+  │ it cost and   │   ├───────────────────────────────────────────────────────┤
+  │ who pays      │   │   3 MODEL ROUTING   allowed models · fallback ·       │
+  │               │   │                     capacity waits · billing          │
+  │               │   ├───────────────────────────────────────────────────────┤
+  │               │   │ 1-2 INFERENCE       any provider · any wire format ·  │
+  │               │   │                     swappable mid-conversation        │
+  └───────────────┘   └───────────────────────────────────────────────────────┘
 ```
 
-The public endpoint is embedded in browser-facing signed URLs. The internal endpoint is used by API and worker storage requests, while the sandbox endpoint is supplied to Docker agent containers. The two private endpoints may share the same address when those processes use one Docker network. Presigned URLs generated for one host are not safely interchangeable with another because the host is part of the S3 signature.
+**Rent the edges, own the middle.** Models, provider APIs, and the raw compute box change too fast to own, so every one of them is a swappable boundary. Durable state, governance, and knowledge are where your workflows, permissions, audit record, and institutional memory actually live, so they sit in a Postgres database you operate, export, and can leave with.
 
-`bun run dev` isolates each checkout/worktree (project from the directory name,
-free host ports, loopback URL rewrite including `nats://`, `.env.runtime`
-overlay for `dev:*`/`db:*`). Copied `.env` host-port pins are ignored unless
-`OPENGENI_PIN_PORTS=1`. Native and Docker warm restarts reuse only a healthy
-recorded stack's generated ports.
+## Documentation
 
-For production deployments, use the native provider object store instead of running Garage or MinIO manually:
+| I want to...                          | Read                                                                                                        |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Start on the managed service          | [Quickstart](https://docs.opengeni.ai/quickstart)                                                           |
+| Run it locally                        | [Local development](docs/local-development.md)                                                              |
+| Deploy to production                  | [Self-host](https://docs.opengeni.ai/guides/self-host) · [Deployment guide](docs/deployment.md)             |
+| Add agents to my product              | [Product integration](docs/product-integration.md) · [SDK reference](https://docs.opengeni.ai/reference/sdk) |
+| Run sessions on my own hardware       | [Connect a machine](https://docs.opengeni.ai/guides/connect-a-machine) · [Connected Machines](docs/connected-machines.md) |
+| Call the HTTP API directly            | [HTTP API overview](docs/http-api.md)                                                                       |
+| Configure models and providers        | [Model providers](docs/model-providers.md)                                                                  |
+| Give agents repository access         | [GitHub App](docs/github-app.md)                                                                            |
+| Understand goals, approvals, memory   | [Goals](docs/goals.md) · [Human input](docs/human-input.md) · [Knowledge](docs/knowledge.md)                |
+| Understand the internals              | [Architecture](docs/architecture.md) · [Run lifecycle](docs/run-lifecycle.md) · [Docs map](docs/README.md)  |
+| See what is planned                   | [Roadmap](docs/roadmap.md)                                                                                  |
 
-```bash
-OPENGENI_OBJECT_STORAGE_BACKEND=azure-blob
-OPENGENI_OBJECT_STORAGE_BUCKET=opengeni-files
-OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING=...
-```
+The public product docs live at [docs.opengeni.ai](https://docs.opengeni.ai), and the thinking behind the layers above is on the [Opengeni blog](https://opengeni.substack.com/). The [Cloudgeni Infrastructure Agents Guide](https://github.com/Cloudgeni-ai/infrastructure-agents-guide) covers patterns for infrastructure-focused agents.
 
-`OPENGENI_OBJECT_STORAGE_BUCKET` maps to the Azure Blob container. The API uses SAS URLs for browser upload/download and server-side reads for document indexing. Docker/local sandboxes mount Azure Blob through rclone; Modal sandboxes receive attached Azure Blob files through sandbox file materialization before the agent starts.
+## Built with
 
-AWS S3 uses `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus `OPENGENI_OBJECT_STORAGE_REGION`; prefer IRSA/EKS Pod Identity over static keys. GCS uses `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over service-account JSON. For AWS S3 and GCS file resources, OpenGeni materializes attached files in sandboxes through short-lived signed downloads.
+Bun · Hono · React and Vite · Temporal · Postgres with pgvector · NATS · OpenAI Agents SDK · a Rust agent and relay for Connected Machines
 
-For Modal runs, configure the Modal sandbox variables in `.env.example`. Private
-registry images use `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET`; the global
-`OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot and remains the logical base
-image identity for every Rig. Optional `OPENGENI_MODAL_SANDBOX_CPU` and
-`OPENGENI_MODAL_SANDBOX_MEMORY_MIB` values reserve physical CPU cores and MiB of
-memory for every new box and remain stable through resume and replacement.
-A verified Rig provider image may accelerate physical cold create,
-but never replaces that logical lease identity. V2 capability Packs select a Rig
-for setup/check composition and cannot require an explicit sandbox image while
-Rig image overrides are disabled. Rig-less pre-v2 Pack rows retain their
-historical turn-time image warmup only for rollback compatibility. The registry Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
-`OPENGENI_MODAL_TOKEN_SECRET` client, so embedded hosts do not need to also set
-standard `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` env vars or provide a
-`~/.modal.toml` profile.
+## Security
 
-For OpenSandbox runs, set `OPENGENI_SANDBOX_BACKEND=opensandbox`, a private
-`OPENGENI_OPENSANDBOX_BASE_URL`, `OPENGENI_OPENSANDBOX_API_KEY`, an
-immutable `OPENGENI_OPENSANDBOX_IMAGE` digest, and configured object storage.
-Kubernetes deployments can use the optional pinned upstream platform wrapper
-under `deploy/stacks`; it keeps the lifecycle service private and its lifecycle
-routes Secret-backed. Exec and files stay on that ClusterIP server-proxy.
-Channel B uses signed URI-mode ingress when
-`OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS=true` (default off: lifecycle proxy,
-in-box curl, and API frame-proxy). OpenSandbox v1 uses exact ID-addressed
-attach, renewable provider TTL, and portable `/workspace` tar archives in
-object storage. A desktop-class image advertises ttyd PTY and
-desktop/recording; native OpenSandbox snapshots and `runAs` stay unavailable.
+Do not expose a production deployment without a deliberate access mode, tested database role posture, rate limits, and a reviewed sandbox credential policy. See the [security boundary](docs/deployment.md#security-boundary) and report vulnerabilities through [SECURITY.md](SECURITY.md).
 
-## Deployment
+## Contributing
 
-The operator guide is in `docs/deployment.md`.
-
-Current deployment artifacts include:
-
-- A repo-owned deployment contract in `packages/deployment`.
-- A Helm chart for API, web, worker, migrations, a persistent non-HA
-  single-machine profile, and disposable local/smoke fixtures at
-  `deploy/helm/opengeni`.
-- An Azure reference Terraform substrate at `deploy/terraform/azure`.
-- AWS and GCP reference Terraform substrates at `deploy/terraform/aws` and `deploy/terraform/gcp`.
-- Stack-wrapper plans that can install official upstream NATS and Temporal Helm charts outside the OpenGeni application chart.
-- Runtime artifact generators for provider-specific non-secret Helm values and private runtime env files.
-- A preflight/profile command:
-
-```bash
-bun run deployment:profiles
-bun run deployment:preflight -- --profile azure-existing-services
-bun run deployment:stack -- --profile gcp-managed
-```
-
-The in-chart Postgres, Temporal, NATS, and Garage templates support a persistent
-non-HA single-machine deployment as well as disposable local, CI, and smoke
-verification. Multi-node operators should use managed services, existing
-endpoints, or official upstream charts/operators. Keep cloud resource
-inventories, generated credentials, kubeconfigs, Terraform state, and filled
-tfvars in private operator-controlled storage outside the repository.
-
-## Web App
-
-1. Start the stack with `bun run dev`.
-2. Open `http://127.0.0.1:3000`.
-3. Choose model and reasoning settings.
-4. Answer **Where should this run?** — pick **Managed Sandbox** (a fresh box, set up for you) or **Connected Machine** (run on your own computer). Machine is offered only when the feature is enabled and you have at least one enrolled machine.
-5. For a Connected Machine, pick the machine and its **Project / folder** — the per-session working directory the agent runs under (the machine root / its launch directory, or a subdirectory). A managed sandbox needs no folder choice.
-6. Optionally attach repositories, files, or document search.
-7. Send the first task.
-8. Watch messages, tool calls, approvals, sandbox output, and final status. The session header's **Run on** control shows the active target and, when machines are enabled, lets you swap targets mid-session.
-9. Send follow-ups, approve or reject tool requests, or interrupt the session.
-
-Sessions are durable. Reloading the browser or opening the session URL later replays event history from Postgres and reconnects to live events.
-
-### Connecting a Machine
-
-When Connected Machines are enabled, connect one from the workspace **Machines** dashboard (or from the composer's machine picker):
-
-1. Click **Connect a machine** and run the printed one-liner on the computer you want to connect. The same command installs or updates the agent and adds this workspace without replacing any existing OpenGeni connections on that computer.
-2. Approve the machine. Two paths exist:
-   - **Device flow (consent):** the agent prints a short code and a verification link; you open it and click **Grant** in the workspace to approve that specific machine. Approval is the loud, explicit consent step, and it records who approved.
-   - **Zero-click enroll token:** mint a short-lived enroll token in the workspace ahead of time; the agent redeems it headlessly (the token is the grant, no per-machine click) — the path for scripted or fleet enrollment.
-3. The machine appears in the dashboard with its status, OS/arch, and whether it offers a screen. You can revoke it at any time. Screen control is a separate opt-in granted at approval.
-
-The agent dials **out** to the control plane, so the machine needs no inbound network exposure. See [Connected Machines](#connected-machines) for how an operator turns the feature on.
-
-## Connected Machines
-
-A Connected Machine is a first-class, co-equal alternative to the managed sandbox: instead of a cloud box OpenGeni provisions, a session runs on a computer you enroll and own.
-
-How a machine session differs from a managed sandbox:
-
-- **Runs directly on your machine.** A machine-targeted turn establishes the session on the enrolled machine directly — no cloud box is created or billed for that turn.
-- **Your own git auth.** OpenGeni does not mint or distribute a repository token to the machine. Commands run under the machine's own local environment and its own git credentials. (For a managed sandbox, OpenGeni can inject independently renewed repository-binding credentials for any mix of GitHub, GitLab, and Azure DevOps repositories: either a contained provider token or a host-owned exact HTTPS smart-Git broker bearer. For a machine that injection is skipped.)
-- **Your files, not a clone.** OpenGeni does not clone selected repositories onto the machine's real disk; the machine already owns its filesystem. The agent works in the per-session working folder you chose.
-- **Per-session working folder.** Each session names a working directory on the machine (the machine root, or a subdirectory); it is the cwd base for the agent's exec, terminal, and file dock.
-
-### Targeting machines from a custom client
-
-Any client that speaks the OpenGeni API can target a machine:
-
-- `POST /v1/workspaces/:workspaceId/sessions` (and the `session_create` MCP tool) accept `targetSandboxId` (the enrolled machine to run on) and `workingDir` (the per-session folder; only valid alongside `targetSandboxId`, and omitted means the machine's default working root).
-- The React SDK ships a `@opengeni/react/machines` subpath with the machines dashboard, enrollment device-flow and consent components, status surfacing, and a `useMachines` hook.
-- Enrollment is a small REST surface: agent-side device `start`/`poll` and headless token `exchange`, plus user-authenticated `approve`/`deny`, enroll-token mint, list, and revoke. All of it returns `404` while the feature is disabled.
-
-### Enabling Connected Machines (operators)
-
-The feature is **off by default**. While off, every enrollment and machine route returns `404` and the machine backend is inert — the surface does not exist for that deployment. Turning it on is provider-neutral:
-
-- **The enable flag.** Set `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true`. This is the keystone that reveals the enrollment routes and activates the machine backend.
-- **The relay component.** Deploy the stream relay (`opengeni-relay`, in `agent/crates`) as its own workload. A machine's agent dials out to it for terminal and desktop frames. Configure its listen address (`OPENGENI_RELAY_BIND`) and token secret (`OPENGENI_RELAY_TOKEN_SECRET`).
-- **Control-plane endpoints handed to the agent.** Point the control plane at the NATS control plane the agent dials (`OPENGENI_SELFHOSTED_NATS_URL`) and the relay's base URL (`OPENGENI_SELFHOSTED_RELAY_URL`); these are returned to the agent as connect info at enrollment.
-- **Signing secrets.** `OPENGENI_ENROLLMENT_SIGNING_SECRET` signs the enrollment credential the agent presents back; `OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET` signs the agent's relay producer token (the relay verifies it with the same secret, and it falls back to the stream-token secret when unset). Without these the credential and stream planes degrade gracefully rather than failing boot. Keep them in the deployment secret store; never log them.
-- **Agent binary hosting.** The control plane serves the agent binary and install script under `/agent/*`; the install one-liner pulls from there. Nothing else needs to host it.
-
-Provision NATS and the relay with your own managed services or upstream charts, as the rest of the stack recommends. Do not expose the machine feature without the relay-token and enrollment-signing secrets in place and rate limits on the enrollment routes.
-
-## GitHub App Setup
-
-The GitHub App integration is optional, but it is the recommended way to give agents scoped repository access. It lets the UI list installed repositories and lets the worker mint short-lived installation tokens only for repositories selected for a session. Each workspace binding owns an independent repository allowlist and can be unlinked without uninstalling the App from GitHub.
-
-From the web app:
-
-1. Open the repository picker in the composer.
-2. Expand **GitHub App**.
-3. Optionally enter an organization login if the app should be created under an organization instead of your personal account.
-4. Click **Create app**. The web app submits a GitHub App manifest to GitHub, and GitHub opens a prefilled app form.
-5. Create the app in GitHub. The callback page prints `OPENGENI_GITHUB_APP_*` lines and includes a copy button.
-6. Copy those lines into `.env`.
-7. Restart the API and worker, or restart everything with `bun run dev`.
-8. Reopen the repository picker and click **Connect GitHub**. Complete GitHub's installation/configuration screen and fresh user authorization as the personal-account owner or an active organization owner.
-
-OpenGeni reports App server configuration and workspace binding separately as `disabled`, `unbound`, or `bound`. It binds only after fresh GitHub authorization proves exact personal ownership or active organization ownership and then atomically stores the OpenGeni account/workspace/subject, GitHub actor/account/installation, one-time proof, and explicit repository IDs. Repository administration, collaboration, installation visibility, setup callback IDs, and App Manager status are never treated as installation authority. An organization approval request remains pending and unbound. See [GitHub App workspace bindings](docs/github-app.md) for the exact supported authority matrix, replay/expiry rules, lifecycle states, and operator requirements.
-
-For local development, the manifest callback can use the API origin from the running request. If you run behind a tunnel or deployed URL, set:
-
-```bash
-OPENGENI_GITHUB_APP_MANIFEST_BASE_URL=https://YOUR_DOMAIN
-OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET=change-me
-```
-
-The generated App configures `<baseUrl>/v1/github/oauth/callback` and requests **Members: read** so GitHub can expose active organization-owner membership. Existing organization installations must approve the added permission before organization-owner self-service can succeed; unavailable proof fails closed.
-
-Existing database rows created without an owner-authority receipt remain visible for audit/unlink as `unverified`, but they cannot enumerate repositories, authorize session resources, or mint installation tokens. Every new binding has a selected-repository allowlist. Session creation, repository listing, and GitHub-authenticated worker turn startup recheck the workspace binding, so unlinking or narrowing it revokes queued and scheduled use before a new token is minted. Installation tokens remain host-owned run material: the worker writes and renews them through the sandbox credential-file boundary, and no model-visible MCP/API/SDK tool returns one. Connected Machines remain exempt because they use their own git credentials and OpenGeni mints no GitHub token for them.
-
-The generated App does not register GitHub webhooks; repository listing, clone tokens, commits, pushes, and pull requests use installation access tokens.
-
-The generated GitHub URL is only the manifest form target. Opening or copying that URL by itself only sends `state`, so GitHub shows an empty app form instead of the prefilled manifest.
-
-## Documents And Knowledge
-
-Agent Knowledge brings together a Files library, retained source text, useful findings, collections, Instructions, and Skills. Typical uploads include PDF, Word, PowerPoint, Excel, OpenDocument, plain-text/structured-text, email, and common image formats. The stock API and worker images include headless LibreOffice for Office conversion and local English OCR data; native source runs use the parser's built-in image conversion but require LibreOffice on the host to index Office formats. Retained sources can carry provider, URI, title, author, version, timestamp, and ACL metadata for retrieval.
-
-Agent Knowledge replaces the former Memory and separate reviewed-Knowledge writers. Original files stay in object storage; retained source text, findings, collections, evidence, and immutable revisions share canonical Knowledge storage in Postgres. Agents use `knowledge_search`, `knowledge_get`, and `knowledge_save`. Normal retrieval returns published entries; explicit pending reads expose unapproved context so agents can improve existing proposals without duplicating them. Agent learning settings choose Automatic, Review first, or Off for authoring; Off leaves authorized retrieval available. Conversation history and temporary task notes remain separate. See [Knowledge and Agent learning](docs/knowledge.md).
-
-Document indexing depends on:
-
-- `OPENGENI_DOCUMENT_PARSER`
-- `OPENGENI_DOCUMENT_EMBEDDING_PROVIDER`
-- `OPENGENI_DOCUMENT_EMBEDDING_MODEL`
-- `OPENGENI_DOCUMENT_EMBEDDING_DIMENSIONS`
-
-DOCX/PDF parsing depends on the configured parser backend. If parser dependencies are missing locally, documents can fail indexing and later be retried from the UI after the dependency issue is fixed.
-
-## Public API
-
-Core endpoints:
-
-- `GET /healthz`
-- `GET /v1/config/client`
-- `GET /v1/access/me`
-- `GET /v1/organization-memberships` (managed-human self membership and personal-workspace identity)
-- `POST /v1/organizations/additional` (managed-human creation of another isolated organization with its first shared workspace)
-- bounded/keyset `GET /v1/organization-invitations` and exact subject-bound
-  `POST /v1/organization-invitations/:id/accept`
-- `GET|POST /v1/organizations/:id/invitations` for bounded admin listing and
-  creation, plus explicit invitation revoke
-- `GET /v1/organizations/:id/members` and revision-fenced member lifecycle `PATCH`
-- `GET|PATCH /v1/organizations/:id/retention-policy`
-- `GET /v1/workspaces`
-- `POST /v1/workspaces`
-- `POST /v1/workspaces/:workspaceId/sessions`
-- `GET /v1/workspaces/:workspaceId/sessions/:sessionId`
-- `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events`
-- `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events/stream`
-- `POST /v1/workspaces/:workspaceId/sessions/:sessionId/events`
-
-Expired offboarded personal data is removed through the explicit bounded
-operator command. Preview first, then execute the same organization-scoped
-batch (default 10, maximum 100):
-
-```bash
-bun run db:sweep-organization-retention --organization-id <uuid> --dry-run
-bun run db:sweep-organization-retention --organization-id <uuid> --limit 10
-```
-
-The command is retry-safe, continues past independently recorded member
-failures, and requires configured object storage for destructive execution.
-It first commits the database deletion and an immutable, exact-key cleanup
-obligation set; only then does it delete external objects and record
-content-free completion receipts. A provider failure retries only unfinished
-obligations. The configured storage bucket is frozen into that authority and
-must still match on resume; a legacy bucket mismatch or an unexpected retained
-database reference aborts before any external object is touched.
-
-Before activating organization authority, gate the cutover on the strictly
-read-only tenancy parity check. It exits `0` when every invariant gate passed,
-`1` when one failed, and `2` when it could not run; it never writes, repairs,
-or widens anything, and no reported mismatch is resolved toward user authority
-(see [`docs/organization-tenancy.md`](docs/organization-tenancy.md) phase E):
-
-```bash
-bun run db:check-tenancy-parity --organization-id <uuid>
-```
-
-Point it at a **writable primary** - it cannot run against a read replica,
-because it claims and releases its own transaction-local capability row
-(`25006: cannot execute DELETE in a read-only transaction`).
-
-GitHub endpoints:
-
-- `GET /v1/workspaces/:workspaceId/github/app`
-- `GET /v1/workspaces/:workspaceId/github/connect`
-- `GET /v1/workspaces/:workspaceId/github/repositories`
-- `POST /v1/workspaces/:workspaceId/github/repositories/sync`
-- `POST /v1/workspaces/:workspaceId/github/installations/select`
-- `POST /v1/workspaces/:workspaceId/github/installations` (legacy, `410 Gone`)
-- `DELETE /v1/workspaces/:workspaceId/github/installations/:installationId`
-- `POST /v1/workspaces/:workspaceId/github/app-manifest`
-- `GET /v1/github/app-manifest/callback`
-- `GET /v1/github/setup`
-- `GET /v1/github/oauth/callback`
-
-Document endpoints:
-
-- `GET /v1/workspaces/:workspaceId/document-bases`
-- `POST /v1/workspaces/:workspaceId/document-bases`
-- `GET /v1/workspaces/:workspaceId/document-bases/:baseId/documents`
-- `POST /v1/workspaces/:workspaceId/document-bases/:baseId/documents`
-- `POST /v1/workspaces/:workspaceId/document-bases/:baseId/search`
-- `POST /v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId/reindex`
-- `POST /v1/workspaces/:workspaceId/knowledge/search`
-- `GET /v1/workspaces/:workspaceId/knowledge/memories`
-- `POST /v1/workspaces/:workspaceId/knowledge/memories`
-- `GET /v1/workspaces/:workspaceId/knowledge/memories/:memoryId`
-- `PATCH /v1/workspaces/:workspaceId/knowledge/memories/:memoryId`
-
-Connected Machine endpoints (all return `404` unless `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true`):
-
-- `POST /v1/enrollments/device/start` (agent-side, unauthenticated)
-- `POST /v1/enrollments/device/poll` (agent-side, unauthenticated)
-- `POST /v1/enrollments/device/lookup`
-- `POST /v1/enrollments/token/exchange` (agent-side headless enroll-token redemption)
-- `POST /v1/workspaces/:workspaceId/enrollments/device/approve`
-- `POST /v1/workspaces/:workspaceId/enrollments/device/deny`
-- `POST /v1/workspaces/:workspaceId/enrollments/token` (mint a headless enroll token)
-- `GET /v1/workspaces/:workspaceId/enrollments`
-- `POST /v1/workspaces/:workspaceId/enrollments/:enrollmentId/revoke`
-
-## Testing
-
-Fast checks do not require Temporal, NATS, Postgres, a sandbox backend, or live model credentials:
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and the pull request workflow, and [AGENTS.md](AGENTS.md) if you work on Opengeni itself.
 
 ```bash
 bun run typecheck
 bun test
 ```
 
-Broader checks:
+## License
 
-```bash
-bun run test:integration
-bun run test:e2e
-bun run test:live
-bun run check
-bun run check:full
-```
-
-Integration and E2E tests use Bun's test runner. Deterministic SDK-level tests use a scripted model so they can exercise the real worker, Temporal workflow, NATS/SSE path, Postgres, and sandbox plumbing without depending on live model output.
-
-## Development Notes
-
-- Public clients should treat the API as the source of truth.
-- Browser streaming uses `GET /v1/workspaces/:workspaceId/sessions/:id/events/stream`.
-- Agent activities are side-effectful. Do not add automatic Temporal retries around full agent turns unless each model, tool, and sandbox boundary has been made idempotent.
-- Docker sandbox file resources from local S3-compatible storage are materialized into the sandbox before the run. Attach file resources before the first run when using the Docker backend.
-- Sandbox preparation profiles are explicit. Model provider credentials are not automatically exposed inside sandboxes unless configured.
-
-## Open Source Release Notes
-
-The first public release should be published from a clean root commit instead of preserving private development history. Create the public repository from the final tracked source tree, not from the existing `.git` directory.
-
-Before publishing:
-
-- Confirm local `.env` files, `var/`, `node_modules/`, and generated build outputs are absent from the exported tree.
-- Confirm local-only private workspaces are absent from the exported tree.
-- Run a secret scan against the export, for example `gitleaks detect --no-git --source <export-dir>` and optionally `trufflehog filesystem <export-dir>`.
-- Rotate any credential that ever appeared in the old private history, even if the new public export is clean.
-
-The project license is Apache-2.0. Optional curated Skills under `packages/runtime/src/curated_skill_library` retain per-entry provenance and license metadata; HashiCorp-derived Terraform guidance is MPL-2.0 and is never mounted by default.
-
-## Roadmap
-
-- First-class `agents` and `environments` API resources.
-- Outbound webhooks for event delivery.
-- A provider-neutral stock repository picker; embedded hosts can already submit
-  mixed-provider, multi-binding `ResourceRef[]` through the current API.
-- More OpenAI Agents SDK-compatible sandbox backends.
-- Native mid-session file mounts for Docker sandboxes once the SDK supports privilege-safe late in-container mounts.
-- Deeper Temporal/OpenAI Agents SDK integration when the TypeScript SDK supports durable agent, tool, and sandbox boundaries cleanly.
-
-## References
-
-- [Anthropic Managed Agents overview](https://platform.claude.com/docs/en/managed-agents/overview)
-- [Anthropic engineering: Managed Agents](https://www.anthropic.com/engineering/managed-agents)
+[Apache-2.0](LICENSE). Optional curated Skills under `packages/runtime/src/curated_skill_library` carry their own provenance and license metadata; HashiCorp-derived Terraform guidance is MPL-2.0 and is never mounted by default.
