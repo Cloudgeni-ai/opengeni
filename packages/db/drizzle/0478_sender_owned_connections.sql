@@ -71,6 +71,9 @@ BEGIN
   END LOOP;
 END
 $schedule_fences$;
+-- Only non-executable ownership/status fields change here. Retain the exact
+-- stored digest even when an older additive migration left new nullable keys.
+ALTER TABLE scheduled_tasks DISABLE TRIGGER zz_scheduled_task_execution_digest;
 UPDATE scheduled_tasks task SET owner_subject_id = coalesce(
   (SELECT authority.subject_id FROM scheduled_task_revision_authorities authority
     WHERE authority.task_id = task.id AND authority.account_id = task.account_id
@@ -86,6 +89,7 @@ ALTER TABLE scheduled_task_revision_authorities FORCE ROW LEVEL SECURITY;
 UPDATE scheduled_tasks SET status = 'paused'
 WHERE action ->> 'kind' = 'agent_turn' AND owner_subject_id IS NULL
   AND status = 'active' AND personal_connection_delegations <> '[]'::jsonb;
+ALTER TABLE scheduled_tasks ENABLE TRIGGER zz_scheduled_task_execution_digest;
 DO $owner_binding_check$
 BEGIN
   IF EXISTS (SELECT 1 FROM scheduled_tasks task JOIN sender_schedule_bindings_before prior ON prior.id = task.id
@@ -2613,15 +2617,6 @@ $function$
 
 
 -- No callable native consent or task-head connection-grant compatibility lane.
--- Preserve the hardened search path of the surviving general resource-grant
--- overloads, including installations in a dedicated schema.
-DO $resource_grant_path$
-BEGIN
-  EXECUTE format('ALTER FUNCTION issue_self_user_resource_grant(uuid,uuid,uuid,text,text,text,uuid,boolean) SET search_path = pg_catalog, %I, pg_temp', current_schema());
-  EXECUTE format('ALTER FUNCTION issue_self_user_resource_grant(uuid,uuid,uuid,text,text,text,uuid,integer,boolean) SET search_path = pg_catalog, %I, pg_temp', current_schema());
-END
-$resource_grant_path$;
-
 DROP FUNCTION issue_self_local_connection_use_grant(uuid,uuid,uuid,text,boolean);
 DROP FUNCTION list_self_connection_authorities(uuid);
 DROP FUNCTION issue_self_connection_use_grant(uuid,uuid,uuid,text,text,uuid,boolean);
@@ -2743,3 +2738,35 @@ EXCEPTION WHEN OTHERS THEN RAISE;
 END
 $function$
 ;
+
+-- Replacing a routine must retain its trusted data schema ahead of pg_temp.
+DO $sender_routine_paths$
+DECLARE data_schema text := current_schema(); routine record;
+BEGIN
+  FOR routine IN
+    SELECT n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) AS arguments
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE (CASE WHEN n.nspname = data_schema THEN p.proname
+      ELSE n.nspname || '.' || p.proname END) = ANY (ARRAY[
+    'opengeni_private.guard_scheduled_task_owner',
+    'opengeni_private.guard_scheduled_run_owner',
+    'opengeni_private.read_sender_connection',
+    'opengeni_private.capture_accepted_turn_connection_authorities',
+    'resolve_accepted_connection_use',
+    'list_owned_connection_accounts',
+    'admit_scheduled_task_run_connection_authorities',
+    'admit_scheduled_agent_run_execution',
+    'bind_scheduled_task_run_connection_authorities',
+    'validate_scheduled_agent_run_live_authority',
+    'opengeni_private.capture_scheduled_turn_connection_authorities',
+    'freeze_scheduled_task_personal_resources',
+    'clone_scheduled_task_personal_resource_authority',
+    'issue_self_user_resource_grant',
+    'record_scheduled_task_revision_authority'
+    ]) AND n.nspname IN (data_schema, 'opengeni_private')
+  LOOP
+    EXECUTE format('ALTER FUNCTION %I.%I(%s) SET search_path = pg_catalog, %I, pg_temp',
+      routine.nspname, routine.proname, routine.arguments, data_schema);
+  END LOOP;
+END
+$sender_routine_paths$;
