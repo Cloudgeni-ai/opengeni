@@ -161,7 +161,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       await Promise.all([mcp.close(), server.close()]);
     }
   }, 60_000);
-  test("Slack notifications discovery identifies personal authority without enabling bot tools", async () => {
+  test("Slack discovery describes both identities without prescribing a connector or enabling tools", async () => {
     if (!shared) throw new Error("Real PostgreSQL fixture required");
     await upsertCapabilityCatalogItem(client.db, {
       accountId: workspace.accountId,
@@ -199,19 +199,25 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         arguments: { query: "Slack notifications" },
       });
       expect(result.isError).not.toBe(true);
-      const body = mcpJson(result) as { matches: Array<{ capabilityId: string; usage?: unknown }> };
+      const body = mcpJson(result) as {
+        matches: Array<{
+          capabilityId: string;
+          name: string;
+          description: string;
+          usage?: unknown;
+        }>;
+      };
       expect(
         body.matches.find((item) => item.capabilityId === "mcp:slack-choice-test"),
       ).toMatchObject({
-        usage: {
-          identity: "personal_user",
-          alternative: {
-            identity: "workspace_bot",
-            availability: "not_verified",
-            discoveryTools: ["slack_bot_list_channels", "slack_bot_search"],
-          },
-        },
+        name: "Slack (personal account)",
+        description: expect.stringContaining("as that user"),
       });
+      expect(body.matches.find((item) => item.capabilityId === "api:slack-bot")).toMatchObject({
+        name: "OpenGeni Slack bot",
+        description: expect.stringContaining("as OpenGeni"),
+      });
+      expect(body.matches.every((item) => item.usage === undefined)).toBe(true);
       expect((await mcp.listTools()).tools.some((tool) => tool.name.startsWith("slack_bot_"))).toBe(
         false,
       );

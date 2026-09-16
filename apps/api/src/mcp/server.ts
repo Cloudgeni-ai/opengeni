@@ -1,5 +1,4 @@
 import { prepareSlackMessage, getPreparedSlackMessage } from "@opengeni/db";
-import { capabilityUsageGuidance } from "./capability-usage-guidance";
 import {
   getAttemptToolCatalog,
   createChannel,
@@ -1373,7 +1372,7 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_create",
       {
         description:
-          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog. For Slack tasks, choose the requested identity: the workspace bot uses slack_bot_prepare_message and slack_bot_send_prepared_message with a saved message ID; personal Slack uses the authorizing human's frozen grant. Generated personal tasks require standing authority, while exact-session grants can schedule that same chat. Once-only grants cannot recur. Missing bot tools are not a reason to substitute personal OAuth.",
+          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog. Generated tasks using personal connections require standing authority; exact-session grants can authorize tasks targeting that same chat. Once-only grants cannot authorize recurring work.",
         inputSchema: {
           name: z4.string(),
           schedule: z4.unknown(),
@@ -5882,7 +5881,7 @@ function registerCapabilityDiscoveryTools(
     "capability_catalog_search",
     {
       description:
-        "Find integrations in OpenGeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. This reads metadata only and does not connect or authorize anything. Honor Slack identity guidance: the personal hosted MCP is not workspace bot authority; discover the native OpenGeni Slack bot separately.",
+        "Find integrations in OpenGeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. This reads metadata only and does not connect or authorize anything.",
       inputSchema: {
         query: z4.string().min(1).max(500),
         limit: z4.number().int().min(1).max(20).optional(),
@@ -5940,7 +5939,6 @@ function registerCapabilityDiscoveryTools(
         tier: item.tier,
         matchedOn,
         ...(item.id === "api:slack-bot" ? { connection: workspaceBot } : {}),
-        usage: capabilityUsageGuidance(item),
         setup: {
           ...setups[index]!,
           requiredVariables: capabilityRequiredVariables(item),
@@ -5958,7 +5956,7 @@ function registerCapabilityDiscoveryTools(
     "capability_authorization_request",
     {
       description:
-        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable. Honor Slack identity guidance: the personal hosted MCP is not workspace bot authority; discover the native OpenGeni Slack bot separately.",
+        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction. Supply its capability ID and a brief rationale explaining how it helps the task; no separate confirmation is needed before showing the card. Requesting setup needs no integration-management permission and grants no access. The authenticated human completes setup through the card; never ask them to paste credentials into chat. Do not request another card for the same pending setup, or for a candidate reported ready or unavailable.",
       inputSchema: {
         capabilityId: z4.string().min(1).max(512),
         rationale: z4.string().min(1).max(2000),

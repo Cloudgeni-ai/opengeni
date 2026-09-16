@@ -66,6 +66,8 @@ import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runti
 import { listCapabilityPacks, listWorkspaceCapabilityPacks } from "./packs";
 import { assertHostMcpAuthoritySourceAdmissionEnabled } from "./host-mcp-authority-source-admission";
 
+import { withCapabilityDescription } from "./capability-descriptions";
+
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
 const mcpRegistryFetchTimeoutMs = 15000;
@@ -159,7 +161,7 @@ export async function buildCapabilityCatalog(input: {
         item.kind === "skill"
           ? applyInstalledSkillEnablement(item, installedSkillById.get(item.id))
           : applyCapabilityEnablement(item, capabilityInstallationById.get(item.id), activePackIds);
-      return applyCapabilityLifecycle(projected);
+      return withCapabilityDescription(applyCapabilityLifecycle(projected));
     })
     .sort(compareCatalogItems);
   return {
@@ -1426,7 +1428,7 @@ export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogIt
       source: "built_in",
       name: "OpenGeni Slack bot",
       description:
-        "Read shared Slack channels and send messages as OpenGeni, including scheduled reports. Distinct from My Slack account, which acts as a personal user.",
+        "Read channels the OpenGeni bot can access and send messages to channels or DMs as OpenGeni. Uses a workspace bot installation. Supports scheduled tasks with a selected bot connection.",
       category: "communication",
       tags: ["slack", "bot", "notifications", "scheduled", "workspace"],
       homepageUrl: "https://slack.com",
