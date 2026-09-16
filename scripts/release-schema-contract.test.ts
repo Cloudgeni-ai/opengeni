@@ -227,17 +227,20 @@ describe("release schema contract", () => {
     const hostResolverFullOrganizationKeys = completeSourceContract.migrations.some(
       (migration) => migration.path === "0467_host_resolver_full_organization_keys.sql",
     );
+    const senderOwnedConnections = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0478_sender_owned_connections.sql",
+    );
     const managedSignInMethods = completeSourceContract.migrations.some(
       (migration) => migration.path === "0477_managed_sign_in_methods.sql",
     );
     const connectionCreateIdempotency = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0478_connection_create_idempotency.sql",
+      (migration) => migration.path === "0479_connection_create_idempotency.sql",
     );
     const privateSessionKeyAdministration = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0479_private_session_organization_key_administration.sql",
+      (migration) => migration.path === "0480_private_session_organization_key_administration.sql",
     );
     const personalConnectionVisibilityCleanup = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0480_personal_connection_visibility_cleanup.sql",
+      (migration) => migration.path === "0481_personal_connection_visibility_cleanup.sql",
     );
     const goalReportRequirements = completeSourceContract.migrations.some(
       (migration) => migration.path === "0474_goal_report_requirements.sql",
@@ -295,6 +298,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (senderOwnedConnections ? 1 : 0) +
         (personalConnectionVisibilityCleanup ? 1 : 0) +
         (privateSessionKeyAdministration ? 1 : 0) +
         (connectionCreateIdempotency ? 1 : 0) +
@@ -465,38 +469,43 @@ describe("release schema contract", () => {
         ? { latestMigration: "0476_session_event_history_policy_planning.sql" }
         : {}),
       ...(managedSignInMethods ? { latestMigration: "0477_managed_sign_in_methods.sql" } : {}),
+      ...(senderOwnedConnections ? { latestMigration: "0478_sender_owned_connections.sql" } : {}),
       ...(connectionCreateIdempotency
-        ? { latestMigration: "0478_connection_create_idempotency.sql" }
+        ? { latestMigration: "0479_connection_create_idempotency.sql" }
         : {}),
       ...(privateSessionKeyAdministration
         ? {
-            latestMigration: "0479_private_session_organization_key_administration.sql",
+            latestMigration: "0480_private_session_organization_key_administration.sql",
           }
         : {}),
       ...(personalConnectionVisibilityCleanup
-        ? { latestMigration: "0480_personal_connection_visibility_cleanup.sql" }
+        ? { latestMigration: "0481_personal_connection_visibility_cleanup.sql" }
         : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
       path: personalConnectionVisibilityCleanup
-        ? "0480_personal_connection_visibility_cleanup.sql"
+        ? "0481_personal_connection_visibility_cleanup.sql"
         : privateSessionKeyAdministration
-          ? "0479_private_session_organization_key_administration.sql"
+          ? "0480_private_session_organization_key_administration.sql"
           : connectionCreateIdempotency
-            ? "0478_connection_create_idempotency.sql"
-            : managedSignInMethods
-              ? "0477_managed_sign_in_methods.sql"
-              : sessionEventHistoryPolicyPlanning
-                ? "0476_session_event_history_policy_planning.sql"
-                : sessionEventHistoryStatistics
-                  ? "0475_session_event_history_statistics.sql"
-                  : goalReportRequirements
-                    ? "0474_goal_report_requirements.sql"
-                    : organizationUsageAnalyticalCapability
-                      ? "0473_organization_usage_analytical_capability.sql"
-                      : "0472_usage_events_workspace_recent_index.sql",
+            ? "0479_connection_create_idempotency.sql"
+            : senderOwnedConnections
+              ? "0478_sender_owned_connections.sql"
+              : managedSignInMethods
+                ? "0477_managed_sign_in_methods.sql"
+                : sessionEventHistoryPolicyPlanning
+                  ? "0476_session_event_history_policy_planning.sql"
+                  : sessionEventHistoryStatistics
+                    ? "0475_session_event_history_statistics.sql"
+                    : goalReportRequirements
+                      ? "0474_goal_report_requirements.sql"
+                      : organizationUsageAnalyticalCapability
+                        ? "0473_organization_usage_analytical_capability.sql"
+                        : "0472_usage_events_workspace_recent_index.sql",
       deploymentMode:
-        !connectionCreateIdempotency && managedSignInMethods ? "maintenance" : "rolling",
+        !connectionCreateIdempotency && (senderOwnedConnections || managedSignInMethods)
+          ? "maintenance"
+          : "rolling",
     });
     expect(
       completeSourceContract.migrations.find(
@@ -1603,17 +1612,20 @@ describe("release schema contract", () => {
     const hostResolverFullOrganizationKeys = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0467_host_resolver_full_organization_keys.sql",
     );
+    const senderOwnedConnections = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0478_sender_owned_connections.sql",
+    );
     const managedSignInMethods = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0477_managed_sign_in_methods.sql",
     );
     const connectionCreateIdempotency = unfilteredSourceContract.migrations.some(
-      (migration) => migration.path === "0478_connection_create_idempotency.sql",
+      (migration) => migration.path === "0479_connection_create_idempotency.sql",
     );
     const privateSessionKeyAdministration = unfilteredSourceContract.migrations.some(
-      (migration) => migration.path === "0479_private_session_organization_key_administration.sql",
+      (migration) => migration.path === "0480_private_session_organization_key_administration.sql",
     );
     const personalConnectionVisibilityCleanup = unfilteredSourceContract.migrations.some(
-      (migration) => migration.path === "0480_personal_connection_visibility_cleanup.sql",
+      (migration) => migration.path === "0481_personal_connection_visibility_cleanup.sql",
     );
     const goalReportRequirements = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0474_goal_report_requirements.sql",
@@ -2104,9 +2116,10 @@ describe("release schema contract", () => {
       "0475_session_event_history_statistics.sql",
       "0476_session_event_history_policy_planning.sql",
       "0477_managed_sign_in_methods.sql",
-      "0478_connection_create_idempotency.sql",
-      "0479_private_session_organization_key_administration.sql",
-      "0480_personal_connection_visibility_cleanup.sql",
+      "0478_sender_owned_connections.sql",
+      "0479_connection_create_idempotency.sql",
+      "0480_private_session_organization_key_administration.sql",
+      "0481_personal_connection_visibility_cleanup.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2515,23 +2528,29 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0477_managed_sign_in_methods.sql",
       };
+    if (senderOwnedConnections)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0478_sender_owned_connections.sql",
+      };
     if (connectionCreateIdempotency)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0478_connection_create_idempotency.sql",
+        latestMigration: "0479_connection_create_idempotency.sql",
       };
     if (privateSessionKeyAdministration)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0479_private_session_organization_key_administration.sql",
+        latestMigration: "0480_private_session_organization_key_administration.sql",
       };
     if (personalConnectionVisibilityCleanup)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0480_personal_connection_visibility_cleanup.sql",
+        latestMigration: "0481_personal_connection_visibility_cleanup.sql",
       };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (senderOwnedConnections ? 1 : 0) +
         (personalConnectionVisibilityCleanup ? 1 : 0) +
         (privateSessionKeyAdministration ? 1 : 0) +
         (connectionCreateIdempotency ? 1 : 0) +
@@ -2906,15 +2925,15 @@ describe("release schema contract", () => {
         : {}),
       ...(managedSignInMethods ? { latestMigration: "0477_managed_sign_in_methods.sql" } : {}),
       ...(connectionCreateIdempotency
-        ? { latestMigration: "0478_connection_create_idempotency.sql" }
+        ? { latestMigration: "0479_connection_create_idempotency.sql" }
         : {}),
       ...(privateSessionKeyAdministration
         ? {
-            latestMigration: "0479_private_session_organization_key_administration.sql",
+            latestMigration: "0480_private_session_organization_key_administration.sql",
           }
         : {}),
       ...(personalConnectionVisibilityCleanup
-        ? { latestMigration: "0480_personal_connection_visibility_cleanup.sql" }
+        ? { latestMigration: "0481_personal_connection_visibility_cleanup.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(

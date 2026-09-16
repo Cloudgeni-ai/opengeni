@@ -453,6 +453,7 @@ const workspaceStateRoute = createRoute({
 const workspaceArtifactsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts",
+  validateSearch: artifactReturnSearch,
   component: Artifacts,
 });
 const workspaceArtifactDetailRoute = createRoute({
@@ -759,7 +760,9 @@ function WorkspaceState() {
 }
 
 function Artifacts() {
-  return <LazyArtifactsRoute {...workspaceArtifactsRoute.useParams()} />;
+  const { workspaceId } = workspaceArtifactsRoute.useParams();
+  const { fromSession } = workspaceArtifactsRoute.useSearch();
+  return <LazyArtifactsRoute workspaceId={workspaceId} fromSession={fromSession} />;
 }
 function IdentityLink() {
   const { linkId } = identityLinkRoute.useParams();

@@ -1,6 +1,6 @@
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/sdk";
 
-/** Status only; personal use in a shared session still requires native grants. */
+/** Status only; runtime use is authorized for the authenticated initiating user. */
 export function matchingActiveMcpConnections(
   item: CapabilityCatalogItem,
   connections: ConnectionMetadata[],

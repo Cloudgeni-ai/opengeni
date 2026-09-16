@@ -109,6 +109,7 @@ import {
   SessionMcpServerMetadata as ContractSessionMcpServerMetadata,
   UpdateSessionMcpApprovalPolicyRequest as ContractUpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionMcpApprovalPolicyResponse as ContractUpdateSessionMcpApprovalPolicyResponse,
+  HumanInputQuestion as ContractHumanInputQuestion,
   SessionEventType as ContractSessionEventType,
   TranscriptionEvent as ContractTranscriptionEvent,
   SessionHumanInputRequest as ContractSessionHumanInputRequest,
@@ -257,6 +258,7 @@ import type {
   ProposeRigChangeRequest,
   Session,
   ForkSessionRequest,
+  HumanInputQuestion,
   ForkSessionResponse,
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
@@ -626,6 +628,61 @@ describe("SDK / contracts parity", () => {
     expect(ContractSessionMcpServerInput.parse(sdkMcpServer)).toEqual(sdkMcpServer);
   });
 
+  test("human-input skillReview present, absent, and null stay assignable to SDK types", () => {
+    const question = {
+      id: "choice",
+      kind: "single_select" as const,
+      prompt: "Choose a format",
+      options: [{ id: "text", label: "Text" }],
+    };
+    const skillReview = {
+      sourceOperationId: "11111111-1111-4111-8111-111111111111",
+      skillId: "22222222-2222-4222-8222-222222222222",
+      revisionId: "33333333-3333-4333-8333-333333333333",
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+    };
+    const requestBase = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      workspaceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      sessionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      turnId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      turnGeneration: 1,
+      creationAttemptId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      toolCallId: "call_skill_review",
+      status: "pending" as const,
+      allowSkip: false,
+      response: null,
+      respondedBy: null,
+      respondedAt: null,
+      expiresAt: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const acceptQuestion = (
+      value: z.infer<typeof ContractHumanInputQuestion>,
+    ): HumanInputQuestion => value;
+    const acceptRequest = (
+      value: z.infer<typeof ContractSessionHumanInputRequest>,
+    ): SessionHumanInputRequest => value;
+
+    const absentQuestion = ContractHumanInputQuestion.parse(question);
+    const nullQuestion = ContractHumanInputQuestion.parse({ ...question, skillReview: null });
+    const presentQuestion = ContractHumanInputQuestion.parse({ ...question, skillReview });
+
+    expect(acceptQuestion(absentQuestion).skillReview).toBeUndefined();
+    expect(acceptQuestion(nullQuestion).skillReview).toBeNull();
+    expect(acceptQuestion(presentQuestion).skillReview).toEqual(skillReview);
+
+    for (const parsed of [
+      ContractSessionHumanInputRequest.parse({ ...requestBase, questions: [absentQuestion] }),
+      ContractSessionHumanInputRequest.parse({ ...requestBase, questions: [nullQuestion] }),
+      ContractSessionHumanInputRequest.parse({ ...requestBase, questions: [presentQuestion] }),
+    ]) {
+      expect(typeof acceptRequest(parsed)).toBe("object");
+    }
+  });
+
   test("new-session draft response and save shapes stay in SDK/contracts parity", () => {
     const acceptDraft = (value: z.infer<typeof ContractNewSessionDraft>): NewSessionDraft => value;
     // Like CreateSessionRequest, the dependency-free SDK deliberately accepts
@@ -676,7 +733,7 @@ describe("SDK / contracts parity", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
       latencyMode: "priority",
-      connectionAuthorities: [],
+      connectionAccounts: [],
     };
     expect(ContractSubmitComposerDraftRequest.safeParse(submit).success).toBe(true);
     const { latencyMode: _latencyMode, ...missingLatency } = submit;
@@ -791,7 +848,7 @@ describe("SDK / contracts parity", () => {
         text: "hello",
         controlEtag: "control-1",
         expectedDraftRevision: 3,
-        connectionAuthorities: [],
+        connectionAccounts: [],
       },
     };
     const approval: ClientSessionEventInput = {

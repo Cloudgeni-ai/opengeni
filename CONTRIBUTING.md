@@ -13,6 +13,9 @@ Thanks for considering a contribution.
 bun run dev
 ```
 
+[`docs/local-development.md`](docs/local-development.md) covers manual startup,
+configuration, the native (no Docker) path, and the web-app walkthrough.
+
 ## Toolchain
 
 Package manager is Bun everywhere (one intentional npm exception for release publishing).
@@ -85,6 +88,13 @@ Release and publishing guidance starts here; executable truth lives in [`package
 **Staging:** dispatch `staging-canary-dispatch.yml` with any `main` SHA whose `canary-sha-*` tags already exist. Pending changesets are allowed. Missing tags fail closed; do not rebuild unsigned `:ci` images.
 
 **Canary npm:** dispatch `publish-canary.yml` to publish `{version}-canary.N` with dist-tag `canary`. This does not consume changeset files or move `latest`.
+
+In GitHub Actions, `N` has a floor derived from the workflow run ID and attempt
+(`run ID * 1000 + attempt`), so retries do not reuse versions hidden by stale
+registry tags or staged publication. A visible version at or above that floor
+rejects a superseded attempt: dispatch a new workflow instead of retrying the
+older one. Fixed package groups remain aligned. An admitted retry publishes a fresh set rather than
+overwriting or removing any partially published versions.
 
 Two publish-coherence rules learned the hard way (all versions are 0.x):
 

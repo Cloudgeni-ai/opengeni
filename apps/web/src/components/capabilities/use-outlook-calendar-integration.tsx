@@ -24,6 +24,7 @@ export function useOutlookCalendarIntegration({
   refreshRevision?: number;
 }): IntegrationAdapter {
   return useIntegrationDefinitionRow({
+    ownership: "personal",
     id: "outlook-calendar",
     name: "Outlook Calendar",
     description: "Read and schedule events on a connected Outlook calendar.",

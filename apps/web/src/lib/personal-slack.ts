@@ -42,14 +42,12 @@ export function personalSlackCapability(
 }
 
 /**
- * Subject-owned personal Slack rows visible to the current caller. The API
- * already applies exact-subject filtering; the client additionally rejects
- * workspace-shared rows and non-official resources before rendering them here.
+ * Hosted Slack accounts visible to the current caller, personal or shared.
+ * The API handles owner visibility; bot tokens and other resources stay separate.
  */
-export function personalSlackConnections(connections: ConnectionMetadata[]): ConnectionMetadata[] {
+export function hostedSlackConnections(connections: ConnectionMetadata[]): ConnectionMetadata[] {
   return connections.filter(
     (connection) =>
-      connection.subjectId !== null &&
       connection.kind === "oauth2" &&
       normalizedProviderDomain(connection.providerDomain) === PERSONAL_SLACK_PROVIDER_DOMAIN &&
       connection.metadata.mcpUrl === OPENGENI_PERSONAL_SLACK_MCP_URL,
@@ -57,10 +55,10 @@ export function personalSlackConnections(connections: ConnectionMetadata[]): Con
 }
 
 /** Prefer a usable row, then the newest actionable/revoked row for reconnect. */
-export function preferredPersonalSlackConnection(
+export function preferredHostedSlackConnection(
   connections: ConnectionMetadata[],
 ): ConnectionMetadata | null {
-  return selectCanonicalPersonalSlackConnection(personalSlackConnections(connections));
+  return selectCanonicalPersonalSlackConnection(hostedSlackConnections(connections));
 }
 
 /**
@@ -91,19 +89,6 @@ export function personalSlackAccountState(
     case "revoked":
       return { state: "disconnected", connection };
   }
-}
-
-export function personalSlackOAuthTarget(item: CapabilityCatalogItem | null): {
-  providerDomain: "slack.com";
-  mcpUrl: typeof OPENGENI_PERSONAL_SLACK_MCP_URL;
-  ownership: "personal";
-} | null {
-  if (!item || personalSlackCapability([item]) === null) return null;
-  return {
-    providerDomain: PERSONAL_SLACK_PROVIDER_DOMAIN,
-    mcpUrl: OPENGENI_PERSONAL_SLACK_MCP_URL,
-    ownership: "personal",
-  };
 }
 
 function connectionExpiresAtOrBefore(connection: ConnectionMetadata, now: Date): boolean {

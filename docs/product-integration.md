@@ -634,14 +634,12 @@ is not proof that an earlier request is no longer in flight. Exact creation
 retries still require the original payload; changed credentials with the same
 operation ID are rejected instead of overwriting accepted credentials.
 
-For initial personal-connection setup, `initialUseContexts` can select
-`user_private`, `workspace_shared`, or both. This requires an `operationId` and
-the same native owner permissions as issuing ordinary standing connection-use
-grants. Selecting `workspace_shared` explicitly acknowledges shared output; it
-does not share ownership of the credential. The connection and its initial native
-grants commit atomically. Replaying creation never issues another grant, including
-after a grant was revoked. Omission preserves connection-only setup. Later changes
-use the ordinary native grant lifecycle, not another connection-creation request.
+Personal connections use the authenticated initiating user's authority, whether
+created interactively or provisioned through `asUser`. No conversation-use grant
+or shared-output acknowledgment is required. `initialUseContexts` is rejected as
+obsolete. Account choices narrow the owner's accounts without granting access;
+sharing a conversation does not share its participants' credentials. Creation
+replay never restores a revoked connection.
 
 ## Delivery checklist
 

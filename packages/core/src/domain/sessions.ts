@@ -44,7 +44,7 @@ import {
   type GoalSpec,
   type FirstPartyMcpToolName,
   type McpPersonalConnectionDelegation,
-  type McpConnectionAuthoritySelection,
+  type McpConnectionAccountSelection,
   type Permission,
   type PersonalResourceAttachmentIntent,
   type ReasoningEffort,
@@ -2750,8 +2750,7 @@ async function createSessionForRequestInFileScope(
     tools,
     resources,
     source: connectionDelegationSource,
-    authoritySelections: payload.connectionAuthorities,
-    visibility: effectiveVisibility,
+    authoritySelections: payload.connectionAccounts,
     googleDrivePublicationEnabled,
     atlassianEnabled,
   });
@@ -3295,8 +3294,7 @@ function sessionPromptBoundaryRequestHash(input: {
   latencyMode: "standard" | "priority" | "fast" | null;
   source: "user" | "api";
   mcpCredentialUpdates: SessionMcpCredentialUpdateInput[];
-  connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
-
+  connectionAccounts?: McpConnectionAccountSelection[];
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
   commandActor: SessionCommandActor;
 }): string {
@@ -3315,8 +3313,7 @@ function sessionPromptBoundaryRequestHash(input: {
     latencyMode: input.latencyMode,
     source: input.source,
     mcpCredentialUpdates: input.mcpCredentialUpdates,
-    connectionAuthorities: input.connectionAuthorities ?? [],
-
+    connectionAccounts: input.connectionAccounts ?? [],
     personalResourceAttachment: input.personalResourceAttachment ?? null,
     ...(input.commandActor.type === "service"
       ? {
@@ -3354,8 +3351,7 @@ async function acceptSessionUserMessageInFileScope(
     latencyMode?: "standard" | "priority" | "fast" | null;
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
-    connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
-
+    connectionAccounts?: McpConnectionAccountSelection[];
     delivery?: "send" | "steer";
     origin?: "human" | "operator";
     controlEtag?: string | null;
@@ -3411,10 +3407,7 @@ async function acceptSessionUserMessageInFileScope(
         latencyMode: input.latencyMode ?? null,
         source,
         mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
-
-        ...(input.connectionAuthorities
-          ? { connectionAuthorities: input.connectionAuthorities }
-          : {}),
+        ...(input.connectionAccounts ? { connectionAccounts: input.connectionAccounts } : {}),
         ...(input.personalResourceAttachment
           ? { personalResourceAttachment: input.personalResourceAttachment }
           : {}),
@@ -3596,7 +3589,6 @@ async function acceptSessionUserMessageInFileScope(
       resources: [...existingSession.resources, ...requestedResources],
       source: connectionDelegationSource,
       targetSessionId: sessionId,
-      visibility: (await getSessionAuthorityProjection(db, workspaceId, sessionId))?.visibility,
       googleDrivePublicationEnabled:
         existingSession.firstPartyMcpTools.includes("editable_artifact_export") &&
         existingSession.firstPartyMcpTools.includes("editable_artifact_export_status") &&
@@ -3607,7 +3599,7 @@ async function acceptSessionUserMessageInFileScope(
         existingSession.firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
         (!existingSession.firstPartyMcpPermissions?.length ||
           existingSession.firstPartyMcpPermissions.includes("connections:read")),
-      ...(input.connectionAuthorities ? { authoritySelections: input.connectionAuthorities } : {}),
+      ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
     });
 
     const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);

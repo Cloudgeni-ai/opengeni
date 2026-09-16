@@ -49,9 +49,7 @@ import postgres from "postgres";
 import {
   OFFICIAL_GMAIL_MCP_SCOPES,
   OFFICIAL_GMAIL_MCP_URL,
-  assertOfficialGmailPersonalOwnership,
   assertGoogleAuthorizationServer,
-  assertHostedSlackMcpPersonalOwnership,
   assertSlackAuthorizationServer,
   buildAuthorizationUrl,
   chooseMcpAuthorizeScopes,
@@ -492,23 +490,6 @@ describe("official Gmail MCP OAuth compatibility", () => {
       }),
     ).toEqual([...OFFICIAL_GMAIL_MCP_SCOPES]);
   });
-
-  test("requires every Gmail OAuth connection to be personal", () => {
-    expect(() =>
-      assertOfficialGmailPersonalOwnership(OFFICIAL_GMAIL_MCP_URL, "personal"),
-    ).not.toThrow();
-    expect(() => assertOfficialGmailPersonalOwnership(OFFICIAL_GMAIL_MCP_URL, "workspace")).toThrow(
-      "Gmail connections are personal only",
-    );
-  });
-
-  test("requires every hosted Slack MCP OAuth connection to be personal", () => {
-    expect(() => assertHostedSlackMcpPersonalOwnership(true, "personal")).not.toThrow();
-    expect(() => assertHostedSlackMcpPersonalOwnership(false, "workspace")).not.toThrow();
-    expect(() => assertHostedSlackMcpPersonalOwnership(true, "workspace")).toThrow(
-      "Slack's hosted MCP connection is personal only",
-    );
-  });
 });
 
 describe("connections routes", () => {
@@ -543,27 +524,6 @@ describe("connections routes", () => {
         ).toBe(404);
       }
     }
-  });
-  test("rejects workspace-owned Gmail OAuth before contacting Google", async () => {
-    if (!available) return;
-    const workspace = await freshWorkspace();
-    const response = await app().request(
-      `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
-      {
-        method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          providerDomain: "gmailmcp.googleapis.com",
-          mcpUrl: OFFICIAL_GMAIL_MCP_URL,
-          ownership: "workspace",
-        }),
-      },
-    );
-    expect(response.status).toBe(422);
-    expect(await response.text()).toContain("Gmail connections are personal only");
   });
 
   test("manual connection ownership defaults to workspace and personal binds only the caller", async () => {
@@ -2005,7 +1965,6 @@ describe("connections routes", () => {
         credential: oauthCredential,
         grantedScopes: ["documents:read"],
         operationId: provisioningOperationId,
-        initialUseContexts: ["user_private", "workspace_shared"],
       };
       const provision = (payload = provisioningPayload) =>
         api.request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
@@ -2013,38 +1972,12 @@ describe("connections routes", () => {
           headers,
           body: JSON.stringify(payload),
         });
-      const rejectedSetup = await provision();
-      expect(rejectedSetup.status).toBe(403);
-      expect(
-        (
-          await api.request(
-            `/v1/workspaces/${workspace.workspaceId}/connections/operations/${provisioningOperationId}`,
-            { headers },
-          )
-        ).status,
-      ).toBe(404);
-      expect(
-        (
-          await listConnectionsMetadata(client.db, workspace.workspaceId, identity.subjectId)
-        ).filter((row) => row.providerDomain === provisioningPayload.providerDomain),
-      ).toHaveLength(0);
       await shared!.admin`
         insert into session_tenancy_activations (
           account_id, activation_version, inventory_digest, parity_digest, activated_by
         ) values (${workspace.accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'oauth-admission-fixture')
         on conflict do nothing
       `;
-      expect((await provision({ ...provisioningPayload, ownership: "workspace" })).status).toBe(
-        422,
-      );
-      expect(
-        (
-          await provision({
-            ...provisioningPayload,
-            initialUseContexts: ["user_private", "user_private"],
-          })
-        ).status,
-      ).toBe(422);
       const [provisioned, simultaneousProvision] = await Promise.all([provision(), provision()]);
       expect(provisioned.status).toBe(201);
       const provisionedBody = await provisioned.json();
@@ -2087,12 +2020,7 @@ describe("connections routes", () => {
         select id, context, status from organization_user_resource_grants
         where authority_id = ${provisionedBody.connection.authorityId}
       `;
-      expect(initialGrants).toHaveLength(2);
-      expect(initialGrants.map((row) => row.context).sort()).toEqual([
-        "user_private",
-        "workspace_shared",
-      ]);
-      expect(initialGrants.every((row) => row.status === "active")).toBe(true);
+      expect(initialGrants).toHaveLength(0);
       const granted = await api.request(
         `/v1/workspaces/${workspace.workspaceId}/connection-authorities/${provisionedBody.connection.authorityId}/grants`,
         {
@@ -2106,7 +2034,7 @@ describe("connections routes", () => {
           }),
         },
       );
-      expect(granted.status).toBe(200);
+      expect(granted.status).toBe(404);
       const sessionApi = appWithDeps(
         {
           sandboxBackend: "none",
@@ -2222,16 +2150,10 @@ describe("connections routes", () => {
         expect(scheduled.status).toBe(201);
         const task = await scheduled.json();
         const capturedTask = await shared!.admin`
-          select personal_connection_delegations from scheduled_tasks
+          select owner_subject_id from scheduled_tasks
           where workspace_id = ${workspace.workspaceId} and id = ${task.id}
         `;
-        expect(capturedTask[0]?.personal_connection_delegations).toMatchObject([
-          {
-            serverId: "provisioned",
-            connectionId: provisionedBody.connection.id,
-            ownerSubjectId: identity.subjectId,
-          },
-        ]);
+        expect(capturedTask[0]?.owner_subject_id).toBe(identity.subjectId);
       }
       for (const retry of retries) {
         expect(retry.status).toBe(201);
@@ -2294,7 +2216,7 @@ describe("connections routes", () => {
           }),
         },
       );
-      expect(otherGrant.status).toBe(200);
+      expect(otherGrant.status).toBe(404);
       const switchedUser = await sessionApi.request(
         `/v1/workspaces/${workspace.workspaceId}/sessions/${admitted.id}/events`,
         {
@@ -2365,23 +2287,12 @@ describe("connections routes", () => {
           (row) => row.personal_connection_delegations[0]?.connectionId === otherConnection.id,
         ),
       ).toHaveLength(2);
-      const privateGrant = initialGrants.find((row) => row.context === "user_private")!;
-      const revokeUse = await api.request(
-        `/v1/workspaces/${workspace.workspaceId}/connection-authorities/grants/${privateGrant.id}?scope=user`,
-        { method: "DELETE", headers },
-      );
-      expect(revokeUse.status).toBe(200);
       expect((await provision()).status).toBe(201);
       const grantsAfterReplay = await shared!.admin`
         select id, context, status from organization_user_resource_grants
         where authority_id = ${provisionedBody.connection.authorityId}
       `;
-      expect(grantsAfterReplay).toHaveLength(2);
-      expect(grantsAfterReplay.find((row) => row.id === privateGrant.id)?.status).toBe("revoked");
-      expect(
-        (await provision({ ...provisioningPayload, initialUseContexts: ["workspace_shared"] }))
-          .status,
-      ).toBe(409);
+      expect(grantsAfterReplay).toHaveLength(0);
       const disconnected = await api.request(
         `/v1/workspaces/${workspace.workspaceId}/connections/${provisionedBody.connection.id}`,
         { method: "DELETE", headers },
@@ -3776,18 +3687,27 @@ describe("connections routes", () => {
     }
   });
 
-  test("rejects workspace-owned hosted Slack MCP at start, on legacy reconnect, and at callback", async () => {
-    if (!available) return;
-    const workspace = await freshWorkspace();
-    const slackSettings = {
-      environment: "test" as const,
-      slackClientId: "slack-client-id",
-      slackClientSecret: "slack-client-secret",
-    };
-    const start = async (body: Record<string, unknown>) =>
-      app(slackSettings).request(
-        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
-        {
+  test.each(["personal", "workspace"] as const)(
+    "Slack MCP uses configured operator credentials with %s ownership",
+    async (ownership) => {
+      if (!available) return;
+      const workspace = await freshWorkspace();
+      const as = startFakeAuthorizationServer({
+        issuer: "https://slack.com/mcp",
+        clientIdMetadataDocumentSupported: false,
+        tokenEndpointAuthMethodsSupported: ["client_secret_post"],
+        scopesSupported: ["search:read.public", "chat:write"],
+      });
+      const mcp = startTestMcpServer({
+        requiredAuthorization: "Bearer mcp-access-token",
+        unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="search:read.public chat:write"`,
+      });
+      try {
+        const response = await app({
+          environment: "test",
+          slackClientId: "slack-client-id",
+          slackClientSecret: "slack-client-secret",
+        }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
           method: "POST",
           headers: {
             authorization: await bearer(workspace, "subject-a", ["connections:write"]),
@@ -3795,155 +3715,57 @@ describe("connections routes", () => {
           },
           body: JSON.stringify({
             providerDomain: "slack.com",
-            mcpUrl: "https://mcp.slack.com/mcp",
+            mcpUrl: mcp.url,
+            ownership,
             returnPath: "/capabilities?connect_item=slack",
-            ...body,
           }),
-        },
-      );
+        });
 
-    // Explicit workspace ownership fails closed before discovery contacts
-    // Slack. An omitted ownership is NOT rejected: for a personal-only resource
-    // it defaults to personal, matching the fence that existed before #1240 and
-    // keeping the optional SDK field backward compatible.
-    const explicitWorkspace = await start({ ownership: "workspace" });
-    expect(explicitWorkspace.status).toBe(422);
-    expect(await explicitWorkspace.text()).toContain(
-      "Slack's hosted MCP connection is personal only",
-    );
-    const omitted = await start({});
-    expect(omitted.status).not.toBe(422);
+        const responseText = await response.clone().text();
+        expect(response.status, responseText).toBe(200);
+        const body = (await response.json()) as { state: string; authorizationUrl: string };
+        const authUrl = new URL(body.authorizationUrl);
+        expect(authUrl.searchParams.get("client_id")).toBe("slack-client-id");
+        expect(authUrl.searchParams.get("scope")).toBe("search:read.public chat:write");
+        const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
+        expect(state?.providerDomain).toBe("slack.com");
+        expect(state?.ownership).toBe(ownership);
+        expect(state?.clientRegistrationMethod).toBe("operator");
+        expect(state?.clientId).toBe("slack-client-id");
+        expect(JSON.stringify(state)).not.toContain("slack-client-secret");
 
-    // A legacy workspace-owned row cannot be renewed through reconnect either.
-    const legacy = await createConnection(client.db, {
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
-      subjectId: null,
-      providerDomain: "slack.com",
-      kind: "oauth2",
-      credentialEncrypted: encryptEnvironmentValue(rawKey, JSON.stringify({ fixture: true })),
-      metadata: { mcpUrl: "https://mcp.slack.com/mcp" },
-      createdBySubjectId: "subject-a",
-    });
-    const reconnect = await start({ connectionId: legacy.id });
-    expect(reconnect.status).toBe(422);
-    expect(await reconnect.text()).toContain("Slack's hosted MCP connection is personal only");
-
-    // State minted by an older deployment with workspace ownership must not
-    // persist shared authority during a rolling update.
-    const state = createSignedState(STATE_SECRET, {
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
-      subjectId: "subject-a",
-      ownership: "workspace",
-      providerDomain: "slack.com",
-      mcpUrl: "https://mcp.slack.com/mcp",
-      resource: "https://mcp.slack.com/mcp",
-      requestedScopes: [],
-      authorizeScopes: ["search:read.public"],
-      encryptedPkceVerifier: encryptEnvironmentValue(rawKey, "slack-verifier"),
-      clientId: "slack-client-id",
-      tokenEndpoint: "https://slack.com/api/oauth.v2.access",
-      authorizationServer: "https://slack.com",
-      issuer: "https://slack.com",
-      clientRegistrationMethod: "operator",
-      tokenEndpointAuthMethod: "client_secret_post",
-      returnPath: "/capabilities?connect_item=slack",
-    });
-    const callback = await publicApp(client.db, slackSettings).request(
-      `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`,
-    );
-    expect(callback.status).toBe(302);
-    const callbackLocation = new URL(
-      callback.headers.get("location")!,
-      "https://api.opengeni.test",
-    );
-    expect(callbackLocation.searchParams.get("integration_oauth")).toBe("error");
-    expect(callbackLocation.searchParams.get("stage")).toBe("state_verify");
-    expect(
-      await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a"),
-    ).toHaveLength(1);
-  });
-
-  test("personal Slack MCP uses configured operator credentials and remains bound to the authenticating subject", async () => {
-    if (!available) return;
-    const workspace = await freshWorkspace();
-    const as = startFakeAuthorizationServer({
-      issuer: "https://slack.com/mcp",
-      clientIdMetadataDocumentSupported: false,
-      tokenEndpointAuthMethodsSupported: ["client_secret_post"],
-      scopesSupported: ["search:read.public", "chat:write"],
-    });
-    const mcp = startTestMcpServer({
-      requiredAuthorization: "Bearer mcp-access-token",
-      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="search:read.public chat:write"`,
-    });
-    try {
-      const response = await app({
-        environment: "test",
-        slackClientId: "slack-client-id",
-        slackClientSecret: "slack-client-secret",
-      }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
-        method: "POST",
-        headers: {
-          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
+        const callback = await publicApp(client.db, {
+          slackClientId: "slack-client-id",
+          slackClientSecret: "slack-client-secret",
+        }).request(
+          `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
+        );
+        expect(callback.status).toBe(302);
+        const callbackLocation = new URL(
+          callback.headers.get("location")!,
+          "https://api.opengeni.test",
+        );
+        expect(callbackLocation.searchParams.get("integration_oauth")).toBe("success");
+        expect(callbackLocation.searchParams.get("ownership")).toBe(ownership);
+        const connectionId = callbackLocation.searchParams.get("connectionId");
+        expect(connectionId).not.toBeNull();
+        expect(
+          await getConnectionMetadata(client.db, workspace.workspaceId, connectionId!, "subject-a"),
+        ).toMatchObject({
+          subjectId: ownership === "personal" ? "subject-a" : null,
           providerDomain: "slack.com",
-          mcpUrl: mcp.url,
-          ownership: "personal",
-          returnPath: "/capabilities?connect_item=slack",
-        }),
-      });
-
-      const responseText = await response.clone().text();
-      expect(response.status, responseText).toBe(200);
-      const body = (await response.json()) as {
-        state: string;
-        authorizationUrl: string;
-      };
-      const authUrl = new URL(body.authorizationUrl);
-      expect(authUrl.searchParams.get("client_id")).toBe("slack-client-id");
-      expect(authUrl.searchParams.get("scope")).toBe("search:read.public chat:write");
-      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
-      expect(state?.providerDomain).toBe("slack.com");
-      expect(state?.ownership).toBe("personal");
-      expect(state?.clientRegistrationMethod).toBe("operator");
-      expect(state?.clientId).toBe("slack-client-id");
-      expect(JSON.stringify(state)).not.toContain("slack-client-secret");
-
-      const callback = await publicApp(client.db, {
-        slackClientId: "slack-client-id",
-        slackClientSecret: "slack-client-secret",
-      }).request(
-        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
-      );
-      expect(callback.status).toBe(302);
-      const callbackLocation = new URL(
-        callback.headers.get("location")!,
-        "https://api.opengeni.test",
-      );
-      expect(callbackLocation.searchParams.get("integration_oauth")).toBe("success");
-      expect(callbackLocation.searchParams.get("ownership")).toBe("personal");
-      const connectionId = callbackLocation.searchParams.get("connectionId");
-      expect(connectionId).not.toBeNull();
-      expect(
-        await getConnectionMetadata(client.db, workspace.workspaceId, connectionId!, "subject-a"),
-      ).toMatchObject({
-        subjectId: "subject-a",
-        providerDomain: "slack.com",
-        kind: "oauth2",
-      });
-      expect(as.tokenRequests).toHaveLength(1);
-      expect(as.tokenRequests[0]!.get("client_id")).toBe("slack-client-id");
-      expect(as.tokenRequests[0]!.get("client_secret")).toBe("slack-client-secret");
-      expect(as.tokenRequestAuthHeaders[0]).toBeNull();
-    } finally {
-      mcp.close();
-      as.close();
-    }
-  });
+          kind: "oauth2",
+        });
+        expect(as.tokenRequests).toHaveLength(1);
+        expect(as.tokenRequests[0]!.get("client_id")).toBe("slack-client-id");
+        expect(as.tokenRequests[0]!.get("client_secret")).toBe("slack-client-secret");
+        expect(as.tokenRequestAuthHeaders[0]).toBeNull();
+      } finally {
+        mcp.close();
+        as.close();
+      }
+    },
+  );
 
   test("Slack MCP rejects browser-provided OAuth clients before discovery", async () => {
     if (!available) return;

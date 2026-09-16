@@ -328,8 +328,8 @@ export function buildCreateSessionRequest(
           personalResourceAttachment: input.submission.personalResourceAttachment,
         }
       : {}),
-    ...(input.submission.connectionAuthorities
-      ? { connectionAuthorities: input.submission.connectionAuthorities }
+    ...(input.submission.connectionAccounts
+      ? { connectionAccounts: input.submission.connectionAccounts }
       : {}),
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),

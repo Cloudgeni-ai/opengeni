@@ -5,7 +5,6 @@ import {
   ConnectionCreateIdempotencyError,
 } from "@opengeni/db";
 import { sql } from "drizzle-orm";
-import { connectionAuthorityLifecycleError } from "../connection-authority-owner";
 import { assertOrganizationIntegrationAllowed } from "@opengeni/contracts";
 import {
   withOrganizationIntegrationAcquisition,
@@ -71,6 +70,7 @@ import {
 } from "@opengeni/contracts/personal-github";
 import {
   hasPermission,
+  listOwnConnectionAccountsForGrant,
   hasReservedFikenMetadata,
   hasReservedOpenGeniSlackBotMetadata,
   isOpenGeniSlackBotConnection,
@@ -79,7 +79,6 @@ import {
   requireAccessGrantAuthorization,
   requireEnvironmentEncryption,
   externalContinuationCommitAuthorizer,
-  issueManagedHumanUserResourceGrant,
 } from "@opengeni/core";
 import {
   consumeIntegrationOAuthStateNonce,
@@ -197,6 +196,16 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  app.get("/v1/workspaces/:workspaceId/connections/accounts", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    return c.json(
+      ListConnectionsResponse.parse({
+        connections: await listOwnConnectionAccountsForGrant(db, grant),
+      }),
+    );
+  });
+
   app.get("/v1/workspaces/:workspaceId/connections/slack-bot/bindings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
@@ -241,16 +250,6 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       assertNotReservedPersonalGitHubMetadata(payload.metadata);
       const key = requireEnvironmentEncryption(settings);
       const subjectId = createConnectionSubjectId(payload, grant.subjectId);
-      if (
-        payload.initialUseContexts &&
-        (!subjectId ||
-          !payload.operationId ||
-          new Set(payload.initialUseContexts).size !== payload.initialUseContexts.length)
-      ) {
-        throw new HTTPException(422, {
-          message: "initialUseContexts requires a keyed personal connection and unique contexts",
-        });
-      }
       if (subjectId !== null) {
         assertPersonalConnectionOwnerPrincipal(access);
       }
@@ -321,36 +320,6 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null,
             metadata: payload.metadata,
             createdBySubjectId: grant.subjectId,
-            ...(payload.initialUseContexts
-              ? {
-                  onCreated: async (
-                    tx: Database,
-                    created: Awaited<ReturnType<typeof createConnectionIdempotently>>,
-                  ) => {
-                    if (!created.authorityId) {
-                      throw new HTTPException(409, {
-                        message: "Native personal connection authority is unavailable",
-                      });
-                    }
-                    for (const context of payload.initialUseContexts!) {
-                      await issueManagedHumanUserResourceGrant(
-                        { ...deps, db: tx },
-                        access,
-                        workspaceId,
-                        created.authorityId,
-                        {
-                          scope: "user",
-                          resourceKind: "connection",
-                          mode: "always",
-                          context,
-                          workspaceSharedAcknowledged: context === "workspace_shared",
-                        },
-                        "http",
-                      ).catch(connectionAuthorityLifecycleError);
-                    }
-                  },
-                }
-              : {}),
             ...(payload.operationId
               ? {
                   operation: {
@@ -366,9 +335,6 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                         ? new Date(payload.expiresAt).toISOString()
                         : null,
                       metadata: payload.metadata,
-                      ...(payload.initialUseContexts
-                        ? { initialUseContexts: [...payload.initialUseContexts].sort() }
-                        : {}),
                     }),
                   },
                 }

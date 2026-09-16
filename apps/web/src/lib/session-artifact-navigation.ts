@@ -1,4 +1,5 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const EDITABLE_ID = /^[0-9a-f]{32}$/iu;
 
 /** Only canonical, same-origin/workspace artifact links belong in the session dock. */
 export function sessionArtifactFromHref(href: string, origin: string, workspaceId: string) {
@@ -13,7 +14,8 @@ export function sessionArtifactFromHref(href: string, origin: string, workspaceI
     const kind = parts[4] === "files" ? ("file" as const) : undefined;
     const nested = editable || kind !== undefined;
     const id = parts[nested ? 5 : 4];
-    if (parts.length !== (nested ? 6 : 5) || !id || !UUID.test(id)) return null;
+    if (parts.length !== (nested ? 6 : 5) || !id) return null;
+    if (!(editable ? EDITABLE_ID.test(id) : UUID.test(id))) return null;
     return { id, editable, ...(kind ? { kind } : {}) };
   } catch {
     return null;

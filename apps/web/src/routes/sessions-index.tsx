@@ -93,6 +93,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
+import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
+import { ConnectionAccountPicker } from "@/components/capabilities/connection-account-picker";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
@@ -153,6 +155,7 @@ import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
   selectableSessionMcpServerIds,
+  unavailableSessionMcpServerIds,
   newSessionDraftToolPolicy,
   rehydrateRepositoryResources,
   repositorySelectionFromResources,
@@ -207,6 +210,15 @@ function SessionsIndexRouteContent({
   launch: ComposerLaunchSearch;
 }) {
   const context = useAppContext();
+  const connectionAccounts = useConnectionAccounts(
+    context.client,
+    {
+      id: "new-session",
+      workspaceId,
+      selectedIds: [...context.selectedCapabilityToolIds],
+    },
+    context.workspaceCapabilityCatalog,
+  );
   const repositoryCatalogRefresh = useRepositoryCatalogRefresh(workspaceId, context);
   const firstPartyMcpToolPolicy = useMemo(
     () => clientFirstPartyMcpToolPolicy(context.clientConfig),
@@ -979,14 +991,39 @@ function SessionsIndexRouteContent({
           : "";
       if (
         busy ||
+        !context.workspaceMcpCatalogReady ||
         newSessionDraft.loading ||
         newSessionDraft.conflict ||
         !newSessionPolicyValid ||
         privateCreateUnavailable ||
         personalResourceCatalogRefreshPending ||
+        (!realtimeModel &&
+          createdSessionAuthority === null &&
+          (connectionAccounts.loading ||
+            connectionAccounts.error !== null ||
+            connectionAccounts.requiresAccountChoice)) ||
         (createdSessionAuthority === null && !fixedResourceSelection.selectionResolved)
       )
         return false;
+      if (createdSessionAuthority === null) {
+        const unavailable = unavailableSessionMcpServerIds(
+          context.selectedCapabilityToolIds,
+          context.toolMcpServers,
+          context.workspaceMcpCatalogLoadedSuccessfully,
+        );
+        if (unavailable.length > 0) {
+          const removed = new Set(unavailable);
+          context.setSelectedCapabilityToolIds(
+            (current) => new Set([...current].filter((id) => !removed.has(id))),
+          );
+          setConnectorExclusions((current) => [...new Set([...current, ...unavailable])]);
+          toast.error("Some selected tools are no longer available", {
+            description:
+              "Removed them from this draft. Your message is still here; review the tools and send again.",
+          });
+          return false;
+        }
+      }
       if (realtimeModel && personalMachineSelected) {
         toast.error("Voice can't start on a personal Connected Machine", {
           description:
@@ -1095,6 +1132,7 @@ function SessionsIndexRouteContent({
                 reasoningEffort,
                 latencyMode,
                 ...submission.extras,
+                connectionAccounts: connectionAccounts.selections,
               },
               {
                 targetSandboxId: submission.options.targetSandboxId,
@@ -1248,6 +1286,10 @@ function SessionsIndexRouteContent({
       !newSessionDraft.conflict &&
       newSessionPolicyValid &&
       !personalResourceCatalogRefreshPending &&
+      (createdSessionAuthority !== null ||
+        (!connectionAccounts.loading &&
+          connectionAccounts.error === null &&
+          !connectionAccounts.requiresAccountChoice)) &&
       (createdSessionAuthority !== null || fixedResourceSelection.selectionResolved) &&
       (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
     pause: async () => {},
@@ -1351,6 +1393,20 @@ function SessionsIndexRouteContent({
         ) : null}
 
         <div ref={composerRegionRef} className="mt-8 [&_textarea]:min-h-[calc(2lh+1rem)]">
+          <ConnectionAccountPicker
+            groups={connectionAccounts.accountGroups}
+            choices={connectionAccounts.accountChoices}
+            onChoose={connectionAccounts.selectAccount}
+            disabled={busy || newSessionDraft.loading}
+          />
+          {connectionAccounts.error ? (
+            <p role="alert" className="mb-2 text-sm text-fg-muted">
+              {connectionAccounts.error}{" "}
+              <Button variant="ghost" onClick={() => void connectionAccounts.refresh()}>
+                Retry
+              </Button>
+            </p>
+          ) : null}
           <ConsoleComposer
             workspaceId={workspaceId}
             composer={createComposer}

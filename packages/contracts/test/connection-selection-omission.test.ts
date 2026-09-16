@@ -6,7 +6,7 @@ import {
   SteerSessionMessageRequest,
 } from "../src";
 
-test("request parsing preserves omitted versus explicitly empty connection selections", () => {
+test("account choices default empty and obsolete conversation grants are rejected", () => {
   const cases = [
     [CreateSessionRequest, { initialMessage: "Use my connection" }],
     [SteerSessionMessageRequest, { text: "Continue" }],
@@ -34,7 +34,8 @@ test("request parsing preserves omitted versus explicitly empty connection selec
     ],
   ] as const;
   for (const [schema, input] of cases) {
-    expect(schema.parse(input).connectionAuthorities).toBeUndefined();
-    expect(schema.parse({ ...input, connectionAuthorities: [] }).connectionAuthorities).toEqual([]);
+    expect(schema.parse(input).connectionAccounts).toEqual([]);
+    expect(schema.parse({ ...input, connectionAccounts: [] }).connectionAccounts).toEqual([]);
+    expect(schema.safeParse({ ...input, connectionAuthorities: [] }).success).toBe(false);
   }
 });

@@ -309,8 +309,6 @@ import type {
   ListManagedOrganizationMembershipsResponse,
   ListUserResourceAuthoritiesOptions,
   ListUserResourceAuthoritiesResponse,
-  IssueUserResourceGrantRequest,
-  UserResourceGrantMutationResponse,
   UpdateGitHubActionPolicyRequest,
   RevokeUserResourceGrantResponse,
   ListOrganizationInvitationsPageResponse,
@@ -4515,19 +4513,6 @@ export class OpenGeniClient {
     );
   }
 
-  /** Issue an exact-session or standing personal-resource grant. */
-  async issueUserResourceGrant(
-    workspaceId: string,
-    authorityId: string,
-    request: IssueUserResourceGrantRequest,
-  ): Promise<UserResourceGrantMutationResponse> {
-    return await this.requestJson<UserResourceGrantMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
-      request,
-    );
-  }
-
   /** Revoke an owner grant through the exact workspace it targets. */
   async revokeUserResourceGrant(
     workspaceId: string,
@@ -7423,6 +7408,15 @@ export class OpenGeniClient {
   }
 
   // --- Connections -------------------------------------------------------------------------------
+
+  /** The authenticated user's active accounts across this organization. */
+  async listOwnConnectionAccounts(workspaceId: string): Promise<ConnectionMetadata[]> {
+    const response = await this.requestJson<ListConnectionsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/connections/accounts`,
+    );
+    return response.connections;
+  }
 
   async listConnections(workspaceId: string): Promise<ConnectionMetadata[]> {
     const response = await this.requestJson<ListConnectionsResponse>(

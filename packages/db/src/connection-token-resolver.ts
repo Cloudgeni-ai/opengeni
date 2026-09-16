@@ -11,11 +11,7 @@ import type {
   McpCredentialAuthNeededReason,
 } from "@opengeni/contracts";
 
-import {
-  ConnectionUseAuthoritySnapshot,
-  type ConnectionUseAttribution,
-  type ConnectionUseAuthorizationResult,
-} from "@opengeni/contracts/connection-authority";
+import { type ConnectionUseAttribution } from "@opengeni/contracts/connection-authority";
 import {
   PERSONAL_GITHUB_REQUESTED_SCOPES,
   PERSONAL_GITHUB_PROVIDER_DOMAIN,
@@ -165,8 +161,8 @@ export type ResolveConnectionCredentialInput = {
   credentialResolutionMode?: "execution" | "preflight";
   /** Frozen provider authority generation captured by the calling integration/catalog. */
   expectedAuthorityGeneration?: number;
-  /** Exact immutable accepted-work authority; never credential-bearing. */
-  connectionUseAuthority?: unknown;
+  /** Attribution already authorized for forwarding to a host resolver; never authorizes local use. */
+  hostConnectionUseAttribution?: ConnectionUseAttribution;
   /** Exact accepted attempt plus one stable physical-provider request id. */
   connectionUseContext?: AcceptedConnectionUseContext;
 };
@@ -363,10 +359,6 @@ export type ConnectionBrokerDeps = {
   encrypt: typeof encryptEnvironmentValue;
   keyBytes: typeof environmentsEncryptionKeyBytes;
   now: () => Date;
-  authorizeUse?: (
-    db: Database,
-    input: { snapshot: unknown },
-  ) => Promise<ConnectionUseAuthorizationResult>;
   authorizeAcceptedUse?: (
     db: Database,
     input: AcceptedConnectionUseContext & {
@@ -675,54 +667,6 @@ export function buildConnectionTokenResolver(
         ...ref,
         connectionId: authorization.attribution.connectionId,
         kind: authorization.connectionKind,
-        subjectScope: expectedPersonal ? "subject" : "workspace",
-      };
-    } else if (input.connectionUseAuthority !== undefined) {
-      const authority = ConnectionUseAuthoritySnapshot.parse(input.connectionUseAuthority);
-      const expectedPersonal = authority.scope === "user";
-      if (
-        authority.targetWorkspaceId !== input.workspaceId ||
-        authority.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase() ||
-        (ref.connectionId !== undefined && ref.connectionId !== authority.connectionId) ||
-        (ref.kind !== undefined && ref.kind !== authority.connectionKind) ||
-        (ref.subjectScope === "subject") !== expectedPersonal ||
-        !deps.authorizeUse
-      ) {
-        return authNeeded(
-          ref,
-          expectedPersonal ? "personal_authority_unavailable" : "missing_connection",
-          ref.connectionId,
-        );
-      }
-      const authorization = await deps.authorizeUse(db, { snapshot: authority });
-      if (authorization.status === "denied") {
-        return authNeeded(
-          ref,
-          expectedPersonal ? "personal_authority_unavailable" : "missing_connection",
-          authority.connectionId,
-        );
-      }
-      if (
-        expectedAuthorityGeneration !== undefined &&
-        authority.connectionGeneration !== expectedAuthorityGeneration
-      ) {
-        return authNeeded(ref, authorityReasonForScope(expectedPersonal), authority.connectionId);
-      }
-      connectionUseAttribution = authorization.attribution;
-      expectedAuthorityGeneration = authority.connectionGeneration;
-      // Personal resources are organization-user owned and may originate in a
-      // different workspace from the session using them. Authorization is
-      // evaluated against the target workspace above; the exact credential is
-      // then loaded from its frozen physical origin, never rediscovered in the
-      // target workspace.
-      credentialWorkspaceId = expectedPersonal
-        ? authority.originWorkspaceId
-        : authority.targetWorkspaceId;
-      subjectId = authority.ownerSubjectId ?? undefined;
-      ref = {
-        ...ref,
-        connectionId: authority.connectionId,
-        kind: authority.connectionKind,
         subjectScope: expectedPersonal ? "subject" : "workspace",
       };
     }

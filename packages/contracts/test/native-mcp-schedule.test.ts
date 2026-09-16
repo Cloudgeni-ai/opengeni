@@ -12,14 +12,14 @@ const task = {
   name: "Native connection schedule",
   schedule: { type: "manual" },
   agentConfig: { prompt: "Use the selected connection", tools: [] },
-  connectionAuthorities: [],
+  connectionAccounts: [],
 };
 
 test("schedule contracts retain ordinary connection selection", () => {
-  expect(CreateScheduledTaskRequest.parse(task).connectionAuthorities).toEqual([]);
-  expect(
-    UpdateScheduledTaskRequest.parse({ connectionAuthorities: [] }).connectionAuthorities,
-  ).toEqual([]);
+  expect(CreateScheduledTaskRequest.parse(task).connectionAccounts).toEqual([]);
+  expect(UpdateScheduledTaskRequest.parse({ connectionAccounts: [] }).connectionAccounts).toEqual(
+    [],
+  );
 });
 
 test.each([
@@ -57,7 +57,7 @@ test.each([
     },
   },
 ])("session admission rejects retired host selection: $name", ({ schema, payload }) => {
-  expect(schema.safeParse({ ...payload, connectionAuthorities: [] }).success).toBe(true);
+  expect(schema.safeParse({ ...payload, connectionAccounts: [] }).success).toBe(true);
   expect(schema.safeParse({ ...payload, selectedHostMcpDelegations: [] }).success).toBe(false);
 });
 

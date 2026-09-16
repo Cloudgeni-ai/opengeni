@@ -1666,9 +1666,12 @@ Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 ### In-conversation connection setup
 
 `SessionCapabilityCard` shares native Connection APIs; hosts retain authorization.
-OAuth never replays tools. Personal MCP grants must match owner, session,
-visibility and authority epoch, including shared-results acknowledgement.
-Credentials alone grant no use.
+OAuth never replays tools. Skills retain workspace scope and reviewed hashes.
+Messages authorize the sender's accounts; queued work, retries and children
+retain that identity. Personal schedules have immutable owners. Setup offers
+Personal and Workspace with provider-specific defaults. Explicit choices win;
+reconnect preserves ownership. See [sender-owned connections](design/sender-owned-connections.md)
+for account selection, provider checks and migration.
 
 `apps/worker/src/activities/mcp-credentials.ts` binds native credentials/refresh
 to accepted user, connection, turn and attempt; physical requests recheck authority.

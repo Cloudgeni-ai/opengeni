@@ -2,13 +2,11 @@ import type { Settings } from "@opengeni/config";
 import {
   buildConnectionTokenResolver,
   resolveAcceptedConnectionUse,
-  sessionTenancyProductActivated,
   type Database,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
   type SessionTurnForExecution,
 } from "@opengeni/db";
-import { recordTenancyCompatibilityLaneUse, type Observability } from "@opengeni/observability";
 import { mcpOperationAuthorityDigest } from "./mcp-operation-authority";
 
 type TurnConnectionInput = {
@@ -20,10 +18,6 @@ type TurnConnectionInput = {
   attemptId: string;
   turn: SessionTurnForExecution;
   authorizeAcceptedUse?: typeof resolveAcceptedConnectionUse;
-  /** Test seam for the activation fence on pre-snapshot workspace refs. */
-  isSessionTenancyProductActivated?: typeof sessionTenancyProductActivated;
-  /** Optional; used only for content-free compatibility-lane counters. */
-  observability?: Observability | null | undefined;
 };
 
 type CredentialResolver = (
@@ -90,9 +84,7 @@ export function bindNativeConnectionCredentialsToTurn(
     const subjectScope: "subject" | "workspace" =
       request.connectionRef.subjectScope === "subject" ? "subject" : "workspace";
     // Every subject-scoped request must match an exact connection frozen on the
-    // accepted turn. This also hard-fences pre-cutover common-user turns that
-    // lack a userDelegation: the DB resolver denies those rows because only a
-    // true legacy_user connection is eligible for bounded compatibility.
+    // accepted turn. The database then checks its immutable sender snapshot.
     if (
       subjectScope === "subject" &&
       (!acceptedDelegation || !request.connectionRef.connectionId)
@@ -104,31 +96,15 @@ export function bindNativeConnectionCredentialsToTurn(
         ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
       };
     }
-    // Workspace-scope requests now run through the same accepted-use authority
-    // (migration 0279): the exact workspace-owned connection is revalidated
-    // inside the canonical lifecycle fences and every use leaves an idempotent
-    // audit fact. A ref with no connection id is the bounded pre-snapshot
-    // legacy path - it cannot be authorized by exact identity, so it keeps the
-    // unprivileged resolution the old short-circuit used.
+    // Workspace connections also need an exact identity for accepted-use
+    // validation and attribution. Never rediscover a credential by domain here.
     if (subjectScope === "workspace" && !request.connectionRef.connectionId) {
-      if (
-        await (input.isSessionTenancyProductActivated ?? sessionTenancyProductActivated)(
-          input.db,
-          input.workspaceId,
-        )
-      ) {
-        return {
-          status: "auth_needed",
-          reason: "missing_connection",
-          providerDomain: request.connectionRef.providerDomain,
-          ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
-        };
-      }
-      // This lane writes no `connection_use_audit_facts` row, so this counter is
-      // the only evidence it was taken. Lane name only - never the server,
-      // provider domain, connection, or subject.
-      recordTenancyCompatibilityLaneUse(input.observability, "connection_pre_snapshot_ref");
-      return await nativeResolver(request);
+      return {
+        status: "auth_needed",
+        reason: "missing_connection",
+        providerDomain: request.connectionRef.providerDomain,
+        ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
+      };
     }
     const credentialUseContext = {
       accountId: input.accountId,
@@ -198,17 +174,10 @@ export function bindNativeConnectionCredentialsToTurn(
         },
       };
     };
-    // The native resolver returns the scope it actually authorized.
-    const recordAuthorizedScope = (scope: "workspace" | "user" | "legacy_user" | undefined) => {
-      if (scope === "legacy_user") {
-        recordTenancyCompatibilityLaneUse(input.observability, "connection_legacy_user");
-      }
-    };
     const result = await nativeResolver({
       ...request,
       connectionUseContext: credentialUseContext,
     });
-    if (result.status === "ok") recordAuthorizedScope(result.connectionUseAttribution?.scope);
     return withProviderRequestAuthorization(result);
   };
 }

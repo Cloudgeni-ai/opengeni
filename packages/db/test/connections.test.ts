@@ -97,52 +97,17 @@ const authorityIds = {
   connectionId: "00000000-0000-4000-8000-000000000105",
 };
 
-function workspaceConnectionUseAuthority() {
+function acceptedConnectionUseContext() {
   return {
-    organizationId: authorityIds.organizationId,
-    originWorkspaceId: authorityIds.workspaceId,
-    targetWorkspaceId: authorityIds.workspaceId,
-    targetSessionId: authorityIds.sessionId,
-    targetSessionVisibility: "workspace_shared",
-    targetSessionAuthorityEpoch: 1,
-    acceptedWork: { kind: "turn", turnId: authorityIds.turnId },
-    connectionId: authorityIds.connectionId,
-    connectionGeneration: 7,
-    connectionStatus: "active",
-    providerDomain: "api.example.com",
-    connectionKind: "api_key",
-    scope: "workspace",
-    ownerSubjectId: null,
-    ownerOrganizationMembershipId: null,
-    authoritySource: "explicit_workspace",
-    selectionSources: ["mcp:workspace"],
-    userDelegation: null,
-  } as const;
-}
-
-function personalConnectionUseAuthority() {
-  return {
-    ...workspaceConnectionUseAuthority(),
-    originWorkspaceId: authorityIds.originWorkspaceId,
-    scope: "user",
-    ownerSubjectId: "user:owner",
-    ownerOrganizationMembershipId: "00000000-0000-4000-8000-000000000107",
-    ownerMembershipAuthorizationRevision: 2,
-    authoritySource: "user_delegation",
-    userDelegation: {
-      authorityId: "00000000-0000-4000-8000-000000000108",
-      grantId: "00000000-0000-4000-8000-000000000109",
-      organizationId: authorityIds.organizationId,
-      workspaceId: authorityIds.workspaceId,
-      sessionId: null,
-      action: "connection.use",
-      mode: "always",
-      context: "workspace_shared",
-      authorityEpoch: null,
-      authorityGeneration: 1,
-      grantGeneration: 1,
-    },
-  } as const;
+    accountId: authorityIds.organizationId,
+    workspaceId: authorityIds.workspaceId,
+    sessionId: authorityIds.sessionId,
+    turnId: authorityIds.turnId,
+    attemptId: "00000000-0000-4000-8000-000000000109",
+    executionGeneration: 1,
+    physicalRequestId: "00000000-0000-4000-8000-000000000110",
+    usePhase: "credential_resolution" as const,
+  };
 }
 
 type Counts = {
@@ -1144,7 +1109,10 @@ describe("buildConnectionTokenResolver", () => {
 
   test("revalidates immutable connection authority before credential lookup", async () => {
     const { deps, counts } = resolverDeps({
-      authorizeUse: async () => ({ status: "denied", reason: "connection_generation_changed" }),
+      authorizeAcceptedUse: async () => ({
+        status: "denied",
+        reason: "connection_generation_changed",
+      }),
     });
     const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
     const result = await resolver({
@@ -1156,7 +1124,7 @@ describe("buildConnectionTokenResolver", () => {
         providerDomain: "api.example.com",
         kind: "api_key",
       },
-      connectionUseAuthority: workspaceConnectionUseAuthority(),
+      connectionUseContext: acceptedConnectionUseContext(),
     });
     expect(result).toEqual({
       status: "auth_needed",
@@ -1181,7 +1149,12 @@ describe("buildConnectionTokenResolver", () => {
       grantId: null,
     };
     const { deps, counts } = resolverDeps({
-      authorizeUse: async () => ({ status: "authorized", attribution }),
+      authorizeAcceptedUse: async () => ({
+        status: "authorized",
+        originWorkspaceId: authorityIds.workspaceId,
+        connectionKind: "api_key",
+        attribution,
+      }),
       loadCredential: async (_db, _settings, input) => {
         counts.load += 1;
         counts.loadInputs.push(input);
@@ -1203,7 +1176,7 @@ describe("buildConnectionTokenResolver", () => {
         providerDomain: "api.example.com",
         kind: "api_key",
       },
-      connectionUseAuthority: workspaceConnectionUseAuthority(),
+      connectionUseContext: acceptedConnectionUseContext(),
     });
     expect(counts.loadInputs).toEqual([
       {
@@ -1224,7 +1197,7 @@ describe("buildConnectionTokenResolver", () => {
   });
 
   test("loads an authorized personal connection from its frozen origin workspace", async () => {
-    const authority = personalConnectionUseAuthority();
+    const authority = { ownerSubjectId: "user:owner" };
     const attribution = {
       organizationId: authorityIds.organizationId,
       workspaceId: authorityIds.workspaceId,
@@ -1233,11 +1206,17 @@ describe("buildConnectionTokenResolver", () => {
       connectionGeneration: 7,
       scope: "user" as const,
       ownerSubjectId: authority.ownerSubjectId,
-      authorityId: authority.userDelegation.authorityId,
-      grantId: authority.userDelegation.grantId,
+      authorityId: "00000000-0000-4000-8000-000000000108",
+      grantId: null,
     };
     const { deps, counts } = resolverDeps({
-      authorizeUse: async () => ({ status: "authorized", attribution }),
+      authorizeAcceptedUse: async () => ({
+        status: "authorized",
+        originWorkspaceId:
+          attribution.scope === "user" ? authorityIds.originWorkspaceId : authorityIds.workspaceId,
+        connectionKind: "api_key",
+        attribution,
+      }),
       loadCredential: async (_db, _settings, input) => {
         counts.load += 1;
         counts.loadInputs.push(input);
@@ -1261,7 +1240,7 @@ describe("buildConnectionTokenResolver", () => {
         kind: "api_key",
         subjectScope: "subject",
       },
-      connectionUseAuthority: authority,
+      connectionUseContext: acceptedConnectionUseContext(),
     });
     expect(counts.loadInputs).toEqual([
       {
@@ -1283,8 +1262,10 @@ describe("buildConnectionTokenResolver", () => {
 
   test("rejects a credential whose authority generation changed after authorization", async () => {
     const { deps, counts } = resolverDeps({
-      authorizeUse: async () => ({
+      authorizeAcceptedUse: async () => ({
         status: "authorized",
+        originWorkspaceId: authorityIds.workspaceId,
+        connectionKind: "api_key",
         attribution: {
           organizationId: authorityIds.organizationId,
           workspaceId: authorityIds.workspaceId,
@@ -1318,7 +1299,7 @@ describe("buildConnectionTokenResolver", () => {
         providerDomain: "api.example.com",
         kind: "api_key",
       },
-      connectionUseAuthority: workspaceConnectionUseAuthority(),
+      connectionUseContext: acceptedConnectionUseContext(),
     });
     expect(result).toEqual({
       status: "auth_needed",
@@ -2315,7 +2296,14 @@ describe("buildConnectionTokenResolver", () => {
   });
 
   test("permanent refresh failure updates the exact personal connection in its origin workspace", async () => {
-    const authority = { ...personalConnectionUseAuthority(), connectionKind: "oauth2" as const };
+    const authority = {
+      ...authorityIds,
+      targetWorkspaceId: authorityIds.workspaceId,
+      targetSessionId: authorityIds.sessionId,
+      ownerSubjectId: "user:owner",
+      connectionGeneration: 7,
+      providerDomain: "api.example.com",
+    };
     const stale = brokerCredential({
       id: authority.connectionId,
       accountId: authority.organizationId,
@@ -2329,8 +2317,10 @@ describe("buildConnectionTokenResolver", () => {
     });
     const writes: Array<Parameters<ConnectionBrokerDeps["setStatus"]>> = [];
     const { deps, counts } = resolverDeps({
-      authorizeUse: async () => ({
+      authorizeAcceptedUse: async () => ({
         status: "authorized",
+        originWorkspaceId: authority.originWorkspaceId,
+        connectionKind: "oauth2",
         attribution: {
           organizationId: authority.organizationId,
           workspaceId: authority.targetWorkspaceId,
@@ -2339,8 +2329,8 @@ describe("buildConnectionTokenResolver", () => {
           connectionGeneration: authority.connectionGeneration,
           scope: "user",
           ownerSubjectId: authority.ownerSubjectId,
-          authorityId: authority.userDelegation.authorityId,
-          grantId: authority.userDelegation.grantId,
+          authorityId: "00000000-0000-4000-8000-000000000108",
+          grantId: null,
         },
       }),
       loadCredential: async () => stale,
@@ -2367,7 +2357,7 @@ describe("buildConnectionTokenResolver", () => {
         kind: "oauth2",
         subjectScope: "subject",
       },
-      connectionUseAuthority: authority,
+      connectionUseContext: acceptedConnectionUseContext(),
     });
     expect(result).toMatchObject({ status: "auth_needed", connectionId: stale.id });
     expect(writes).toHaveLength(1);

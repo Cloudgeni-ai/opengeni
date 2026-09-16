@@ -7,7 +7,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Audience | Reads | Notes |
 | --- | --- | --- |
 | Integrator | `docs/product-integration.md`, `packages/sdk/README.md`, `packages/react/README.md`, `docs/embedding-workbench.md`, `examples/chat-quickstart` | Products consuming a standalone OpenGeni deployment; start with the `@opengeni/sdk/chat` facade and the chat quickstart; `docs/embedding.md` is only for advanced in-process hosts. |
-| Maintainer | `CONTRIBUTING.md`, `docs/architecture.md`, topic docs | Contributors changing code, packages, workflows, or release mechanics. |
+| Maintainer | `CONTRIBUTING.md`, `docs/local-development.md`, `docs/architecture.md`, topic docs | Contributors changing code, packages, workflows, or release mechanics. |
 | Repo agent | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, this map | Coding agents working in this repository. |
 | Integration agent | `.agents/skills/opengeni-client/SKILL.md` and its references | Customer-side coding agents choosing and implementing a product integration shape. |
 | Product agent | Curated opt-in Skills in `packages/runtime/src/curated_skill_library` plus native tool-bound Skills in `packages/runtime/src/bundled_artifact_skills`, `packages/runtime/src/bundled_site_skills`, and `packages/runtime/src/bundled_video_skills` | Versioned product content; not covered by this freshness system. |
@@ -20,6 +20,9 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Topic | Current canonical home | Known restatement locations |
 | --- | --- | --- |
 | Architecture & package layout | `docs/architecture.md` | `README.md`, `AGENTS.md`, package READMEs should link or summarize lightly. |
+| Local development stack, manual startup, `.env` configuration, and web-app walkthrough | `docs/local-development.md` | `README.md` keeps only the one-command quick start; `CONTRIBUTING.md`, `docs-site/run-locally.mdx`, and `docs/deployment.md` § Local Development Stack (launcher internals) link here. |
+| HTTP route families | `docs/http-api.md` | `README.md`, `packages/sdk/README.md`, and topic docs link instead of re-listing routes; typed method details stay in `packages/sdk/README.md`. |
+| Roadmap | `docs/roadmap.md` | `README.md` links; issues carry discussion. |
 | Standalone product integration, organization keys/workspaces, and external Skill ownership | `docs/product-integration.md` | `README.md`, package READMEs, the Northstar example, and both integration Skills link here; `packages/sdk/README.md` owns typed method details, while `docs/embedding-workbench.md` owns the optional workbench. |
 | Advanced in-process embedding & ports | `docs/embedding.md` | `README.md` and `CONTRIBUTING.md` should not present it as the default customer path. |
 | Shared connection UI and conversation setup | `docs/connection-presentation.md` | Console and SDK discovery, OAuth details, personal consent, and shared controls. |
@@ -63,7 +66,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Codemode programmatic tool access | `docs/mcp-surfaces.md`, `docs/architecture.md`; record design in `docs/design/codemode.md` | Runtime/API/worker comments should link instead of restating security invariants. |
 | Client/server compatibility policy | `docs/architecture.md` §3.10 | `packages/sdk/README.md` links; release notes should link. |
 | Typecheck/lint/format toolchain | `docs/toolchain.md` | `CONTRIBUTING.md` links; other docs should not restate tool choice or version. |
-| Model providers and OpenAI-compatible inference routes | `docs/model-providers.md` (start at § Configuring inference) | `README.md` Configuration and `.env.example` should link instead of restating `OPENGENI_MODEL_PROVIDERS_JSON`. |
+| Model providers and OpenAI-compatible inference routes | `docs/model-providers.md` (start at § Configuring inference) | `docs/local-development.md` § Configuration and `.env.example` should link instead of restating `OPENGENI_MODEL_PROVIDERS_JSON`. |
 | Model catalog pricing audit | `docs/model-providers.md` § Price audit (`bun run check:model-pricing`) | Debit authority stays in `packages/config` `defaultModelPricing`; llm-prices is a canary only. |
 | Provider-aware image generation | `docs/image-generation.md` | Runtime, worker, artifact, SDK, and React summaries should link instead of restating provider and recovery semantics. |
 | Workspace and session artifact library | `docs/artifact-library.md` | Unified discovery and retained-file presentation; existing Site and editable-artifact authorities remain separate content models. |

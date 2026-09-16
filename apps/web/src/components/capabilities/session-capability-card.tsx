@@ -1,4 +1,3 @@
-import { authorizeSessionPersonalConnection } from "./session-connection-authority";
 import { attachSessionCapability } from "./attach-session-capability";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { SessionMcpCapabilityCard, type AuthNeededItem } from "@opengeni/react";
@@ -59,7 +58,6 @@ function ScopedSessionCapabilityCard({
   item,
   workspaceId,
   sessionId,
-  visibility = "workspace",
   onConfigured,
 }: SessionCapabilityCardProps) {
   const context = useAppContext();
@@ -144,7 +142,6 @@ function ScopedSessionCapabilityCard({
           key={`${workspaceId}:${sessionId}:${recommendation.id}`}
           capabilityId={recommendation.id}
           onResolvedItem={setResolvedItem}
-          visibility={visibility}
           onConfigured={onConfigured}
           workspaceId={workspaceId}
           sessionId={sessionId}
@@ -164,7 +161,6 @@ function SessionCapabilitySetup({
   setBusy,
   capabilityId,
   onResolvedItem,
-  visibility,
   onConfigured,
   workspaceId,
   sessionId,
@@ -175,7 +171,6 @@ function SessionCapabilitySetup({
   setBusy: (busy: boolean) => void;
   capabilityId: string;
   onResolvedItem: (item: CapabilityCatalogItem) => void;
-  visibility: "private" | "workspace";
   onConfigured?: (() => Promise<void>) | undefined;
   workspaceId: string;
   sessionId: string;
@@ -184,8 +179,6 @@ function SessionCapabilitySetup({
 }) {
   const context = useAppContext();
   const catalog = useCapabilitiesCatalog(workspaceId);
-  const [sharedAcknowledged, setSharedAcknowledged] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
   const scope = useRef({ client: context.client, workspaceId, sessionId, alive: true });
@@ -240,12 +233,6 @@ function SessionCapabilitySetup({
             if (!current()) return;
             if (!updated?.enabled)
               throw new Error("Setup could not be verified. Refresh and try again.");
-            if (updated.connectionRef?.subjectScope === "subject") {
-              setNotice(
-                "Your account is connected. Choose how to use it in this conversation below.",
-              );
-              return;
-            }
             await attachSessionCapability(context.client, workspaceId, sessionId, updated, current);
             await onConfigured?.();
             if (current()) onComplete();
@@ -285,17 +272,6 @@ function SessionCapabilitySetup({
       scope.current.workspaceId === invocation.workspaceId &&
       scope.current.sessionId === invocation.sessionId;
     try {
-      if (item.connectionRef?.subjectScope === "subject") {
-        await authorizeSessionPersonalConnection(
-          context.client,
-          workspaceId,
-          sessionId,
-          item,
-          visibility,
-          sharedAcknowledged,
-          current,
-        );
-      }
       await attachSessionCapability(context.client, workspaceId, sessionId, item, current);
       if (current()) await onConfigured?.();
       if (current()) onComplete();
@@ -358,34 +334,6 @@ function SessionCapabilitySetup({
           onAction={(action) => void act(action)}
         />
       )}
-      {notice ? (
-        <p role="status" className="mt-2 text-xs text-fg-muted">
-          {notice}
-        </p>
-      ) : null}
-      {item?.enabled && item.connectionRef?.subjectScope === "subject" ? (
-        <div className="mt-3 text-xs text-fg-muted">
-          {visibility === "workspace" ? (
-            <label className="flex items-start gap-2">
-              <input
-                type="checkbox"
-                checked={sharedAcknowledged}
-                onChange={(event) => setSharedAcknowledged(event.target.checked)}
-                disabled={busy}
-                className="mt-0.5 size-4"
-              />
-              <span>
-                Allow this conversation to use my personal account. Results shared here will be
-                visible to other workspace members.
-              </span>
-            </label>
-          ) : (
-            <p>
-              Allow your personal account only in this private conversation and its continuations.
-            </p>
-          )}
-        </div>
-      ) : null}
       <div className="mt-2 flex justify-end gap-2">
         {!ownsActionRow ? (
           <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>
@@ -393,18 +341,8 @@ function SessionCapabilitySetup({
           </Button>
         ) : null}
         {item?.enabled && health?.state !== "attention" && health?.state !== "unverified" ? (
-          <Button
-            size="sm"
-            disabled={
-              busy ||
-              (item.connectionRef?.subjectScope === "subject" &&
-                visibility === "workspace" &&
-                !sharedAcknowledged)
-            }
-            onClick={() => void useConnected()}
-          >
-            {busy ? <Loader2Icon className="animate-spin" /> : <CheckIcon />}Use in this
-            conversation
+          <Button size="sm" disabled={busy} onClick={() => void useConnected()}>
+            {busy ? <Loader2Icon className="animate-spin" /> : <CheckIcon />}Add tools
           </Button>
         ) : null}
       </div>

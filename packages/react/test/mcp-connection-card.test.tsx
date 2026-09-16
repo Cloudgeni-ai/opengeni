@@ -103,3 +103,46 @@ test("connection status retains exact workspace account ownership and endpoint",
     0,
   );
 });
+
+test("personal setup reads sender accounts without conversation grants or consent", async () => {
+  const unexpected: string[] = [];
+  const personal = {
+    ...item,
+    connectionRef: { providerDomain: "service.example", kind: "oauth2", subjectScope: "subject" },
+  };
+  const client = new Proxy(
+    {
+      listCapabilities: async () => ({ items: [personal] }),
+      listOwnConnectionAccounts: async () => [{ ...connection, subjectId: "owner" }],
+      getSession: async () => ({ tools: [], toolPolicy: { mode: "explicit" } }),
+      connectTransport: () => ({}),
+    },
+    {
+      get(target, key) {
+        if (key in target) return Reflect.get(target, key);
+        return () => {
+          unexpected.push(String(key));
+          throw new Error(`Unexpected ${String(key)}`);
+        };
+      },
+    },
+  ) as unknown as OpenGeniClient;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      sessionId="session"
+      capabilityId="service"
+      name="Example service"
+      returnUrl="https://host.example/"
+      dialogOnly
+    />,
+  );
+  try {
+    expect(document.body.textContent).toContain("Your account is connected.");
+    expect(document.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(unexpected).toEqual([]);
+  } finally {
+    await view.unmount();
+  }
+});

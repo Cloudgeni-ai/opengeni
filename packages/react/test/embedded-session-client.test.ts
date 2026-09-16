@@ -33,7 +33,7 @@ const request = (clientEventId: string, text: string): SubmitComposerDraftReques
   model: "model-x",
   reasoningEffort: "medium",
   latencyMode: "standard",
-  connectionAuthorities: [],
+  connectionAccounts: [],
 });
 
 const response = (

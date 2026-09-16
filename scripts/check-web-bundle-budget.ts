@@ -487,6 +487,10 @@ const effectiveBudgets = {
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    // Sender-owned account selection replaces the consent UI: Bun 1.4 macOS/arm64
+    // measures 2,434,041 raw / 689,945 gzip across 37 files. Raw and file count
+    // remain below their existing caps; retain the standard gzip variance allowance.
+    wholeKibEnvelope(689_945, 1.5 * kib),
     wholeKibEnvelope(684_860, 1.5 * kib),
     // Same unified Knowledge measurement documented in the raw bound above.
     wholeKibEnvelope(663_198, 1.5 * kib),

@@ -30,7 +30,7 @@ console's entire capabilities page.
 ## OAuth details and conversation use
 
 `McpConnectionCard` without a session ID configures only a connection: it never
-reads a session, selects tools, or creates personal session grants.
+reads a session or selects tools.
 `SessionMcpCapabilityCard` supplies a session target to that same implementation.
 Console OAuth setup and embedded service discovery share it; existing console
 management and non-OAuth adapters remain distinct surfaces. Initial detail reads
@@ -42,22 +42,19 @@ dialog focus. Recommendations resolve against the live catalogue, use the native
 Connect controller and exact host return URL, and require backend-verified
 completion. An isolated provider window is reserved before discovery; successful
 authorization attaches the capability while preserving existing selections.
-Personal accounts in shared conversations require explicit shared-output
-acknowledgment. Completion derives from live credentials, grants and tool
-selection, never a browser success flag.
+Personal accounts belong to the authenticated sender; sharing a conversation
+does not delegate account access. No separate conversation consent is required.
+Completion derives from live credentials and tool selection, never a browser
+success flag.
 
-Selection and personal grants live in
-`packages/react/src/session-capability-policy.ts` and
-`packages/react/src/session-connection-authority.ts`.
+Tool selection lives in `packages/react/src/session-capability-policy.ts`.
 `sessionAuthRecommendation` matches recovery notices by exact native server or
 connection identity; `SessionConnectionRequest` exposes it to embeds. Missing or
 ambiguous matches never choose another account by provider domain.
 
-Omitted connection selections restore existing owner grants only: workspace/context
-grants or grants for the exact session and current server-read authority epoch.
-An explicit empty selection suppresses restoration. Session grants do not carry
-into another session through this lookup; background work inherits captured turn
-authority. Restoration does not create grants. Authenticated catalogue marks use
+Account choices narrow the authenticated sender's own accounts; they never grant
+access. Multiple matching accounts require an explicit choice. Background work
+inherits captured initiating-user authority. Authenticated catalogue marks use
 `client.downloadCatalogAsset`; passive downloads are bounded and reject arbitrary
 URLs.
 

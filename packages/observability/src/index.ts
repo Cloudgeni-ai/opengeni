@@ -112,26 +112,6 @@ const SANDBOX_OPERATION_NAMES = new Set([
  */
 export const TENANCY_COMPATIBILITY_LANES = [
   /**
-   * A provider connection carrying `authority_scope = 'legacy_user'` was
-   * resolved for accepted use: a personal row with no common authority or
-   * grant, admitted through `legacy_user_compatibility` provenance instead of
-   * an explicit delegation. Migration 0256 backfilled the existing rows, but
-   * its `bind_connection_authority` trigger still classifies a NEW personal
-   * connection this way whenever the inserting subject has no active
-   * organization membership, so this counter is expected to stay above zero
-   * until that classification changes. That is the finding, not a defect.
-   */
-  "connection_legacy_user",
-  /**
-   * A workspace-scope connection ref carried no connection id, so the
-   * accepted-use authority (migration 0279) could not identify the exact row
-   * and the request fell back to the unprivileged pre-snapshot resolution.
-   * This lane writes no `connection_use_audit_facts` row and leaves no durable
-   * trace of any kind, so a use counter is the only possible evidence it was
-   * taken at all.
-   */
-  "connection_pre_snapshot_ref",
-  /**
    * A NEW persistable `/workspace` mutation was refused because the writer
    * behind it has no recorded authority (`authority_unattributed`): either a
    * direct request whose principal froze the pre-0096 legacy initiator, or a

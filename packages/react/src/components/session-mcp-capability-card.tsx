@@ -12,10 +12,6 @@ import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/brow
 import { useEffect, useRef, useState } from "react";
 import { useConnect } from "../hooks/use-connect";
 import { attachSessionCapability, sessionCapabilityTools } from "../session-capability-policy";
-import {
-  authorizeSessionPersonalConnection,
-  sessionConnectionAuthorities,
-} from "../session-connection-authority";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 import { matchingActiveMcpConnections } from "../mcp-connection-status";
 
@@ -32,7 +28,7 @@ export type SessionMcpCapabilityCardProps = {
 };
 
 export type McpConnectionCardProps = Omit<SessionMcpCapabilityCardProps, "sessionId"> & {
-  /** Omit for connection management: no session selection or personal grant is written. */
+  /** Omit for connection management: no session tool selection is written. */
   sessionId?: string;
   dialogOnly?: boolean;
   onClose?: (() => void) | undefined;
@@ -84,8 +80,6 @@ function ScopedCard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ownership, setOwnership] = useState<ConnectOwnership>("workspace");
-  const [visibility, setVisibility] = useState<"private" | "workspace" | null>(null);
-  const [acknowledged, setAcknowledged] = useState(false);
   const lifetime = useRef<AbortController | null>(null);
   const operation = useRef(false);
   const startKey = useRef(crypto.randomUUID());
@@ -107,26 +101,20 @@ function ScopedCard({
       throw new Error(
         "This recommendation is not an available OAuth MCP integration. Review the current connection catalog.",
       );
-    if (session && !session.tenancy)
-      throw new Error("Conversation access could not be verified. Refresh and retry.");
     setItem(resolved);
-    setVisibility(session?.tenancy?.visibility ?? null);
     if (resolved.connectionRef)
       setOwnership(resolved.connectionRef.subjectScope === "subject" ? "personal" : "workspace");
+    else if (!item && resolved.metadata?.defaultConnectionOwnership === "personal")
+      setOwnership("personal");
     let accountReady = false;
-    let authorizedHere = false;
     if (resolved.enabled && resolved.connectionRef) {
-      const connections = await client.listConnections(workspaceId);
+      const connections =
+        resolved.connectionRef.subjectScope === "subject"
+          ? await client.listOwnConnectionAccounts(workspaceId)
+          : await client.listConnections(workspaceId);
       if (invocation.signal.aborted || lifetime.current !== invocation) return null;
-      const ref = resolved.connectionRef;
       const matches = matchingActiveMcpConnections(resolved, connections);
       accountReady = matches.length === 1;
-      authorizedHere =
-        accountReady &&
-        (!session ||
-          ref.subjectScope !== "subject" ||
-          (await sessionConnectionAuthorities(client, session, [resolved], connections)).length ===
-            1);
     }
     if (invocation.signal.aborted || lifetime.current !== invocation) return null;
     const selected =
@@ -135,7 +123,7 @@ function ScopedCard({
         : session?.tools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id);
     setConnected(accountReady);
     setComplete(
-      authorizedHere &&
+      accountReady &&
         !!selected &&
         sessionCapabilityTools(resolved).every((tool) => selected.includes(tool.id)),
     );
@@ -269,13 +257,7 @@ function ScopedCard({
     });
     if (!current()) return;
     const enabled = await load();
-    if (
-      enabled &&
-      current() &&
-      (!sessionId ||
-        attempt.ownership === "workspace" ||
-        (visibility && (visibility === "private" || acknowledged)))
-    ) {
+    if (enabled && current()) {
       await finishConnection(enabled);
     }
     try {
@@ -394,7 +376,7 @@ function ScopedCard({
 
   async function finishConnection(capability: CapabilityCatalogItem) {
     if (!sessionId) {
-      // Connection management does not select session tools or create a grant.
+      // Connection management does not select session tools.
       await onConfigured?.();
       if (!current()) return;
       setComplete(true);
@@ -402,7 +384,6 @@ function ScopedCard({
       onClose?.();
       return;
     }
-    if (!visibility) throw new Error("Refresh the conversation before connecting.");
     if (capability.connectionRef && capability.connectionRef.subjectScope !== "subject") {
       const selected = (await client.listConnections(workspaceId)).find(
         (entry) => entry.id === capability.connectionRef?.connectionId,
@@ -411,16 +392,12 @@ function ScopedCard({
       if (!selected || selected.status !== "active")
         throw new Error("This account needs reconnection before it can be used here.");
     }
-    if (capability.connectionRef?.subjectScope === "subject")
-      await authorizeSessionPersonalConnection(
-        client,
-        workspaceId,
-        sessionId,
-        capability,
-        visibility,
-        acknowledged,
-        current,
-      );
+    if (capability.connectionRef?.subjectScope === "subject") {
+      const accounts = await client.listOwnConnectionAccounts(workspaceId);
+      if (!current()) return;
+      if (matchingActiveMcpConnections(capability, accounts).length === 0)
+        throw new Error("Your account needs reconnection before it can be used here.");
+    }
     if (!current()) return;
     await attachSessionCapability(client, workspaceId, sessionId, capability, current);
     if (!current()) return;
@@ -436,7 +413,6 @@ function ScopedCard({
     });
   }
 
-  const personal = item?.connectionRef?.subjectScope === "subject";
   return (
     <SessionCapabilityFrame
       name={item?.name ?? name}
@@ -512,30 +488,15 @@ function ScopedCard({
                     </label>
                   </fieldset>
                 ) : null}
-                {ownership === "personal" && visibility === "workspace" ? (
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={acknowledged}
-                      onChange={(event) => setAcknowledged(event.target.checked)}
-                    />
-                    Allow this conversation to use my account. Results will be visible to other
-                    workspace members.
-                  </label>
-                ) : (
-                  <p className="og-session-capability-scope">
-                    {ownership === "workspace"
-                      ? sessionId
-                        ? "This connection will be available to your workspace and used in this conversation."
-                        : "This connection will be available to your workspace."
-                      : sessionId
-                        ? "This connection will be used only by you, including in this private conversation."
-                        : "This connection belongs to you. Connecting does not share your account with any conversation."}
-                  </p>
-                )}
+                <p className="og-session-capability-scope">
+                  {ownership === "workspace"
+                    ? sessionId
+                      ? "This connection will be available to your workspace and used in this conversation."
+                      : "This connection will be available to your workspace."
+                    : "This connection belongs to you. Your messages can use it; other participants use their own accounts."}
+                </p>
                 <button
                   className="og-session-capability-primary"
-                  disabled={ownership === "personal" && visibility === "workspace" && !acknowledged}
                   onClick={() => {
                     if (view.attempt?.nextAction.type === "authorize") void authorize(view.attempt);
                     else void begin();
@@ -554,30 +515,9 @@ function ScopedCard({
                     ? "Your account is connected. Enable it for this conversation to finish."
                     : "Your account is connected."}
                 </p>
-                {personal && sessionId ? (
-                  visibility === "workspace" ? (
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={acknowledged}
-                        onChange={(event) => setAcknowledged(event.target.checked)}
-                        disabled={busy}
-                      />
-                      Allow this conversation to use my personal account. Results shared here will
-                      be visible to other workspace members.
-                    </label>
-                  ) : (
-                    <p>
-                      Allow your personal account only in this private conversation and its
-                      continuations.
-                    </p>
-                  )
-                ) : null}
                 <button
                   className="og-session-capability-primary"
-                  disabled={
-                    busy || view.busy || (personal && visibility === "workspace" && !acknowledged)
-                  }
+                  disabled={busy || view.busy}
                   onClick={() => void useHere()}
                 >
                   {sessionId ? "Use in this conversation" : "Done"}

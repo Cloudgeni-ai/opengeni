@@ -37,10 +37,6 @@
     "./managed-auth-session-sets": {
       "types": "./src/managed-auth-session-sets.ts",
       "default": "./src/managed-auth-session-sets.ts"
-    },
-    "./connection-authority": {
-      "types": "./src/domain/connection-authority.ts",
-      "default": "./src/domain/connection-authority.ts"
     }
   },
   "publishConfig": {

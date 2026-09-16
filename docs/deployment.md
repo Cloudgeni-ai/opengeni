@@ -2745,7 +2745,9 @@ Connected Machines:
 
 Non-secret wiring goes in config/values: `OPENGENI_SELFHOSTED_NATS_URL` and
 `OPENGENI_SELFHOSTED_RELAY_URL` (the public wss URLs the agent dials, matching the
-ingress hosts) plus the callout account/user names. The relay's non-secret tuning
+ingress hosts; both are returned to the agent as connect info at enrollment)
+plus the callout account/user names. The relay process itself listens on
+`OPENGENI_RELAY_BIND`. The relay's non-secret tuning
 knobs are `OPENGENI_RELAY_RING_FRAMES`, `OPENGENI_RELAY_SPLICE_BUFFER`,
 `OPENGENI_RELAY_RATE_BURST_BYTES`, `OPENGENI_RELAY_RATE_BYTES_PER_SEC`, and
 `OPENGENI_RELAY_PAIR_TIMEOUT_SECS`. A missing token secret makes the relay reject

@@ -1475,8 +1475,8 @@ export function useComposer(
               ...(wireInput.mcpCredentialUpdates
                 ? { mcpCredentialUpdates: wireInput.mcpCredentialUpdates }
                 : {}),
-              ...(wireInput.connectionAuthorities
-                ? { connectionAuthorities: wireInput.connectionAuthorities }
+              ...(wireInput.connectionAccounts
+                ? { connectionAccounts: wireInput.connectionAccounts }
                 : {}),
 
               ...(wireInput.personalResourceAttachment
@@ -1752,10 +1752,7 @@ export function useComposer(
             ...(input.mcpCredentialUpdates
               ? { mcpCredentialUpdates: input.mcpCredentialUpdates }
               : {}),
-            ...(input.connectionAuthorities
-              ? { connectionAuthorities: input.connectionAuthorities }
-              : {}),
-
+            ...(input.connectionAccounts ? { connectionAccounts: input.connectionAccounts } : {}),
             ...(input.personalResourceAttachment
               ? { personalResourceAttachment: input.personalResourceAttachment }
               : {}),

@@ -17,10 +17,6 @@ export {
   attachSessionCapability,
   completeSessionCapabilityOAuth,
 } from "./session-capability-policy";
-export {
-  authorizeSessionPersonalConnection,
-  sessionConnectionAuthorities,
-} from "./session-connection-authority";
 export { retainedImageId } from "./components/markdown";
 // oxlint-disable-next-line typescript/triple-slash-reference -- package consumers must load the ambient type for this optional untyped peer without emitting a runtime import.
 /// <reference path="./types/external.d.ts" />

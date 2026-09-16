@@ -564,6 +564,12 @@ describe("compact session view on the live local workspace route (API fixture)",
       await page.getByRole("button", { name: /Switch workspace$/ }).click();
       await page.getByRole("menuitem", { name: /Compact view verification/ }).click();
       await page.waitForURL(`**/workspaces/${workspaceId}/sessions`);
+      // Wait for the new workspace composer to mount before typing into its rail.
+      await page
+        .getByRole("textbox", { name: "Message the agent", exact: true })
+        .and(page.locator(":focus"))
+        .waitFor();
+      await settleRead();
       await page.getByLabel("Search sessions", { exact: true }).fill("Needle");
       // Late composer hydration must not take focus while search is being entered.
       await settleRead();

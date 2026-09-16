@@ -1723,6 +1723,10 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    IF to_regprocedure(format('%I.list_owned_connection_accounts(uuid,uuid)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.list_owned_connection_accounts(uuid,uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_owned_connection_accounts(uuid,uuid) TO %I', ${literal(schema)}, ${literal(role)});
+    END IF;
     IF to_regprocedure(format('%I.list_self_user_resource_authorities(uuid,uuid,text,uuid,integer)', ${literal(schema)}))
       IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON FUNCTION %I.list_self_user_resource_authorities(uuid) FROM PUBLIC', ${literal(schema)});
@@ -1740,29 +1744,9 @@ BEGIN
       EXECUTE format('REVOKE ALL ON FUNCTION %I.authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid) FROM PUBLIC', ${literal(schema)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid) TO %I', ${literal(schema)}, ${literal(role)});
     END IF;
-    IF to_regprocedure(format('%I.issue_self_local_connection_use_grant(uuid,uuid,uuid,text,boolean)', ${literal(schema)}))
-      IS NOT NULL THEN
-      EXECUTE format('REVOKE ALL ON FUNCTION %I.issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean) FROM PUBLIC', ${literal(schema)});
-      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean) TO %I', ${literal(schema)}, ${literal(role)});
-    END IF;
-    IF to_regprocedure(format('%I.resolve_connection_use_authority(uuid,uuid,uuid,jsonb)', ${literal(schema)}))
-      IS NOT NULL THEN
-      EXECUTE format('REVOKE ALL ON FUNCTION %I.list_self_connection_authorities(uuid) FROM PUBLIC', ${literal(schema)});
-      EXECUTE format('REVOKE ALL ON FUNCTION %I.list_self_connection_authorities(uuid) FROM %I', ${literal(schema)}, ${literal(role)});
-      EXECUTE format('REVOKE ALL ON FUNCTION %I.issue_self_connection_use_grant(uuid, uuid, uuid, text, text, uuid, boolean) FROM PUBLIC', ${literal(schema)});
-      EXECUTE format('REVOKE ALL ON FUNCTION %I.issue_self_connection_use_grant(uuid, uuid, uuid, text, text, uuid, boolean) FROM %I', ${literal(schema)}, ${literal(role)});
-      EXECUTE format('REVOKE ALL ON FUNCTION %I.revoke_self_connection_use_grant(uuid, uuid) FROM PUBLIC', ${literal(schema)});
-      EXECUTE format('REVOKE ALL ON FUNCTION %I.revoke_self_connection_use_grant(uuid, uuid) FROM %I', ${literal(schema)}, ${literal(role)});
-      EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_connection_use_authority(uuid, uuid, uuid, jsonb) FROM PUBLIC', ${literal(schema)});
-      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_connection_use_authority(uuid, uuid, uuid, jsonb) TO %I', ${literal(schema)}, ${literal(role)});
-      IF to_regprocedure(format('%I.resolve_personal_connection_authority_selection(uuid,uuid,text,uuid,jsonb)', ${literal(schema)})) IS NOT NULL THEN
-        EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb) FROM PUBLIC', ${literal(schema)});
-        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb) TO %I', ${literal(schema)}, ${literal(role)});
-      END IF;
-      IF to_regprocedure(format('%I.resolve_accepted_connection_use(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,uuid,text,text,text,text)', ${literal(schema)})) IS NOT NULL THEN
-        EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text) FROM PUBLIC', ${literal(schema)});
-        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text) TO %I', ${literal(schema)}, ${literal(role)});
-      END IF;
+    IF to_regprocedure(format('%I.resolve_accepted_connection_use(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,uuid,text,text,text,text)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text) TO %I', ${literal(schema)}, ${literal(role)});
     END IF;
     IF to_regprocedure(
       format('%I.get_self_personal_github_repository_selection(uuid,uuid,text,uuid)', ${literal(schema)})
@@ -1892,20 +1876,7 @@ BEGIN
         ${literal(schema)},
         ${literal(role)}
       );
-      IF to_regprocedure(
-        format(
-          '%I.refresh_scheduled_task_personal_resources_clone_connections(uuid,uuid,uuid,bigint,bigint)',
-          ${literal(schema)}
-        )
-      ) IS NOT NULL THEN
-        EXECUTE format(
-          'REVOKE ALL ON FUNCTION %I.refresh_scheduled_task_personal_resources_clone_connections(uuid, uuid, uuid, bigint, bigint) FROM PUBLIC',
-          ${literal(schema)}
-        );
-        EXECUTE format(
-          'GRANT EXECUTE ON FUNCTION %I.refresh_scheduled_task_personal_resources_clone_connections(uuid, uuid, uuid, bigint, bigint) TO %I',
-          ${literal(schema)}, ${literal(role)}
-        );
+      IF to_regprocedure(format('%I.create_scheduled_agent_run_with_admission(uuid,uuid,uuid,uuid,bigint,text,text,text,timestamp with time zone,timestamp with time zone,jsonb)', ${literal(schema)})) IS NOT NULL THEN
         EXECUTE format(
           'REVOKE ALL ON FUNCTION %I.create_scheduled_agent_run_with_admission(uuid, uuid, uuid, uuid, bigint, text, text, text, timestamp with time zone, timestamp with time zone, jsonb) FROM PUBLIC',
           ${literal(schema)}
@@ -2108,6 +2079,7 @@ BEGIN
       REVOKE ALL ON FUNCTION opengeni_private.list_sandbox_file_publications(uuid,uuid,jsonb) FROM PUBLIC;
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
+      'read_sender_connection(uuid,uuid,uuid,text)',
       'guard_mcp_operation_immutable()',
       'mcp_operation_command_scoped(jsonb,text,jsonb)',
       'guard_workspace_owned_skill_head_delete()',

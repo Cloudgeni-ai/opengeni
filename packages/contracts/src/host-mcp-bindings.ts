@@ -1,10 +1,12 @@
 import { z } from "zod";
 export { HostMcpCreateSelections, type HostMcpCreateSelection } from "./index";
-import { McpServerConnectionRef, SessionTenancyVisibility, stableJson } from "./index";
 import {
-  ConnectionUseAuthoritySnapshot,
-  IssueConnectionUseGrantRequest,
-} from "./connection-authority";
+  McpServerConnectionRef,
+  SessionTenancyVisibility,
+  ManagedUserResourceGrantMode,
+  stableJson,
+} from "./index";
+import { ConnectionUseAuthoritySnapshot } from "./connection-authority";
 import { ExternalIdentity } from "./external-identities";
 export const HostMcpOwnerSubject = z.union([
   ExternalIdentity.shape.subjectId,
@@ -112,8 +114,38 @@ export const CreateHostMcpBindingRequest = z
   .strict();
 export type CreateHostMcpBindingRequest = z.infer<typeof CreateHostMcpBindingRequest>;
 
+const HostMcpGrantRequest = z
+  .object({
+    scope: z.literal("user"),
+    mode: ManagedUserResourceGrantMode,
+    context: SessionTenancyVisibility,
+    sessionId: z.string().uuid().nullable().optional(),
+    expectedAuthorityEpoch: z.number().int().positive().nullable().optional(),
+    workspaceSharedAcknowledged: z.boolean().default(false),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.context === "workspace_shared" && !value.workspaceSharedAcknowledged) {
+      context.addIssue({
+        code: "custom",
+        path: ["workspaceSharedAcknowledged"],
+        message: "workspace_shared requires durable shared-output acknowledgement",
+      });
+    }
+    if (value.mode === "always" && (value.sessionId || value.expectedAuthorityEpoch)) {
+      context.addIssue({ code: "custom", path: ["sessionId"], message: "always is unbound" });
+    }
+    if (value.mode === "session" && (!value.sessionId || !value.expectedAuthorityEpoch)) {
+      context.addIssue({
+        code: "custom",
+        path: ["sessionId"],
+        message: "session requires a target session and expectedAuthorityEpoch",
+      });
+    }
+  });
+
 /** Internal owner-authorized issuance; never itself proves caller identity. */
-const HostMcpDelegationGrant = IssueConnectionUseGrantRequest.superRefine((value, context) => {
+const HostMcpDelegationGrant = HostMcpGrantRequest.superRefine((value, context) => {
   if (
     Boolean(value.sessionId) !== (value.expectedAuthorityEpoch != null) ||
     (value.expectedAuthorityEpoch != null && !Number.isSafeInteger(value.expectedAuthorityEpoch))

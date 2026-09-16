@@ -4420,6 +4420,7 @@ function scheduledTask(
     status: "active",
     schedule,
     temporalScheduleId: `sched-${name.toLowerCase().replace(/[^a-z]+/g, "-")}`,
+    ownerSubjectId: null,
     runMode: "new_session_per_run",
     overlapPolicy: "skip",
     action: { kind: "agent_turn" },

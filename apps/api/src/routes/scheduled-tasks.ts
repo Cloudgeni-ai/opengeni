@@ -27,6 +27,7 @@ import {
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
   updateScheduledTaskForApi,
+  triggerScheduledTaskForGrant,
   validateScheduledTaskMachineTarget,
   validateScheduledTaskTarget,
   validatedScheduledTaskUpdate,
@@ -152,7 +153,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     });
     const task = await updateScheduledTaskForApi(
       db,
-      workspaceId,
+      grant,
       taskId,
       update,
       payload.agentLearning
@@ -168,7 +169,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const existing = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
     const previous = await captureScheduledTaskRestoreState(db, existing);
-    const task = await updateScheduledTaskForApi(db, workspaceId, existing.id, {
+    const task = await updateScheduledTaskForApi(db, grant, existing.id, {
       status: "paused",
     });
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
@@ -203,7 +204,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
     });
-    const task = await updateScheduledTaskForApi(db, workspaceId, existing.id, update);
+    const task = await updateScheduledTaskForApi(db, grant, existing.id, update);
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
     return c.json(scheduledTaskForGrant(task, grant));
   });
@@ -262,7 +263,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         ? manualScheduledTaskTriggerUsageKey(workspaceId, task.id, triggerToken)
         : `knowledge-source-sync:manual:${workspaceId}:${task.id}:${triggerToken}`;
     const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
-    await workflowClient.triggerScheduledTask({
+    await triggerScheduledTaskForGrant(db, grant, workflowClient, {
       task,
       agentRunUsageIdempotencyKey,
       triggerWorkflowId,
@@ -288,9 +289,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     await deleteScheduledTaskWithDurableCleanup(deps, {
-      workspaceId,
+      grant,
       taskId: c.req.param("taskId"),
-      subjectId: grant.subjectId,
     });
     return c.json({ ok: true });
   });

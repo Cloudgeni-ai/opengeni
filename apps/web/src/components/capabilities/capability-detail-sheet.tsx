@@ -1,3 +1,5 @@
+import { OwnershipSelector } from "./connection-ownership-selector";
+export { OwnershipSelector } from "./connection-ownership-selector";
 import {
   ExternalLinkIcon,
   Loader2Icon,
@@ -41,7 +43,7 @@ import {
   capabilityConnectPlan,
   capabilityItemKindLabel,
   capabilityReconnectPlan,
-  capabilityRequiresPersonalConnection,
+  defaultCapabilityConnectionOwnership,
   capabilitySourceLabel,
   curatedSkillProvenance,
   socialConnectionsForOwnership,
@@ -257,17 +259,13 @@ export function DetailBody({
   onAction: (action: ConnectAction) => void;
 }) {
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
-  const personalOnly = capabilityRequiresPersonalConnection(item);
+  const defaultOwnership = defaultCapabilityConnectionOwnership(item);
   // API-key reconnect reveals the credential form in place of the button.
   const [reconnecting, setReconnecting] = useState(false);
   useEffect(() => setReconnecting(false), [item.id]);
-  const [connectionOwnership, setConnectionOwnership] = useState<ConnectionOwnership>(
-    personalOnly ? "personal" : DEFAULT_CONNECTION_OWNERSHIP,
-  );
-  useEffect(
-    () => setConnectionOwnership(personalOnly ? "personal" : DEFAULT_CONNECTION_OWNERSHIP),
-    [item.id, personalOnly],
-  );
+  const [connectionOwnership, setConnectionOwnership] =
+    useState<ConnectionOwnership>(defaultOwnership);
+  useEffect(() => setConnectionOwnership(defaultOwnership), [item.id, defaultOwnership]);
 
   const canDisconnect =
     !setupOnly && item.enabled && item.kind === "mcp" && item.actions.includes("disconnect");
@@ -543,16 +541,13 @@ export function DetailBody({
               <p className="text-sm text-fg-muted">
                 You’ll use credentials for your own provider account or service account.
               </p>
-              {personalOnly ? (
-                <PersonalOnlyConnectionNotice itemName={item.name} />
-              ) : (
-                <OwnershipSelector
-                  compact={inline}
-                  credentialBased
-                  value={connectionOwnership}
-                  onChange={setConnectionOwnership}
-                />
-              )}
+              <OwnershipSelector
+                compact={inline}
+                credentialBased
+                value={connectionOwnership}
+                onChange={setConnectionOwnership}
+              />
+
               <CredentialForm
                 compact={inline}
                 onCancel={onCancel}
@@ -585,15 +580,12 @@ export function DetailBody({
                 requestedScopes={plan.requestedScopes}
               />
               <p className="text-sm text-fg-muted">You’ll sign in with your own account.</p>
-              {personalOnly ? (
-                <PersonalOnlyConnectionNotice itemName={item.name} />
-              ) : (
-                <OwnershipSelector
-                  compact={inline}
-                  value={connectionOwnership}
-                  onChange={setConnectionOwnership}
-                />
-              )}
+              <OwnershipSelector
+                compact={inline}
+                value={connectionOwnership}
+                onChange={setConnectionOwnership}
+              />
+
               <ConnectionActions onCancel={onCancel} busy={busy}>
                 <Button
                   type="button"
@@ -793,16 +785,6 @@ function ConnectorConsentCopy({
         <p className="text-xs text-fg-subtle">{presentation.permissionSummary}</p>
       ) : null}
     </div>
-  );
-}
-
-function PersonalOnlyConnectionNotice({ itemName }: { itemName: string }) {
-  return (
-    <Notice tone="info">
-      <span className="font-medium">Personal connection.</span> Other workspace members cannot
-      discover or use this account. Each member connects their own. {itemName} content added to a
-      session follows that session's visibility.
-    </Notice>
   );
 }
 
@@ -1080,113 +1062,6 @@ function socialConnectionStatusLabel(status: SocialConnection["status"]): string
   return "Disconnected";
 }
 
-export function OwnershipSelector({
-  value,
-  onChange,
-  compact = false,
-  credentialBased = false,
-}: {
-  value: ConnectionOwnership;
-  onChange: (value: ConnectionOwnership) => void;
-  compact?: boolean;
-  credentialBased?: boolean;
-}) {
-  const groupName = useId();
-  const workspaceDescription = credentialBased
-    ? "Workspace agents and automations can act through the account these credentials authorize."
-    : "Workspace agents and automations can act through your account.";
-  const personalDescription = credentialBased
-    ? "Only your authorized work can use these credentials."
-    : "Only your authorized work can use your account.";
-  if (compact) {
-    const descriptionId = `${groupName}-description`;
-    return (
-      <fieldset className="space-y-2" aria-describedby={descriptionId}>
-        <legend className="session-capability-card__fine font-medium text-fg">Connect for</legend>
-        <div className="session-capability-card__choice">
-          {(["workspace", "personal"] as const).map((ownership) => (
-            <label key={ownership} className="relative cursor-pointer">
-              <input
-                className="peer sr-only"
-                type="radio"
-                name={groupName}
-                value={ownership}
-                checked={value === ownership}
-                onChange={() => onChange(ownership)}
-              />
-              <span className="session-capability-card__choice-label border border-border text-fg-muted peer-checked:bg-surface-2 peer-checked:text-fg peer-focus-visible:ring-2 peer-focus-visible:ring-ring">
-                {ownership === "workspace" ? "This workspace" : "Only me"}
-              </span>
-            </label>
-          ))}
-        </div>
-        <p id={descriptionId} className="session-capability-card__fine text-fg-subtle">
-          {value === "workspace" ? workspaceDescription : personalDescription}
-        </p>
-      </fieldset>
-    );
-  }
-  return (
-    <fieldset className="space-y-2">
-      <legend className="text-xs font-medium text-fg-muted">Who can use this connection?</legend>
-      <OwnershipOption
-        groupName={groupName}
-        checked={value === "workspace"}
-        value="workspace"
-        title="This workspace"
-        description={workspaceDescription}
-        onChange={() => onChange("workspace")}
-      />
-      <OwnershipOption
-        groupName={groupName}
-        checked={value === "personal"}
-        value="personal"
-        title="Only me"
-        description={personalDescription}
-        onChange={() => onChange("personal")}
-      />
-    </fieldset>
-  );
-}
-
-function OwnershipOption({
-  groupName,
-  checked,
-  value,
-  title,
-  description,
-  onChange,
-}: {
-  groupName: string;
-  checked: boolean;
-  value: ConnectionOwnership;
-  title: string;
-  description: string;
-  onChange: () => void;
-}) {
-  return (
-    <label
-      className={cn(
-        "flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors",
-        checked ? "border-brand bg-brand/5" : "border-border bg-bg hover:bg-surface",
-      )}
-    >
-      <input
-        type="radio"
-        name={groupName}
-        value={value}
-        checked={checked}
-        onChange={onChange}
-        className="mt-0.5 size-4 accent-current"
-      />
-      <span className="min-w-0">
-        <span className="block text-sm font-medium text-fg">{title}</span>
-        <span className="mt-0.5 block text-xs leading-5 text-fg-subtle">{description}</span>
-      </span>
-    </label>
-  );
-}
-
 function CuratedSkillProvenanceSection({ item }: { item: CapabilityCatalogItem }) {
   const metadata = curatedSkillProvenance(item);
   if (!metadata) return null;
@@ -1382,7 +1257,7 @@ export function ConnectionStatus({
         {attention
           ? `${personal ? "Personal" : "Workspace"} connection needs to be reconnected.`
           : personal
-            ? `Personal connection to ${health.connection.providerDomain}. Automations use it only when explicitly delegated.`
+            ? `Personal connection to ${health.connection.providerDomain}. Your messages and personal schedules can use this account.`
             : `Workspace connection to ${health.connection.providerDomain}. Shared with agents and automations here.`}
       </p>
     </div>
