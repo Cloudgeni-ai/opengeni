@@ -27,7 +27,7 @@ export function SettingsSection({
         </div>
         {actions}
       </div>
-      <div className="overflow-hidden rounded-lg border border-border bg-surface/40">
+      <div className="overflow-hidden rounded-xl border border-border bg-surface/35 shadow-sm">
         {children}
       </div>
     </section>
@@ -51,12 +51,12 @@ export function SettingsRow({
   return (
     <div
       data-slot="settings-row"
-      className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-3 border-b border-border px-4 py-4 last:border-b-0 sm:px-5"
+      className="group flex min-w-0 flex-wrap items-center gap-x-4 gap-y-3 border-b border-border/80 px-4 py-4 transition-colors last:border-b-0 hover:bg-surface-2/35 sm:px-5"
     >
       {icon && (
         <span
           aria-hidden="true"
-          className="flex size-9 shrink-0 items-center justify-center rounded-md bg-surface-2 text-fg-muted [&_svg]:size-4"
+          className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-brand/15 bg-brand/5 text-fg-muted transition-colors group-hover:border-brand/25 group-hover:bg-brand/10 [&_svg]:size-4"
         >
           {icon}
         </span>
@@ -71,6 +71,45 @@ export function SettingsRow({
       {control && (
         <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">{control}</div>
       )}
+    </div>
+  );
+}
+
+/** Shared surface for settings collections such as members, keys, and accounts. */
+export function SettingsResourceList({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      data-slot="settings-resource-list"
+      className={cn(
+        "divide-y divide-border/70 overflow-hidden rounded-xl border border-border bg-surface/35 shadow-sm",
+        className,
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** Shared interactive row surface for resource settings lists. */
+export function SettingsResourceRow({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      data-slot="settings-resource-row"
+      className={cn("group transition-colors hover:bg-surface-2/35", className)}
+    >
+      {children}
     </div>
   );
 }

@@ -60,6 +60,11 @@ import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  SettingsResourceList,
+  SettingsResourceRow,
+  SettingsSection,
+} from "@/components/ui/settings-patterns";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
@@ -450,28 +455,21 @@ function OperationalWorkspaceSettingsRoute({
 
             {personal ? <PersonalWorkspaceNotice organizationLabel={organizationLabel} /> : null}
 
-            <section aria-labelledby="workspace-preferences-heading" className="grid min-w-0 gap-2">
-              <div>
-                <h2 id="workspace-preferences-heading" className="text-sm font-medium">
-                  Session defaults
-                </h2>
-                <p className="mt-1 text-xs text-fg-muted">
-                  Applied when someone starts a new session in this workspace.
-                </p>
-              </div>
-              <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
-                <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
-                <VideoGenerationPreferenceRow
-                  workspaceId={workspaceId}
-                  canManage={canManageSettings}
-                  refreshKey={gatewayRevision}
-                />
-                <CodexCompactionPreferenceRow
-                  workspaceId={workspaceId}
-                  canManage={canManageSettings}
-                />
-              </div>
-            </section>
+            <SettingsSection
+              title="Session defaults"
+              description="Applied when someone starts a new session in this workspace."
+            >
+              <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
+              <VideoGenerationPreferenceRow
+                workspaceId={workspaceId}
+                canManage={canManageSettings}
+                refreshKey={gatewayRevision}
+              />
+              <CodexCompactionPreferenceRow
+                workspaceId={workspaceId}
+                canManage={canManageSettings}
+              />
+            </SettingsSection>
 
             <NativeIdentityLinkAccounts workspaceId={workspaceId} />
           </>
@@ -632,7 +630,7 @@ function OperationalWorkspaceSettingsRoute({
                     : `${activeApiKeyCount} active`}
               </span>
             </div>
-            <div className="divide-y divide-border/70 overflow-hidden rounded-lg border border-border">
+            <SettingsResourceList>
               {apiKeysError ? (
                 <div className="p-2">
                   <LoadErrorState
@@ -666,9 +664,9 @@ function OperationalWorkspaceSettingsRoute({
                 </div>
               ) : (
                 apiKeys.map((apiKey) => (
-                  <div
+                  <SettingsResourceRow
                     key={apiKey.id}
-                    className="flex min-w-0 items-center justify-between gap-3 px-3 py-2"
+                    className="flex min-w-0 items-center justify-between gap-3 px-4 py-3 sm:px-5"
                   >
                     <div className="min-w-0">
                       <div className="truncate text-sm font-medium">{apiKey.name}</div>
@@ -689,10 +687,10 @@ function OperationalWorkspaceSettingsRoute({
                       <Trash2Icon className="size-3.5" />
                       Revoke
                     </Button>
-                  </div>
+                  </SettingsResourceRow>
                 ))
               )}
-            </div>
+            </SettingsResourceList>
             {!canManageApiKeys ? (
               <p className="text-xs text-fg-subtle">
                 You don't have permission to manage API keys here.
