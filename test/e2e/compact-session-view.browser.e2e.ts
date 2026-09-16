@@ -565,6 +565,9 @@ describe("compact session view on the live local workspace route (API fixture)",
       await page.getByRole("menuitem", { name: /Compact view verification/ }).click();
       await page.waitForURL(`**/workspaces/${workspaceId}/sessions`);
       await page.getByLabel("Search sessions", { exact: true }).fill("Needle");
+      // Late composer hydration must not take focus while search is being entered.
+      await settleRead();
+      expect(await page.getByLabel("Search sessions", { exact: true }).inputValue()).toBe("Needle");
       await rail.getByText("Needle 00", { exact: true }).waitFor();
       archiveFixture = undefined;
     }, 45_000);

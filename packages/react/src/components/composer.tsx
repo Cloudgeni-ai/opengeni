@@ -1015,6 +1015,14 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
       const textarea = controller.textareaRef.current;
       if (!textarea || textarea.disabled) return;
       autoFocusedRef.current = true;
+      // Draft hydration may finish after the user has started editing another
+      // field. Initial focus is a convenience, not authority to take their caret.
+      const active = textarea.ownerDocument.activeElement;
+      if (
+        active !== textarea &&
+        active?.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]')
+      )
+        return;
       textarea.focus();
     });
     return () => window.cancelAnimationFrame(frame);
