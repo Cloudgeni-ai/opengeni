@@ -34,7 +34,7 @@
 
 Opengeni is the platform underneath AI agents that do real work. It keeps a session running for hours or days, records every step in a replayable event log, stops for a human when an action needs approval, and runs each session either in a managed sandbox or directly on a machine you own.
 
-It is the platform, not the agent. Give agents work from the web app and follow along, or call the same session API from your own product and let Opengeni hold the state, history, approvals, and outputs. It grew out of two years of running agents against production cloud infrastructure at [CloudGeni](https://cloudgeni.ai).
+It is the platform, not the agent. Give agents work from the web app and follow along, or call the same session API from your own product and let Opengeni hold the state, history, approvals, and outputs. It grew out of two years of running agents against production cloud infrastructure at [Cloudgeni](https://cloudgeni.ai).
 
 ## Get started
 
@@ -136,7 +136,7 @@ Opengeni is built as those layers.
 | Understand the internals              | [Architecture](docs/architecture.md) · [Run lifecycle](docs/run-lifecycle.md) · [Docs map](docs/README.md)  |
 | See what is planned                   | [Roadmap](docs/roadmap.md)                                                                                  |
 
-The public product docs live at [docs.opengeni.ai](https://docs.opengeni.ai), and the thinking behind the layers above is on the [Opengeni blog](https://opengeni.substack.com/). The [CloudGeni Infrastructure Agents Guide](https://github.com/Cloudgeni-ai/infrastructure-agents-guide) covers patterns for infrastructure-focused agents.
+The public product docs live at [docs.opengeni.ai](https://docs.opengeni.ai), and the thinking behind the layers above is on the [Opengeni blog](https://opengeni.substack.com/). The [Cloudgeni Infrastructure Agents Guide](https://github.com/Cloudgeni-ai/infrastructure-agents-guide) covers patterns for infrastructure-focused agents.
 
 ## Built with
 
