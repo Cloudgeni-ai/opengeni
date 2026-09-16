@@ -33,6 +33,33 @@ const design = (name: string) =>
 try {
   await mkdir(resolve(output, "qa"), { recursive: true });
   await page.goto(`http://127.0.0.1:${server.port}`, { waitUntil: "networkidle" });
+  check(
+    (await page.locator(".direction-ledger").count()) === 1,
+    "Preferred B must open by default",
+  );
+  await navigate("Models & subscriptions");
+  const subscription = page.getByRole("button", { name: "Manage Codex subscription", exact: true });
+  check(
+    (await subscription
+      .locator('.og-capability-catalog-indicator[data-status="added"]')
+      .count()) === 1,
+    "Exact Capabilities connected indicator",
+  );
+  check((await subscription.locator("button").count()) === 0, "Whole row is a single action");
+  check(
+    (await subscription
+      .locator(".og-capability-catalog-indicator > svg")
+      .evaluate((el) => getComputedStyle(el).width)) === "18px",
+    "Capabilities checkmark size",
+  );
+  await subscription.focus();
+  await page.keyboard.press("Enter");
+  await page.getByRole("dialog").waitFor();
+  await page.keyboard.press("Escape");
+  await page.screenshot({
+    path: resolve(output, "qa/settings-refined-subscriptions.png"),
+    fullPage: true,
+  });
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: 1100 });
     for (const direction of ["A · Soft modules", "B · Quiet index", "C · Overview"]) {
@@ -136,10 +163,14 @@ try {
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Toggle theme" }).click();
   await navigate("General");
+  // Audit settled theme colors, not an intermediate button transition.
+  await page.evaluate(() =>
+    Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => {}))),
+  );
   const light = await new AxeBuilder({ page }).analyze();
   check(
     !light.violations.some((v) => v.impact === "serious" || v.impact === "critical"),
-    "Light a11y",
+    `Light a11y: ${JSON.stringify(light.violations.map((v) => ({ id: v.id, nodes: v.nodes.map((n) => ({ target: n.target, summary: n.failureSummary })) })))}`,
   );
   check(errors.length === 0, errors.join("\n"));
   console.log(

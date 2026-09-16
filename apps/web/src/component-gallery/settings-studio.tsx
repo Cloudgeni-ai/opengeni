@@ -9,7 +9,6 @@ import {
   KeyRound,
   Cpu,
   Plus,
-  Check,
   ChevronRight,
   Moon,
   Sun,
@@ -32,6 +31,10 @@ import { CodexSourceSettings } from "@/components/codex-source-settings";
 import { SubscriptionAccountRow } from "@/components/subscription-account-row";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import { PermissionGroupPicker } from "@/components/permission-picker";
+import {
+  CapabilityCatalogRow,
+  CapabilityCatalogIndicator,
+} from "../../../../packages/react/src/capability-catalog-row";
 import type { CodexAccountsResponse } from "@opengeni/sdk";
 import "./settings-studio.css";
 
@@ -69,6 +72,7 @@ type SettingItem = {
   summary: string;
   control: ReactNode;
   detail?: ReactNode;
+  connectedAction?: () => void;
 };
 
 /** Shared proposed presentation, independent of settings state and backend. */
@@ -83,36 +87,50 @@ export function SettingsPresentation({
 }) {
   return (
     <div className={`settings-items ${variant}`}>
-      {items.map((item) => (
-        <article key={item.id} className="setting-item">
-          <span className="setting-symbol" aria-hidden="true">
-            {item.icon}
-          </span>
-          <div className="setting-copy">
-            <h3>{item.title}</h3>
-            <p>{variant === "focus" ? item.summary : item.description}</p>
-          </div>
-          {variant === "focus" ? (
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={`Edit ${item.title}`}
-              onClick={() => onOpen(item)}
-            >
-              <ChevronRight />
-            </Button>
-          ) : (
-            <div className="setting-control">{item.control}</div>
-          )}
-        </article>
-      ))}
+      {items.map((item) =>
+        item.connectedAction && variant !== "focus" ? (
+          <CapabilityCatalogRow
+            key={item.id}
+            className="settings-subscription-card"
+            name={item.title}
+            description={item.description}
+            icon={item.icon}
+            status="added"
+            statusLabel="Connected"
+            aria-label={`Manage ${item.title} subscription`}
+            onOpen={item.connectedAction}
+          />
+        ) : (
+          <article key={item.id} className="setting-item">
+            <span className="setting-symbol" aria-hidden="true">
+              {item.icon}
+            </span>
+            <div className="setting-copy">
+              <h3>{item.title}</h3>
+              <p>{variant === "focus" ? item.summary : item.description}</p>
+            </div>
+            {variant === "focus" ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={`Edit ${item.title}`}
+                onClick={() => onOpen(item)}
+              >
+                <ChevronRight />
+              </Button>
+            ) : (
+              <div className="setting-control">{item.control}</div>
+            )}
+          </article>
+        ),
+      )}
     </div>
   );
 }
 
 export function SettingsStudio() {
   const [page, setPage] = useState("general"),
-    [variant, setVariant] = useState("tiles"),
+    [variant, setVariant] = useState("ledger"),
     [theme, setTheme] = useState("dark");
   const [name, setName] = useState("Design engineering"),
     [voice, setVoice] = useState(true),
@@ -201,6 +219,7 @@ export function SettingsStudio() {
       description: "Use your ChatGPT subscription. Manage accounts and the subscription source.",
       icon: <Cpu />,
       summary: "1 subscription · workspace source",
+      connectedAction: () => setDialog("codex"),
       control: (
         <Button
           variant="ghost"
@@ -208,7 +227,7 @@ export function SettingsStudio() {
           aria-label="Manage Codex subscription"
           onClick={() => setDialog("codex")}
         >
-          <Check className="text-emerald-500" />
+          <CapabilityCatalogIndicator status="added" label="Connected" />
         </Button>
       ),
       detail: (
