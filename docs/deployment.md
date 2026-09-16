@@ -60,17 +60,15 @@ This is a maintenance-only runtime-role contract change: stop old API/control/
 turn workers, supply every application database role, migrate, provision the
 matching roles, and start only matching binaries. Do not restart pre-0463 code.
 Configure `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` consistently across API/workers.
-Thereafter instance registration and rotation require no process restart.
-No existing organization opts in automatically; the first registration enables
-exact namespace routing with no static fallback. See
-[remote host MCP credentials](remote-mcp-credentials.md#native-instance-registration)
-for the explicit legacy-migration acknowledgement and authority boundaries.
+This is historical schema guidance. The current runtime has removed the resolver
+registration API and callback execution; new integrations use ordinary native
+OAuth connections. See [cutover notes](remote-mcp-credentials.md#native-instance-registration).
 
 `0467_host_resolver_full_organization_keys.sql` is a rolling correction to the
 existing write trigger: resolver administration uses the `workspace:admin`
 permission issued by full organization API keys, not human `account:admin`.
-Deploy the matching API/core code with the migration. No key rotation, added
-permissions, role provisioning change, or resolver re-registration is needed.
+This correction remains part of migration history; it does not restore resolver
+administration in the current API.
 
 ### Host MCP, native-link and Connect authority migrations (0443–0456)
 
@@ -177,10 +175,8 @@ owning-user proof; do not synthesize native-cookie flags or grant Personal
 workspace membership to service keys. The matching runtime adds live external
 authority checks before session-create, visibility-change, and fork commits.
 
-The optional remote host MCP credential adapter is configured separately with
-server-owned secrets. It is not required for inline credentials or native OAuth.
-See [remote MCP credentials](remote-mcp-credentials.md) for the endpoint contract,
-limits, and live host authorization obligations.
+The former remote host MCP credential adapter and its environment setting are
+removed. Use native OAuth connections; see [cutover notes](remote-mcp-credentials.md).
 
 ## Workspace MCP OAuth
 

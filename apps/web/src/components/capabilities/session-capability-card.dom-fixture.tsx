@@ -2,7 +2,6 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
-import { sessionAuthRecommendation } from "./session-auth-recommendation";
 
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import type { AuthNeededItem } from "@opengeni/react";
@@ -39,6 +38,7 @@ const enableCapability = mock(async () => {
 });
 const context = {
   client: {
+    connectTransport: () => ({}),
     listCapabilities: async () => ({
       items: [
         {
@@ -82,6 +82,7 @@ const context = {
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({ toast: { success: () => {}, error: () => {} } }));
 GlobalRegistrator.register();
+const { sessionAuthRecommendation } = await import("./session-auth-recommendation");
 const { buildTimeline } = await import("@opengeni/react");
 const { createRoot } = await import("react-dom/client");
 const { SessionCapabilityCard } = await import("./session-capability-card");
@@ -218,10 +219,16 @@ describe("conversation connection card", () => {
     const cached = { ...catalogItem, authKind: "oauth2" as const };
     const h = await render(false, { ...cached, name: "Current Example" }, cached);
     try {
-      expect(button(h.container, "Connect Example").textContent).toBe("Connect Example");
-      await act(async () => button(h.container, "Connect Example").click());
+      expect(button(h.container, "Connect Current Example").textContent).toBe(
+        "Connect Current Example",
+      );
+      await act(async () => button(h.container, "Connect Current Example").click());
       expect(h.container.querySelector("h3")?.textContent).toBe("Current Example");
-      await act(async () => button(h.container, "Cancel").click());
+      await act(async () =>
+        h.container
+          .querySelector<HTMLButtonElement>('[aria-label="Close connection setup"]')!
+          .click(),
+      );
       expect(h.container.querySelector('[data-state="suggested"]')).not.toBeNull();
       expect(h.container.querySelector("h3")?.textContent).toBe("Current Example");
       expect(button(h.container, "Connect Current Example").textContent).toBe(
@@ -257,8 +264,7 @@ describe("conversation connection card", () => {
     expect(h.container.textContent).toContain("Connect for workspace");
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog).not.toBeNull();
-    expect(dialog?.className).toContain("sm:max-w-[42rem]");
-    expect(dialog?.className).toContain("sm:top-1/2");
+    expect(dialog?.className).toContain("og-session-capability-dialog");
     expect(h.host.querySelector("form")).toBeNull();
     await act(async () => button(h.container, "Cancel").click());
     expect(h.container.querySelector("form")).toBeNull();

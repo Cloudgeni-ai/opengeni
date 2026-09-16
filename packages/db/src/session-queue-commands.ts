@@ -1756,11 +1756,7 @@ export async function submitHumanPromptInTransaction(
     beforeFreshPromptCommit?: (tx: Database) => Promise<void>;
     /** Backend-only authority capture, atomic with the newly accepted turn. */
     captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
-    selectedHostMcpDelegations?: Array<{
-      serverId: string;
-      delegationId: string;
-      generation: number;
-    }>;
+
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
   },
@@ -1817,9 +1813,7 @@ export async function submitHumanPromptInTransaction(
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
     personalConnectionDelegations: input.personalConnectionDelegations ?? [],
     personalResourceAttachment: input.personalResourceAttachment ?? null,
-    ...(input.selectedHostMcpDelegations?.length
-      ? { selectedHostMcpDelegations: input.selectedHostMcpDelegations }
-      : {}),
+
     ...(input.actor.type === "service"
       ? {
           serviceInitiator: {

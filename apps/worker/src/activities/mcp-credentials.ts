@@ -1,12 +1,6 @@
 import type { Settings } from "@opengeni/config";
-import type { ConnectionCredentialsPort } from "@opengeni/contracts";
-import type { HostMcpAcceptedAuthority } from "@opengeni/contracts/host-mcp-bindings";
 import {
   buildConnectionTokenResolver,
-  buildHostConnectionTokenResolver,
-  getSessionTurnForAttempt,
-  authorizeDirectHostMcpUse,
-  resolveAcceptedHostMcpBinding,
   resolveAcceptedConnectionUse,
   type Database,
   type ResolveConnectionCredentialInput,
@@ -15,27 +9,35 @@ import {
 } from "@opengeni/db";
 import { mcpOperationAuthorityDigest } from "./mcp-operation-authority";
 
-const OPENGENI_CONNECTION_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-
-export function connectionTokenResolverForTurn(input: {
+type TurnConnectionInput = {
   db: Database;
   settings: Settings;
-  connectionCredentials?: ConnectionCredentialsPort | null;
   accountId: string;
   workspaceId: string;
   sessionId: string;
-  rootSessionId: string;
   attemptId: string;
   turn: SessionTurnForExecution;
   authorizeAcceptedUse?: typeof resolveAcceptedConnectionUse;
-  /** Test seam; production always reads the canonical active-attempt projection. */
-  getHostTurnForAttempt?: typeof getSessionTurnForAttempt;
-}): (request: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
-  const hostResolver = input.connectionCredentials?.mcpCredentials;
-  const readHostTurn = input.getHostTurnForAttempt ?? getSessionTurnForAttempt;
-  const hostDb = input.db;
-  const nativeResolver = buildConnectionTokenResolver(input.db, input.settings);
+};
+
+type CredentialResolver = (
+  request: ResolveConnectionCredentialInput,
+) => Promise<ResolveConnectionCredentialResult>;
+
+export function connectionTokenResolverForTurn(input: TurnConnectionInput): CredentialResolver {
+  return bindNativeConnectionCredentialsToTurn(
+    input,
+    buildConnectionTokenResolver(input.db, input.settings),
+  );
+}
+
+/** Bind the ordinary credential resolver to one immutable accepted turn.
+ * Credential acquisition and refresh stay inside the native connection engine;
+ * this layer adds the exact execution context and physical-request checks. */
+export function bindNativeConnectionCredentialsToTurn(
+  input: TurnConnectionInput,
+  nativeResolver: CredentialResolver,
+): CredentialResolver {
   const recoveryEnabled = (serverId: string) =>
     input.settings.mcpServers.some(
       (server) =>
@@ -44,84 +46,10 @@ export function connectionTokenResolverForTurn(input: {
         server.operationRecovery !== undefined &&
         Object.keys(server.operationRecovery ?? {}).length > 0,
     );
-  const configuredResolver = hostResolver
-    ? async (
-        credentialRequest: ResolveConnectionCredentialInput,
-      ): Promise<ResolveConnectionCredentialResult> => {
-        let authorizedSnapshot: HostMcpAcceptedAuthority | undefined;
-        const wantsDigest = recoveryEnabled(credentialRequest.serverId);
-        const resolver = buildHostConnectionTokenResolver(hostResolver, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          rootSessionId: input.rootSessionId,
-          turnId: input.turn.id,
-          attemptId: input.attemptId,
-          executionGeneration: input.turn.executionGeneration,
-          initiator: input.turn.initiator,
-          initiatorContext: input.turn.initiatorContext,
-          surface: "model",
-          resolveAcceptedBinding: (request) => resolveAcceptedHostMcpBinding(hostDb, request),
-          // Only immutable captured direct-turn authority is currently supported.
-          // Direct, scheduled and exact causal/child snapshots are validated;
-          // no authority follows merely from a binding or creator identity.
-          authorizeDurableBinding: (request) =>
-            authorizeDirectHostMcpUse(
-              hostDb,
-              request,
-              wantsDigest
-                ? (snapshot) => {
-                    authorizedSnapshot = snapshot;
-                  }
-                : undefined,
-            ),
-          authorizeExecution: async (request) => {
-            // Native UUID references already pass the accepted-use boundary below.
-            // Legacy opaque host IDs retain their compatibility path, but not a
-            // right to execute after their accepted attempt has stopped.
-            if (
-              request.connectionRef.authoritySource !== "host" &&
-              (!request.connectionRef.connectionId ||
-                OPENGENI_CONNECTION_ID_PATTERN.test(request.connectionRef.connectionId))
-            )
-              return true;
-            if (!request.attemptId) return false;
-            const current = await readHostTurn(
-              hostDb,
-              request.workspaceId,
-              request.sessionId,
-              request.attemptId,
-            );
-            return (
-              current !== null &&
-              current.id === request.turnId &&
-              current.executionGeneration === request.executionGeneration
-            );
-          },
-        });
-        const result = await resolver(credentialRequest);
-        return result.status === "ok" && authorizedSnapshot
-          ? {
-              ...result,
-              operationAuthorityDigest: mcpOperationAuthorityDigest(credentialRequest, {
-                host: authorizedSnapshot,
-              }),
-            }
-          : result;
-      }
-    : nativeResolver;
-  const baseResolver = (request: ResolveConnectionCredentialInput) =>
-    input.connectionCredentials?.mcpAuthoritySource === "host" &&
-    request.connectionRef.authoritySource !== "host"
-      ? nativeResolver(request)
-      : configuredResolver(request);
   return async (request) => {
-    // Host-owned refs carry explicit provenance because their opaque ids may
-    // themselves be valid UUIDs. They never enter OpenGeni's native connection
-    // authority or PostgreSQL UUID lookup; the bound host authorizes the exact
-    // immutable turn context on every credential request.
+    // Superseded host references must never fall through to native lookup,
+    // even when their opaque identifier happens to be a valid native UUID.
     if (request.connectionRef.authoritySource === "host") {
-      if (hostResolver) return await baseResolver(request);
       return {
         status: "auth_needed",
         reason: "unsupported_auth",
@@ -137,35 +65,6 @@ export function connectionTokenResolverForTurn(input: {
           ? { selectedResources: request.connectionRef.selectedResources }
           : {}),
       };
-    }
-    // Before explicit provenance existed, the public embedding contract let a
-    // bound host use any non-UUID opaque id. Preserve those frozen/stored refs
-    // during upgrades while keeping every UUID-shaped omission on OpenGeni's
-    // native accepted-use authority. New host refs must carry authoritySource
-    // so UUID-shaped host ids are unambiguous.
-    if (
-      hostResolver &&
-      input.connectionCredentials?.mcpAuthoritySource !== "host" &&
-      request.connectionRef.connectionId &&
-      !OPENGENI_CONNECTION_ID_PATTERN.test(request.connectionRef.connectionId)
-    ) {
-      try {
-        return await baseResolver(request);
-      } catch {
-        return {
-          status: "auth_needed",
-          reason: "refresh_failed",
-          providerDomain: request.connectionRef.providerDomain,
-          authoritySource: "host",
-          ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
-          connectionId: request.connectionRef.connectionId,
-          ...(request.connectionRef.scopes ? { scopes: request.connectionRef.scopes } : {}),
-          ...(request.connectionRef.resource ? { resource: request.connectionRef.resource } : {}),
-          ...(request.connectionRef.selectedResources
-            ? { selectedResources: request.connectionRef.selectedResources }
-            : {}),
-        };
-      }
     }
     const acceptedDelegation = input.turn.personalConnectionDelegations.find(
       (delegation) =>
@@ -275,40 +174,11 @@ export function connectionTokenResolverForTurn(input: {
         },
       };
     };
-    if (!hostResolver) {
-      const result = await baseResolver({
-        ...request,
-        connectionUseContext: credentialUseContext,
-      });
-      return withProviderRequestAuthorization(result);
-    }
-    const authorization = await authorize(credentialUseContext);
-    if (authorization.status === "denied") {
-      return {
-        status: "auth_needed",
-        reason:
-          request.connectionRef.subjectScope === "subject"
-            ? "personal_authority_unavailable"
-            : "missing_connection",
-        providerDomain: request.connectionRef.providerDomain,
-        ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
-      };
-    }
-    const result = await baseResolver({
+    const result = await nativeResolver({
       ...request,
       connectionUseContext: credentialUseContext,
-      hostConnectionUseAttribution: authorization.attribution,
-      connectionRef: {
-        ...request.connectionRef,
-        connectionId: authorization.attribution.connectionId,
-        kind: authorization.connectionKind,
-        subjectScope: authorization.attribution.scope === "workspace" ? "workspace" : "subject",
-      },
-      ...(authorization.attribution.ownerSubjectId
-        ? { subjectId: authorization.attribution.ownerSubjectId }
-        : {}),
     });
-    return withProviderRequestAuthorization(result, authorization.attribution);
+    return withProviderRequestAuthorization(result);
   };
 }
 

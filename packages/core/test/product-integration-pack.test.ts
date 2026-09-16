@@ -117,8 +117,8 @@ describe("OpenGeni Product Integration Pack", () => {
       "Never retry a denied user request using the unscoped service client",
     );
     expect(external).toContain("without adding status parameters");
-    expect(external).toContain("Short-lived inline MCP credentials remain a valid simple choice");
-    expect(external).toContain("Durable host renewal is opt-in");
+    expect(external).toContain("OAuth refresh remains in the native connection engine");
+    expect(external).toContain("An optional external credential supplier is future work behind");
     expect(external).toContain("not upstream provider consent");
   });
 });

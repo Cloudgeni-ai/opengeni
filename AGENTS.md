@@ -76,12 +76,17 @@ Garage is the local S3-compatible object storage default for Docker Compose and 
 
 ## Architecture Notes
 
-Host MCP `hostBinding: {selection: "accepted_turn"}` is an explicit configuration
-constraint, never execution permission. Resolve it only from immutable accepted
-turn/task authority, preserve fixed-binding exact matches and all live checks,
-and never fall back to a creator or registry owner. Empty realtime session
-creation captures no authority; first text Send selects normally. See
-`docs/remote-mcp-credentials.md`.
+For organization-key and `asUser` integration development, set
+`OPENGENI_PRODUCT_ACCESS_MODE=managed`. Single-user `local` access mode deliberately
+does not accept external actors. `bun run dev` generates missing managed-auth
+signing secrets only in local/test environments and persists them in the worktree
+`.env`; it preserves configured secrets across restarts.
+
+MCP execution uses ordinary native connections and immutable accepted turn/task
+selection. Never fall back to a session creator or another connection owner.
+Empty realtime session creation captures no authority; first text Send selects
+normally. Superseded host references are rejected, not converted to native IDs.
+See `docs/architecture.md` and `docs/remote-mcp-credentials.md`.
 
 For a map of every app, package, and how the parts fit together, start at [`docs/architecture.md`](docs/architecture.md) and follow its links to the focused topic docs.
 
@@ -391,8 +396,18 @@ Unit tests and typechecks do not require Temporal, NATS, Postgres, a sandbox bac
 
 ```bash
 bun run typecheck
-bun test
+bun run test:unit
 ```
+
+The full unit command uses the same test discovery and process isolation as CI.
+For focused checks, use `bun test ./path/to/file.test.ts`; do not run the entire
+unit corpus in one shared test process. Prepared-runtime tests, including native
+report delivery, remain separate package-contract checks with their required
+runtime configuration.
+
+Bun services launched by the test harness ignore implicit checkout `.env` files.
+Supply fixture settings through the service environment, or use an explicit
+`--env-file` argument when testing dotenv behavior itself.
 
 End-to-end agent runs require the full stack plus valid model and sandbox credentials.
 

@@ -39,7 +39,6 @@ import {
 } from "../src/session-authorization";
 import type { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import { freezePersonalConnectionDelegations } from "../src/domain/personal-connection-delegations";
-import { verifyHostMcpBindings } from "./host-mcp-binding-fixture";
 
 export async function verifyExternalPersonal(
   db: Database,
@@ -114,16 +113,6 @@ export async function verifyExternalPersonal(
     }),
   ).toEqual([]);
   const app = new Hono();
-  await verifyHostMcpBindings(
-    db,
-    {
-      accountId: scope.accountId,
-      workspaceId: scope.workspaceId,
-      subjectId: owner.subjectId,
-      authorizationRevision: owner.authorizationRevision,
-    },
-    other.subjectId,
-  );
   let continuation: ExternalActorContinuation | null = null;
   let beforeCommit: ((tx: Database) => Promise<void>) | undefined;
   app.onError((error, c) => {

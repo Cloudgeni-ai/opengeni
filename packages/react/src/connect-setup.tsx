@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import type { ConnectAttempt, ConnectController } from "@opengeni/connect";
-import { useConnect } from "./connect";
+import { useConnect } from "./hooks/use-connect";
 
 const setupStatus: Record<ConnectAttempt["state"], string> = {
   ready: "Ready to connect",

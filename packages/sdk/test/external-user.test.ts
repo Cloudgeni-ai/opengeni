@@ -38,6 +38,28 @@ test("identity link SDK retains server actor and passes explicit confirmation wi
 });
 import { OpenGeniClient } from "../src/index";
 
+test("product clients expose ordinary connections instead of a parallel host registry", () => {
+  const client = new OpenGeniClient({
+    baseUrl: "https://fixture.invalid",
+    apiKey: "synthetic",
+  }).asUser("alice");
+  for (const removed of [
+    "putHostMcpResolver",
+    "getHostMcpResolver",
+    "revokeHostMcpResolver",
+    "createHostMcpBinding",
+    "getHostMcpBinding",
+    "revokeHostMcpBinding",
+    "issueHostMcpDelegation",
+    "getHostMcpDelegation",
+    "revokeHostMcpDelegation",
+  ]) {
+    expect(removed in client).toBe(false);
+  }
+  expect(typeof client.createConnection).toBe("function");
+  expect(typeof client.issueUserResourceGrant).toBe("function");
+});
+
 test("linked actor selection is explicit and isolated from service and external clients", async () => {
   const actors: unknown[] = [];
   const service = new OpenGeniClient({
@@ -79,111 +101,6 @@ test("linked actor selection is explicit and isolated from service and external 
     service.asLinkedUser("person", { linkId: "not-a-link", expectedLinkRevision: 2 }),
   ).toThrow();
   expect(actors).toHaveLength(3);
-});
-
-test("host binding registry calls retain external actor, operation identity and observed generation", async () => {
-  const calls: { path: string; method: string | undefined; body: unknown; actor: string | null }[] =
-    [];
-  const client = new OpenGeniClient({
-    baseUrl: "https://fixture.invalid",
-    apiKey: "synthetic",
-    fetch: async (url, init) => {
-      calls.push({
-        path: new URL(String(url)).pathname,
-        method: init?.method,
-        body: init?.body ? JSON.parse(String(init.body)) : null,
-        actor: new Headers(init?.headers).get("x-opengeni-external-actor"),
-      });
-      return Response.json({});
-    },
-  }).asUser("host-owner", { source: "product" });
-  const input = {
-    operationId: crypto.randomUUID(),
-    definition: {
-      serverId: "mcp",
-      destinationUrl: "https://mcp.example/tools",
-      connectionRef: {
-        authoritySource: "host" as const,
-        connectionId: "opaque",
-        providerDomain: "mcp.example",
-      },
-    },
-  };
-  await client.createHostMcpBinding("workspace/encoded", input);
-  await client.getHostMcpBinding("workspace/encoded", "binding/encoded");
-  await client.revokeHostMcpBinding("workspace/encoded", "binding/encoded", {
-    expectedGeneration: 7,
-  });
-  expect(calls.map((call) => [call.method, call.path])).toEqual([
-    ["POST", "/v1/workspaces/workspace%2Fencoded/host-mcp-bindings"],
-    ["GET", "/v1/workspaces/workspace%2Fencoded/host-mcp-bindings/binding%2Fencoded"],
-    ["POST", "/v1/workspaces/workspace%2Fencoded/host-mcp-bindings/binding%2Fencoded/revoke"],
-  ]);
-  expect(calls[0]!.body).toEqual(input);
-  expect(calls[2]!.body).toEqual({ expectedGeneration: 7 });
-  const grantInput = {
-    operationId: crypto.randomUUID(),
-    bindingId: crypto.randomUUID(),
-    expectedBindingGeneration: 1,
-    grant: {
-      scope: "user" as const,
-      mode: "always" as const,
-      context: "user_private" as const,
-      workspaceSharedAcknowledged: false,
-    },
-  };
-  await client.issueHostMcpDelegation("workspace/encoded", grantInput);
-  await client.getHostMcpDelegation("workspace/encoded", "delegation/encoded");
-  await client.revokeHostMcpDelegation("workspace/encoded", "delegation/encoded", {
-    expectedGeneration: 2,
-  });
-  expect(calls.slice(3).map((call) => [call.method, call.path])).toEqual([
-    ["POST", "/v1/workspaces/workspace%2Fencoded/host-mcp-delegations"],
-    ["GET", "/v1/workspaces/workspace%2Fencoded/host-mcp-delegations/delegation%2Fencoded"],
-    ["POST", "/v1/workspaces/workspace%2Fencoded/host-mcp-delegations/delegation%2Fencoded/revoke"],
-  ]);
-  expect(calls[3]!.body).toEqual(grantInput);
-  expect(calls[5]!.body).toEqual({ expectedGeneration: 2 });
-  const selectedStart = {
-    initialMessage: "Start",
-    selectedHostMcpDelegations: [
-      { serverId: "mcp", delegationId: grantInput.operationId, generation: 1 },
-    ],
-  };
-  await client.createSession("workspace/encoded", selectedStart);
-  expect(calls[6]!.path).toBe("/v1/workspaces/workspace%2Fencoded/sessions");
-  expect(calls[6]!.body).toEqual(selectedStart);
-  const followup = {
-    text: "Continue",
-    clientEventId: crypto.randomUUID(),
-    selectedHostMcpDelegations: selectedStart.selectedHostMcpDelegations,
-  };
-  await client.sendMessage("workspace", "session", followup);
-  expect(calls[7]!.body).toEqual({
-    type: "user.message",
-    clientEventId: followup.clientEventId,
-    payload: {
-      text: followup.text,
-      selectedHostMcpDelegations: followup.selectedHostMcpDelegations,
-    },
-  });
-  await client.steerMessage("workspace", "session", followup);
-  expect(calls[8]!.body).toEqual(followup);
-  const schedule = {
-    name: "Product task",
-    schedule: { type: "manual" as const },
-    agentConfig: { prompt: "Read product data" },
-    selectedHostMcpDelegations: selectedStart.selectedHostMcpDelegations,
-  };
-  await client.createScheduledTask("workspace", schedule);
-  expect(calls[9]!.body).toEqual(schedule);
-  await client.updateScheduledTask("workspace", "task", { selectedHostMcpDelegations: [] });
-  expect(calls[10]!.body).toEqual({ selectedHostMcpDelegations: [] });
-  for (const call of calls)
-    expect(JSON.parse(decodeURIComponent(call.actor!))).toMatchObject({
-      mode: "external",
-      identity: { externalId: "host-owner", source: "product" },
-    });
 });
 
 test("generic MCP OAuth forwards the exact host return URL in external mode", async () => {

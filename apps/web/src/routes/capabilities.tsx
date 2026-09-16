@@ -1,6 +1,6 @@
 import type { SkillSummary } from "@opengeni/sdk";
 import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
-import { ConnectionCatalog } from "@opengeni/react/connect";
+import { ConnectionCatalog, McpConnectionCard } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
 import { ConnectionLogo } from "@opengeni/react/connect";
 import {
@@ -339,9 +339,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
   const logoUrl = useCallback(
     (item: CapabilityCatalogItem) =>
-      item.name === "Gmail"
-        ? "/capability-logos/gmail.ico"
-        : capabilityLogoSource(item, (path) => client.catalogAssetUrl(path)),
+      capabilityLogoSource(item, (path) => client.catalogAssetUrl(path)),
     [client],
   );
   const connectionsLoaded = connections !== null;
@@ -1792,27 +1790,51 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         </CatalogActionContext.Provider>
       </div>
 
-      <CapabilityDetailSheet
-        workspaceId={workspaceId}
-        item={selectedItem}
-        health={selectedHealth}
-        logoSrc={selectedItem ? logoUrl(selectedItem) : null}
-        open={selectedItem !== null}
-        restoreFocusRef={sheetOpenerRef}
-        restoreFocusFallbackRef={capabilityFocusFallbackRef}
-        onOpenChange={(open) => {
-          if (!open) {
+      {rawSelectedItem?.kind === "mcp" &&
+      rawSelectedItem.authKind === "oauth2" &&
+      !rawSelectedItem.enabled ? (
+        <McpConnectionCard
+          client={client}
+          workspaceId={workspaceId}
+          capabilityId={rawSelectedItem.id}
+          name={rawSelectedItem.name}
+          returnUrl={window.location.href}
+          dialogOnly
+          onConfigured={refresh}
+          onClose={() => {
             setSelected(null);
             setSheetError(null);
-          }
-        }}
-        busy={busyId === selectedItem?.id}
-        errorMessage={sheetError}
-        socialConnections={selectedSocialConnections}
-        canManageSocial={canManageSocial}
-        canManageSkills={canManageSkills}
-        onAction={handleAction}
-      />
+            queueMicrotask(() => {
+              const target = sheetOpenerRef.current?.isConnected
+                ? sheetOpenerRef.current
+                : capabilityFocusFallbackRef.current;
+              target?.focus();
+            });
+          }}
+        />
+      ) : (
+        <CapabilityDetailSheet
+          workspaceId={workspaceId}
+          item={selectedItem}
+          health={selectedHealth}
+          logoSrc={selectedItem ? logoUrl(selectedItem) : null}
+          open={selectedItem !== null}
+          restoreFocusRef={sheetOpenerRef}
+          restoreFocusFallbackRef={capabilityFocusFallbackRef}
+          onOpenChange={(open) => {
+            if (!open) {
+              setSelected(null);
+              setSheetError(null);
+            }
+          }}
+          busy={busyId === selectedItem?.id}
+          errorMessage={sheetError}
+          socialConnections={selectedSocialConnections}
+          canManageSocial={canManageSocial}
+          canManageSkills={canManageSkills}
+          onAction={handleAction}
+        />
+      )}
 
       <ConfirmDialog
         open={skillRemoval !== null}

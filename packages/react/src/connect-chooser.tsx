@@ -1,7 +1,8 @@
 import { ConnectionCatalog } from "./connection-catalog";
+import { ConnectionLogo } from "./connection-logo";
 import { useEffect, useState, type FormEvent } from "react";
-import type { ConnectController, ConnectProvider } from "@opengeni/connect";
-import { useConnect } from "./connect";
+import type { ConnectAccount, ConnectController, ConnectProvider } from "@opengeni/connect";
+import { useConnect } from "./hooks/use-connect";
 
 export type ConnectChooserProps = {
   controller: ConnectController;
@@ -9,6 +10,10 @@ export type ConnectChooserProps = {
   returnUrl: string;
   className?: string;
   presentation?: "select" | "catalog";
+  /** Compact mechanism picker when service discovery is already shown by the host. */
+  customOnly?: boolean;
+  providerOnly?: boolean;
+  compact?: boolean;
 };
 
 /** Catalog readiness is supplied by the authenticated backend, never inferred
@@ -31,9 +36,13 @@ function ScopedChooser({
   returnUrl,
   className,
   presentation = "select",
+  customOnly = false,
+  providerOnly = false,
+  compact = false,
 }: ConnectChooserProps) {
   const view = useConnect(controller);
   const [catalog, setCatalog] = useState<ConnectProvider[] | null>(null);
+  const [accounts, setAccounts] = useState<ConnectAccount[]>([]);
   const [failed, setFailed] = useState(false);
   const [load, setLoad] = useState(0);
   const [query, setQuery] = useState("");
@@ -42,6 +51,7 @@ function ScopedChooser({
   useEffect(() => {
     const abort = new AbortController();
     setCatalog(null);
+    setAccounts([]);
     setFailed(false);
     setProviderId("");
     setOwnership("");
@@ -49,16 +59,42 @@ function ScopedChooser({
     void Promise.resolve()
       .then(() => {
         abort.signal.throwIfAborted();
-        return controller.transport.catalog(controller.workspaceId, { signal: abort.signal });
+        return Promise.all([
+          controller.transport.catalog(controller.workspaceId, { signal: abort.signal }),
+          presentation === "catalog"
+            ? controller.transport.accounts(controller.workspaceId, { signal: abort.signal })
+            : Promise.resolve([] as ConnectAccount[]),
+        ]);
       })
-      .then((providers) => {
-        if (!abort.signal.aborted) setCatalog(structuredClone(providers));
+      .then(([providers, inventory]) => {
+        if (!abort.signal.aborted) {
+          setCatalog(
+            structuredClone(
+              providers.filter(
+                (entry) =>
+                  entry.readiness === "available" &&
+                  entry.ownership.length > 0 &&
+                  (!providerOnly ||
+                    (entry.family !== "mcp" &&
+                      !entry.setup.some((kind) =>
+                        ["installation", "openapi", "graphql"].includes(kind),
+                      ))) &&
+                  (!customOnly ||
+                    entry.family === "mcp" ||
+                    entry.setup.some((kind) =>
+                      ["installation", "openapi", "graphql"].includes(kind),
+                    )),
+              ),
+            ),
+          );
+          setAccounts(structuredClone(inventory));
+        }
       })
       .catch(() => {
         if (!abort.signal.aborted) setFailed(true);
       });
     return () => abort.abort();
-  }, [controller, load]);
+  }, [controller, load, presentation, customOnly, providerOnly]);
   const provider = catalog?.find((entry) => entry.id === providerId);
   const canBegin =
     provider?.readiness === "available" &&
@@ -76,6 +112,9 @@ function ScopedChooser({
       setFailed(true);
     }
   };
+  // Optional adapters must not add a temporary section that disappears once
+  // readiness arrives. The primary discovery surface already owns loading.
+  if (compact && (!catalog || catalog.length === 0) && !failed) return null;
   return (
     <section
       className={className}
@@ -92,39 +131,109 @@ function ScopedChooser({
       {Boolean(catalog?.length) && (
         <form onSubmit={submit}>
           <fieldset disabled={view.busy}>
-            <legend>Provider and ownership</legend>
+            <legend hidden={customOnly || compact}>
+              {presentation === "catalog" ? "Add a connection" : "Provider and ownership"}
+            </legend>
             {presentation === "catalog" && !provider ? (
               <>
-                <label>
+                <label hidden={customOnly || compact}>
                   Search connections
                   <input
                     type="search"
+                    placeholder="Find a service…"
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
                   />
                 </label>
-                <ConnectionCatalog
-                  query={query}
-                  services={catalog!.map((entry) => ({
-                    id: entry.id,
-                    name: entry.label,
-                    options: [
-                      {
-                        id: entry.id,
-                        name: entry.label,
-                        description: entry.reason,
-                        status: entry.readiness.replaceAll("_", " "),
-                        connected: false,
-                        onOpen: () => {
-                          if (!view.busy) {
-                            setProviderId(entry.id);
-                            setOwnership(entry.ownership.length === 1 ? entry.ownership[0]! : "");
-                          }
-                        },
-                      },
-                    ],
-                  }))}
-                />
+                {[
+                  {
+                    name: "Services",
+                    entries: catalog!.filter(
+                      (entry) =>
+                        entry.readiness === "available" &&
+                        entry.family !== "mcp" &&
+                        !entry.setup.some((kind) =>
+                          ["installation", "openapi", "graphql"].includes(kind),
+                        ),
+                    ),
+                    secondary: false,
+                  },
+                  {
+                    name: "Custom connections",
+                    entries: catalog!.filter(
+                      (entry) =>
+                        entry.readiness === "available" &&
+                        (entry.family === "mcp" ||
+                          entry.setup.some((kind) =>
+                            ["installation", "openapi", "graphql"].includes(kind),
+                          )),
+                    ),
+                    secondary: true,
+                  },
+                ].map((group) => {
+                  const entries = group.entries.filter((entry) =>
+                    entry.label.toLocaleLowerCase().includes(query.toLocaleLowerCase().trim()),
+                  );
+                  if (!entries.length) return null;
+                  const rows = (
+                    <ConnectionCatalog
+                      services={entries.map((entry) => {
+                        const connected = accounts.some(
+                          (account) =>
+                            account.providerId === entry.id && account.status === "connected",
+                        );
+                        return {
+                          id: entry.id,
+                          name: entry.label,
+                          logo: <ConnectionLogo src={null} name={entry.label} />,
+                          options: [
+                            {
+                              id: entry.id,
+                              name: entry.label,
+                              status: connected
+                                ? "Connected"
+                                : entry.readiness === "available"
+                                  ? "Connect"
+                                  : "Unavailable",
+                              state: connected
+                                ? "added"
+                                : entry.readiness === "available"
+                                  ? "available"
+                                  : "unavailable",
+                              connected,
+                              onOpen: () => {
+                                if (!view.busy) {
+                                  setProviderId(entry.id);
+                                  setOwnership(
+                                    entry.ownership.length === 1 ? entry.ownership[0]! : "",
+                                  );
+                                }
+                              },
+                            },
+                          ],
+                        };
+                      })}
+                    />
+                  );
+                  return group.secondary && !customOnly ? (
+                    <details
+                      className="og-connect-secondary"
+                      key={group.name}
+                      open={query.trim() ? true : undefined}
+                    >
+                      <summary>
+                        {group.name}
+                        <span>{entries.length}</span>
+                      </summary>
+                      {rows}
+                    </details>
+                  ) : (
+                    <div key={group.name}>{rows}</div>
+                  );
+                })}
+                {!catalog!.some((entry) =>
+                  entry.label.toLocaleLowerCase().includes(query.toLocaleLowerCase().trim()),
+                ) && <p role="status">No services match your search.</p>}
               </>
             ) : null}
             {presentation === "catalog" && provider ? (
@@ -165,6 +274,12 @@ function ScopedChooser({
             {provider && (
               <>
                 <strong>{presentation === "catalog" ? provider.label : null}</strong>
+                {provider.readiness !== "available" && (
+                  <p role="status">
+                    {provider.reason ??
+                      "This service is not available in this environment. Contact your administrator to enable it."}
+                  </p>
+                )}
                 <label>
                   Ownership
                   <select
@@ -196,7 +311,7 @@ function ScopedChooser({
           </fieldset>
         </form>
       )}
-      <button type="button" disabled={view.busy} onClick={() => setLoad(load + 1)}>
+      <button hidden={!failed} type="button" disabled={view.busy} onClick={() => setLoad(load + 1)}>
         Reload providers
       </button>
     </section>

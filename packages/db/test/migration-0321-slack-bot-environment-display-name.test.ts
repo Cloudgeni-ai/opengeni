@@ -13,7 +13,8 @@ beforeAll(async () => {
   shared = await acquireSharedTestDatabase("migration-0321-slack-display-name");
 }, 180_000);
 
-afterAll(async () => shared?.release());
+// Releasing the holder can wait behind another process's migration-template build.
+afterAll(async () => shared?.release(), 180_000);
 
 describe("migration 0321 Slack bot environment display name", () => {
   test("is a rolling constraint-only expansion", async () => {

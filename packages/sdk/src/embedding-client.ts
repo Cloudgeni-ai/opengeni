@@ -1,5 +1,5 @@
 import { OpenGeniClient as OpenGeniArtifactClient } from "./artifact-client";
-import type { OpenGeniClientOptions, OpenGeniRequestOptions } from "./client";
+import type { OpenGeniClientOptions } from "./client";
 import type { AddWorkspaceMemberRequest } from "./types";
 import type {
   ExternalIdentityLink,
@@ -12,52 +12,17 @@ import type {
 
 /** Public product embedding administration, kept out of the native browser client. */
 export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
-  /** Server-only organization administration. First registration opts the whole
-   * organization into exact namespace routing, including future workspaces. */
-  async putHostMcpResolver(
-    organizationId: string,
-    externalSource: string,
-    request: import("@opengeni/contracts/host-mcp-resolvers").PutHostMcpResolverRequest,
-    options?: OpenGeniRequestOptions,
-  ): Promise<import("@opengeni/contracts/host-mcp-resolvers").HostMcpResolver> {
-    return this.requestJson(
-      "PUT",
-      `/v1/organizations/${organizationId}/mcp-credential-resolvers/${encodeURIComponent(externalSource)}`,
-      request,
-      {},
-      options,
-    );
-  }
-
-  async getHostMcpResolver(
-    organizationId: string,
-    externalSource: string,
-    options?: OpenGeniRequestOptions,
-  ): Promise<import("@opengeni/contracts/host-mcp-resolvers").HostMcpResolver> {
-    return this.requestJson(
+  /** Recover this actor's connection creation result without resending secrets.
+   * A 404 means no visible committed result, not proof that an in-flight write failed. */
+  async getConnectionCreationResult(
+    workspaceId: string,
+    operationId: string,
+  ): Promise<import("./types").ConnectionMetadata> {
+    const response = await this.requestJson<import("./types").ConnectionResponse>(
       "GET",
-      `/v1/organizations/${organizationId}/mcp-credential-resolvers/${encodeURIComponent(externalSource)}`,
-      undefined,
-      {},
-      options,
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/connections/operations/${encodeURIComponent(operationId)}`,
     );
-  }
-
-  /** Retains registration identity and namespace opt-in. Replays never restore
-   * a previous endpoint/secret. Use put with the current generation to reactivate. */
-  async revokeHostMcpResolver(
-    organizationId: string,
-    externalSource: string,
-    request: import("@opengeni/contracts/host-mcp-resolvers").RevokeHostMcpResolverRequest,
-    options?: OpenGeniRequestOptions,
-  ): Promise<import("@opengeni/contracts/host-mcp-resolvers").HostMcpResolver> {
-    return this.requestJson(
-      "POST",
-      `/v1/organizations/${organizationId}/mcp-credential-resolvers/${encodeURIComponent(externalSource)}/revoke`,
-      request,
-      {},
-      options,
-    );
+    return response.connection;
   }
 
   /** Rotate existing inline credentials only while no credential-consuming work
@@ -245,95 +210,6 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     workspaceId: string,
   ): Promise<import("@opengeni/contracts/connect").ConnectProvider[]> {
     return this.requestJson("GET", `/v1/workspaces/${workspaceId}/connect/catalog`);
-  }
-
-  /** Register credential-free, external-owner host authority. Does not itself
-   * authorize an execution or install MCP tools. */
-  async createHostMcpBinding(
-    workspaceId: string,
-    request: import("@opengeni/contracts/host-mcp-bindings").CreateHostMcpBindingRequest,
-    options: OpenGeniRequestOptions = {},
-  ): Promise<import("@opengeni/contracts/host-mcp-bindings").HostMcpBinding> {
-    return this.requestJson(
-      "POST",
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/host-mcp-bindings`,
-      request,
-      {},
-      options,
-    );
-  }
-
-  async getHostMcpBinding(
-    workspaceId: string,
-    bindingId: string,
-    options: OpenGeniRequestOptions = {},
-  ): Promise<import("@opengeni/contracts/host-mcp-bindings").HostMcpBinding> {
-    return this.requestJson(
-      "GET",
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/host-mcp-bindings/${encodeURIComponent(bindingId)}`,
-      undefined,
-      {},
-      options,
-    );
-  }
-
-  async revokeHostMcpBinding(
-    workspaceId: string,
-    bindingId: string,
-    request: { expectedGeneration: number },
-    options: OpenGeniRequestOptions = {},
-  ): Promise<import("@opengeni/contracts/host-mcp-bindings").HostMcpBinding> {
-    return this.requestJson(
-      "POST",
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/host-mcp-bindings/${encodeURIComponent(bindingId)}/revoke`,
-      request,
-      {},
-      options,
-    );
-  }
-
-  /** Issue owner-scoped grant metadata; accepted execution must separately admit it. */
-  async issueHostMcpDelegation(
-    workspaceId: string,
-    request: import("@opengeni/contracts/host-mcp-bindings").IssueHostMcpDelegationRequest,
-    options: OpenGeniRequestOptions = {},
-  ): Promise<import("@opengeni/contracts/host-mcp-bindings").HostMcpDelegation> {
-    return this.requestJson(
-      "POST",
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/host-mcp-delegations`,
-      request,
-      {},
-      options,
-    );
-  }
-
-  async getHostMcpDelegation(
-    workspaceId: string,
-    delegationId: string,
-    options: OpenGeniRequestOptions = {},
-  ): Promise<import("@opengeni/contracts/host-mcp-bindings").HostMcpDelegation> {
-    return this.requestJson(
-      "GET",
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/host-mcp-delegations/${encodeURIComponent(delegationId)}`,
-      undefined,
-      {},
-      options,
-    );
-  }
-
-  async revokeHostMcpDelegation(
-    workspaceId: string,
-    delegationId: string,
-    request: { expectedGeneration: number },
-    options: OpenGeniRequestOptions = {},
-  ): Promise<import("@opengeni/contracts/host-mcp-bindings").HostMcpDelegation> {
-    return this.requestJson(
-      "POST",
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/host-mcp-delegations/${encodeURIComponent(delegationId)}/revoke`,
-      request,
-      {},
-      options,
-    );
   }
 
   async listConnectAccounts(

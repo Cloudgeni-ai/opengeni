@@ -4440,7 +4440,7 @@ export type McpCredentialsRequest = {
   workspaceId: string;
   /** Immediate session whose model or Codemode call needs the credential. */
   sessionId: string;
-  /** Workspace-scoped lineage root for host authorization and binding lookup. */
+  /** Workspace-scoped lineage root for accepted execution authority. */
   rootSessionId: string;
   turnId: string;
   /** Null only while a durable turn exists without a currently executing attempt. */
@@ -4456,8 +4456,8 @@ export type McpCredentialsRequest = {
   destinationUrl: string;
   /**
    * Credential transport requested by the caller. Omitted means the existing
-   * header-only MCP transport. The additive `http_api` target allows embedding
-   * hosts to return query/cookie API-key placements for local API integrations
+   * header-only MCP transport. The `http_api` target permits query/cookie
+   * API-key placements for local API integrations
    * without making those placements eligible for a remote MCP request.
    */
   credentialTarget?: "mcp" | "http_api";
@@ -4484,81 +4484,7 @@ export type ConnectionCredentialPlacement = {
   prefix?: string;
 };
 
-/** Backend-only physical-use fence. Never serialized or accepted from a host response. */
-export const hostMcpCredentialUseGuard: unique symbol = Symbol("hostMcpCredentialUseGuard");
-
-export type McpCredentialResolution =
-  | {
-      [hostMcpCredentialUseGuard]?: () => Promise<boolean>;
-      status: "ok";
-      /** Scope echoes are mandatory and verified before any header is used. */
-      accountId: string;
-      workspaceId: string;
-      sessionId: string;
-      headers: Record<string, string>;
-      /**
-       * Optional normalized HTTP credential placements. When present, header
-       * placements must exactly match `headers`. Query/cookie placements are
-       * accepted only for a request whose credentialTarget is `http_api`.
-       */
-      placements?: ConnectionCredentialPlacement[];
-      connectionId: string;
-      providerDomain: string;
-      provider?: string;
-      scopes?: string[];
-      resource?: string;
-      selectedResources?: McpConnectionResourceScope[];
-      expiresAt?: string | null;
-    }
-  | {
-      status: "auth_needed";
-      /** Scope echoes are mandatory even when the credential cannot be resolved. */
-      accountId: string;
-      workspaceId: string;
-      sessionId: string;
-      reason: McpCredentialAuthNeededReason;
-      providerDomain: string;
-      provider?: string;
-      connectionId?: string;
-      scopes?: string[];
-      resource?: string;
-      selectedResources?: McpConnectionResourceScope[];
-      authorizationUrl?: string;
-    };
-
-/** Non-turn authority captured by the authenticated API gateway, never by caller JSON. */
-export type McpGatewayCredentialAuthority = {
-  kind: "external_user" | "organization_service";
-  subjectId: string;
-  permissions: AccessGrant["permissions"];
-};
-
-export type McpGatewayCredentialsRequest = Pick<
-  McpCredentialsRequest,
-  | "accountId"
-  | "workspaceId"
-  | "destinationUrl"
-  | "credentialTarget"
-  | "serverId"
-  | "toolName"
-  | "connectionRef"
-  | "forceRefresh"
-> & {
-  surface: "workspace_gateway";
-  requestId: string;
-  authority: McpGatewayCredentialAuthority;
-};
-
-export type McpGatewayCredentialResolution =
-  | (Omit<Extract<McpCredentialResolution, { status: "ok" }>, "sessionId"> & { requestId: string })
-  | (Omit<Extract<McpCredentialResolution, { status: "auth_needed" }>, "sessionId"> & {
-      requestId: string;
-    });
-
 export type ConnectionCredentialsPort = {
-  /** Restrict an optional remote adapter to explicit host refs. Omission keeps
-   * existing in-process host override and legacy-reference behavior. */
-  mcpAuthoritySource?: "host";
   // Every leg is optional: a host may drive only the credential classes it
   // owns. An unset leg falls through to today's standalone implementation for
   // that leg only.
@@ -4570,18 +4496,6 @@ export type ConnectionCredentialsPort = {
    * remains the sole owner of connection selection and credential policy.
    */
   runCredentials?(input: RunCredentialsRequest): Promise<RunCredentialsResolution>;
-  /**
-   * Resolve rotating MCP transport credentials at request time. Embedded hosts
-   * use this to keep their provider connection as the sole credential source;
-   * OpenGeni never requires a duplicate connection record. The same resolver is
-   * used by model-visible MCP tools and the exact-attempt Codemode projection.
-   */
-  mcpCredentials?(input: McpCredentialsRequest): Promise<McpCredentialResolution>;
-  /** Explicit opt-in for authenticated pre-session discovery and invocation.
-   * Does not call the turn-based mcpCredentials fallback or grant durable use. */
-  mcpGatewayCredentials?(
-    input: McpGatewayCredentialsRequest,
-  ): Promise<McpGatewayCredentialResolution>;
 };
 
 // ============ connection-credential provider — GitHub App API port (BYO-App, §7.6 / GitHub credential prototype remainder) ===
@@ -5842,8 +5756,7 @@ export const SessionMcpServerInput = z.object({
   // Write-only credential headers. Values are encrypted at rest and never
   // returned in session responses or events; response metadata exposes names.
   headers: z.record(z.string(), z.string()).optional(),
-  // Non-secret opaque pointer resolved at request time by the standalone
-  // connection broker or an embedding host's mcpCredentials port.
+  // Non-secret pointer resolved by the native connection credential engine.
   connectionRef: McpServerConnectionRef.optional(),
 });
 export type SessionMcpServerInput = z.infer<typeof SessionMcpServerInput>;
@@ -7581,27 +7494,33 @@ export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
  * integrity fence for outcome-unknown idempotent replay; the matching durable
  * draft revision remains authoritative and is atomically rotated on acceptance.
  */
-export const SubmitComposerDraftRequest = ComposerDraft.pick({
-  text: true,
-  annotations: true,
-  resources: true,
-  model: true,
-  reasoningEffort: true,
-  latencyMode: true,
-})
-  .extend({
-    expectedDraftRevision: z.number().int().positive(),
-    clientEventId: SessionOperationKey,
-    delivery: z.enum(["send", "steer"]),
-    controlEtag: z.string().min(1).optional(),
-    modelContext: z.string().trim().min(1).max(32768).optional(),
-    mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-    connectionAuthorities: z.never().optional(),
-    connectionAccounts: McpConnectionAccountSelections.default([]),
-    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
-    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
+export const SubmitComposerDraftRequest = z.preprocess(
+  (input) =>
+    input && typeof input === "object" && Object.hasOwn(input, "selectedHostMcpDelegations")
+      ? null
+      : input,
+  ComposerDraft.pick({
+    text: true,
+    annotations: true,
+    resources: true,
+    model: true,
+    reasoningEffort: true,
+    latencyMode: true,
   })
-  .superRefine(requireEstablishedPersonalResourceEpoch);
+    .extend({
+      expectedDraftRevision: z.number().int().positive(),
+      clientEventId: SessionOperationKey,
+      delivery: z.enum(["send", "steer"]),
+      controlEtag: z.string().min(1).optional(),
+      modelContext: z.string().trim().min(1).max(32768).optional(),
+      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+      connectionAuthorities: z.never().optional(),
+      connectionAccounts: McpConnectionAccountSelections.default([]),
+
+      personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
+    })
+    .superRefine(requireEstablishedPersonalResourceEpoch),
+);
 export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftRequest>;
 
 /**
@@ -9658,31 +9577,34 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
 });
 export type ScheduledTaskRun = z.infer<typeof ScheduledTaskRun>;
 
-const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
-  agentLearning: z
-    .object({ scope: z.enum(["workspace", "personal"]), settings: AgentLearningOverrides })
-    .strict()
-    .optional(),
-  name: ScheduledTaskNameInput,
-  schedule: ScheduledTaskScheduleSpec,
-  action: z
-    .object({ kind: z.literal("agent_turn") })
-    .strict()
-    .default({ kind: "agent_turn" }),
-  runMode: ScheduledTaskRunMode.default("new_session_per_run"),
-  overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
-  targetSessionId: z.string().uuid().nullable().optional(),
-  connectionAuthorities: z.never().optional(),
-  connectionAccounts: McpConnectionAccountSelections.default([]),
-  selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
-  agentConfig: ScheduledTaskAgentConfigInput,
-  status: ScheduledTaskStatus.default("active"),
-  variableSetId: z.string().uuid().nullable().optional(),
-  environmentId: z.string().uuid().nullable().optional(),
-  // The rig each run binds to (M3); its active version is resolved per fire.
-  rigId: z.string().uuid().nullable().optional(),
-  metadata: ScheduledTaskMetadataInput.default({}),
-}).superRefine((value, context) => {
+const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
+  {
+    agentLearning: z
+      .object({ scope: z.enum(["workspace", "personal"]), settings: AgentLearningOverrides })
+      .strict()
+      .optional(),
+    name: ScheduledTaskNameInput,
+    schedule: ScheduledTaskScheduleSpec,
+    action: z
+      .object({ kind: z.literal("agent_turn") })
+      .strict()
+      .default({ kind: "agent_turn" }),
+    runMode: ScheduledTaskRunMode.default("new_session_per_run"),
+    overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
+    targetSessionId: z.string().uuid().nullable().optional(),
+    connectionAuthorities: z.never().optional(),
+    connectionAccounts: McpConnectionAccountSelections.default([]),
+
+    agentConfig: ScheduledTaskAgentConfigInput,
+    status: ScheduledTaskStatus.default("active"),
+    variableSetId: z.string().uuid().nullable().optional(),
+    environmentId: z.string().uuid().nullable().optional(),
+    // The rig each run binds to (M3); its active version is resolved per fire.
+    rigId: z.string().uuid().nullable().optional(),
+    metadata: ScheduledTaskMetadataInput.default({}),
+  },
+  { rejectKeys: ["selectedHostMcpDelegations"] },
+).superRefine((value, context) => {
   if (value.runMode === "existing_session" && !value.targetSessionId) {
     context.addIssue({
       code: "custom",
@@ -9742,35 +9664,38 @@ export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
 export const UpdateScheduledTaskRequest =
-  /* @__PURE__ */ withVariableSetIdAlias({
-    agentLearning: z
-      .object({
-        scope: z.enum(["workspace", "personal"]),
-        baselineScope: z.enum(["workspace", "personal"]).optional(),
-        operationId: z.uuid(),
-        expectedVersion: z.number().int().nonnegative(),
-        settings: AgentLearningOverrides,
-      })
-      .strict()
-      .optional(),
-    name: ScheduledTaskNameInput.optional(),
-    schedule: ScheduledTaskScheduleSpec.optional(),
-    runMode: ScheduledTaskRunMode.optional(),
-    overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
-    action: ScheduledTaskAction.optional(),
-    targetSessionId: z.string().uuid().nullable().optional(),
-    connectionAuthorities: z.never().optional(),
-    connectionAccounts: McpConnectionAccountSelections.optional(),
-    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
-    agentConfig: ScheduledTaskAgentConfigInput.optional(),
-    status: ScheduledTaskStatus.optional(),
-    variableSetId: z.string().uuid().nullable().optional(),
-    environmentId: z.string().uuid().nullable().optional(),
-    // The rig each run binds to (M3); null clears it. Its active version is
-    // resolved per fire, so an update takes effect on the next dispatch.
-    rigId: z.string().uuid().nullable().optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
-  }).superRefine((value, context) => {
+  /* @__PURE__ */ withVariableSetIdAlias(
+    {
+      agentLearning: z
+        .object({
+          scope: z.enum(["workspace", "personal"]),
+          baselineScope: z.enum(["workspace", "personal"]).optional(),
+          operationId: z.uuid(),
+          expectedVersion: z.number().int().nonnegative(),
+          settings: AgentLearningOverrides,
+        })
+        .strict()
+        .optional(),
+      name: ScheduledTaskNameInput.optional(),
+      schedule: ScheduledTaskScheduleSpec.optional(),
+      runMode: ScheduledTaskRunMode.optional(),
+      overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
+      action: ScheduledTaskAction.optional(),
+      targetSessionId: z.string().uuid().nullable().optional(),
+      connectionAuthorities: z.never().optional(),
+      connectionAccounts: McpConnectionAccountSelections.optional(),
+
+      agentConfig: ScheduledTaskAgentConfigInput.optional(),
+      status: ScheduledTaskStatus.optional(),
+      variableSetId: z.string().uuid().nullable().optional(),
+      environmentId: z.string().uuid().nullable().optional(),
+      // The rig each run binds to (M3); null clears it. Its active version is
+      // resolved per fire, so an update takes effect on the next dispatch.
+      rigId: z.string().uuid().nullable().optional(),
+      metadata: z.record(z.string(), z.unknown()).optional(),
+    },
+    { rejectKeys: ["selectedHostMcpDelegations"] },
+  ).superRefine((value, context) => {
     if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
       context.addIssue({
         code: "custom",
@@ -11253,6 +11178,8 @@ export const CreateConnectionRequest = z.object({
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
   operationId: z.string().uuid().optional(),
+  /** Retired: connection execution is authorized by the initiating user. */
+  initialUseContexts: z.never().optional(),
 });
 export type CreateConnectionRequest = z.infer<typeof CreateConnectionRequest>;
 
@@ -15179,7 +15106,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
        */
       requestedSessionId: z.string().uuid().optional(),
       /** Explicit external-owner grants for the direct initial turn only. */
-      selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
+
       /** Top-level omission is workspace-visible. Agent-child omission inherits
        * the exact parent visibility; cross-visibility child creation is rejected.
        * Top-level private creation is an activated managed-cookie owning-human
@@ -15349,7 +15276,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         ])
         .optional(),
     },
-    { rejectKeys: ["turnInstructions"] },
+    { rejectKeys: ["turnInstructions", "selectedHostMcpDelegations"] },
   ).superRefine((value, context) => {
     if (value.startMode !== "realtime" && value.initialMessage === undefined) {
       context.addIssue({
@@ -15647,7 +15574,6 @@ export const SessionUserMessagePayload = z
     /** Optional choices among the authenticated sender’s own accounts. */
     connectionAuthorities: z.never().optional(),
     connectionAccounts: McpConnectionAccountSelections.default([]),
-    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .strict()
@@ -15698,7 +15624,6 @@ export const SteerSessionMessageRequest = z
     /** Optional choices among the authenticated sender’s own accounts. */
     connectionAuthorities: z.never().optional(),
     connectionAccounts: McpConnectionAccountSelections.default([]),
-    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .strict()

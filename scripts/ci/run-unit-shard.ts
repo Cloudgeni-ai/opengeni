@@ -11,6 +11,7 @@ import {
 import {
   deterministicFileBatches,
   deterministicShards,
+  discoverTestFiles,
   fileUsesProcessGlobalTestState,
 } from "./workspace";
 import { explicitBunTestPath } from "./run-test-shard";
@@ -267,16 +268,28 @@ async function run(
     stdout: "inherit",
     stderr: "inherit",
   });
-  return child.exited;
+  const exitCode = await child.exited;
+  if (exitCode !== 0) {
+    process.stderr.write(`[unit-shard] failed: exitCode=${exitCode} files=${files.join(", ")}\n`);
+  }
+  return exitCode;
 }
 
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+export function resolveUnitTestSelection(
+  root: string,
+  args: readonly string[],
+): { selected: string[]; index: number; count: number } {
+  if (args.includes("--all")) {
+    if (args.length !== 1) throw new Error("--all cannot be combined with shard arguments");
+    return { selected: discoverTestFiles(root).unit, index: 0, count: 1 };
+  }
   const planIndex = args.indexOf("--plan");
   const shardIndex = args.indexOf("--shard");
   const countIndex = args.indexOf("--shards");
   if (planIndex < 0 || shardIndex < 0 || countIndex < 0) {
-    throw new Error("usage: run-unit-shard.ts --plan <json> --shard <index> --shards <count>");
+    throw new Error(
+      "usage: run-unit-shard.ts --all | --plan <json> --shard <index> --shards <count>",
+    );
   }
   const planPath = args[planIndex + 1];
   const index = Number(args[shardIndex + 1]);
@@ -294,7 +307,12 @@ async function main(): Promise<void> {
   if (plan.schemaVersion !== 1 || !Array.isArray(plan.unitTests)) {
     throw new Error("unsupported or malformed impact plan");
   }
-  const selected = deterministicShards(process.cwd(), plan.unitTests, count)[index] ?? [];
+  const selected = deterministicShards(root, plan.unitTests, count)[index] ?? [];
+  return { selected, index, count };
+}
+
+async function main(): Promise<void> {
+  const { selected, index, count } = resolveUnitTestSelection(process.cwd(), process.argv.slice(2));
   const batch = selected.filter((path) => !fileUsesProcessGlobalTestState(process.cwd(), path));
   const isolated = selected.filter((path) => fileUsesProcessGlobalTestState(process.cwd(), path));
   // One file per Bun process is the measured safe default: larger batches keep

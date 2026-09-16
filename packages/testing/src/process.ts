@@ -1,7 +1,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import { readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 
 export type CommandResult = {
@@ -223,6 +223,23 @@ export async function startE2eWorkerTopology(options: {
   };
 }
 
+export function testServiceCommand(args: readonly string[]): string[] {
+  const command = args[0];
+  if (
+    !command ||
+    !["bun", "bun.exe"].includes(basename(command)) ||
+    args
+      .slice(1)
+      .some(
+        (arg) => arg === "--no-env-file" || arg === "--env-file" || arg.startsWith("--env-file="),
+      )
+  )
+    return [...args];
+  // Test services receive their configuration explicitly; never load a
+  // developer's credentials or access mode from the checkout's .env files.
+  return [command, "--no-env-file", ...args.slice(1)];
+}
+
 export async function startProcess(
   args: string[],
   options: {
@@ -232,7 +249,7 @@ export async function startProcess(
     timeoutMs?: number;
   } = {},
 ): Promise<StartedProcess> {
-  const [command, ...commandArgs] = args;
+  const [command, ...commandArgs] = testServiceCommand(args);
   if (!command) {
     throw new Error("startProcess requires a command");
   }

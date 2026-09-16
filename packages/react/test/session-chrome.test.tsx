@@ -339,7 +339,7 @@ describe("SessionChrome", () => {
     expect(mounted.container.querySelector("[data-og-session-chrome]")).toBeNull();
   });
 
-  test("renders separate incoming and queue segments", async () => {
+  test("groups incoming and agents behind activity while queue and goal remain visible", async () => {
     mounted = await renderComponent(
       <SessionChrome
         queue={queue({ pendingInputs: [pendingInput()] })}
@@ -353,16 +353,15 @@ describe("SessionChrome", () => {
     expect(root).not.toBeNull();
     expect(
       mounted.container.querySelector('[data-og-session-chrome-signal="incoming"]'),
-    ).not.toBeNull();
+    ).toBeNull();
     expect(
       mounted.container.querySelector('[data-og-session-chrome-signal="queue"]'),
     ).not.toBeNull();
     expect(
       mounted.container.querySelector('[data-og-session-chrome-signal="goal"]'),
     ).not.toBeNull();
-    expect(
-      mounted.container.querySelector('[data-og-session-chrome-signal="agents"]'),
-    ).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-signal="agents"]')).toBeNull();
+    expect(mounted.container.querySelector('[aria-label="Session activity"]')).not.toBeNull();
   });
 
   test("presents queued realtime work as voice instead of leaking agent context", async () => {
@@ -392,8 +391,7 @@ describe("SessionChrome", () => {
     const queueChip = mounted.container.querySelector<HTMLButtonElement>(
       '[data-og-session-chrome-signal="queue"]',
     );
-    expect(queueChip?.textContent).toContain("Voice request queued");
-    expect(queueChip?.textContent).toContain(transcript);
+    expect(queueChip?.textContent).toContain("1 queued");
     expect(queueChip?.textContent).not.toContain("realtime_delegation");
     expect(queueChip?.querySelector(".lucide-audio-lines")).not.toBeNull();
 
@@ -424,7 +422,7 @@ describe("SessionChrome", () => {
     expect(
       mounted.container.querySelector('[data-og-session-chrome-signal="steering"]'),
     ).toBeNull();
-    expect(queueChip?.textContent).toContain("1 queued prompt");
+    expect(queueChip?.textContent).toContain("1 queued");
     const queuePanel = mounted.container.querySelector('[data-og-session-chrome-panel="queue"]');
     expect(queuePanel?.textContent).toContain("Then update the documentation");
     expect(queuePanel?.textContent).not.toContain("Focus on the authentication failure first");
@@ -476,7 +474,7 @@ describe("SessionChrome", () => {
 
     expect(
       mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')?.textContent,
-    ).toContain("1 queued prompt");
+    ).toContain("1 queued");
     await act(async () => {
       mounted!.container
         .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
@@ -517,7 +515,7 @@ describe("SessionChrome", () => {
 
     expect(
       mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')?.textContent,
-    ).toContain("1 queued prompt");
+    ).toContain("1 queued");
     expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
     expect(mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')).toBeNull();
     expect(
@@ -927,7 +925,7 @@ describe("SessionChrome", () => {
       />,
     );
     const chip = mounted.container.querySelector<HTMLButtonElement>(
-      '[data-og-session-chrome-signal="incoming"]',
+      '[aria-label="Session activity"]',
     );
     await act(async () => {
       chip?.click();
@@ -998,7 +996,7 @@ describe("SessionChrome", () => {
     expect(queueChip?.getAttribute("data-slot")).not.toBe("tooltip-trigger");
   });
 
-  test("puts the close affordance on the expanded chip", async () => {
+  test("the activity button closes the expanded agents panel", async () => {
     mounted = await renderComponent(
       <SessionChrome
         queue={queue({
@@ -1014,12 +1012,12 @@ describe("SessionChrome", () => {
         defaultActive="agents"
       />,
     );
-    const agentsChip = mounted.container.querySelector<HTMLButtonElement>(
-      '[data-og-session-chrome-signal="agents"]',
+    const activity = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Session activity"]',
     );
-    const close = agentsChip?.querySelector('[data-testid="session-chrome-close"]');
-    expect(close).not.toBeNull();
-    expect(agentsChip?.getAttribute("aria-label")).toBe("Close 15 agents");
+    expect(activity?.getAttribute("aria-expanded")).toBe("true");
+    await act(async () => activity?.click());
+    expect(activity?.getAttribute("aria-expanded")).toBe("false");
     // Other chips stay free of a close glyph.
     const queueChip = mounted.container.querySelector('[data-og-session-chrome-signal="queue"]');
     expect(queueChip?.querySelector('[data-testid="session-chrome-close"]')).toBeNull();
@@ -1161,11 +1159,7 @@ describe("SessionChrome goal pill reasons", () => {
 describe("SessionChrome compact actions", () => {
   test("visibly identifies the goal when its continuation needs attention", async () => {
     mounted = await renderComponent(
-      <SessionChrome
-        compact
-        queue={queue({ queue: [] })}
-        goal={goal({ continuation: undefined })}
-      />,
+      <SessionChrome queue={queue({ queue: [] })} goal={goal({ continuation: undefined })} />,
     );
     const chip = mounted.container.querySelector<HTMLButtonElement>(
       '[data-og-session-chrome-signal="goal"]',
@@ -1175,9 +1169,7 @@ describe("SessionChrome compact actions", () => {
   });
 
   test("opens an idle authoritative queue without a click", async () => {
-    mounted = await renderComponent(
-      <SessionChrome compact queue={queue()} composer={composer()} />,
-    );
+    mounted = await renderComponent(<SessionChrome queue={queue()} composer={composer()} />);
     expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
     expect(
       mounted.container.querySelector('[data-og-session-chrome-panel="queue"]'),
@@ -1188,28 +1180,20 @@ describe("SessionChrome compact actions", () => {
   });
 
   test("keeps the compact queue closed after the operator dismisses it", async () => {
-    mounted = await renderComponent(
-      <SessionChrome compact queue={queue()} composer={composer()} />,
-    );
+    mounted = await renderComponent(<SessionChrome queue={queue()} composer={composer()} />);
     await act(async () => {
       mounted!.container
         .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
         ?.click();
     });
     expectChromeCollapsed(mounted.container);
-    await mounted.rerender(<SessionChrome compact queue={queue()} composer={composer()} />);
+    await mounted.rerender(<SessionChrome queue={queue()} composer={composer()} />);
     expectChromeCollapsed(mounted.container);
   });
 
   test("opens the compact queue after a default-open goal is closed", async () => {
     mounted = await renderComponent(
-      <SessionChrome
-        compact
-        defaultActive="goal"
-        queue={queue()}
-        composer={composer()}
-        goal={goal()}
-      />,
+      <SessionChrome defaultActive="goal" queue={queue()} composer={composer()} goal={goal()} />,
     );
     expect(mounted.container.querySelector('[data-og-session-chrome-panel="goal"]')).not.toBeNull();
     expect(mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')).toBeNull();
@@ -1227,7 +1211,7 @@ describe("SessionChrome compact actions", () => {
 
   test("does not re-offer the queue after a dismiss and a later goal close", async () => {
     mounted = await renderComponent(
-      <SessionChrome compact queue={queue()} composer={composer()} goal={goal()} />,
+      <SessionChrome queue={queue()} composer={composer()} goal={goal()} />,
     );
     await act(async () => {
       mounted!.container
@@ -1250,11 +1234,10 @@ describe("SessionChrome compact actions", () => {
 
   test("keeps a live Send collapsed after the optimistic row becomes authoritative", async () => {
     mounted = await renderComponent(
-      <SessionChrome compact queue={queue({ queue: [] })} composer={composer()} />,
+      <SessionChrome queue={queue({ queue: [] })} composer={composer()} />,
     );
     await mounted.rerender(
       <SessionChrome
-        compact
         queue={queue({ queue: [] })}
         composer={composer({
           optimisticMessages: [
@@ -1276,7 +1259,6 @@ describe("SessionChrome compact actions", () => {
 
     await mounted.rerender(
       <SessionChrome
-        compact
         queue={queue({
           queue: [fakeTurn({ id: "turn-live-1", prompt: "live send" })],
         })}
@@ -1289,7 +1271,7 @@ describe("SessionChrome compact actions", () => {
 
   test("leaves a controlled collapsed queue closed even when occupancy exists", async () => {
     mounted = await renderComponent(
-      <SessionChrome compact active={null} queue={queue()} composer={composer()} />,
+      <SessionChrome active={null} queue={queue()} composer={composer()} />,
     );
     expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
     expect(mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')).toBeNull();
@@ -1298,7 +1280,6 @@ describe("SessionChrome compact actions", () => {
   test("offers the next authoritative wave after the previous occupancy drains", async () => {
     mounted = await renderComponent(
       <SessionChrome
-        compact
         queue={queue({ queue: [fakeTurn({ id: "wave-1", prompt: "first wave" })] })}
         composer={composer()}
       />,
@@ -1310,12 +1291,9 @@ describe("SessionChrome compact actions", () => {
     });
     expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
 
-    await mounted.rerender(
-      <SessionChrome compact queue={queue({ queue: [] })} composer={composer()} />,
-    );
+    await mounted.rerender(<SessionChrome queue={queue({ queue: [] })} composer={composer()} />);
     await mounted.rerender(
       <SessionChrome
-        compact
         queue={queue({
           queue: [fakeTurn({ id: "wave-2", prompt: "later wave" })],
         })}
@@ -1331,7 +1309,6 @@ describe("SessionChrome compact actions", () => {
   test("re-offers after a dismiss when a different session occupies the same chrome", async () => {
     mounted = await renderComponent(
       <SessionChrome
-        compact
         queue={queue({
           queue: [
             fakeTurn({
@@ -1353,7 +1330,6 @@ describe("SessionChrome compact actions", () => {
 
     await mounted.rerender(
       <SessionChrome
-        compact
         queue={queue({
           queue: [
             fakeTurn({
@@ -1378,7 +1354,6 @@ describe("SessionChrome compact actions", () => {
     });
     await mounted.rerender(
       <SessionChrome
-        compact
         queue={queue({
           queue: [
             fakeTurn({
@@ -1470,14 +1445,14 @@ describe("SessionChrome compact actions", () => {
     expect(mounts).toBe(0);
     await act(async () =>
       mounted!.container
-        .querySelector<HTMLButtonElement>('[data-testid="session-chrome-commands"]')!
+        .querySelector<HTMLButtonElement>('[aria-label="Session activity"]')!
         .click(),
     );
     expect(mounts).toBeGreaterThan(0);
     expect(mounted.container.textContent).toContain("Active command details");
     await act(async () =>
       mounted!.container
-        .querySelector<HTMLButtonElement>('[data-testid="session-chrome-commands"]')!
+        .querySelector<HTMLButtonElement>('[aria-label="Session activity"]')!
         .click(),
     );
     expect(mounted.container.textContent).not.toContain("Active command details");
@@ -1488,7 +1463,6 @@ describe("compact activity navigation", () => {
   test("activity opens content, selected tab stays open, and queue hides activity navigation", async () => {
     mounted = await renderComponent(
       <SessionChrome
-        compact
         queue={queue({ queue: [fakeTurn()] })}
         commandsCount={1}
         commandsPanel={<div>Command body</div>}
@@ -1516,7 +1490,6 @@ describe("compact activity navigation", () => {
   test("default command panel includes its navigation", async () => {
     mounted = await renderComponent(
       <SessionChrome
-        compact
         defaultActive="commands"
         queue={queue({ queue: [] })}
         commandsCount={1}
@@ -1535,7 +1508,6 @@ describe("compact activity navigation", () => {
 test("controlled compact command selection exposes activity navigation", async () => {
   mounted = await renderComponent(
     <SessionChrome
-      compact
       active="commands"
       queue={queue({ queue: [] })}
       commandsCount={1}
@@ -1575,7 +1547,6 @@ test("failed-session goal chip and panel explain the block without changing the 
   });
   mounted = await renderComponent(
     <SessionChrome
-      compact
       sessionStatus="failed"
       queue={queue({ queue: [] })}
       goal={activeGoal}

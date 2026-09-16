@@ -4077,7 +4077,7 @@ describe("useComposer durable draft and control binding", () => {
   }
 
   for (const delivery of ["send", "steer"] as const) {
-    test(`durable ${delivery} retains explicit host selection across an uncertain retry`, async () => {
+    test(`durable ${delivery} retains native connection selection across an uncertain retry`, async () => {
       const initial: ComposerDraft = {
         revision: 4,
         text: "Use this account",
@@ -4090,9 +4090,12 @@ describe("useComposer durable draft and control binding", () => {
         updatedAt: new Date().toISOString(),
       };
       const original = [
-        { serverId: "host-tools", delegationId: crypto.randomUUID(), generation: 1 },
+        {
+          serverId: "example-tools",
+          connectionId: crypto.randomUUID(),
+        },
       ];
-      let selectedHostMcpDelegations = original;
+      let connectionAccounts = original;
       const attempts: SendMessageInput[] = [];
       const client = fakeClient({
         getComposerDraft: async () => initial,
@@ -4116,7 +4119,7 @@ describe("useComposer durable draft and control binding", () => {
           useComposer(SESSION_ID, {
             client,
             workspaceId: WORKSPACE_ID,
-            sendExtras: () => ({ selectedHostMcpDelegations }),
+            sendExtras: () => ({ connectionAccounts }),
           }),
         undefined,
       );
@@ -4125,7 +4128,7 @@ describe("useComposer durable draft and control binding", () => {
         expect(await hook.result.current[delivery]()).toBe(delivery === "send"),
       );
       await flush();
-      selectedHostMcpDelegations = [{ ...original[0]!, delegationId: crypto.randomUUID() }];
+      connectionAccounts = [{ ...original[0]!, connectionId: crypto.randomUUID() }];
       if (delivery === "send") {
         const failed = hook.result.current.optimisticMessages?.find(
           (message) => message.outcomeUnknown,
@@ -4137,8 +4140,8 @@ describe("useComposer durable draft and control binding", () => {
         await flushing(async () => expect(await hook.result.current.steer()).toBe(true));
       }
       expect(attempts).toHaveLength(2);
-      expect(attempts[0]?.selectedHostMcpDelegations).toEqual(original);
-      expect(attempts[1]?.selectedHostMcpDelegations).toEqual(original);
+      expect(attempts[0]?.connectionAccounts).toEqual(original);
+      expect(attempts[1]?.connectionAccounts).toEqual(original);
       expect(attempts[1]?.clientEventId).toBe(attempts[0]?.clientEventId);
       expect(attempts[1]?.expectedDraftRevision).toBe(attempts[0]?.expectedDraftRevision);
       await hook.unmount();

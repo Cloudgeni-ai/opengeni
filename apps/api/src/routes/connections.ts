@@ -1,4 +1,9 @@
 import { createHash, createHmac } from "node:crypto";
+import {
+  createConnectionIdempotently,
+  getConnectionCreationResult,
+  ConnectionCreateIdempotencyError,
+} from "@opengeni/db";
 import { sql } from "drizzle-orm";
 import { assertOrganizationIntegrationAllowed } from "@opengeni/contracts";
 import {
@@ -81,7 +86,6 @@ import {
   finishConnectOperation,
   getConnectAttempt,
   decryptEnvironmentValue,
-  createConnection,
   withWorkspaceSubjectRls,
   type Database,
   encryptEnvironmentValue,
@@ -215,6 +219,22 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  app.get("/v1/workspaces/:workspaceId/connections/operations/:operationId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    const operationId = CreateConnectionRequest.shape.operationId
+      .unwrap()
+      .parse(c.req.param("operationId"));
+    const connection = await getConnectionCreationResult(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      operationId,
+    });
+    if (!connection) throw new HTTPException(404, { message: "Connection operation not found" });
+    return c.json(ConnectionResponse.parse({ connection }));
+  });
+
   app.post("/v1/workspaces/:workspaceId/connections", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
@@ -289,7 +309,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             }
             return created;
           })()
-        : await createConnection(db, {
+        : await createConnectionIdempotently(db, {
             accountId: grant.accountId,
             workspaceId,
             subjectId,
@@ -300,6 +320,30 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             expiresAt: payload.expiresAt ? new Date(payload.expiresAt) : null,
             metadata: payload.metadata,
             createdBySubjectId: grant.subjectId,
+            ...(payload.operationId
+              ? {
+                  operation: {
+                    id: payload.operationId,
+                    requestDigest: workspaceProviderCredentialRequestDigest(key, {
+                      action: "create",
+                      providerDomain,
+                      kind: payload.kind,
+                      subjectId,
+                      credential: payload.credential,
+                      grantedScopes: payload.grantedScopes,
+                      expiresAt: payload.expiresAt
+                        ? new Date(payload.expiresAt).toISOString()
+                        : null,
+                      metadata: payload.metadata,
+                    }),
+                  },
+                }
+              : {}),
+          }).catch((error: unknown) => {
+            if (error instanceof ConnectionCreateIdempotencyError) {
+              throw new HTTPException(409, { message: error.message });
+            }
+            throw error;
           });
       return c.json(ConnectionResponse.parse({ connection }), 201);
     };

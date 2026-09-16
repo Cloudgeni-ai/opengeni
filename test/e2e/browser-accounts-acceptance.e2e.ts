@@ -746,6 +746,13 @@ function actorTransitionResponseDispatchPhaseMatches(input: {
     : input.dispatchPhase === input.expectedPhase;
 }
 
+function isActorTransitionRead(method: string, pathname: string): boolean {
+  return (
+    method === "GET" ||
+    (method === "POST" && /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(pathname))
+  );
+}
+
 let owned: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let edge: ReturnType<typeof Bun.serve> | null = null;
@@ -946,7 +953,7 @@ function observeBrowser(page: Page): BrowserProblems {
         pathname.endsWith("/attention") &&
         new Set(["logout-one", "logout-all-response-loss-replay"]).has(problems.phase)) ||
       (response.status() === 409 &&
-        request.method() === "GET" &&
+        isActorTransitionRead(request.method(), pathname) &&
         pathname.startsWith("/v1/workspaces/") &&
         problems.phase === "cross-tab-select-race");
     if (recordsActorTransition) {
@@ -1686,11 +1693,15 @@ async function expectAndConsumeActorTransitionResponse(
     expect(responseEvidence).toEqual(
       expect.objectContaining({
         actorEpoch: input.actorEpoch,
-        method: input.method,
         responsePhase: input.phase,
         status: input.status,
       }),
     );
+    expect(
+      response.method === input.method ||
+        (input.timing?.kind === "direct-race-fence" &&
+          isActorTransitionRead(response.method, response.pathname)),
+    ).toBe(true);
     const dispatchPhaseValid = actorTransitionResponseDispatchPhaseMatches({
       dispatchPhase: response.dispatchPhase,
       expectedPhase: input.phase,
@@ -2918,6 +2929,20 @@ afterAll(async () => {
 }, 180_000);
 
 describe("provider-neutral browser account acceptance", () => {
+  test("actor transition reads include only the exact read-only POST search", () => {
+    const path = "/v1/workspaces/workspace/knowledge/entries/search";
+    expect(isActorTransitionRead("POST", path)).toBe(true);
+    expect(isActorTransitionRead("GET", path)).toBe(true);
+    for (const [method, pathname] of [
+      ["DELETE", path],
+      ["PATCH", path],
+      ["POST", `${path}/other`],
+      ["POST", "/v1/workspaces/workspace/knowledge/entries/review"],
+      ["POST", "/v1/workspaces/workspace/sessions"],
+    ]) {
+      expect(isActorTransitionRead(method!, pathname!)).toBe(false);
+    }
+  });
   test("neutral race cancellations require the exact accepted select and explicit reload window", () => {
     const input: BrowserRequestFailureInput = {
       actorEpoch: null,

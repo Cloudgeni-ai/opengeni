@@ -2926,10 +2926,6 @@ export type ScheduledTask = {
 };
 
 export type CreateSessionRequest = {
-  /** Opt-in host grants for a direct external-user initial turn. */
-  selectedHostMcpDelegations?:
-    | { serverId: string; delegationId: string; generation: number }[]
-    | undefined;
   /** Omitted: defaults/inheritance; []: no bundled guidance. Children cannot widen. */
   bundledSkillIds?: BundledSkillId[] | undefined;
   excludedMcpServerIds?: string[] | undefined;
@@ -5322,7 +5318,6 @@ export type CreateAgentScheduledTaskRequest = {
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
-  selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
@@ -5353,7 +5348,6 @@ export type UpdateScheduledTaskRequest = {
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
-  selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
@@ -8048,7 +8042,6 @@ export type UserMessageEventInput = {
     expectedDraftRevision?: number | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
     connectionAccounts?: McpConnectionAccountSelection[] | undefined;
-    selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
     personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   };
 };

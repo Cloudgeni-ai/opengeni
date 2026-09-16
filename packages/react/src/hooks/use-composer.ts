@@ -1478,9 +1478,7 @@ export function useComposer(
               ...(wireInput.connectionAccounts
                 ? { connectionAccounts: wireInput.connectionAccounts }
                 : {}),
-              ...(wireInput.selectedHostMcpDelegations
-                ? { selectedHostMcpDelegations: wireInput.selectedHostMcpDelegations }
-                : {}),
+
               ...(wireInput.personalResourceAttachment
                 ? { personalResourceAttachment: wireInput.personalResourceAttachment }
                 : {}),
@@ -1755,9 +1753,6 @@ export function useComposer(
               ? { mcpCredentialUpdates: input.mcpCredentialUpdates }
               : {}),
             ...(input.connectionAccounts ? { connectionAccounts: input.connectionAccounts } : {}),
-            ...(input.selectedHostMcpDelegations
-              ? { selectedHostMcpDelegations: input.selectedHostMcpDelegations }
-              : {}),
             ...(input.personalResourceAttachment
               ? { personalResourceAttachment: input.personalResourceAttachment }
               : {}),

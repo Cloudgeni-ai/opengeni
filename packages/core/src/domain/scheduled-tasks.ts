@@ -69,10 +69,6 @@ import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owne
 import { isDeepStrictEqual } from "node:util";
 import { hasPermission, requirePermission, type AccessGrantAuthorization } from "../access";
 import {
-  prepareHostMcpTaskAdmission,
-  prepareInheritedHostMcpTaskAdmission,
-} from "./host-mcp-task-admission";
-import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
@@ -247,10 +243,6 @@ export async function createValidatedScheduledTask(input: {
   // API parsing fills this default, but pack installers and older internal
   // callers can still invoke the shared validator with the pre-action shape.
   const action = input.payload.action ?? ({ kind: "agent_turn" } as const);
-  const hostSelections =
-    "selectedHostMcpDelegations" in input.payload
-      ? input.payload.selectedHostMcpDelegations
-      : undefined;
   const knowledgeAction = input.payload.agentConfig.knowledgeSource ?? null;
   if (knowledgeAction) {
     await validateKnowledgeSourceSyncAction({
@@ -344,21 +336,21 @@ export async function createValidatedScheduledTask(input: {
   // Existing-session runs use the target's persisted MCP configuration, with
   // session definitions taking precedence over deployment servers of the same
   // ID. Metadata selects the destination; captured grants still supply authority.
-  const hostRuntimeSettings =
+  const effectiveRuntimeSettings =
     runtimeSettings && target
       ? settingsWithSessionMcpServerMetadata(runtimeSettings, target.mcpServers)
       : runtimeSettings;
   const personalConnectionDelegations =
-    knowledgeAction || !runtimeSettings
+    knowledgeAction || !effectiveRuntimeSettings
       ? []
       : await freezePersonalConnectionDelegations({
           db: input.db,
           workspaceId: input.grant.workspaceId,
-          settings: hostRuntimeSettings ?? runtimeSettings,
+          settings: effectiveRuntimeSettings,
           tools: await scheduledConnectionTools(
             input.db,
             input.grant.workspaceId,
-            runtimeSettings,
+            effectiveRuntimeSettings,
             target,
             agentConfig.tools,
             input.grant.subjectId,
@@ -366,7 +358,7 @@ export async function createValidatedScheduledTask(input: {
           resources: target?.resources ?? agentConfig.resources,
           source: personalConnectionDelegationSourceForGrant(input.grant),
           authoritySelections: input.payload.connectionAccounts,
-          ...scheduledConnectionSurfaceEligibility(runtimeSettings, target),
+          ...scheduledConnectionSurfaceEligibility(effectiveRuntimeSettings, target),
         });
   if (personalConnectionDelegationSourceForGrant(input.grant).kind === "turn") {
     agentConfig.connectionAccounts = personalConnectionDelegations
@@ -436,25 +428,6 @@ export async function createValidatedScheduledTask(input: {
         variableSetId: input.payload.variableSetId ?? null,
         rigId: input.payload.rigId ?? null,
         metadata: input.payload.metadata,
-        ...(hostSelections?.length && hostRuntimeSettings
-          ? {
-              captureHostAuthority: prepareHostMcpTaskAdmission({
-                settings: hostRuntimeSettings,
-                tools: target?.tools ?? agentConfig.tools,
-                grant: input.grant,
-                ...(input.authorization ? { authorization: input.authorization } : {}),
-                selections: hostSelections,
-              }),
-            }
-          : hostSelections === undefined && creationInitiator.actor && hostRuntimeSettings
-            ? {
-                captureHostAuthority: prepareInheritedHostMcpTaskAdmission(
-                  hostRuntimeSettings,
-                  target?.tools ?? agentConfig.tools,
-                  creationInitiator.actor,
-                ),
-              }
-            : {}),
         ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
       });
       if (learning && learningContext)
@@ -1135,7 +1108,6 @@ export async function validatedScheduledTaskUpdate(input: {
     (input.payload.rigId !== undefined && input.payload.rigId !== input.existing.rigId);
   const materialExecutionChange =
     authorityTargetChanged ||
-    input.payload.selectedHostMcpDelegations !== undefined ||
     input.payload.connectionAccounts !== undefined ||
     !isDeepStrictEqual(nextAgentConfig, input.existing.agentConfig) ||
     (input.payload.action !== undefined &&
@@ -1279,25 +1251,6 @@ export async function validatedScheduledTaskUpdate(input: {
     scheduledTaskInitiatorForGrant(input.grant).actor,
   );
   if (linkCapture) update.captureLinkAuthority = linkCapture;
-  if (input.payload.selectedHostMcpDelegations !== undefined) {
-    const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
-      input.db,
-      input.grant.workspaceId,
-      input.settings,
-      { subjectId: input.grant.subjectId },
-    );
-    const target =
-      nextRunMode === "existing_session" && nextTargetSessionId
-        ? await getSession(input.db, input.grant.workspaceId, nextTargetSessionId)
-        : null;
-    update.captureHostAuthority = prepareHostMcpTaskAdmission({
-      settings: runtimeSettings,
-      tools: target?.tools ?? nextAgentConfig.tools,
-      grant: input.grant,
-      ...(input.authorization ? { authorization: input.authorization } : {}),
-      selections: input.payload.selectedHostMcpDelegations,
-    });
-  }
   if (update.clonePersonalResourceAuthorityFromRevision !== undefined) {
     update.refreshPersonalResourceAuthority = false;
   }

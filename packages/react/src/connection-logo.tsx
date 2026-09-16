@@ -5,17 +5,21 @@ export function ConnectionLogo({
   name,
   size = 40,
   fallback,
+  loading = false,
 }: {
   src: string | null;
   name: string;
   size?: number;
   fallback?: ReactNode;
+  loading?: boolean;
 }) {
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
   return (
     <span className="og-connection-logo" aria-hidden="true" style={{ width: size, height: size }}>
       {src && src !== failedSrc ? (
         <img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailedSrc(src)} />
+      ) : loading ? (
+        <span className="og-connection-skeleton-mark" />
       ) : (
         (fallback ?? (
           <span>

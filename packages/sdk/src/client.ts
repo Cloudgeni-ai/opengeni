@@ -7714,6 +7714,27 @@ export class OpenGeniClient {
     return logoAssetPath ? `${this.baseUrl}/v1/${logoAssetPath}` : null;
   }
 
+  /** Read a passive catalog mark through this client's authenticated transport.
+   * Useful when an embedding backend protects even public upstream assets. */
+  async downloadCatalogAsset(
+    logoAssetPath: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<Blob> {
+    if (
+      !/^catalog-assets\/[a-zA-Z0-9_./-]+$/.test(logoAssetPath) ||
+      logoAssetPath.split("/").some((part) => !part || part === "." || part === "..")
+    )
+      throw new TypeError("A catalog asset path is required");
+    const response = await this.requestResponse("GET", `/v1/${logoAssetPath}`, {}, options);
+    const type = response.headers.get("content-type")?.split(";")[0] ?? "";
+    if (!type.startsWith("image/")) {
+      await response.body?.cancel();
+      throw new Error("The catalog asset is not an image");
+    }
+    const bytes = await readBoundedResponseBytes(response, 2_000_000, null);
+    return new Blob([Uint8Array.from(bytes)], { type });
+  }
+
   // --- GitHub ----------------------------------------------------------------------------------
 
   /** GitHub App server configuration plus truthful workspace binding status. */

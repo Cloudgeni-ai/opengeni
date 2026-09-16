@@ -39,23 +39,31 @@ const testFiles =
         "./test/e2e/workbench.browser.e2e.ts",
       ];
 
-for (const testFile of testFiles) {
-  const engineIds = testFile.endsWith("artifact-spreadsheet-canvas.browser.e2e.ts")
-    ? (["chromium", "firefox", "webkit"] as const)
-    : testFile.endsWith("ai-gateway-connection.browser.e2e.ts")
-      ? (["chromium", "webkit"] as const)
-      : ([undefined] as const);
-  for (const engineId of engineIds) {
-    // Keep native browser engines in separate Bun processes so one engine's teardown cannot
-    // influence another engine's performance or liveness result.
-    const environment = engineId
-      ? testFile.endsWith("ai-gateway-connection.browser.e2e.ts")
-        ? { OPENGENI_AI_GATEWAY_BROWSER_ENGINE: engineId }
-        : { OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE: engineId }
-      : {};
-    const status = runTestFile(testFile, environment);
-    if (status !== 0) process.exit(status);
+if (import.meta.main)
+  for (const testFile of testFiles) {
+    const engineIds = testFile.endsWith("artifact-spreadsheet-canvas.browser.e2e.ts")
+      ? (["chromium", "firefox", "webkit"] as const)
+      : testFile.endsWith("ai-gateway-connection.browser.e2e.ts")
+        ? (["chromium", "webkit"] as const)
+        : ([undefined] as const);
+    for (const engineId of engineIds) {
+      // Keep native browser engines in separate Bun processes so one engine's teardown cannot
+      // influence another engine's performance or liveness result.
+      const environment: Readonly<Record<string, string>> = engineId
+        ? testFile.endsWith("ai-gateway-connection.browser.e2e.ts")
+          ? { OPENGENI_AI_GATEWAY_BROWSER_ENGINE: engineId }
+          : { OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE: engineId }
+        : {};
+      const status = runTestFile(testFile, environment);
+      if (status !== 0) process.exit(status);
+    }
   }
+
+export function isMissingBrowserLibraryError(output: string): boolean {
+  return (
+    output.includes("error while loading shared libraries") ||
+    output.includes("Host system is missing dependencies to run browsers.")
+  );
 }
 
 function runTestFile(testFile: string, environment: Readonly<Record<string, string>>): number {
@@ -73,13 +81,14 @@ function runTestFile(testFile: string, environment: Readonly<Record<string, stri
   }
 
   const output = `${first.stdout}\n${first.stderr}`;
-  if (!output.includes("error while loading shared libraries") || !commandExists("nix")) {
+  if (!isMissingBrowserLibraryError(output) || !commandExists("nix")) {
     process.stdout.write(first.stdout);
     process.stderr.write(first.stderr);
     return first.status ?? 1;
   }
 
   const libraryPath = nixLibraryPath([
+    "stdenv.cc.cc.lib",
     "glib",
     "nss",
     "nspr",
@@ -91,6 +100,9 @@ function runTestFile(testFile: string, environment: Readonly<Record<string, stri
     "expat",
     "libxkbcommon",
     "xorg.libX11",
+    "xorg.libXcursor",
+    "xorg.libXi",
+    "xorg.libXrender",
     "xorg.libXcomposite",
     "xorg.libXdamage",
     "xorg.libXext",
@@ -104,6 +116,8 @@ function runTestFile(testFile: string, environment: Readonly<Record<string, stri
     "libgbm",
     "gtk3",
     "gdk-pixbuf",
+    "freetype",
+    "fontconfig",
   ]);
 
   if (!libraryPath) {

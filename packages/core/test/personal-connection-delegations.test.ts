@@ -248,6 +248,92 @@ describe("personal MCP connection delegation", () => {
         authoritySelections: [selection],
       });
       expect(personalFrozen[0]?.originWorkspaceId).toBe(origin!.id);
+      const defaultInput = {
+        db: client.db,
+        workspaceId: origin!.id,
+        settings: { mcpServers: [personalServer] },
+        tools: [{ kind: "mcp" as const, id: "linear" }],
+        source: { kind: "subject" as const, subjectId, accountId: account!.id },
+        visibility: "workspace_shared" as const,
+      };
+      // A sole owned account is selected without conversation grants, in either
+      // visibility. An empty preference list does not remove sender authority.
+      expect(await freezePersonalConnectionDelegations(defaultInput)).toEqual(personalFrozen);
+      expect(
+        await freezePersonalConnectionDelegations({
+          ...defaultInput,
+          authoritySelections: [],
+        }),
+      ).toEqual(personalFrozen);
+      expect(
+        await freezePersonalConnectionDelegations({
+          ...defaultInput,
+          visibility: "user_private",
+        }),
+      ).toEqual(personalFrozen);
+      const scopedSession = await createSession(client.db, {
+        accountId: account!.id,
+        workspaceId: origin!.id,
+        initialMessage: "sender account capture",
+        resources: [],
+        tools: [{ kind: "mcp", id: "linear" }],
+        metadata: {},
+        createdBy: { kind: "subject", subjectId },
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        subjectId,
+      });
+      const [scopedAuthority] = await sql<
+        Array<{ visibility: "user_private" | "workspace_shared"; epoch: number }>
+      >`select visibility, authority_epoch::int as epoch from sessions where id = ${scopedSession.id}`;
+      const scopedInput = {
+        ...defaultInput,
+        targetSessionId: scopedSession.id,
+        visibility: scopedAuthority!.visibility,
+      };
+      const automaticallyFrozen = await freezePersonalConnectionDelegations(scopedInput);
+      expect(automaticallyFrozen).toEqual(
+        await freezePersonalConnectionDelegations({
+          ...scopedInput,
+          authoritySelections: [selection],
+        }),
+      );
+      expect(automaticallyFrozen).toEqual(personalFrozen);
+      expect(
+        await freezePersonalConnectionDelegations({ ...scopedInput, authoritySelections: [] }),
+      ).toEqual(personalFrozen);
+      const acceptedScoped = await withWorkspaceSubjectSessionActivityRls(
+        client.db,
+        origin!.id,
+        subjectId,
+        (db) =>
+          submitHumanPromptInTransaction(db, {
+            accountId: account!.id,
+            workspaceId: origin!.id,
+            sessionId: scopedSession.id,
+            subjectId,
+            actor: { type: "human", subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "use the sender account",
+            resources: [],
+            model: "test-model",
+            reasoningEffort: "low",
+            reasoningEffortFallback: "medium",
+            source: "user",
+            personalConnectionDelegations: automaticallyFrozen,
+          }),
+      );
+      expect(
+        await getSessionTurnPersonalConnectionDelegations(
+          client.db,
+          origin!.id,
+          scopedSession.id,
+          acceptedScoped.turnId,
+        ),
+      ).toEqual(automaticallyFrozen);
       expect(
         await sql`
           select 1 from workspace_memberships

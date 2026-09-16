@@ -137,7 +137,6 @@ import { MCP_MAX_TOOL_RESULT_BYTES } from "../src/mcp-network";
 import { baseModelInputFilterForSettings } from "../src/model-input";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 import { McpResultCustomDataBridge } from "../src/mcp-result-custom-data";
-import { buildHostConnectionTokenResolver } from "../../db/src/connection-token-resolver";
 
 import { Manifest } from "@openai/agents/sandbox";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
@@ -2167,6 +2166,7 @@ describe("runtime event normalization", () => {
     // agent's MCP tools and reports which prefixed tool names need approval.
     async function mcpToolApprovalMap(
       requireApproval: boolean | string[] | undefined,
+      connectionBacked = false,
     ): Promise<Record<string, boolean>> {
       const mcp = startTestMcpServer();
       const serverConfig = {
@@ -2181,7 +2181,22 @@ describe("runtime event normalization", () => {
       ]);
       try {
         const agent = buildOpenGeniAgent(
-          testSettings({ sandboxBackend: "none", mcpServers: [serverConfig] }),
+          testSettings({
+            sandboxBackend: "none",
+            mcpServers: [
+              {
+                ...serverConfig,
+                ...(connectionBacked
+                  ? {
+                      connectionRef: {
+                        connectionId: "connection-1",
+                        providerDomain: "example.test",
+                      },
+                    }
+                  : {}),
+              },
+            ],
+          }),
           [],
           { mcpServers: prepared.mcpServers },
         );
@@ -2210,6 +2225,14 @@ describe("runtime event normalization", () => {
 
     test("requireApproval absent → nothing needs approval (historical default)", async () => {
       const map = await mcpToolApprovalMap(undefined);
+      expect(map).toEqual({
+        docs__search_documents: false,
+        docs__fetch_document: false,
+      });
+    });
+
+    test("connection-backed MCP with requireApproval false builds without requesting approval", async () => {
+      const map = await mcpToolApprovalMap(false, true);
       expect(map).toEqual({
         docs__search_documents: false,
         docs__fetch_document: false,
@@ -8542,89 +8565,6 @@ describe("runtime event normalization", () => {
       ).toBe(true);
     } finally {
       await prepared.close();
-      mcp.close();
-    }
-  });
-
-  test("durable host broker revocation at the physical MCP fence sends no provider request", async () => {
-    const mcp = startTestMcpServer();
-    const workspaceId = "44444444-4444-4444-8444-444444444444";
-    let checks = 0;
-    let credentialCalls = 0;
-    const authNeeded: ToolAuthNeededPayload[] = [];
-    const resolveCredential = buildHostConnectionTokenResolver(
-      async (request) => {
-        credentialCalls++;
-        return {
-          status: "ok",
-          accountId: request.accountId,
-          workspaceId: request.workspaceId,
-          sessionId: request.sessionId,
-          connectionId: "opaque-host-account",
-          providerDomain: request.connectionRef.providerDomain,
-          headers: { authorization: "Bearer synthetic-host-token" },
-        };
-      },
-      {
-        accountId: "55555555-5555-4555-8555-555555555555",
-        workspaceId,
-        sessionId: "session",
-        rootSessionId: "session",
-        turnId: "turn",
-        attemptId: "attempt",
-        executionGeneration: 1,
-        initiator: { kind: "service", subjectId: "scheduler" },
-        initiatorContext: {},
-        surface: "model",
-        // Admission and post-resolution checks pass; authority disappears before
-        // the transport sends the first byte. This seam does not grant schedules.
-        authorizeDurableBinding: async () => ++checks <= 2,
-      },
-    );
-    try {
-      const prepared = await prepareAgentTools(
-        testSettings({
-          mcpServers: [
-            {
-              id: "durable-host",
-              name: "Durable host fence",
-              url: mcp.url,
-              connectionRef: {
-                authoritySource: "host",
-                connectionId: "opaque-host-account",
-                providerDomain: new URL(mcp.url).hostname,
-                hostBinding: {
-                  bindingId: "ac94f59b-5a1e-4c56-a733-e5133b525b12",
-                  generation: 1,
-                },
-              },
-              cacheToolsList: false,
-            },
-          ],
-        }),
-        [{ kind: "mcp", id: "durable-host" }],
-        {
-          workspaceId,
-          resolveCredential,
-          onAuthNeeded: (payload) => authNeeded.push(payload),
-        },
-      );
-      try {
-        expect(prepared.mcpServers).toHaveLength(0);
-        expect(checks).toBeGreaterThanOrEqual(3);
-        expect(credentialCalls).toBe(1);
-        expect(mcp.requests).toHaveLength(0);
-        expect(authNeeded).toContainEqual(
-          expect.objectContaining({
-            serverId: "durable-host",
-            authoritySource: "host",
-            reason: "personal_authority_unavailable",
-          }),
-        );
-      } finally {
-        await prepared.close();
-      }
-    } finally {
       mcp.close();
     }
   });

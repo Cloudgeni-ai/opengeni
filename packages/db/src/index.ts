@@ -62,11 +62,9 @@ import { releaseOrphanedSkillHeads, type SkillSourceReleaseReceipt } from "./ski
 import type { SkillActor, SkillWriteReceipt } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
 import {
-  normalizeHostCreateSelection,
-  metadataWithHostCreateSelection,
-  hostCreateSelectionFromMetadata,
-  type HostMcpCreateSelection,
-} from "./host-selection-identity";
+  withoutRetiredSessionCreateMetadata,
+  hasRetiredSessionCreateSelection,
+} from "./retired-session-create-metadata";
 export * from "./connect-attempts";
 export * from "./external-identities";
 export * from "./external-identity-links";
@@ -78,17 +76,7 @@ import {
   cloneExternalLinkTaskAuthority,
   getExternalLinkTurnAuthorization,
 } from "./external-link-work";
-export * from "./host-mcp-bindings";
-export * from "./host-mcp-resolvers";
-import {
-  inheritCausalHostMcpTurnAuthorities,
-  inheritChildHostMcpTurnAuthorities,
-} from "./host-mcp-bindings";
-export * from "./host-mcp-task-authority";
-import {
-  cloneHostMcpTaskAuthorities,
-  captureScheduledHostMcpTurnAuthorities,
-} from "./host-mcp-task-authority";
+
 import {
   SESSION_GOAL_PROGRESS_MAX_BYTES,
   SESSION_GOAL_RATIONALE_MAX_BYTES,
@@ -696,7 +684,7 @@ export {
   type UserProfileLookup,
 } from "./database";
 export { withSessionRlsActorContext } from "./database";
-export { normalizedHostCredentialHeaders } from "./connection-token-resolver";
+export { normalizedCredentialHeaders } from "./connection-token-resolver";
 import {
   buildCodexTokenResolver as buildCodexTokenResolverCore,
   fetchCodexRateLimitResetCreditsForAccount as fetchCodexRateLimitResetCreditsForAccountCore,
@@ -5485,7 +5473,7 @@ export type CreateScheduledTaskInput = {
   metadata: Record<string, unknown>;
   /** Trusted database-only admission seam. Throwing rolls the task creation back. */
   beforeCreateCommit?: (tx: Database) => Promise<void>;
-  captureHostAuthority?: (tx: Database, task: ScheduledTask) => Promise<void>;
+
   captureLinkAuthority?: (tx: Database, task: ScheduledTask) => Promise<void>;
 };
 
@@ -5509,7 +5497,7 @@ export type UpdateScheduledTaskInput = Partial<{
   authorityUpdatedByActor: AgentSessionCreationActor | null;
   /** Trusted database-only admission seam. Throwing rolls the task update back. */
   beforeUpdateCommit: (tx: Database) => Promise<void>;
-  captureHostAuthority: (tx: Database, task: ScheduledTask) => Promise<void>;
+
   captureLinkAuthority: (tx: Database, task: ScheduledTask) => Promise<void>;
 }>;
 
@@ -10127,6 +10115,104 @@ async function createConnectionInScope(
     throw new Error("Failed to create connection");
   }
   return mapConnectionMetadata(row);
+}
+
+export class ConnectionCreateIdempotencyError extends Error {
+  constructor() {
+    super("Connection operationId was already used with different input");
+    this.name = "ConnectionCreateIdempotencyError";
+  }
+}
+
+export async function getConnectionCreationResult(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string; operationId: string },
+) {
+  return withRlsContext(db, input, async (tx) => {
+    await setSubjectRlsContext(tx, input.subjectId);
+    const [receipt] = await tx
+      .select({ id: schema.connections.id })
+      .from(schema.connections)
+      .where(
+        and(
+          eq(schema.connections.workspaceId, input.workspaceId),
+          eq(schema.connections.createdBySubjectId, input.subjectId),
+          eq(schema.connections.createOperationId, input.operationId),
+        ),
+      )
+      .limit(1);
+    return receipt
+      ? getConnectionMetadata(tx, input.workspaceId, receipt.id, input.subjectId)
+      : null;
+  });
+}
+
+export async function createConnectionIdempotently(
+  db: Database,
+  input: CreateConnectionInput & {
+    operation?: { id: string; requestDigest: string };
+    /** Runs inside the first creation transaction, never on operation replay. */
+    onCreated?: (
+      tx: Database,
+      connection: Awaited<ReturnType<typeof createConnection>>,
+    ) => Promise<void>;
+  },
+) {
+  const operation = input.operation;
+  if (!operation) {
+    if (input.onCreated) throw new Error("Initial connection setup requires an operationId");
+    return createConnection(db, input);
+  }
+  const actor = input.createdBySubjectId;
+  if (!actor) throw new Error("Idempotent connection creation requires an initiating subject");
+  return withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (tx) => {
+      await setSubjectRlsContext(tx, actor);
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`connection-create:${input.workspaceId}:${actor}:${operation.id}`}, 0))`,
+      );
+      const [existing] = await tx
+        .select({
+          id: schema.connections.id,
+          digest: schema.connections.createRequestDigest,
+        })
+        .from(schema.connections)
+        .where(
+          and(
+            eq(schema.connections.workspaceId, input.workspaceId),
+            eq(schema.connections.createdBySubjectId, actor),
+            eq(schema.connections.createOperationId, operation.id),
+          ),
+        )
+        .limit(1);
+      if (existing) {
+        if (existing.digest !== operation.requestDigest)
+          throw new ConnectionCreateIdempotencyError();
+        const connection = await getConnectionMetadata(tx, input.workspaceId, existing.id, actor);
+        if (!connection) throw new ConnectionCreateIdempotencyError();
+        return connection;
+      }
+      const connection = await createConnection(tx, input);
+      await input.onCreated?.(tx, connection);
+      const [receipt] = await tx
+        .update(schema.connections)
+        .set({
+          createOperationId: operation.id,
+          createRequestDigest: operation.requestDigest,
+        })
+        .where(
+          and(
+            eq(schema.connections.workspaceId, input.workspaceId),
+            eq(schema.connections.id, connection.id),
+          ),
+        )
+        .returning({ id: schema.connections.id });
+      if (!receipt) throw new Error("Connection creation receipt was not persisted");
+      return connection;
+    },
+  );
 }
 
 export async function createConnection(
@@ -16851,7 +16937,7 @@ export async function createScheduledTask(
         ${row.id}::uuid,
         ${row.authorityRevision}::bigint
       )`);
-      await input.captureHostAuthority?.(scopedDb, mapScheduledTask(row));
+
       await input.captureLinkAuthority?.(scopedDb, mapScheduledTask(row));
       return mapScheduledTask(row);
     },
@@ -16897,7 +16983,7 @@ export async function updateScheduledTask(
   input: UpdateScheduledTaskInput,
 ): Promise<ScheduledTask> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [previousHostRevision] = await scopedDb
+    const [previousLinkRevision] = await scopedDb
       .select({ authorityRevision: schema.scheduledTasks.authorityRevision })
       .from(schema.scheduledTasks)
       .where(
@@ -16996,19 +17082,13 @@ export async function updateScheduledTask(
     }
     const mapped = mapScheduledTask(row);
     if (input.captureLinkAuthority) await input.captureLinkAuthority(scopedDb, mapped);
-    else if (previousHostRevision)
+    else if (previousLinkRevision)
       await cloneExternalLinkTaskAuthority(
         scopedDb,
         mapped,
-        input.clonePersonalResourceAuthorityFromRevision ?? previousHostRevision.authorityRevision,
+        input.clonePersonalResourceAuthorityFromRevision ?? previousLinkRevision.authorityRevision,
       );
-    if (input.captureHostAuthority) await input.captureHostAuthority(scopedDb, mapped);
-    else if (previousHostRevision)
-      await cloneHostMcpTaskAuthorities(
-        scopedDb,
-        mapped,
-        input.clonePersonalResourceAuthorityFromRevision ?? previousHostRevision.authorityRevision,
-      );
+
     return mapped;
   });
 }
@@ -17935,12 +18015,8 @@ export async function materializeScheduledTaskReusableSessionFromRun(
       }
       const materializedTask = await getScheduledTask(scopedDb, input.workspaceId, input.taskId);
       if (!materializedTask || materializedTask.authorityRevision !== Number(row.authorityRevision))
-        throw new Error("scheduled host materialization revision changed");
-      await cloneHostMcpTaskAuthorities(
-        scopedDb,
-        materializedTask,
-        input.sourceTaskAuthorityRevision,
-      );
+        throw new Error("scheduled materialization revision changed");
+
       await cloneExternalLinkTaskAuthority(
         scopedDb,
         materializedTask,
@@ -31810,8 +31886,7 @@ export type SessionCreateInput = {
   createIdempotencyKey?: string | null;
   /** Exact explicit installed-Skill selection used for keyed-create replay. */
   selectedInstalledSkillIds?: string[];
-  /** Backend-only replay identity; does not admit host credential authority. */
-  selectedHostMcpDelegations?: HostMcpCreateSelection[];
+
   sandboxGroupId?: string | null;
   sandboxOs?: SandboxOs;
   /** Exact accepted generated-session compaction policy; internal lifecycle callers only. */
@@ -32106,7 +32181,7 @@ type SessionCreateReplayIdentity = {
   visibility?: "user_private" | "workspace_shared";
   variableSetIds: string[];
   selectedInstalledSkillIds: string[];
-  selectedHostMcpDelegations?: HostMcpCreateSelection[];
+
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   /** Access/memory scope of the retrying request; omitted means the defaults. */
   agentAccess?: SessionAgentAccess;
@@ -32163,10 +32238,7 @@ function assertSessionCreateReplayIdentity(
     stableJson(input.initialAgentLearning ?? {})
   )
     throw new SessionCreateIdempotencyConflictError();
-  if (
-    stableJson(hostCreateSelectionFromMetadata(existing.metadata)) !==
-    stableJson(normalizeHostCreateSelection(input.selectedHostMcpDelegations))
-  ) {
+  if (hasRetiredSessionCreateSelection(existing.metadata)) {
     throw new SessionCreateIdempotencyConflictError();
   }
   if (
@@ -32299,12 +32371,11 @@ async function createSessionInTransaction(
   const variableSetId = variableSetIds.at(-1) ?? null;
   const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
   const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
-    metadataWithHostCreateSelection(
+    withoutRetiredSessionCreateMetadata(
       withBundledSkillSelectionMetadata(
         metadataWithAgentLearningCreateIdentity(input.metadata, input.initialAgentLearning),
         input.bundledSkillIds,
       ),
-      input.selectedHostMcpDelegations,
     ),
     selectedInstalledSkillIds,
   );
@@ -32361,7 +32432,7 @@ async function createSessionInTransaction(
         visibility: createRequestedVisibility,
         variableSetIds,
         selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
-        selectedHostMcpDelegations: input.selectedHostMcpDelegations ?? [],
+
         initialPersonalResourceAttachmentIntent:
           input.initialPersonalResourceAttachmentIntent ?? null,
         ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
@@ -32620,7 +32691,7 @@ async function createSessionInTransaction(
           visibility: createRequestedVisibility,
           variableSetIds,
           selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
-          selectedHostMcpDelegations: input.selectedHostMcpDelegations ?? [],
+
           initialPersonalResourceAttachmentIntent:
             input.initialPersonalResourceAttachmentIntent ?? null,
           ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
@@ -32834,7 +32905,7 @@ export async function getInitializedSessionCreateReplay(
     visibility?: "user_private" | "workspace_shared";
     variableSetIds: string[];
     selectedInstalledSkillIds: string[];
-    selectedHostMcpDelegations?: HostMcpCreateSelection[];
+
     initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
     deferInitialTurn?: boolean;
   },
@@ -63688,19 +63759,7 @@ export async function initializeSessionStartAtomically(
             sourceTurnId: session.parentTurnId,
             kind: "child",
           });
-        if (
-          insertedTurn &&
-          session.parentSessionId &&
-          session.parentTurnId &&
-          turn.initiatingHumanSubjectId
-        )
-          await inheritChildHostMcpTurnAuthorities(tx as unknown as Database, {
-            accountId: session.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: session.id,
-            turnId: turn.id,
-            subjectId: turn.initiatingHumanSubjectId,
-          });
+
         if (initialPersonalResourceIntent) {
           const attachmentInitiatingHumanSubjectId =
             turn.initiatingHumanSubjectId ??
@@ -66795,13 +66854,6 @@ export async function claimSessionWorkForAttempt(
               turnId: internalTurn.id,
               runId: scheduledTaskRunId,
             });
-            await captureScheduledHostMcpTurnAuthorities(tx as unknown as Database, {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              turnId: internalTurn.id,
-              runId: scheduledTaskRunId,
-            });
           } else if (causalHumanTurnId && initiatingHumanSubjectId) {
             await inheritExternalLinkTurnAuthority(tx as unknown as Database, {
               accountId: session.accountId,
@@ -66810,14 +66862,6 @@ export async function claimSessionWorkForAttempt(
               turnId: internalTurn.id,
               sourceTurnId: causalHumanTurnId,
               kind: "causal",
-            });
-            await inheritCausalHostMcpTurnAuthorities(tx as unknown as Database, {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId,
-              subjectId: initiatingHumanSubjectId,
-              sourceTurnId: causalHumanTurnId,
-              targetTurnId: internalTurn.id,
             });
           }
           // The batch is now durable model memory. Every child it reports on has
@@ -78927,11 +78971,7 @@ export {
 } from "./codex-token-resolver";
 
 export {
-  buildHostConnectionTokenResolver,
-  buildHostGatewayConnectionTokenResolver,
   ConnectionRefreshHttpError,
-  HostMcpCredentialBindingError,
-  HostMcpCredentialScopeError,
   isPrivateAddress,
   normalizeBearerScheme,
   refreshOAuthConnectionCredential,
@@ -78941,7 +78981,6 @@ export {
   type ConnectionStatusGuard,
   type ConnectionTokenRefreshInput,
   type ConnectionTokenResolverOptions,
-  type HostMcpCredentialResolverContext,
   type PermanentConnectionRefreshFailure,
   type RefreshTransportOptions,
   type ResolveConnectionCredentialInput,

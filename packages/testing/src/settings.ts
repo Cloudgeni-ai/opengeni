@@ -95,7 +95,6 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     goalIdleBackoffMs: DEFAULT_GOAL_IDLE_BACKOFF_MS,
     goalIdleBackoffMaxMs: DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
     childLifecycleNoticesEnabled: false,
-    hostMcpAuthoritySourceAdmissionEnabled: false,
     slackWorkspaceRoutingEnabled: false,
     agentMaxModelCallsPerTurn: 40,
     contextWindowTokens: 1_050_000,

@@ -8,23 +8,22 @@ export const MCP_OAUTH_CONSENT_TTL_SECONDS = 10 * 60;
 
 const RedirectUri = z.string().url().max(2_048);
 
-export const McpOAuthClientRegistrationRequest = z
-  .object({
-    redirect_uris: z.array(RedirectUri).min(1).max(16),
-    client_name: z.string().trim().min(1).max(200).optional(),
-    application_type: z.enum(["native", "web"]).optional(),
-    token_endpoint_auth_method: z.literal("none").default("none"),
-    scope: z.literal(MCP_OAUTH_SCOPE).optional(),
-    grant_types: z
-      .array(z.enum(["authorization_code", "refresh_token"]))
-      .min(1)
-      .max(2)
-      .refine((grantTypes) => grantTypes.includes("authorization_code"), {
-        message: "authorization_code grant is required",
-      })
-      .default(["authorization_code", "refresh_token"]),
-    response_types: z.array(z.literal("code")).min(1).max(1).default(["code"]),
-  });
+export const McpOAuthClientRegistrationRequest = z.object({
+  redirect_uris: z.array(RedirectUri).min(1).max(16),
+  client_name: z.string().trim().min(1).max(200).optional(),
+  application_type: z.enum(["native", "web"]).optional(),
+  token_endpoint_auth_method: z.literal("none").default("none"),
+  scope: z.literal(MCP_OAUTH_SCOPE).optional(),
+  grant_types: z
+    .array(z.enum(["authorization_code", "refresh_token"]))
+    .min(1)
+    .max(2)
+    .refine((grantTypes) => grantTypes.includes("authorization_code"), {
+      message: "authorization_code grant is required",
+    })
+    .default(["authorization_code", "refresh_token"]),
+  response_types: z.array(z.literal("code")).min(1).max(1).default(["code"]),
+});
 export type McpOAuthClientRegistrationRequest = z.infer<typeof McpOAuthClientRegistrationRequest>;
 
 export const McpOAuthClientRegistrationResponse = McpOAuthClientRegistrationRequest.extend({
