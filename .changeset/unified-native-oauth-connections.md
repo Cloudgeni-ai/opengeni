@@ -7,8 +7,6 @@
 "@opengeni/connect": minor
 "@opengeni/react": minor
 "@opengeni/runtime": patch
-"@opengeni/deployment": patch
-"@opengeni/testing": patch
 ---
 
 Unify interactive and trusted-backend OAuth setup on native workspace connections
