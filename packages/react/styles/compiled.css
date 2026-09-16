@@ -654,7 +654,8 @@
   gap: 4px;
   overflow-wrap: anywhere;
 }
-:where(.og-root).og-session-capability-identity strong,:where(.og-root) .og-session-capability-identity strong {
+:where(.og-root).og-session-capability-identity h3,:where(.og-root) .og-session-capability-identity h3 {
+  margin: 0;
   font-size: 14px;
   font-weight: 600;
 }
