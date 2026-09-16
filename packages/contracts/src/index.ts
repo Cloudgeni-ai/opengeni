@@ -9431,7 +9431,9 @@ export type ScheduledTask = z.infer<typeof ScheduledTask>;
 export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
   .object({
     version: z.literal(1),
-    task: ScheduledTask,
+    // Historical accepted snapshots predate task ownership. Their execution
+    // identity remains the separately frozen causal human, never this default.
+    task: ScheduledTask.extend({ ownerSubjectId: z.string().min(1).nullable().default(null) }),
     resolvedModel: z.string().min(1),
     resolvedReasoningEffort: ReasoningEffort,
     resolvedLatencyMode: LatencyMode,

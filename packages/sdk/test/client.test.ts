@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
+import { OpenGeniDocumentAuthorityClient } from "../src/document-authority-client";
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
@@ -157,7 +158,12 @@ describe("OpenGeniClient", () => {
   test("manages bounded session/always personal grants without exposing once", async () => {
     const authorityId = "66666666-6666-4666-8666-666666666666";
     const grantId = "77777777-7777-4777-8777-777777777777";
-    const { client, requests } = makeClient(() => jsonResponse({}));
+    const { fetch, requests } = recordingFetch(() => jsonResponse({}));
+    const client = new OpenGeniDocumentAuthorityClient({
+      baseUrl: "https://api.example.test/",
+      apiKey: "og_test_key",
+      fetch,
+    });
     await client.listUserResourceAuthorities(WORKSPACE_ID, {
       resourceKind: "document",
       cursor: authorityId,

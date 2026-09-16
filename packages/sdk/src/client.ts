@@ -309,8 +309,6 @@ import type {
   ListManagedOrganizationMembershipsResponse,
   ListUserResourceAuthoritiesOptions,
   ListUserResourceAuthoritiesResponse,
-  IssueUserResourceGrantRequest,
-  UserResourceGrantMutationResponse,
   UpdateGitHubActionPolicyRequest,
   RevokeUserResourceGrantResponse,
   ListOrganizationInvitationsPageResponse,
@@ -4512,19 +4510,6 @@ export class OpenGeniClient {
     return await this.requestJson<ListUserResourceAuthoritiesResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/user-resource-authorities?${query.toString()}`,
-    );
-  }
-
-  /** Issue an exact-session or standing personal-resource grant. */
-  async issueUserResourceGrant(
-    workspaceId: string,
-    authorityId: string,
-    request: IssueUserResourceGrantRequest,
-  ): Promise<UserResourceGrantMutationResponse> {
-    return await this.requestJson<UserResourceGrantMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
-      request,
     );
   }
 
