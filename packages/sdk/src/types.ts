@@ -2985,6 +2985,8 @@ export type CreateSessionRequest = {
   firstPartyMcpPermissions?: string[] | undefined;
   firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
+  /** Optional account choices among the authenticated sender’s own connections. */
+  connectionAccounts?: import("@opengeni/contracts").McpConnectionAccountSelection[] | undefined;
   /** Atomically attach the server-derived personal Variable Set/Rig closure to the initial turn. */
   personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
