@@ -332,6 +332,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       // event sequence.
       await assistantRow.first().click();
       await preview.getByText(/ledger-north/).waitFor({ timeout: 15_000 });
+      await page.screenshot({ path: `${artifactDir}/session-search-desktop-preview.png` });
       await preview.getByRole("button", { name: "Open here", exact: true }).click();
       await page.waitForURL(`**/workspaces/${workspaceId}/sessions/${assistantMatch.id}**`);
       const landed = new URL(page.url());
@@ -610,9 +611,22 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       const list = dialog.locator('div[aria-label="Matching sessions"]');
       const scanningBeforeScroll = (await dialog.innerText()).includes("Searching saved history");
       await results.nth(14).scrollIntoViewIfNeeded();
-      await waitFor(async () => (await list.evaluate((node) => node.scrollTop)) > 0, {
-        timeoutMs: 5_000,
-      });
+      let initialScroll = { top: 0, height: 0, contentHeight: 0 };
+      await waitFor(
+        async () => {
+          initialScroll = await list.evaluate((node) => ({
+            top: node.scrollTop,
+            height: node.clientHeight,
+            contentHeight: node.scrollHeight,
+          }));
+          return initialScroll.top > 0;
+        },
+        {
+          timeoutMs: 5_000,
+          describe: () =>
+            `initial result-list scroll ${JSON.stringify(initialScroll)}; scan active=${scanningBeforeScroll}`,
+        },
+      );
       const selectedRow = results.nth(10);
       const selectedTitle = (await selectedRow.locator("div").first().innerText()).trim();
       await selectedRow.click();
@@ -660,6 +674,13 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
         },
       );
 
+      await waitFor(async () => !(await dialog.innerText()).includes("Searching saved history"), {
+        timeoutMs: 15_000,
+        describe: () => "restored search finishes revalidation without losing scroll",
+      });
+      expect(
+        Math.abs((await list.evaluate((node) => node.scrollTop)) - recordedScroll),
+      ).toBeLessThanOrEqual(4);
       // Escape closes the dialog without disturbing the conversation.
       await page.screenshot({ path: `${artifactDir}/session-search-return-restored.png` });
       await page.keyboard.press("Escape");
@@ -702,6 +723,10 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
         describe: () => "two narrowpine results",
       });
       await expectNoPageOverflow(page);
+      await waitFor(async () => !(await dialog.innerText()).includes("Searching saved history"), {
+        timeoutMs: 15_000,
+        describe: () => "narrow search results finish loading before visual inspection",
+      });
       await expectNoAxeViolations(page, ['[role="dialog"]']);
       await page.screenshot({ path: `${artifactDir}/session-search-narrow-list.png` });
 
