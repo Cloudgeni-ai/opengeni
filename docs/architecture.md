@@ -1362,6 +1362,10 @@ window with cancellation, while `MessageTimeline.searchTarget` owns disclosure
 and occurrence navigation. Browser result batches and scan continuations remain
 bounded; counts are provisional until traversal finishes. Tool output, reasoning
 and unfinished delta-only assistant messages are not included.
+Markdown search targets use a labeled, bounded source excerpt so raw offsets
+cannot silently select a different rendered occurrence. Closing Find removes
+the active highlight but preserves the excerpt and reading position; restoring
+the formatted message is an explicit action.
 
 Web imports `@opengeni/sdk/browser`. Operator Document-authority and tenancy
 backfills use `@opengeni/sdk/document-authority`; root/`core` retain compatibility.

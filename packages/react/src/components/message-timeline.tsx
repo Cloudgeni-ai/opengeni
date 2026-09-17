@@ -491,7 +491,23 @@ export function MessageTimeline({
             renderMessageText(text, item, {
               searchTarget: searchItem?.id === item.id ? (searchTarget ?? null) : null,
             })
-        : undefined,
+        : (text: string, item: AgentMessageItem | UserMessageItem) => {
+            const body = (
+              <Markdown
+                searchTarget={searchItem?.id === item.id ? searchTarget : null}
+                streaming={item.kind === "agent-message" && item.streaming}
+              >
+                {text}
+              </Markdown>
+            );
+            return item.kind === "user-message" ? (
+              <UserMessageBody messageId={item.id} text={text}>
+                {body}
+              </UserMessageBody>
+            ) : (
+              body
+            );
+          },
     [renderMessageText, searchItem?.id, searchTarget],
   );
   // Event-window identity is independent of projected rows (partial messages

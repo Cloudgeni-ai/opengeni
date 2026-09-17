@@ -2275,15 +2275,26 @@ function SessionChatPane(props: {
   );
 
   const renderMessageText = useCallback(
-    (text: string, item: AgentMessageItem | UserMessageItem) => {
+    (
+      text: string,
+      item: AgentMessageItem | UserMessageItem,
+      context: { searchTarget: TimelineSearchTarget | null },
+    ) => {
       if (item.kind === "user-message") {
-        return <UserMessageBody workspaceId={props.session.workspaceId} item={item} />;
+        return (
+          <UserMessageBody
+            workspaceId={props.session.workspaceId}
+            item={item}
+            searchTarget={context.searchTarget}
+          />
+        );
       }
       return (
         <div data-testid="assistant-markdown">
           <MarkdownText
             text={text}
-            streaming={item.streaming}
+            searchTarget={context.searchTarget}
+            streaming={item.kind === "agent-message" && item.streaming}
             onSandboxFile={props.onOpenSandboxFile}
             renderInteractiveBlock={renderInteractiveBlock}
             renderImage={renderImage}

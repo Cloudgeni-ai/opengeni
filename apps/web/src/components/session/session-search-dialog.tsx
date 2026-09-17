@@ -216,6 +216,7 @@ export default function SessionSearchDialog(props: {
                 search.next();
               }}
               scrollPosition={resultScroll}
+              active={props.open}
             />
             <div className="mt-auto flex shrink-0 flex-wrap gap-2 border-t border-border px-3 py-2">
               {search.pageIndex > 0 ? (
@@ -281,7 +282,7 @@ export default function SessionSearchDialog(props: {
   );
 }
 
-function SessionSearchPreview(props: {
+export function SessionSearchPreview(props: {
   client: ReturnType<typeof useAppContext>["client"];
   authority: string;
   workspaceId: string;
@@ -296,8 +297,10 @@ function SessionSearchPreview(props: {
   setIndex: (index: number) => void;
   scrollPosition: RefObject<number>;
 }) {
-  const { search, index, setIndex } = props;
+  const { search, setIndex } = props;
   const matches = search.page?.matches ?? [];
+  // -1 means land on the last occurrence when a previous batch arrives.
+  const index = props.index < 0 ? Math.max(0, matches.length - 1) : props.index;
   const match = matches[Math.min(index, Math.max(0, matches.length - 1))];
   const loadContext = useCallback(async (): Promise<SearchPreviewMessage[]> => {
     if (!match) return [];
@@ -362,6 +365,7 @@ function SessionSearchPreview(props: {
   const titleOnly = !!search.page && !search.page.hasMore && !matches.length;
   return (
     <SearchPreviewView
+      active={props.enabled}
       title={props.title}
       query={props.query}
       messages={preview.value ?? []}
@@ -386,7 +390,7 @@ function SessionSearchPreview(props: {
         props.scrollPosition.current = 0;
         if (index > 0) setIndex(index - 1);
         else {
-          setIndex(0);
+          setIndex(-1);
           search.previous();
         }
       }}

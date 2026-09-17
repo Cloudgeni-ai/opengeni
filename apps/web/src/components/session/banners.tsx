@@ -2,6 +2,7 @@ import { AlertTriangleIcon, ArrowLeftIcon, AudioLinesIcon, TerminalIcon } from "
 import {
   UserMessageBody as CollapsibleUserMessageBody,
   type UserMessageItem,
+  type TimelineSearchTarget,
 } from "@opengeni/react";
 import { lazy, Suspense } from "react";
 
@@ -65,9 +66,11 @@ export function TerminalSessionArchive(props: { session: Session; eventCount: nu
 export function UserMessageBody({
   workspaceId,
   item,
+  searchTarget,
 }: {
   workspaceId: string;
   item: UserMessageItem;
+  searchTarget?: TimelineSearchTarget | null | undefined;
 }) {
   const hasFiles = item.resources.some((resource) => resource.kind === "file");
   const repositoryChips = item.resources.some((resource) => resource.kind === "repository") ? (
@@ -100,7 +103,7 @@ export function UserMessageBody({
       )}
 
       <CollapsibleUserMessageBody messageId={item.id} text={item.text}>
-        <MarkdownText text={item.text} compact />
+        <MarkdownText text={item.text} compact searchTarget={searchTarget} />
       </CollapsibleUserMessageBody>
 
       {item.presentation ? (

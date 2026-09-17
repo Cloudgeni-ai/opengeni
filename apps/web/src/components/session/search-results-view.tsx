@@ -11,6 +11,42 @@ import { Button } from "@/components/ui/button";
 import { SearchText } from "./search-text";
 import { cn } from "@/lib/utils";
 
+/** Hidden/unmounted dialog panes must not overwrite the last visible position. */
+function useRetainedScroll(
+  element: RefObject<HTMLDivElement | null>,
+  position: RefObject<number> | undefined,
+  ready: boolean,
+  revision: unknown,
+) {
+  const restored = useRef(false);
+  useLayoutEffect(() => {
+    restored.current = false;
+    const node = element.current;
+    if (!ready || !node || !position) return;
+    const desired = position.current;
+    let frame = 0;
+    const restore = () => {
+      if (restored.current || node.clientHeight === 0) return;
+      // Revalidation/hidden mobile panes may not have enough layout yet.
+      if (node.scrollHeight - node.clientHeight < desired) return;
+      node.scrollTop = desired;
+      restored.current = true;
+    };
+    restore();
+    frame = requestAnimationFrame(restore);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(restore);
+    observer?.observe(node);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer?.disconnect();
+    };
+  }, [element, position, ready, revision]);
+  return (node: HTMLDivElement) => {
+    if (ready && restored.current && node.clientHeight > 0 && position)
+      position.current = node.scrollTop;
+  };
+}
+
 export type SearchResultSummary = {
   sessionId: string;
   title: string;
@@ -31,12 +67,15 @@ export function SearchResultsView(props: {
   hasMore: boolean;
   onMore: () => void;
   scrollPosition?: RefObject<number>;
+  active?: boolean;
 }) {
   const list = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    if (!props.loading && list.current && props.scrollPosition)
-      list.current.scrollTop = props.scrollPosition.current;
-  }, [props.results, props.loading, props.scrollPosition]);
+  const saveScroll = useRetainedScroll(
+    list,
+    props.scrollPosition,
+    props.active !== false && !props.loading,
+    props.results,
+  );
   function onKeyDown(event: KeyboardEvent) {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     if (!props.results.length) return;
@@ -56,8 +95,7 @@ export function SearchResultsView(props: {
       aria-label="Matching sessions"
       onKeyDown={onKeyDown}
       onScroll={(event) => {
-        if (!props.loading && props.scrollPosition)
-          props.scrollPosition.current = event.currentTarget.scrollTop;
+        saveScroll(event.currentTarget);
       }}
     >
       {!props.query.trim() ? (
@@ -151,12 +189,15 @@ export function SearchPreviewView(props: {
   counter: string;
   titleOnly: boolean;
   scrollPosition?: RefObject<number>;
+  active?: boolean;
 }) {
   const body = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    if (!props.loading && body.current && props.scrollPosition)
-      body.current.scrollTop = props.scrollPosition.current;
-  }, [props.messages, props.loading, props.scrollPosition]);
+  const saveScroll = useRetainedScroll(
+    body,
+    props.scrollPosition,
+    props.active !== false && !props.loading,
+    props.messages,
+  );
   return (
     <section aria-label="Conversation preview" className="flex min-h-0 flex-col">
       <header className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
@@ -178,8 +219,7 @@ export function SearchPreviewView(props: {
       <div
         ref={body}
         onScroll={(event) => {
-          if (!props.loading && props.scrollPosition)
-            props.scrollPosition.current = event.currentTarget.scrollTop;
+          saveScroll(event.currentTarget);
         }}
         className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4"
       >

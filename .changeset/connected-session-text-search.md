@@ -16,4 +16,6 @@ Expose bounded exact-sequence history navigation and message highlighting for
 React hosts. The web console connects a contextual session-search dialog to
 full-history Find, preserves search state across navigation, and keeps ended
 conversations readable. Tool output, reasoning and unfinished delta-only
-assistant messages are outside the initial searchable scope.
+assistant messages are outside the initial searchable scope. Exact Markdown
+matches use a labeled source excerpt that stays in place when Find closes;
+readers can explicitly restore the formatted message.

@@ -28,6 +28,54 @@ function event(sequence: number, type: SessionEvent["type"], text: string): Sess
 }
 
 describe("exact timeline search", () => {
+  test("raw offsets never highlight coincidentally matching unmarked rendered text", async () => {
+    const previousCSS = globalThis.CSS;
+    const previousHighlight = (globalThis as any).Highlight;
+    let highlights = 0;
+    Object.defineProperty(globalThis, "CSS", {
+      configurable: true,
+      value: {
+        highlights: {
+          set: () => {
+            highlights++;
+          },
+          delete: () => {},
+        },
+      },
+    });
+    (globalThis as any).Highlight = class {};
+    try {
+      const view = await renderComponent(
+        <MessageTimeline
+          events={[event(1, "user.message", "**a**testtest")]}
+          searchTarget={{ sequence: 1, query: "test", offset: 5 }}
+          renderMessageText={() => <p>atesttest</p>}
+        />,
+      );
+      await flush(40);
+      expect(highlights).toBe(0);
+      await view.unmount();
+    } finally {
+      Object.defineProperty(globalThis, "CSS", { configurable: true, value: previousCSS });
+      (globalThis as any).Highlight = previousHighlight;
+    }
+  });
+  test("default Markdown renderer materializes the selected source occurrence", async () => {
+    const text = "**a**testtest";
+    const view = await renderComponent(
+      <MessageTimeline
+        events={[event(1, "user.message", text)]}
+        searchTarget={{ sequence: 1, query: "test", offset: 5 }}
+      />,
+    );
+    await flush(30);
+    const mark = view.container.querySelector<HTMLElement>("[data-og-search-offset]");
+    expect(mark?.dataset.ogSearchOffset).toBe("5");
+    expect(mark?.textContent).toBe("test");
+    expect(mark?.previousSibling?.textContent).toBe("**a**");
+    expect(mark?.nextSibling?.textContent).toBe("test");
+    await view.unmount();
+  });
   test("matches literal metacharacters and repeated occurrences without offset arrays", () => {
     expect(literalSearchOffset("[a+b] then [A+B]", "[a+b]", 1)).toBe(11);
     expect(literalSearchOffset("İ before needle", "needle")).toBe(9);
@@ -52,12 +100,13 @@ describe("exact timeline search", () => {
     expect(matchAtOffset(text, "needle", -1)).toBe(-1);
     expect(matchAtOffset(text, "needle", 1.5)).toBe(-1);
     expect(matchAtOffset(text, "", first)).toBe(-1);
+    expect(matchAtOffset("😀", "😀", 1)).toBe(-1);
     // searchMatchOffset prefers a valid offset, otherwise falls back to the
     // occurrence ordinal exactly like before.
     expect(searchMatchOffset(text, { sequence: 1, query: "needle", offset: second })).toBe(second);
-    expect(searchMatchOffset(text, { sequence: 1, query: "needle", offset: second, occurrence: 0 })).toBe(
-      second,
-    );
+    expect(
+      searchMatchOffset(text, { sequence: 1, query: "needle", offset: second, occurrence: 0 }),
+    ).toBe(second);
     expect(searchMatchOffset(text, { sequence: 1, query: "needle", occurrence: 2 })).toBe(third);
     expect(searchMatchOffset(text, { sequence: 1, query: "needle", offset: first + 1 })).toBe(-1);
   });

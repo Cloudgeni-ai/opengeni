@@ -56,7 +56,8 @@ export function matchAtOffset(text: string, query: string, offset: number): numb
   if (!query || !Number.isSafeInteger(offset) || offset < 0 || offset > text.length) return -1;
   const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iyu");
   pattern.lastIndex = offset;
-  return pattern.test(text) ? offset : -1;
+  // Unicode regex engines may rewind a lastIndex inside a surrogate pair.
+  return pattern.exec(text)?.index === offset ? offset : -1;
 }
 
 /** Resolve a target to a UTF-16 offset: explicit offset wins, else the ordinal scan. */
@@ -123,13 +124,19 @@ export function useTimelineSearchNavigation(
             : element.dataset.ogSearchOccurrence === String(target.occurrence ?? 0)),
       );
       const { text, spans } = annotatableText(materialized ?? source);
-      // Inside a materialized chunk the match starts at the chunk start;
-      // otherwise resolve against the full mounted message text.
-      const offset = materialized ? 0 : searchMatchOffset(text, target);
+      // Inside a materialized chunk the match starts at the chunk start.
+      // Raw source offsets must NEVER be interpreted as rendered DOM offsets:
+      // even matching characters can identify a different repeated occurrence.
+      const offset = materialized
+        ? matchAtOffset(text, target.query, 0)
+        : target.offset != null
+          ? -1
+          : searchMatchOffset(text, target);
       const range =
         offset < 0 ? null : rangeFromOffsets(spans, offset, offset + target.query.length);
       if (range && registry && HighlightClass)
         registry.set(highlightName.current, new HighlightClass(range));
+      else registry?.delete(highlightName.current);
       const rect = range ? visibleClientRect(range) : null;
       // A custom renderer may mount the message body later (or materialize a
       // virtualized chunk in response to renderMessageText's search context).
