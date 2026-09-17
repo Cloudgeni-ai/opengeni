@@ -1,4 +1,5 @@
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
+import { unresolvedCodexCredentialFailures } from "./codex-failure-eligibility";
 export * from "./artifact-catalog";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
 export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
@@ -24439,6 +24440,8 @@ export type CodexLeaseAccountStatus = Omit<
   | "connectedBySubjectId"
   | "source"
 > & {
+  /** Cooldown mutation fence, absent only in pre-0383 compatibility schemas. */
+  exhaustedRevision?: number;
   activeLeaseCount: number;
   selectionCount: number;
   lastSelectedAt: Date | null;
@@ -24497,6 +24500,9 @@ export type CodexCredentialLeaseSelectionContext<
   existingCredentialId: string | null;
   /** Credentials already consumed by a definitive refusal on this accepted turn. */
   failedCredentialIds?: readonly string[];
+  failoverExhausted?: boolean;
+  /** Product model frozen on the accepted logical turn. */
+  modelId?: string;
   /** Downstream-owned accepted-turn policy; absent until a resolver is supplied. */
   policyScope: TPolicyScope | null;
   /** Diagnostics produced while choosing one policy scope for this NEW allocation. */
@@ -24628,6 +24634,7 @@ type CodexLeaseCandidateRow = {
   usage_checked_at: Date | string | null;
   exhausted_until: Date | string | null;
   exhausted_kind: string | null;
+  exhausted_revision?: number | string | null;
   selection_count: number;
   last_selected_at: Date | string | null;
   active_lease_count: number;
@@ -24661,6 +24668,7 @@ function mapCodexLeaseCandidate(
     secondaryResetAt: codexMetadataDate(row.secondary_reset_at),
     usageCheckedAt: codexMetadataDate(row.usage_checked_at),
     exhaustedUntil: codexMetadataDate(row.exhausted_until),
+    exhaustedRevision: Number(row.exhausted_revision ?? 0),
     exhaustedKind:
       row.exhausted_kind === "quota" || row.exhausted_kind === "rate_limit"
         ? row.exhausted_kind
@@ -24734,6 +24742,7 @@ async function listCodexLeaseCandidatesInTransaction(
       -- pre-0383 compatibility schema while returning the real value once the
       -- additive column exists.
       to_jsonb(c) ->> 'exhausted_kind' as exhausted_kind,
+      to_jsonb(c) ->> 'exhausted_revision' as exhausted_revision,
       c.selection_count,
       c.last_selected_at,
       ${
@@ -25065,7 +25074,9 @@ export async function acquireCodexCredentialLease<
         rotationEnabled,
         rotationStrategy,
         existingCredentialId,
-        failedCredentialIds: [...failoverMetadata.failedCredentialIds],
+        failedCredentialIds: unresolvedCodexCredentialFailures(turn.metadata, accounts),
+        failoverExhausted: failoverMetadata.exhausted,
+        modelId: turn.model,
         policyScope,
         unavailableDiagnostics,
       });
@@ -26362,6 +26373,12 @@ export async function reconcileCodexCapacityWait<
           rotationEnabled,
           rotationStrategy,
           existingCredentialId: null,
+          failedCredentialIds: unresolvedCodexCredentialFailures(
+            blockedTurn.metadata,
+            filtered.accounts,
+          ),
+          failoverExhausted: codexFailoverMetadata(blockedTurn.metadata).exhausted,
+          modelId: blockedTurn.model,
           policyScope,
           unavailableDiagnostics: filtered.unavailableDiagnostics,
           sessionId: session.id,
@@ -27955,7 +27972,10 @@ export async function quarantineCodexCredentialForLease(
           } as const;
         }
         const [credential] = await tx
-          .select({ version: schema.codexSubscriptionCredentials.version })
+          .select({
+            version: schema.codexSubscriptionCredentials.version,
+            exhaustedRevision: schema.codexSubscriptionCredentials.exhaustedRevision,
+          })
           .from(schema.codexSubscriptionCredentials)
           .where(
             and(
@@ -28027,6 +28047,13 @@ export async function quarantineCodexCredentialForLease(
               ...turn.metadata,
               codexCredentialFailureAccountingVersion: 1,
               codexCredentialFailedIds: failedCredentialIds,
+              codexCredentialFailureCooldownRevisions: {
+                ...(turn.metadata?.codexCredentialFailureCooldownRevisions as
+                  | Record<string, unknown>
+                  | undefined),
+                [input.credentialId]:
+                  input.quarantine.kind === "cooldown" ? credential.exhaustedRevision + 1 : null,
+              },
               codexCredentialFailovers: failoverCount,
               codexCredentialFailoverLimit: maxFailovers,
               codexCredentialFailoverExhausted: exhausted,

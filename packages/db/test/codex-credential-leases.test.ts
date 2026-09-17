@@ -321,6 +321,9 @@ async function attemptFenceForTurn(turnId: string) {
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("codex-credential-leases");
   if (!shared) {
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+      throw new Error("Codex lease regressions require a real Postgres database");
+    }
     available = false;
     console.warn("[codex-credential-leases] postgres unavailable, skipping");
     return;
@@ -339,6 +342,129 @@ afterAll(async () => {
 }, 180_000);
 
 describe("credential allocator atomic Codex credential allocation", () => {
+  for (const legacy of [false, true]) {
+    test(`same-turn reset respects failure evidence (${legacy ? "legacy remains excluded" : "revision receipt recovers"})`, async () => {
+      if (!available) return;
+      const [ws] = await freshAccount();
+      const credentialId = await connectCredential(ws!, `reset-${legacy}`);
+      const turnId = await seedTurn(ws!);
+      const fence = await attemptFenceForTurn(turnId);
+      const select = (
+        context: CodexCredentialLeaseSelectionContext,
+        state: CodexCredentialLeaseSessionState,
+      ) =>
+        selectCodexCredentialLeaseForTurn({
+          context,
+          sessionId: fence.sessionId,
+          sessionPinnedCredentialId: state.pinnedCredentialId,
+          sessionPinSource: state.pinSource,
+          sessionLastCredentialId: state.lastCredentialId,
+          now: new Date(),
+        });
+      const lease = await acquireCodexCredentialLease(
+        dbA,
+        {
+          ...ws!,
+          ...fence,
+          turnId,
+          holderId: `reset:${turnId}`,
+          advanceActivePointer: true,
+        },
+        select,
+      );
+      const credential = await loadCodexCredentialForRun(
+        dbA,
+        settings,
+        ws!.workspaceId,
+        credentialId,
+      );
+      const refusal = await quarantineCodexCredentialForLease(dbA, {
+        ...ws!,
+        ...fence,
+        turnId,
+        credentialId,
+        credentialVersion: credential!.version,
+        holderId: lease.holderId!,
+        generation: lease.generation!,
+        maxFailovers: lease.failoverLimit,
+        quarantine: {
+          kind: "cooldown",
+          cooldownKind: "quota",
+          until: new Date(Date.now() + 86_400_000),
+        },
+      });
+      expect(refusal.action).toBe("recorded");
+      if (legacy)
+        await admin`update session_turns set metadata = metadata - 'codexCredentialFailureCooldownRevisions' where id = ${turnId}`;
+      const armed = await armCodexCapacityWait(dbA, {
+        ...ws!,
+        sessionId: fence.sessionId,
+        turnId,
+        attemptId: fence.attemptId,
+        workflowId: fence.workflowId,
+        earliestResetAt: new Date(Date.now() + 86_400_000),
+        resetKind: "bounded_refresh",
+        failurePayload: {
+          code: "codex_usage_limit_reached",
+          error: "definitive test quota refusal",
+        },
+        leaseFence: { holderId: lease.holderId!, generation: lease.generation! },
+        expectedRedispatches: fence.expectedRedispatches,
+      });
+      if (armed.action !== "waiting") throw new Error("Expected capacity wait");
+      const reconcile = () =>
+        reconcileCodexCapacityWait(
+          dbB,
+          {
+            ...ws!,
+            sessionId: fence.sessionId,
+            waiterId: armed.waiter.id,
+            generation: armed.waiter.generation,
+          },
+          codexCapacityDecision,
+        );
+      for (let i = 0; i < 3; i++) {
+        const waiting = await reconcile();
+        expect(waiting.action).toBe("waiting");
+        expect(waiting.events).toEqual([]);
+        expect(waiting.waiter?.resetKind).toBe("bounded_refresh");
+      }
+      // Authoritative usage recovery clears only the exact quota revision.
+      const [cooldown] =
+        await admin`select exhausted_revision from codex_subscription_credentials where id = ${credentialId}`;
+      await recordCodexAccountUsage(dbA, ws!.workspaceId, credentialId, {
+        checkedAt: new Date(),
+        primaryUsedPercent: 0,
+        secondaryUsedPercent: 0,
+        clearQuotaCooldownRevision: cooldown!.exhausted_revision,
+      });
+      if (legacy) {
+        expect((await reconcile()).action).toBe("waiting");
+        expect((await reconcile()).events).toEqual([]);
+        return;
+      }
+      expect((await reconcile()).action).toBe("resumed");
+      expect((await reconcile()).action).toBe("stale");
+      await startRecoveryAttempt(ws!, turnId);
+      const nextFence = await attemptFenceForTurn(turnId);
+      const reacquired = await acquireCodexCredentialLease(
+        dbA,
+        {
+          ...ws!,
+          ...nextFence,
+          turnId,
+          holderId: `reset-recovered:${turnId}`,
+          advanceActivePointer: true,
+        },
+        select,
+      );
+      expect(reacquired.credentialId).toBe(credentialId);
+      const [turn] = await admin`select metadata from session_turns where id = ${turnId}`;
+      expect(turn!.metadata.codexCredentialFailedIds).toEqual([credentialId]);
+      expect(turn!.metadata.codexCredentialFailovers).toBe(1);
+    });
+  }
+
   async function pinnedCapacityWait() {
     const [ws] = await freshAccount();
     const exhausted = await connectCredential(ws!, "exhausted@example.test");
