@@ -465,14 +465,20 @@ export function SessionList() {
   >(() => new Map());
   const archiveMembershipEvidence = useMemo(() => {
     const evidence = new Map([...archiveOverrides].map(([id, receipt]) => [id, receipt.session]));
-    for (const session of sessions) {
+    // A retained first page can overlap a newer continuation. Preserve its
+    // versioned archive decision separately from whole-row merge priority;
+    // channel membership still follows its independent read authority below.
+    const continuationSessions = activeGroupContinuations.flatMap(([key, continuation]) =>
+      key === "archived" ? [] : continuation.sessions,
+    );
+    for (const session of [...sessions, ...continuationSessions]) {
       const previous = evidence.get(session.id);
       if (!previous || (session.archiveVersion ?? 0) > (previous.archiveVersion ?? 0)) {
         evidence.set(session.id, session);
       }
     }
     return evidence;
-  }, [archiveOverrides, sessions]);
+  }, [activeGroupContinuations, archiveOverrides, sessions]);
   const archiveReadEvidence = useMemo(() => {
     const rowReadGenerations = new Map<string, number>();
     for (const [, continuation] of activeGroupContinuations) {
