@@ -524,6 +524,38 @@ test("workspace grouping skips prolific sessions in both buffered results and co
   expect(next.matchedMessageCount).toBe(2);
   expect(next.scannedMessages).toBe(2);
   expect(next.countIsExact).toBe(true);
+  // A larger/default result limit must also preserve the continuation when
+  // grouping drains all 33 buffered identities of the first session. There
+  // may still be another session beyond this full batch; no buffered identity
+  // is not evidence that the entire search is exhausted.
+  for (const limit of [undefined, 50]) {
+    const groupedRequest = {
+      query: "group-token",
+      groupBy: "session" as const,
+      ...(limit === undefined ? {} : { limit }),
+    };
+    const drained = await searchSessionMessagesForSubject(
+      client.db,
+      workspaceId,
+      groupedRequest,
+      authority,
+    );
+    expect(drained.matches.map((m) => m.sessionId)).toEqual([first!.id]);
+    expect(drained.hasMore).toBe(true);
+    expect(drained.countIsExact).toBe(false);
+    expect(drained.nextCursor).not.toBeNull();
+    const resumed = await searchSessionMessagesForSubject(
+      client.db,
+      workspaceId,
+      { ...groupedRequest, cursor: drained.nextCursor! },
+      authority,
+    );
+    expect(resumed.matches.map((m) => m.sessionId)).toEqual([second!.id]);
+    expect(resumed.scannedMessages).toBe(2);
+    expect(resumed.matchedOccurrenceCount).toBe(2);
+    expect(resumed.countIsExact).toBe(true);
+    expect(resumed.hasMore).toBe(false);
+  }
   // Grouping participates in cursor identity in both directions.
   await expect(
     searchSessionMessagesForSubject(
@@ -555,6 +587,41 @@ test("workspace grouping skips prolific sessions in both buffered results and co
   );
   expect(unchangedFind.matches).toHaveLength(50);
   expect(unchangedFind.matches[49]!.messageMatchOffset).toBe(49 * "group-token ".length);
+}, 180_000);
+
+test("grouped exact multiples of the identity batch terminate on one empty continuation", async () => {
+  for (const messageCount of [33, 66]) {
+    const session = await makeSession();
+    for (let sequence = 1; sequence <= messageCount; sequence++)
+      await insert(session.id, sequence, "user.message", { text: "exact-batch-token" });
+    const authority = {
+      subjectId,
+      authorizationScope: {
+        kind: "scoped" as const,
+        sessionIds: [session.id],
+        rootSessionIds: [],
+      },
+    };
+    const request = { query: "exact-batch-token", groupBy: "session" as const, limit: 50 };
+    const first = await searchSessionMessagesForSubject(client.db, workspaceId, request, authority);
+    expect(first.matches.map((match) => match.sessionId)).toEqual([session.id]);
+    expect(first.hasMore).toBe(true);
+    expect(first.countIsExact).toBe(false);
+    expect(first.nextCursor).not.toBeNull();
+    const terminal = await searchSessionMessagesForSubject(
+      client.db,
+      workspaceId,
+      { ...request, cursor: first.nextCursor! },
+      authority,
+    );
+    expect(terminal.matches).toHaveLength(0);
+    expect(terminal.hasMore).toBe(false);
+    expect(terminal.nextCursor).toBeNull();
+    expect(terminal.countIsExact).toBe(true);
+    expect(terminal.scannedMessages).toBe(1);
+    expect(terminal.matchedMessageCount).toBe(1);
+    expect(terminal.matchedOccurrenceCount).toBe(1);
+  }
 }, 180_000);
 
 test("grouped workspace counts still exclude sessions outside authorization scope", async () => {

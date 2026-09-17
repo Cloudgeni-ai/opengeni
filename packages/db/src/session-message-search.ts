@@ -195,7 +195,9 @@ export async function scanSessionMessages(
       if (window > 0 && performance.now() - started >= 1_500) break;
       const identity = identities[identityIndex];
       if (!identity) {
-        exhausted = true;
+        // Grouping can drain a full candidate batch in fewer than 32 windows.
+        // A full batch is not proof that later sessions do not exist.
+        exhausted = identities.length < 33;
         break;
       }
       const continuing =
