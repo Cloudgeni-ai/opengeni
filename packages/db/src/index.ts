@@ -35083,6 +35083,24 @@ export async function reapExpiredSessionListSnapshots(db: Database, limit = 500)
   return Number(rows[0]?.deleted_count ?? 0);
 }
 
+/** Cursor-binding identity for a resolved list scope. A host may return the
+ * same semantic scope with ids in any order across pages; sorting makes the
+ * binding canonical so only a real scope change invalidates a continuation.
+ * Applied ONLY to the binding hash input — the authorization filter itself
+ * always uses the live resolved scope.
+ */
+function canonicalSearchScopeIdentity(
+  scope: SessionAuthorizationListScope | undefined,
+): SessionAuthorizationListScope | null {
+  if (!scope) return null;
+  if (scope.kind === "all") return scope;
+  return {
+    ...scope,
+    rootSessionIds: [...new Set(scope.rootSessionIds)].sort(),
+    sessionIds: [...new Set(scope.sessionIds)].sort(),
+  };
+}
+
 /** Bounded full-history message search. The caller must authorize a live grant
  * and its complete host/agent list scope before entering this RLS projection.
  */
@@ -35131,7 +35149,7 @@ export async function searchSessionMessagesForSubject(
         workspaceId,
         parsed,
         sessionFilters({ ...authority, archiveStatus: parsed.archiveStatus }),
-        [authority.subjectId, authority.authorizationScope ?? null],
+        [authority.subjectId, canonicalSearchScopeIdentity(authority.authorizationScope)],
         options.signal,
       );
     }),

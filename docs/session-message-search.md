@@ -67,8 +67,10 @@ authority and archive filters. Concurrent appends, deletion, archiving, or
 visibility changes require restarting the traversal for refreshed results and
 counts; exhaustion does not certify a snapshot of mutable history. Cursors bind
 workspace, subject, resolved host/agent scope, query, session filter, and archive
-filter. They carry bounded positions/counts, not source message text. Counts
-from a cursor are continuation bookkeeping, never authorization or billing
+filter. Scope id order is canonicalized before binding, so a host returning the
+same scope in a different order does not invalidate a continuation — only a real
+scope change does. Cursors carry bounded positions/counts, not source message
+text. Counts from a cursor are continuation bookkeeping, never authorization or billing
 evidence. Invalid or changed-scope cursors return HTTP 400.
 Grouping mode is also bound to the cursor; it cannot be switched mid-traversal.
 
@@ -81,11 +83,18 @@ history cutoff.
 
 Each request reads one batch of at most 33 message identities/bounded small
 scalars, processes at most 32 message/scalar windows, returns at most 50 hits,
-and yields a continuation after roughly 1.5 seconds of processing. SQL statements
-have a five-second timeout, and AbortSignal checks run before/between reads.
-In-flight database statements finish or hit that timeout; browser cancellation
-does not promise instantaneous database cancellation. Authorization, transaction,
-and RLS setup remain bounded per page, rather than per ordinary message.
+and checks a roughly 1.5-second processing budget between windows. That budget
+cannot interrupt a statement already running: any single SQL statement may run
+up to the five-second statement timeout, so one slow identity or slice read can
+push a page past 1.5 seconds. This is not an end-to-end latency bound: connection
+acquisition, authorization, transaction setup, and multiple SQL statements add
+time outside the between-window processing budget.
+AbortSignal checks run before/between reads. In-flight database statements
+finish or hit that timeout; browser cancellation does not promise instantaneous
+database cancellation. An abort observed during the search returns an empty
+499 (client closed) response rather than a server error; a disconnected client
+may never receive that response. Authorization, transaction, and RLS setup run
+once per page, rather than per ordinary message.
 
 Large scalars use the existing `session-event-slices` reader, including exact
 lossless UTF-16 decoding for NUL, lone surrogates, and codec-marker collisions.

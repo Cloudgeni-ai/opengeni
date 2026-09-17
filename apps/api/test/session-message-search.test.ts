@@ -130,6 +130,36 @@ test("HTTP occurrence pagination carries advancing cursors and exact terminal co
   expect(next.matchedMessageCount).toBe(1);
 }, 180_000);
 
+test("HTTP cancelled searches return an empty client-closed response, not a server error", async () => {
+  const f = await fixture();
+  for (const customReason of [false, true]) {
+    const controller = new AbortController();
+    controller.abort(customReason ? new Error("superseded search") : undefined);
+    const response = await appWith().request(`${f.path}?query=twice`, {
+      headers: { authorization: f.authorization },
+      signal: controller.signal,
+    });
+    expect(response.status).toBe(499);
+    expect(await response.text()).toBe("");
+  }
+  // The request may be cancelled while the live host scope is resolving,
+  // before control enters the database search.
+  const controller = new AbortController();
+  const app = appWith({
+    authorizeSession: async () => ({ allowed: true }),
+    resolveListScope: async () => {
+      controller.abort();
+      return { kind: "all" };
+    },
+  });
+  const response = await app.request(`${f.path}?query=twice`, {
+    headers: { authorization: f.authorization },
+    signal: controller.signal,
+  });
+  expect(response.status).toBe(499);
+  expect(await response.text()).toBe("");
+}, 180_000);
+
 test("HTTP workspace grouping returns one representative and rejects an in-session filter", async () => {
   const f = await fixture();
   const app = appWith();

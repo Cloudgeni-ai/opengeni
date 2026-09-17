@@ -573,3 +573,189 @@ test("grouped workspace counts still exclude sessions outside authorization scop
   expect(page.page.matchedMessageCount).toBe(1);
   expect(page.page.scannedMessages).toBe(1);
 }, 180_000);
+
+test("a later text-less completion copy never hides earlier retained text", async () => {
+  const session = await makeSession();
+  const triggerId = await insert(session.id, 1, "user.message", { text: "start" });
+  const [turn] = await shared.admin`insert into session_turns (
+    account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+    status, source, position, prompt, model, reasoning_effort, sandbox_backend
+  ) values (${accountId}, ${workspaceId}, ${session.id}, ${triggerId}, 'search-fixture',
+    'cancelled', 'user', 1, 'start', 'test', 'medium', 'none') returning id`;
+  const turnId = turn!.id as string;
+  // A failed/empty retry completion can share the provider message id without
+  // retaining any text. It must not suppress the earlier complete copy.
+  await insert(
+    session.id,
+    2,
+    "agent.message.completed",
+    { text: "kept needle", messageId: "retry-shared-id" },
+    { turnId },
+  );
+  await insert(
+    session.id,
+    3,
+    "agent.message.completed",
+    { messageId: "retry-shared-id" },
+    { turnId },
+  );
+  await insert(
+    session.id,
+    4,
+    "agent.message.completed",
+    { text: null, messageId: "retry-shared-id" },
+    { turnId },
+  );
+  await insert(
+    session.id,
+    5,
+    "agent.message.completed",
+    { text: 42, messageId: "retry-shared-id" },
+    { turnId },
+  );
+  const result = await collect({ query: "kept needle", sessionId: session.id });
+  expect(result.matches.map((m) => m.sequence)).toEqual([2]);
+}, 180_000);
+
+test("cursor binding canonicalizes authorization scope id order", async () => {
+  const first = await makeSession();
+  const second = await makeSession();
+  await insert(first.id, 1, "user.message", { text: "order-canonical-token" });
+  await insert(second.id, 1, "user.message", { text: "order-canonical-token" });
+  const ids = [first.id, second.id].sort();
+  const ascending = { kind: "scoped" as const, sessionIds: ids, rootSessionIds: ids };
+  const descending = {
+    kind: "scoped" as const,
+    sessionIds: [...ids].reverse().concat(ids[0]!),
+    rootSessionIds: [...ids].reverse().concat(ids[0]!),
+  };
+  const page = await searchSessionMessagesForSubject(
+    client.db,
+    workspaceId,
+    { query: "order-canonical-token", limit: 1 },
+    { subjectId, authorizationScope: ascending },
+  );
+  expect(page.matches).toHaveLength(1);
+  expect(page.nextCursor).not.toBeNull();
+  // Same semantic scope, different id order across pages: still one traversal.
+  const next = await searchSessionMessagesForSubject(
+    client.db,
+    workspaceId,
+    { query: "order-canonical-token", limit: 1, cursor: page.nextCursor! },
+    { subjectId, authorizationScope: descending },
+  );
+  expect(next.matches).toHaveLength(1);
+  expect(next.countIsExact).toBe(true);
+  expect(next.matchedOccurrenceCount).toBe(2);
+  // A genuinely narrower scope is still a changed scope.
+  await expect(
+    searchSessionMessagesForSubject(
+      client.db,
+      workspaceId,
+      { query: "order-canonical-token", limit: 1, cursor: page.nextCursor! },
+      {
+        subjectId,
+        authorizationScope: { kind: "scoped", sessionIds: [first.id], rootSessionIds: [] },
+      },
+    ),
+  ).rejects.toThrow("cursor");
+}, 180_000);
+
+test("Slack-private sessions stay owner-only in message search", async () => {
+  const slackOwner = `user:slack-owner-${crypto.randomUUID()}`;
+  const slackPeer = `user:slack-peer-${crypto.randomUUID()}`;
+  for (const member of [slackOwner, slackPeer])
+    await grantWorkspaceAccess(client.db, {
+      accountId,
+      workspaceId,
+      subjectId: member,
+      permissions: ["sessions:read"],
+    });
+  const session = await makeSession();
+  await insert(session.id, 1, "user.message", { text: "slack-private-search-token" });
+  const [connection] = await shared.admin`insert into connections (
+    account_id, workspace_id, origin_workspace_id, provider_domain, kind,
+    credential_encrypted, status
+  ) values (${accountId}, ${workspaceId}, ${workspaceId}, 'slack.test', 'oauth2',
+    'ciphertext-never-read-by-search-test', 'active') returning id`;
+  await shared.admin`insert into slack_interactions (
+    account_id, workspace_id, connection_id, slack_team_id, slack_channel_id,
+    slack_thread_ts, route_key, triggering_provider_event_id, owning_subject_id,
+    visibility, session_reservation_id, session_id
+  ) values (
+    ${accountId}, ${workspaceId}, ${connection!.id}, 'TSEARCH', 'CSEARCH',
+    '1700000000.0099', ${`route-${crypto.randomUUID()}`}, ${`Ev-${crypto.randomUUID()}`},
+    ${slackOwner}, 'private', ${session.id}, ${session.id}
+  )`;
+  const ownerResult = await collect(
+    { query: "slack-private-search-token", sessionId: session.id },
+    { subjectId: slackOwner },
+  );
+  expect(ownerResult.matches.map((m) => m.sessionId)).toEqual([session.id]);
+  const peerResult = await collect(
+    { query: "slack-private-search-token" },
+    { subjectId: slackPeer },
+  );
+  expect(peerResult.matches).toHaveLength(0);
+  expect(peerResult.page.matchedMessageCount).toBe(0);
+  expect(peerResult.page.matchedOccurrenceCount).toBe(0);
+  // Other shared messages in this workspace can still be scanned. Narrowing
+  // to the known private session proves it contributes no scans or counts.
+  const narrowed = await collect(
+    { query: "slack-private-search-token", sessionId: session.id },
+    { subjectId: slackPeer },
+  );
+  expect(narrowed.matches).toHaveLength(0);
+  expect(narrowed.page.scannedMessages).toBe(0);
+  expect(narrowed.page.matchedMessageCount).toBe(0);
+  expect(narrowed.page.matchedOccurrenceCount).toBe(0);
+}, 180_000);
+
+test("cross-account workspaces are fenced before any message is scanned", async () => {
+  const foreignSubject = `user:foreign-${crypto.randomUUID()}`;
+  const foreign = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: crypto.randomUUID(),
+    accountName: "Foreign",
+    workspaceExternalSource: "test",
+    workspaceExternalId: crypto.randomUUID(),
+    workspaceName: "Foreign",
+    subjectId: foreignSubject,
+  });
+  const foreignGrant = foreign.workspaceGrants[0]!;
+  const foreignSession = await createSession(client.db, {
+    accountId: foreignGrant.accountId,
+    workspaceId: foreignGrant.workspaceId,
+    initialMessage: "foreign",
+    resources: [],
+    metadata: {},
+    model: "test",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  await shared.admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+    values (${foreignGrant.accountId}, ${foreignGrant.workspaceId}, ${foreignSession.id}, 1, 'user.message', '{"text":"cross-tenant-search-token"}'::jsonb)`;
+  // The same token exists in our workspace: a correct search returns only ours.
+  const ownSession = await makeSession();
+  await insert(ownSession.id, 1, "user.message", { text: "cross-tenant-search-token" });
+  const ours = await collect({ query: "cross-tenant-search-token" });
+  expect(ours.matches.map((m) => m.sessionId)).toEqual([ownSession.id]);
+  // Our member has no authority in the foreign workspace at all.
+  await expect(
+    searchSessionMessagesForSubject(
+      client.db,
+      foreignGrant.workspaceId,
+      { query: "cross-tenant-search-token" },
+      { subjectId },
+    ),
+  ).rejects.toBeInstanceOf(SessionListAccessError);
+  // The foreign subject sees only its own workspace's copy.
+  const theirs = await searchSessionMessagesForSubject(
+    client.db,
+    foreignGrant.workspaceId,
+    { query: "cross-tenant-search-token" },
+    { subjectId: foreignSubject },
+  );
+  expect(theirs.matches.map((m) => m.sessionId)).toEqual([foreignSession.id]);
+}, 180_000);

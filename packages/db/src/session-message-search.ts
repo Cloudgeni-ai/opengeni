@@ -131,6 +131,9 @@ export async function scanSessionMessages(
     // so an earlier shorter completion cannot hide later retained text. Same-
     // text distinct provider messages remain distinct; the id-less final
     // settlement copy is suppressed against its earlier complete text.
+    // Suppression requires the competing copy to retain searchable string text
+    // itself: a later text-less completion (failed/empty retry sharing the
+    // provider message id) must never hide the earlier complete text.
     const identities = await db
       .select({
         sessionId: e.sessionId,
@@ -171,6 +174,7 @@ export async function scanSessionMessages(
           and other_message.turn_id = ${e.turnId}
           and other_message.type = 'agent.message.completed' and other_message.duplicate_of_event_id is null
           and (other_message.turn_association is null or other_message.turn_association = 'current')
+          and jsonb_typeof(other_message.payload->'text') = 'string'
           and ((jsonb_typeof(${e.payload}->'messageId') = 'string'
               and other_message.sequence > ${e.sequence}
               and other_message.payload->'messageId' = ${e.payload}->'messageId'
