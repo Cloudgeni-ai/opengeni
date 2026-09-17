@@ -17,20 +17,47 @@ function useRetainedScroll(
   position: RefObject<number> | undefined,
   ready: boolean,
   revision: unknown,
+  identity: string,
 ) {
-  const restored = useRef(false);
+  const restoration = useRef<{
+    node: HTMLDivElement;
+    position: RefObject<number>;
+    identity: string;
+    savedPosition: number;
+    restored: boolean;
+  } | null>(null);
   useLayoutEffect(() => {
-    restored.current = false;
     const node = element.current;
-    if (!ready || !node || !position) return;
+    if (!ready || !node || !position) {
+      restoration.current = null;
+      return;
+    }
+    // New batches may render between the browser's scroll and its asynchronous
+    // event. Do not replay a stale saved position over an already-live pane.
+    // A new query, remount, or explicit caller reset starts a fresh restoration.
+    if (
+      restoration.current?.node !== node ||
+      restoration.current.position !== position ||
+      restoration.current.identity !== identity ||
+      restoration.current.savedPosition !== position.current
+    )
+      restoration.current = {
+        node,
+        position,
+        identity,
+        savedPosition: position.current,
+        restored: false,
+      };
+    const current = restoration.current;
+    if (current.restored) return;
     const desired = position.current;
     let frame = 0;
     const restore = () => {
-      if (restored.current || node.clientHeight === 0) return;
+      if (current.restored || node.clientHeight === 0) return;
       // Revalidation/hidden mobile panes may not have enough layout yet.
       if (node.scrollHeight - node.clientHeight < desired) return;
       node.scrollTop = desired;
-      restored.current = true;
+      current.restored = true;
     };
     restore();
     frame = requestAnimationFrame(restore);
@@ -40,10 +67,12 @@ function useRetainedScroll(
       cancelAnimationFrame(frame);
       observer?.disconnect();
     };
-  }, [element, position, ready, revision]);
+  }, [element, position, ready, revision, identity]);
   return (node: HTMLDivElement) => {
-    if (ready && restored.current && node.clientHeight > 0 && position)
+    if (ready && restoration.current?.restored && node.clientHeight > 0 && position) {
       position.current = node.scrollTop;
+      restoration.current.savedPosition = node.scrollTop;
+    }
   };
 }
 
@@ -77,6 +106,7 @@ export function SearchResultsView(props: {
     // Loading only prevents persistence when it has replaced the actual rows.
     props.active !== false && !!props.query.trim() && !props.error && props.results.length > 0,
     props.results,
+    props.query,
   );
   function onKeyDown(event: KeyboardEvent) {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
@@ -201,6 +231,7 @@ export function SearchPreviewView(props: {
     props.scrollPosition,
     props.active !== false && !props.loading,
     props.messages,
+    props.query,
   );
   return (
     <section aria-label="Conversation preview" className="flex min-h-0 flex-col">

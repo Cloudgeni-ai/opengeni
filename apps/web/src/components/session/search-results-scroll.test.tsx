@@ -9,6 +9,96 @@ import {
 
 registerDom();
 
+test("live result revisions cannot undo a DOM scroll before its event; query resets still restore", async () => {
+  const position = { current: 0 };
+  const render = (query = "harborlight") => (
+    <SearchResultsView
+      query={query}
+      results={[
+        {
+          sessionId: "1",
+          title: query,
+          subtitle: "",
+          snippet: "",
+          matchingMessages: 0,
+          titleMatch: true,
+        },
+      ]}
+      selectedId="1"
+      onSelect={() => {}}
+      loading
+      error={null}
+      onRetry={() => {}}
+      hasMore={false}
+      onMore={() => {}}
+      scrollPosition={position}
+    />
+  );
+  const view = await renderComponent(render());
+  const list = view.container.querySelector<HTMLDivElement>('[aria-label="Matching sessions"]')!;
+  Object.defineProperties(list, { clientHeight: { value: 600 }, scrollHeight: { value: 2500 } });
+  await view.rerender(render());
+  // Native scroll delivery is asynchronous: a new partial batch may render
+  // after the browser moved the pane but before React receives its event.
+  list.scrollTop = 1109;
+  await view.rerender(render());
+  expect(list.scrollTop).toBe(1109);
+  await act(async () => list.dispatchEvent(new Event("scroll", { bubbles: true })));
+  expect(position.current).toBe(1109);
+  await view.rerender(render());
+  expect(list.scrollTop).toBe(1109);
+  position.current = 0;
+  await view.rerender(render("new query"));
+  expect(list.scrollTop).toBe(0);
+  list.scrollTop = 800;
+  await act(async () => list.dispatchEvent(new Event("scroll", { bubbles: true })));
+  position.current = 0; // An explicit page navigation also requests a reset.
+  await view.rerender(render("new query"));
+  expect(list.scrollTop).toBe(0);
+  await view.unmount();
+});
+
+test("a pending restore retries on result revisions until the pane has enough layout", async () => {
+  const position = { current: 1109 };
+  const render = () => (
+    <SearchResultsView
+      query="harborlight"
+      results={[
+        {
+          sessionId: "1",
+          title: "harborlight",
+          subtitle: "",
+          snippet: "",
+          matchingMessages: 0,
+          titleMatch: true,
+        },
+      ]}
+      selectedId="1"
+      onSelect={() => {}}
+      loading
+      error={null}
+      onRetry={() => {}}
+      hasMore={false}
+      onMore={() => {}}
+      scrollPosition={position}
+    />
+  );
+  const view = await renderComponent(render());
+  const list = view.container.querySelector<HTMLDivElement>('[aria-label="Matching sessions"]')!;
+  let totalHeight = 800;
+  Object.defineProperties(list, {
+    clientHeight: { value: 600 },
+    scrollHeight: { get: () => totalHeight },
+  });
+  await view.rerender(render());
+  expect(list.scrollTop).toBe(0);
+  expect(position.current).toBe(1109);
+  totalHeight = 2500;
+  await view.rerender(render());
+  expect(list.scrollTop).toBe(1109);
+  await view.unmount();
+});
+
 test("result rows show match metadata once and omit title-only duplicate snippets", async () => {
   const view = await renderComponent(
     <SearchResultsView
