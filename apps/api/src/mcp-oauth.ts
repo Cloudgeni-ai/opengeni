@@ -783,7 +783,7 @@ async function listConsentWorkspaces(deps: ApiRouteDeps, context: AccessContext)
   for (const workspace of [...fromGrants, ...memberships, ...shared.flat()]) {
     if (workspace) byId.set(workspace.id, workspace);
   }
-  return [...byId.values()].toSorted((left, right) => left.name.localeCompare(right.name));
+  return [...byId.values()].sort((left, right) => left.name.localeCompare(right.name));
 }
 
 async function consentAccountsForWorkspaces(
@@ -798,7 +798,7 @@ async function consentAccountsForWorkspaces(
         return { id: accountId, name: account?.name.trim() || "Organization" };
       }),
     )
-  ).toSorted((left, right) => left.name.localeCompare(right.name));
+  ).sort((left, right) => left.name.localeCompare(right.name));
 }
 
 function consentWorkspaceLabel(workspace: McpOAuthConsentWorkspace): string {
