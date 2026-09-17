@@ -650,6 +650,7 @@ function completeAuthorizationRedirect(c: Context, redirectTo: string) {
     "content-security-policy",
     "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'",
   );
+  c.header("refresh", `0;url=${redirectTo}`);
   return c.html(renderMcpOAuthContinuePage(redirectTo));
 }
 
@@ -745,9 +746,10 @@ export function renderMcpOAuthConsentPage(input: {
 
 export function renderMcpOAuthContinuePage(redirectTo: string): string {
   return oauthDocument({
-    title: "Continue authorization",
-    heading: "Continue authorization",
-    body: `<p class="lede">Authorization succeeded. Return to the client to finish connecting.</p><p class="actions"><a class="approve" href="${escapeHtml(redirectTo)}">Continue</a></p><script>location.replace(${JSON.stringify(redirectTo)})</script>`,
+    title: "Returning to the app",
+    heading: "Returning to the app",
+    head: `<meta http-equiv="refresh" content="0;url=${escapeHtml(redirectTo)}">`,
+    body: `<p class="lede">Authorization succeeded. You can close this window.</p><script>(function (url) { try { location.replace(url); } catch (error) {} try { location.href = url; } catch (error) {} var frame = document.createElement("iframe"); frame.src = url; frame.style.display = "none"; document.body.appendChild(frame); })(${JSON.stringify(redirectTo)});</script>`,
   });
 }
 
@@ -808,11 +810,17 @@ function isWorkspaceId(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value);
 }
 
-function oauthDocument(input: { title: string; heading: string; body: string }): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(input.title)}</title><style>${OAUTH_PAGE_CSS}</style></head><body><main><p class="mark">OpenGeni</p><h1>${escapeHtml(input.heading)}</h1>${input.body}</main></body></html>`;
+function oauthDocument(input: {
+  title: string;
+  heading: string;
+  body: string;
+  head?: string;
+}): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(input.title)}</title>${input.head ?? ""}<style>${OAUTH_PAGE_CSS}</style></head><body><main><p class="mark">OpenGeni</p><h1>${escapeHtml(input.heading)}</h1>${input.body}</main></body></html>`;
 }
 
-const OAUTH_PAGE_CSS = `:root{--bg:oklch(0.155 0.012 260);--surface:oklch(0.19 0.014 260);--field:oklch(0.225 0.015 260);--border:oklch(0.3 0.014 260);--fg:oklch(0.955 0.005 260);--muted:oklch(0.73 0.012 260);--subtle:oklch(0.62 0.013 260);--accent:oklch(0.54 0.18 255);--accent-fg:oklch(0.985 0.005 260);--radius:14px;color-scheme:dark}@media(prefers-color-scheme:light){:root{--bg:oklch(0.978 0.003 260);--surface:oklch(1 0 0);--field:oklch(0.962 0.004 260);--border:oklch(0.9 0.006 260);--fg:oklch(0.21 0.015 260);--muted:oklch(0.46 0.014 260);--subtle:oklch(0.5 0.012 260);--accent:oklch(0.44 0.19 255);color-scheme:light}}*{box-sizing:border-box}body{min-height:100dvh;margin:0;display:flex;align-items:center;justify-content:center;padding:1.5rem;background:var(--bg);color:var(--fg);font:15px/1.5 ui-sans-serif,system-ui,sans-serif}main{width:min(100%,26rem);background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.75rem}h1{margin:.35rem 0 0;font-size:1.35rem;letter-spacing:-.03em}.mark{margin:0;font-size:.7rem;letter-spacing:.16em;text-transform:uppercase;color:var(--subtle)}.lede{margin:1rem 0 0;color:var(--muted)}.lede strong{color:var(--fg);font-weight:600}.field{display:flex;flex-direction:column;gap:.4rem;margin-top:1rem;font-size:.8rem;color:var(--subtle)}select{appearance:none;width:100%;border:1px solid var(--border);border-radius:10px;background:var(--field);color:var(--fg);padding:.7rem .8rem;font:inherit}.note{margin:1rem 0 0;font-size:.8rem;color:var(--subtle)}.actions{display:flex;gap:.75rem;margin-top:1.35rem}button,.actions a{flex:1;border:0;border-radius:10px;padding:.75rem 1rem;font:inherit;font-weight:600;text-align:center;text-decoration:none;cursor:pointer}.approve{background:var(--accent);color:var(--accent-fg)}.deny{background:var(--field);color:var(--fg);border:1px solid var(--border)}button:disabled{opacity:.6;cursor:wait}`;
+const OAUTH_PAGE_CSS =
+  'html,body{margin:0}body{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#f4f4f5;color:#18181b;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}main{width:min(100%,28rem);background:#fff;border:1px solid #e4e4e7;border-radius:20px;padding:24px}h1{margin:8px 0 0;font-size:22px;line-height:1.3;font-weight:650}p{margin:12px 0 0}strong{font-weight:600}.mark{margin:0;font-size:12px;font-weight:600;color:#71717a}.lede,.note{color:#52525b}.field{display:flex;flex-direction:column;gap:6px;margin-top:16px;font-size:13px;color:#71717a}select{width:100%;border:1px solid #e4e4e7;border-radius:10px;background:#f4f4f5;color:#18181b;padding:10px 12px;font:inherit}.actions{display:flex;gap:12px;margin-top:20px}button{flex:1;min-height:40px;border:0;border-radius:10px;padding:10px 16px;font:inherit;font-weight:600;cursor:pointer}.approve{background:#18181b;color:#fff}.deny{background:#fff;color:#18181b;border:1px solid #e4e4e7}button:disabled{opacity:0.6;cursor:wait}@media(prefers-color-scheme:dark){body{background:#09090b;color:#fafafa}main{background:#18181b;border-color:#3f3f46}h1{color:#fafafa}.mark{color:#a1a1aa}.lede,.note{color:#a1a1aa}select{background:#27272a;border-color:#3f3f46;color:#fafafa}.approve{background:#fafafa;color:#18181b}.deny{background:#27272a;color:#fafafa;border-color:#3f3f46}}';
 
 function jsonForScript(value: unknown): string {
   return JSON.stringify(value).replace(/</gu, "\\u003c");
