@@ -127,6 +127,11 @@ never history; running reads do not. Failed/cancelled sessions retain audit only
 Fanout is replaceable and post-commit. Conversation history remains separate:
 sequence cursors bound traversal, and `packages/db/src/session-event-slices.ts`
 transfers large message scalars in bounded slices, not whole histories.
+Literal full-history Find is a separate authorized, resumable message projection:
+`packages/db/src/session-message-search.ts` batches ordinary scalars and reuses
+those slices for large completed messages. Browsers receive occurrence snippets
+and cursors, never a complete payload-history scan. See
+[`session-message-search.md`](session-message-search.md).
 
 Docker/local SDK processes expose turn-scoped handles after a bounded wait.
 They remain on the turn cancellation fence and stop before finalization, allowing

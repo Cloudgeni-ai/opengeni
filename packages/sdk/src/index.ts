@@ -4,6 +4,11 @@ export type {
   ArtifactCatalogListOptions,
   ArtifactCatalogListResponse,
 } from "./artifact-catalog";
+export type {
+  SessionMessageSearchRequest,
+  SessionMessageSearchMatch,
+  SessionMessageSearchResponse,
+} from "./session-message-search";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
 export { pluginMcpUnavailableReason } from "@opengeni/contracts/plugin-discovery";
 export type {

@@ -1,4 +1,9 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
+export type {
+  SessionMessageSearchRequest,
+  SessionMessageSearchMatch,
+  SessionMessageSearchResponse,
+} from "./session-message-search";
 
 export type BundledSkillId =
   | "builtin:opengeni-help"

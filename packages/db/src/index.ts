@@ -1,4 +1,11 @@
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
+import {
+  SessionMessageSearchRequest,
+  type SessionMessageSearchResponse,
+} from "@opengeni/contracts";
+import { scanSessionMessages } from "./session-message-search";
+import { withDatabaseStatementTimeout } from "./database";
+export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
 export { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
@@ -35074,6 +35081,61 @@ export async function reapExpiredSessionListSnapshots(db: Database, limit = 500)
     sql`select opengeni_private.reap_expired_session_list_snapshots(${limit}) as deleted_count`,
   );
   return Number(rows[0]?.deleted_count ?? 0);
+}
+
+/** Bounded full-history message search. The caller must authorize a live grant
+ * and its complete host/agent list scope before entering this RLS projection.
+ */
+export async function searchSessionMessagesForSubject(
+  db: Database,
+  workspaceId: string,
+  request: SessionMessageSearchRequest,
+  authority: Pick<
+    ListSessionsForSubjectOptions,
+    "subjectId" | "authorizationScope" | "personalWorkspaceOwnerException"
+  >,
+  options: { signal?: AbortSignal | undefined } = {},
+): Promise<SessionMessageSearchResponse> {
+  const parsed = SessionMessageSearchRequest.parse(request);
+  options.signal?.throwIfAborted();
+  // Same session-tenancy, subject RLS and member-removal fence as session lists.
+  // The API must resolve its live grant and complete host/agent list scope first.
+  return withDatabaseStatementTimeout(db, 5_000, (boundedDb) =>
+    withWorkspaceSubjectRls(boundedDb, workspaceId, authority.subjectId, async (tx) => {
+      await lockSessionPersonalStateShared(tx, workspaceId, authority.subjectId);
+      const [membership] = await tx
+        .select({ id: schema.workspaceMemberships.id })
+        .from(schema.workspaceMemberships)
+        .where(
+          and(
+            eq(schema.workspaceMemberships.workspaceId, workspaceId),
+            eq(schema.workspaceMemberships.subjectId, authority.subjectId),
+          ),
+        )
+        .limit(1);
+      if (
+        !membership &&
+        authority.subjectId.startsWith("user:") &&
+        !(
+          authority.personalWorkspaceOwnerException === true &&
+          (await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+            accountId: await accountIdInRlsScope(tx),
+            workspaceId,
+            subjectId: authority.subjectId,
+          }))
+        )
+      )
+        throw new SessionListAccessError();
+      return scanSessionMessages(
+        tx,
+        workspaceId,
+        parsed,
+        sessionFilters({ ...authority, archiveStatus: parsed.archiveStatus }),
+        [authority.subjectId, authority.authorizationScope ?? null],
+        options.signal,
+      );
+    }),
+  );
 }
 
 /**

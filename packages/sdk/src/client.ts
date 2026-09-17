@@ -1,5 +1,9 @@
 import type { ArtifactCatalogListOptions, ArtifactCatalogListResponse } from "./artifact-catalog";
 import type {
+  SessionMessageSearchRequest,
+  SessionMessageSearchResponse,
+} from "./session-message-search";
+import type {
   KnowledgeOriginalFileDownload,
   AgentLearningContext,
   AgentLearningSettingsRecord,
@@ -1311,6 +1315,30 @@ export class OpenGeniClient {
       "PATCH",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/mcp-servers/${encodeURIComponent(serverId)}/approval-policy`,
       request,
+    );
+  }
+
+  /** Search durable visible user/assistant text, including unloaded history.
+   * Pages may be empty with hasMore=true. Never fall back to title search on
+   * older servers. Use listEventPage before/after the returned sequence for context.
+   */
+  async searchSessionMessages(
+    workspaceId: string,
+    request: SessionMessageSearchRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<SessionMessageSearchResponse> {
+    return this.requestJson<SessionMessageSearchResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/session-message-search`,
+      undefined,
+      {
+        query: request.query,
+        ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
+        ...(request.archiveStatus !== undefined ? { archiveStatus: request.archiveStatus } : {}),
+        ...(request.limit !== undefined ? { limit: String(request.limit) } : {}),
+        ...(request.cursor !== undefined ? { cursor: request.cursor } : {}),
+      },
+      options,
     );
   }
 

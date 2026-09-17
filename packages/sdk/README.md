@@ -286,6 +286,28 @@ the advisory UI without changing stored evidence or API authority. See
 [`docs/work-discovery.md`](../../docs/work-discovery.md) for ranking, bounds,
 claim lifecycle, and rollout semantics.
 
+## Full-history message search
+
+`searchSessionMessages(workspaceId, { query, sessionId?, archiveStatus?, limit?,
+cursor? }, { signal? })` searches durable user and **completed assistant** text,
+including unloaded history. It returns every non-overlapping literal occurrence,
+not tools, reasoning, model context, or delta-only assistant output.
+
+Each match has a durable `eventId`/`sequence`, a UTF-16 `messageMatchOffset`, and
+`snippet: { text, matchStart, matchEnd }` with original-text UTF-16 offsets.
+Results include `nextCursor`, `hasMore`, cumulative `matchedMessageCount` and
+`matchedOccurrenceCount`, `scannedMessages`, and `countIsExact`. Keep following
+cursors even on empty pages while `hasMore` is true; counts are provisional until
+exhaustion. Cancel superseded searches with the third argument's AbortSignal.
+This is a live, authorized traversal rather than a frozen snapshot; restart to
+refresh after concurrent history or visibility changes.
+
+The method and types are exported from the ordinary SDK and browser entry.
+Use `listEventPage` around the hit's sequence for bounded context, and use the
+returned search snippet when a large source message's ordinary projection does
+not include the hit. Never download complete history to perform Find locally.
+See [the API contract and bounds](../../docs/session-message-search.md).
+
 ## Session visibility and forks
 
 For organizations with session-tenancy activation, a canonical managed-cookie
