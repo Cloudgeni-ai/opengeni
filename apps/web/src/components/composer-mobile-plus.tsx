@@ -87,6 +87,8 @@ export type ComposerPlusProps = {
   selection: SessionToolSelection;
   toolsDisabled?: boolean;
   toolsSaving?: boolean;
+  connectorCustomizing?: boolean;
+  onConnectorCustomizingChange?: (customizing: boolean) => void;
   onToolSelectionChange: (selection: SessionToolSelection) => void;
   /** When set, Repositories appears under + and opens a drill-in panel. */
   repositories?: {
@@ -285,6 +287,8 @@ export function ComposerMobilePlus(props: ComposerPlusProps) {
                 servers={props.servers}
                 firstPartyTools={props.firstPartyTools}
                 selection={props.selection}
+                customizing={props.connectorCustomizing}
+                onCustomizingChange={props.onConnectorCustomizingChange}
                 onChange={props.onToolSelectionChange}
                 leading={backButton}
               />

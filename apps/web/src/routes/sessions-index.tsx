@@ -7,6 +7,7 @@ import {
   addsConnectorOutsideDefaults,
   changedConnectorExclusions,
   defaultConnectorSelection,
+  newSessionConnectorCustomizeState,
 } from "@/lib/composer-connectors";
 // The sessions index: the centered "Start a session" composer. The form is
 // organised top-down — (A) message + model/tools/repos pills → (B) WHERE SHOULD
@@ -597,8 +598,18 @@ function SessionsIndexRouteContent({
     },
   );
   const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
+  const [connectorCustomizing, setConnectorCustomizing] = useState(false);
   const [connectorExclusions, setConnectorExclusions] = useState<string[]>([]);
+  const followWorkspaceConnectors = () => {
+    setConnectorCustomizing(false);
+    setToolSelectionExplicit(false);
+    setConnectorExclusions([]);
+    context.setSelectedCapabilityToolIds(
+      defaultConnectorSelection(context.workspaceDefaultToolIds, []),
+    );
+  };
   const changeConnectorSelection = (selection: SessionToolSelection) => {
+    if (!connectorCustomizing) return;
     if (
       !toolSelectionExplicit &&
       addsConnectorOutsideDefaults(
@@ -727,6 +738,7 @@ function SessionsIndexRouteContent({
         selectedMcpServerIds: context.selectedCapabilityToolIds,
         workspaceDefaultMcpServerIds: context.workspaceDefaultToolIds,
         catalogReady: context.workspaceMcpCatalogReady,
+        customizing: connectorCustomizing,
         explicit: toolSelectionExplicit,
         ...(!toolSelectionExplicit ? { excludedMcpServerIds: connectorExclusions } : {}),
       }),
@@ -735,6 +747,7 @@ function SessionsIndexRouteContent({
       context.workspaceMcpCatalogReady,
       context.workspaceDefaultToolIds,
       toolSelectionExplicit,
+      connectorCustomizing,
       connectorExclusions,
     ],
   );
@@ -839,14 +852,20 @@ function SessionsIndexRouteContent({
       setModel(remote.model);
       setReasoningEffort(remote.reasoningEffort);
       setLatencyMode(remote.latencyMode);
-      setToolSelectionExplicit(remote.toolsProvided);
+      const customize = newSessionConnectorCustomizeState({
+        toolsProvided: remote.toolsProvided,
+        tools: remote.tools,
+        excludedMcpServerIds: remote.options.excludedMcpServerIds,
+      });
+      setConnectorCustomizing(customize.customizing);
+      setToolSelectionExplicit(customize.explicit);
       setConnectorExclusions(remote.options.excludedMcpServerIds ?? []);
       const selected = new Set(
-        remote.toolsProvided
+        customize.explicit
           ? remote.tools.map((tool) => tool.id)
           : defaultConnectorSelection(
               workspaceDefaultToolIdsForHydration,
-              remote.options.excludedMcpServerIds ?? [],
+              customize.customizing ? (remote.options.excludedMcpServerIds ?? []) : [],
             ),
       );
       setSelectedCapabilityToolIds(selectableSessionMcpServerIds(selected));
@@ -891,7 +910,10 @@ function SessionsIndexRouteContent({
   useEffect(() => {
     if (newSessionDraft.loading || !context.workspaceMcpCatalogReady || toolSelectionExplicit)
       return;
-    const next = defaultConnectorSelection(context.workspaceDefaultToolIds, connectorExclusions);
+    const next = defaultConnectorSelection(
+      context.workspaceDefaultToolIds,
+      connectorCustomizing ? connectorExclusions : [],
+    );
     setSelectedCapabilityToolIds((current) =>
       current.size === next.size && [...next].every((id) => current.has(id)) ? current : next,
     );
@@ -900,6 +922,7 @@ function SessionsIndexRouteContent({
     context.workspaceMcpCatalogReady,
     context.workspaceDefaultToolIds,
     setSelectedCapabilityToolIds,
+    connectorCustomizing,
     connectorExclusions,
     toolSelectionExplicit,
   ]);
@@ -1436,6 +1459,11 @@ function SessionsIndexRouteContent({
                   firstPartyToolIds: draft.firstPartyMcpTools,
                 }}
                 toolsDisabled={busy || newSessionDraft.loading}
+                connectorCustomizing={connectorCustomizing}
+                onConnectorCustomizingChange={(next) => {
+                  if (next) setConnectorCustomizing(true);
+                  else followWorkspaceConnectors();
+                }}
                 onToolSelectionChange={(selection) => {
                   changeConnectorSelection(selection);
                 }}

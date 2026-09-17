@@ -279,9 +279,14 @@ export function buildCreateSessionRequest(
   const defaultToolIds = input.workspaceDefaultMcpServerIds
     ? [...new Set(input.workspaceDefaultMcpServerIds)].sort()
     : null;
-  const tools = input.newSessionDraftToolPolicy
-    ? input.newSessionDraftToolPolicy.toolsProvided
-      ? [...input.newSessionDraftToolPolicy.tools]
+  const draftPolicy = input.newSessionDraftToolPolicy;
+  const exclusionOnlyCustomize =
+    draftPolicy?.toolsProvided === true &&
+    draftPolicy.tools.length === 0 &&
+    draftPolicy.excludedMcpServerIds !== undefined;
+  const tools = draftPolicy
+    ? draftPolicy.toolsProvided && !exclusionOnlyCustomize
+      ? [...draftPolicy.tools]
       : undefined
     : input.workspaceMcpCatalogReady === true &&
         defaultToolIds &&

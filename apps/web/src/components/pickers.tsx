@@ -87,6 +87,8 @@ export function SessionToolPicker(props: {
   selection: SessionToolSelection;
   disabled?: boolean;
   saving?: boolean;
+  customizing?: boolean;
+  onCustomizingChange?: (customizing: boolean) => void;
   /** Prefer `bottom` on home/new-chat; `top` when composer is docked at bottom. */
   menuSide?: "top" | "bottom";
   /** Extra classes on the bar trigger (e.g. `max-sm:hidden` when opened from +). */
@@ -126,6 +128,8 @@ export function SessionToolPicker(props: {
           servers={props.servers}
           firstPartyTools={props.firstPartyTools}
           selection={props.selection}
+          customizing={props.customizing}
+          onCustomizingChange={props.onCustomizingChange}
           onChange={props.onChange}
         />
       </DropdownMenuContent>

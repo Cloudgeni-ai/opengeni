@@ -34,6 +34,7 @@ function Preview() {
     mcpServerIds: new Set(initial.map((s) => s.id)),
     firstPartyToolIds: new Set(["session_get", "memory_search"]),
   });
+  const [connectorCustomizing, setConnectorCustomizing] = useState(false);
   const [status, setStatus] = useState("Preview connections use sample data.");
   return (
     <main className="min-h-screen bg-bg px-6 text-fg">
@@ -61,6 +62,8 @@ function Preview() {
               servers={servers}
               firstPartyTools={[]}
               selection={selection}
+              connectorCustomizing={connectorCustomizing}
+              onConnectorCustomizingChange={setConnectorCustomizing}
               onToolSelectionChange={setSelection}
               connectorActions={{
                 onReconnect: (id) => {

@@ -251,6 +251,20 @@ describe("buildCreateSessionRequest", () => {
     expect(result.expectedNewSessionDraftRevision).toBe(7);
   });
 
+  test("remembers customize-without-pin as exclusions rather than an empty tool list", () => {
+    const result = build([], [], {
+      selectedTools: [{ kind: "mcp", id: "docs" }],
+      newSessionDraftToolPolicy: {
+        tools: [],
+        toolsProvided: true,
+        excludedMcpServerIds: [],
+      },
+      expectedNewSessionDraftRevision: 7,
+    });
+    expect(result).not.toHaveProperty("tools");
+    expect(result.excludedMcpServerIds).toEqual([]);
+  });
+
   test("preserves explicit empty and omitted draft policies across catalog changes", () => {
     for (const toolsProvided of [true, false]) {
       const result = build([], [], {

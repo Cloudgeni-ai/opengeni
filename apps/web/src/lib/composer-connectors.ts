@@ -112,3 +112,37 @@ export function connectorSelectionUpdate(
     expectedVersion: session.toolPolicyVersion,
   };
 }
+
+export function sessionConnectorPolicyIsCustomized(
+  session: Pick<Session, "toolPolicy">,
+): boolean {
+  return (
+    session.toolPolicy.mode === "explicit" ||
+    (session.toolPolicy.excludedMcpServerIds?.length ?? 0) > 0
+  );
+}
+
+export function followWorkspaceConnectorPolicy(
+  session: Pick<Session, "toolPolicyVersion">,
+): UpdateSessionToolPolicyRequest {
+  // Omit exclusions: supplying the field is a connector-only edit and 409s
+  // while the session is still explicit. Omission fully adopts workspace defaults.
+  return {
+    mode: "workspace_default",
+    expectedVersion: session.toolPolicyVersion,
+  };
+}
+
+export function newSessionConnectorCustomizeState(input: {
+  toolsProvided: boolean;
+  tools: ReadonlyArray<{ id: string }>;
+  excludedMcpServerIds?: readonly string[] | null;
+}): { customizing: boolean; explicit: boolean } {
+  const exclusions = input.excludedMcpServerIds ?? [];
+  return {
+    customizing: input.toolsProvided || exclusions.length > 0,
+    explicit:
+      input.toolsProvided &&
+      (input.tools.length > 0 || input.excludedMcpServerIds === undefined),
+  };
+}

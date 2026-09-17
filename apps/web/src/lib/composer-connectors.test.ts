@@ -6,6 +6,8 @@ import {
   connectorSelectionUpdate,
   changedConnectorExclusions,
   composerConnectorOptions,
+  followWorkspaceConnectorPolicy,
+  newSessionConnectorCustomizeState,
 } from "./composer-connectors";
 
 function item(id: string, overrides: Partial<CapabilityCatalogItem> = {}): CapabilityCatalogItem {
@@ -158,5 +160,44 @@ describe("connector selection policy", () => {
     });
     expect(addsConnectorOutsideDefaults(after, before, ["files"])).toBe(false);
     expect(addsConnectorOutsideDefaults(before, after, ["files", "slack"])).toBe(false);
+  });
+
+  test("customize without a pin keeps live defaults and remembers the switch", () => {
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: ["files"],
+        workspaceDefaultMcpServerIds: ["files", "slack"],
+        catalogReady: true,
+        customizing: false,
+        explicit: false,
+      }),
+    ).toEqual({ tools: [], toolsProvided: false });
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: ["files"],
+        workspaceDefaultMcpServerIds: ["files", "slack"],
+        catalogReady: true,
+        customizing: true,
+        explicit: false,
+        excludedMcpServerIds: ["slack"],
+      }),
+    ).toEqual({
+      tools: [],
+      toolsProvided: true,
+      excludedMcpServerIds: ["slack"],
+    });
+    expect(
+      newSessionConnectorCustomizeState({
+        toolsProvided: true,
+        tools: [],
+        excludedMcpServerIds: [],
+      }),
+    ).toEqual({ customizing: true, explicit: false });
+    expect(
+      followWorkspaceConnectorPolicy({ toolPolicyVersion: 4 }),
+    ).toEqual({
+      mode: "workspace_default",
+      expectedVersion: 4,
+    });
   });
 });

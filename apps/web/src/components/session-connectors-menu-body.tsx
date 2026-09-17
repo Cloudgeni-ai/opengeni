@@ -1,9 +1,13 @@
-import { RefreshCwIcon, Loader2Icon } from "lucide-react";
+import { CheckIcon, RefreshCwIcon, Loader2Icon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { ComposerMenuHeader, ComposerMenuSwitchIndicator } from "@/components/ui/composer-menu";
+import {
+  ComposerMenuHeader,
+  ComposerMenuSwitch,
+  ComposerMenuSwitchIndicator,
+} from "@/components/ui/composer-menu";
 import type { SessionToolSelection } from "@/components/pickers";
 import type { McpServerOption } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
@@ -14,6 +18,9 @@ export type SessionConnectorsMenuProps = {
   firstPartyTools: ReadonlyArray<{ id: FirstPartyMcpToolName; name: string }>;
   selection: SessionToolSelection;
   onChange: (selection: SessionToolSelection) => void;
+  /** Header switch. Off = read-only workspace list; on = row toggles. */
+  customizing?: boolean;
+  onCustomizingChange?: (customizing: boolean) => void;
   leading?: ReactNode;
   onReconnect?: (serverId: string) => void;
   loading?: boolean;
@@ -28,9 +35,23 @@ export function isComposerConnector(server: Pick<McpServerOption, "id">): boolea
 /** Connection availability belongs here; built-in tools remain in workspace settings. */
 export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
   const connectors = props.servers.filter(isComposerConnector);
+  const customizing = props.customizing === true;
   return (
     <>
-      <ComposerMenuHeader title="Connectors" leading={props.leading} />
+      <ComposerMenuHeader
+        title="Connectors"
+        leading={props.leading}
+        trailing={
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-fg-muted">Customize</span>
+            <ComposerMenuSwitch
+              label="Customize connectors"
+              checked={customizing}
+              onCheckedChange={(next) => props.onCustomizingChange?.(next)}
+            />
+          </div>
+        }
+      />
       <div className="min-h-0 shrink overflow-y-auto overscroll-contain p-2">
         {props.loading && !connectors.length ? (
           <p className="px-2 py-4 text-xs text-fg-muted" role="status">
@@ -47,25 +68,30 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
           const repair = server.connectionStatus === "reconnect";
           const unavailable = server.connectionStatus === "unavailable";
           const busy = props.busyId === server.id;
+          const rowLocked = !customizing && !repair && !unavailable;
           return (
             <ConnectorAction
               presentation={props.presentation}
               keepOpen
               key={server.id}
-              checked={repair || unavailable ? undefined : selected}
+              checked={repair || unavailable || rowLocked ? undefined : selected}
               label={
                 repair
                   ? `Reconnect ${server.name}`
                   : unavailable
                     ? `${server.name} unavailable`
-                    : server.name
+                    : rowLocked
+                      ? `${server.name}${selected ? ", on for this session" : ", off for this session"}`
+                      : server.name
               }
               disabled={busy}
+              locked={rowLocked}
               onAction={() => {
                 if (repair || unavailable) {
                   props.onReconnect?.(server.id);
                   return;
                 }
+                if (rowLocked) return;
                 const next = new Set(props.selection.mcpServerIds);
                 if (selected) next.delete(server.id);
                 else next.add(server.id);
@@ -75,7 +101,10 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
                   firstPartyToolIds: new Set(props.selection.firstPartyToolIds),
                 });
               }}
-              className="min-h-11 cursor-pointer gap-3 rounded-none border-b border-border px-0 py-3 last:border-b-0"
+              className={cn(
+                "min-h-11 gap-3 rounded-none border-b border-border px-0 py-3 last:border-b-0",
+                rowLocked ? "cursor-default hover:bg-transparent" : "cursor-pointer",
+              )}
             >
               <CapabilityLogo
                 src={server.logoSrc ?? null}
@@ -101,8 +130,12 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
                 <Loader2Icon className="size-4 animate-spin" />
               ) : repair || unavailable ? (
                 <RefreshCwIcon className="size-4 text-fg-muted" />
-              ) : (
+              ) : customizing ? (
                 <ComposerMenuSwitchIndicator checked={selected} />
+              ) : selected ? (
+                <CheckIcon className="size-4 text-fg-muted" aria-hidden />
+              ) : (
+                <span className="size-4" aria-hidden />
               )}
             </ConnectorAction>
           );
@@ -122,11 +155,25 @@ function ConnectorAction(props: {
   checked?: boolean;
   label?: string;
   disabled?: boolean;
+  locked?: boolean;
   className?: string;
   keepOpen?: boolean;
   onAction: () => void;
   children: ReactNode;
 }) {
+  if (props.locked) {
+    return (
+      <div
+        aria-label={props.label}
+        className={cn(
+          "flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm",
+          props.className,
+        )}
+      >
+        {props.children}
+      </div>
+    );
+  }
   if (props.presentation === "dialog") {
     return (
       <button
@@ -134,6 +181,7 @@ function ConnectorAction(props: {
         role={props.checked === undefined ? undefined : "switch"}
         aria-label={props.label}
         aria-checked={props.checked}
+        aria-disabled={props.disabled || undefined}
         disabled={props.disabled}
         className={cn(
           "flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm outline-none hover:bg-surface-2 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
@@ -150,6 +198,7 @@ function ConnectorAction(props: {
       role={props.checked === undefined ? "menuitem" : "menuitemcheckbox"}
       aria-label={props.label}
       aria-checked={props.checked}
+      aria-disabled={props.disabled || undefined}
       disabled={props.disabled}
       className={props.className}
       onSelect={(event) => {

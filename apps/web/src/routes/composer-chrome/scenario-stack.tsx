@@ -185,6 +185,7 @@ export function ScenarioStack({
   const [model, setModel] = useState("gpt-5.6-sol");
   const [effort, setEffort] = useState<IntelligenceEffort>("medium");
   const [toolSelection, setToolSelection] = useState(galleryToolSelection);
+  const [connectorCustomizing, setConnectorCustomizing] = useState(false);
   const attachments = useMemo(() => emptyAttachments(), []);
   const { queue, dismissIncoming, addCommandResult } = useHarnessLiveQueue(scenario.queue);
   const goal = useHarnessLiveGoal(scenario.goal);
@@ -279,6 +280,8 @@ export function ScenarioStack({
           servers={galleryToolServers}
           firstPartyTools={galleryFirstPartyTools}
           selection={toolSelection}
+          connectorCustomizing={connectorCustomizing}
+          onConnectorCustomizingChange={setConnectorCustomizing}
           onToolSelectionChange={setToolSelection}
         />
       }

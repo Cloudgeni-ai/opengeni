@@ -1474,7 +1474,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                 <InstalledStrip
                   title="Connected"
                   items={
-                    hasQuery || searchingAll
+                    hasQuery
                       ? []
                       : [
                           ...integrations

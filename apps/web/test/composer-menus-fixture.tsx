@@ -43,6 +43,7 @@ function Fixture() {
     mcpServerIds: new Set(servers.map((server) => server.id)),
     firstPartyToolIds: new Set(),
   });
+  const [connectorCustomizing, setConnectorCustomizing] = useState(false);
   const [selected, setSelected] = useState(new Set([1]));
   const [refs, setRefs] = useState<Record<number, string>>({});
   const [settings, setSettings] = useState<AgentLearningOverrides>({});
@@ -115,6 +116,8 @@ function Fixture() {
           servers={servers}
           firstPartyTools={[]}
           selection={selection}
+          connectorCustomizing={connectorCustomizing}
+          onConnectorCustomizingChange={setConnectorCustomizing}
           onToolSelectionChange={setSelection}
           menuSide="bottom"
           repositories={{ selectedCount: selected.size, panel: <RepositoryBody {...props} /> }}
