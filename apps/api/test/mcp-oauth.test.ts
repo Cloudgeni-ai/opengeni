@@ -9,7 +9,11 @@ import {
   isMcpOAuthPublicProtocolPath,
   isMcpOAuthResourcePath,
   mcpOAuthBearerToken,
+  mcpOAuthRedirectUriCandidates,
   registerMcpOAuthRoutes,
+  renderMcpOAuthConsentPage,
+  renderMcpOAuthContinuePage,
+  renderMcpOAuthExpiredPage,
 } from "../src/mcp-oauth";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -101,6 +105,95 @@ describe("MCP OAuth protocol", () => {
     });
     expect(rejected.status).toBe(400);
     expect(await rejected.json()).toEqual({ error: "invalid_redirect_uri" });
+  });
+
+  test("registers any native custom-scheme client, not a vendor-specific redirect", async () => {
+    const app = new Hono();
+    registerMcpOAuthRoutes(
+      app,
+      depsWithRows([
+        {
+          client_id: "ogmcp_client_generic_native",
+          redirect_uris: ["myapp://oauth/callback", "http://127.0.0.1:8787/callback"],
+          client_name: "Generic MCP client",
+          grant_types: ["authorization_code", "refresh_token"],
+          response_types: ["code"],
+          created_at: "2026-09-02T00:00:00.000Z",
+        },
+      ]),
+    );
+    const registered = await app.request("/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: ["myapp://oauth/callback", "http://127.0.0.1:8787/callback"],
+        client_name: "Generic MCP client",
+        application_type: "native",
+        scope: "mcp:access",
+      }),
+    });
+    expect(registered.status).toBe(201);
+    expect(await registered.json()).toMatchObject({
+      client_id: "ogmcp_client_generic_native",
+      client_name: "Generic MCP client",
+      redirect_uris: ["myapp://oauth/callback", "http://127.0.0.1:8787/callback"],
+    });
+  });
+
+  test("consent UI lets any client pick organization and workspace", () => {
+    const html = renderMcpOAuthConsentPage({
+      clientName: "Claude Code",
+      requestToken: "ogmcp_req_fixture",
+      accounts: [
+        { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Northwind" },
+        { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", name: "Contoso" },
+      ],
+      workspaces: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          name: "Site A",
+          kind: "shared",
+        },
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          accountId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          name: "Home",
+          kind: "personal",
+        },
+      ],
+      selectedWorkspaceId: "11111111-1111-4111-8111-111111111111",
+    });
+    expect(html).toContain("Claude Code");
+    expect(html).toContain('name="organization"');
+    expect(html).toContain('name="workspace_id"');
+    expect(html).toContain("Northwind");
+    expect(html).toContain("Site A");
+    expect(html).toContain("Home (Personal)");
+    expect(html).not.toContain("cursor://");
+    expect(html).not.toContain("Resource:");
+  });
+
+  test("token exchange can use any registered redirect URI for the same client", () => {
+    expect(
+      mcpOAuthRedirectUriCandidates(
+        ["myapp://oauth/callback", "http://127.0.0.1:8787/callback"],
+        "http://127.0.0.1:8787/callback",
+      ),
+    ).toEqual(["http://127.0.0.1:8787/callback", "myapp://oauth/callback"]);
+    expect(
+      mcpOAuthRedirectUriCandidates(["https://client.example/callback"], "https://evil.example"),
+    ).toEqual([]);
+  });
+
+  test("continue and expired pages stay client-agnostic", () => {
+    const continueHtml = renderMcpOAuthContinuePage("myapp://oauth/callback?code=demo");
+    expect(continueHtml).toContain("Continue authorization");
+    expect(continueHtml).toContain("myapp://oauth/callback?code=demo");
+    expect(continueHtml).not.toContain("cursor://");
+    expect(renderMcpOAuthExpiredPage("This authorization request expired.")).toContain(
+      "Authorization expired",
+    );
   });
 
   test("registers native clients and ignores extra RFC 7591 metadata", async () => {
