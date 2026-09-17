@@ -640,12 +640,12 @@ function authorizationRedirect(redirectUri: string, params: Record<string, strin
   return url.toString();
 }
 
-function completeAuthorizationRedirect(c: Context, redirectTo: string) {
+export function completeAuthorizationRedirect(c: Context, redirectTo: string) {
+  // Consent posts under CSP form-action 'self'. A 302 to the client's
+  // registered redirect_uri (loopback HTTP or a custom scheme) is blocked,
+  // so the waiter never receives the code. Return 200 HTML that navigates
+  // to the exact requested URI from script and Refresh.
   c.header("cache-control", "no-store");
-  const url = new URL(redirectTo);
-  if (url.protocol === "http:" || url.protocol === "https:") {
-    return c.redirect(redirectTo);
-  }
   c.header(
     "content-security-policy",
     "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'",
@@ -709,7 +709,7 @@ export function renderMcpOAuthConsentPage(input: {
     label: consentWorkspaceLabel(workspace),
   }));
   const body = `<p class="lede"><strong>${escapeHtml(input.clientName)}</strong> wants MCP access to the organization and workspace you choose.</p>
-<form method="post" action="/oauth/authorize" onsubmit="this.querySelectorAll('button').forEach(function(button){button.disabled=true})">
+<form method="post" action="/oauth/authorize" onsubmit="var submitter=event.submitter;if(submitter&&submitter.name){var input=document.createElement('input');input.type='hidden';input.name=submitter.name;input.value=submitter.value;this.appendChild(input)}this.querySelectorAll('button').forEach(function(button){button.disabled=true})">
 <input type="hidden" name="request" value="${escapeHtml(input.requestToken)}">
 <label class="field"><span>Organization</span><select id="organization" name="organization" autocomplete="off">${accountOptions}</select></label>
 <label class="field"><span>Workspace</span><select id="workspace_id" name="workspace_id" autocomplete="off">${workspaceOptions}</select></label>
