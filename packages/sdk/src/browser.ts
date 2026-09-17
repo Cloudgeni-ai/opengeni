@@ -1,5 +1,10 @@
 /** Browser-console client. Optional SDK surfaces must not enter this eager graph. */
 export { OpenGeniClient as OpenGeniBrowserClient } from "./client";
+export type {
+  SessionMessageSearchRequest,
+  SessionMessageSearchMatch,
+  SessionMessageSearchResponse,
+} from "./session-message-search";
 export {
   OpenGeniToolCallError,
   OpenGeniToolReapprovalRequiredError,

@@ -187,9 +187,7 @@ describe("MCP OAuth protocol", () => {
     app.get("/https", (c) =>
       completeAuthorizationRedirect(c, "https://client.example/callback?code=demo"),
     );
-    app.get("/native", (c) =>
-      completeAuthorizationRedirect(c, "myapp://oauth/callback?code=demo"),
-    );
+    app.get("/native", (c) => completeAuthorizationRedirect(c, "myapp://oauth/callback?code=demo"));
 
     for (const [path, redirectTo] of [
       ["/loopback", "http://127.0.0.1:4567/callback?code=demo"],

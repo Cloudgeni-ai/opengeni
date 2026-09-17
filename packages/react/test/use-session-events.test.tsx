@@ -99,6 +99,280 @@ function scriptedClient(input: {
 }
 
 describe("useSessionEvents", () => {
+  test("an exact target supersedes the initial tail even when the client ignores abort", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const store = Array.from({ length: 3000 }, (_, i) => event(i + 1));
+    const { client } = scriptedClient({
+      store,
+      listEvents: async (options) => {
+        if (options.before === Number.MAX_SAFE_INTEGER) await gate;
+        return listPage(store, options);
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    expect(hook.result.current.initialLoading).toBe(true);
+    await actRun(async () => expect(await hook.result.current.jumpToSequence(50)).toBe(true));
+    release();
+    await flush(30);
+    expect(hook.result.current.events.some((item) => item.sequence === 50)).toBe(true);
+    expect(hook.result.current.events.at(-1)?.sequence).toBeLessThan(3000);
+    expect(hook.result.current.initialLoading).toBe(false);
+    expect(hook.result.current.loadingTarget).toBe(false);
+    await hook.unmount();
+  });
+
+  test("client replacement fences a pending target rejection without a session change", async () => {
+    let reject!: (reason: Error) => void;
+    const gate = new Promise<SessionEvent[]>((_resolve, rejectPromise) => {
+      reject = rejectPromise;
+    });
+    const store = [event(1000)];
+    const first = scriptedClient({
+      store,
+      listEvents: (options) => (options.limit === 128 ? gate : Promise.resolve(store)),
+    });
+    const second = scriptedClient({ store });
+    const hook = await renderHook(
+      ({ client }) => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      { client: first.client },
+    );
+    await flush(20);
+    let stale!: Promise<boolean>;
+    await actRun(async () => {
+      stale = hook.result.current.jumpToSequence(10);
+    });
+    await hook.rerender({ client: second.client });
+    reject(new Error("old client unauthorized"));
+    await actRun(async () => expect(await stale).toBe(false));
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.loadingTarget).toBe(false);
+    expect(hook.result.current.events).toEqual(store);
+    await hook.unmount();
+  });
+
+  test("exact far-old targets use two bounded reads and preserve adjacent paging", async () => {
+    const store = Array.from({ length: 12_000 }, (_, i) => event(i + 1));
+    const { client, listCalls, streamCalls } = scriptedClient({ store });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    const reads = listCalls.length;
+    const streams = streamCalls.length;
+    await actRun(async () => expect(await hook.result.current.jumpToSequence(1000)).toBe(true));
+    await flush(20);
+    expect(listCalls.slice(reads)).toEqual([
+      { before: 1001, limit: 128, compact: true, payloadMode: "full" },
+      { after: 1000, limit: 128, compact: true, direction: "after", payloadMode: "full" },
+    ]);
+    expect(hook.result.current.events.some((item) => item.sequence === 1000)).toBe(true);
+    expect(hook.result.current.events.length).toBeLessThanOrEqual(256);
+    expect(hook.result.current.lastSequence).toBe(12_000);
+    expect(hook.result.current.hasOlder).toBe(true);
+    expect(hook.result.current.hasNewer).toBe(true);
+    expect(streamCalls.length).toBe(streams);
+    await actRun(() => hook.result.current.loadOlder());
+    await actRun(() => hook.result.current.loadNewer());
+    const sequences = hook.result.current.events.map((item) => item.sequence);
+    expect(new Set(sequences).size).toBe(sequences.length);
+    expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+    expect(sequences).toContain(1000);
+    await hook.unmount();
+  });
+
+  test("rapid target switching ignores stale completion and latest supersedes a target", async () => {
+    const store = Array.from({ length: 5000 }, (_, i) => event(i + 1));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { client } = scriptedClient({
+      store,
+      listEvents: async (options) => {
+        if (options.before === 101 || options.after === 100) await gate;
+        return listPage(store, options);
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    let stale!: Promise<boolean>;
+    await actRun(async () => {
+      stale = hook.result.current.jumpToSequence(100);
+    });
+    expect(hook.result.current.loadingTarget).toBe(true);
+    await actRun(async () => expect(await hook.result.current.jumpToSequence(800)).toBe(true));
+    release();
+    await actRun(async () => expect(await stale).toBe(false));
+    expect(hook.result.current.events.some((item) => item.sequence === 800)).toBe(true);
+    expect(hook.result.current.loadingTarget).toBe(false);
+    await actRun(async () => {
+      stale = hook.result.current.jumpToSequence(100);
+      await hook.result.current.jumpToLatest();
+      expect(await stale).toBe(false);
+    });
+    await flush(20);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(5000);
+    await hook.unmount();
+  });
+
+  test("a pre-aborted signal returns false without disturbing the current view", async () => {
+    const store = Array.from({ length: 300 }, (_, i) => event(i + 1));
+    const { client, listCalls } = scriptedClient({ store });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    const reads = listCalls.length;
+    const controller = new AbortController();
+    controller.abort();
+    await actRun(async () =>
+      expect(await hook.result.current.jumpToSequence(50, { signal: controller.signal })).toBe(
+        false,
+      ),
+    );
+    await flush(10);
+    expect(listCalls.length).toBe(reads);
+    expect(hook.result.current.loadingTarget).toBe(false);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(300);
+    await hook.unmount();
+  });
+
+  test("closing Find during the fetch fences the window replacement and settles loadingTarget", async () => {
+    const store = Array.from({ length: 3000 }, (_, i) => event(i + 1));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { client } = scriptedClient({
+      store,
+      listEvents: async (options) => {
+        if (options.before === 101 || options.after === 100) await gate;
+        return listPage(store, options);
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    const controller = new AbortController();
+    let pending!: Promise<boolean>;
+    await actRun(async () => {
+      pending = hook.result.current.jumpToSequence(100, { signal: controller.signal });
+    });
+    expect(hook.result.current.loadingTarget).toBe(true);
+    // Find closes while the bounded reads are still in flight.
+    controller.abort();
+    release();
+    await actRun(async () => expect(await pending).toBe(false));
+    await flush(20);
+    // The fetched window was never published; the live tip is restored.
+    expect(hook.result.current.events.some((item) => item.sequence === 100)).toBe(false);
+    expect(hook.result.current.loadingTarget).toBe(false);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(3000);
+    await hook.unmount();
+  });
+
+  test("an aborted target does not disturb a newer navigation that superseded it", async () => {
+    const store = Array.from({ length: 5000 }, (_, i) => event(i + 1));
+    let releaseFirst!: () => void;
+    const gateFirst = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const { client } = scriptedClient({
+      store,
+      listEvents: async (options) => {
+        if (options.before === 101 || options.after === 100) await gateFirst;
+        return listPage(store, options);
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    const controller = new AbortController();
+    let stale!: Promise<boolean>;
+    await actRun(async () => {
+      stale = hook.result.current.jumpToSequence(100, { signal: controller.signal });
+    });
+    // A newer target supersedes the aborted one; only the newer window applies.
+    await actRun(async () => expect(await hook.result.current.jumpToSequence(800)).toBe(true));
+    controller.abort();
+    releaseFirst();
+    await actRun(async () => expect(await stale).toBe(false));
+    await flush(20);
+    expect(hook.result.current.events.some((item) => item.sequence === 800)).toBe(true);
+    expect(hook.result.current.events.some((item) => item.sequence === 100)).toBe(false);
+    expect(hook.result.current.loadingTarget).toBe(false);
+    await hook.unmount();
+  });
+
+  test("a target cannot cross session or client identity and invalid targets do not navigate", async () => {
+    const store = Array.from({ length: 3000 }, (_, i) => event(i + 1));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = scriptedClient({
+      store,
+      listEvents: async (options) => {
+        if (options.limit === 128) await gate;
+        return listPage(store, options);
+      },
+    });
+    const second = scriptedClient({ store: [event(9000)] });
+    const hook = await renderHook(
+      ({ client, sessionId }) => useSessionEvents(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      { client: first.client, sessionId: SESSION_ID },
+    );
+    await flush(20);
+    for (const invalid of [0, -1, NaN, Infinity, 1.5]) {
+      expect(await hook.result.current.jumpToSequence(invalid)).toBe(false);
+    }
+    let stale!: Promise<boolean>;
+    await actRun(async () => {
+      stale = hook.result.current.jumpToSequence(10);
+    });
+    await hook.rerender({ client: second.client, sessionId: SECOND_SESSION_ID });
+    release();
+    await actRun(async () => expect(await stale).toBe(false));
+    await flush(20);
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([9000]);
+    expect(hook.result.current.loadingTarget).toBe(false);
+    await hook.unmount();
+  });
+
+  test("oversized target stays exact and a missing sequence leaves the window intact", async () => {
+    const huge = event(3, "user.message", {
+      text: "x".repeat(SESSION_EVENT_BROWSER_MAX_BYTES + 100),
+    });
+    const store = [event(1), huge, event(4)];
+    const { client } = scriptedClient({ store });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    await actRun(async () => expect(await hook.result.current.jumpToSequence(3)).toBe(true));
+    expect(hook.result.current.events).toEqual([huge]);
+    expect(hook.result.current.hasNewer).toBe(true);
+    await actRun(async () => expect(await hook.result.current.jumpToSequence(2)).toBe(false));
+    expect(hook.result.current.events).toEqual([huge]);
+    await hook.unmount();
+  });
+
   test("a second older page survives the stream reconnect caused by the first", async () => {
     const store = Array.from({ length: 4000 }, (_, i) => event(i + 1));
     let release!: () => void;

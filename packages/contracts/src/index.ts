@@ -1,4 +1,5 @@
 export * from "./artifact-catalog";
+export * from "./session-message-search";
 export * from "./session-goal-reports";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
 export * from "./organization-integration-policy";

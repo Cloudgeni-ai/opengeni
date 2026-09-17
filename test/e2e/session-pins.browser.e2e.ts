@@ -568,13 +568,23 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const managerRow = rail.locator(`a[data-session-row="${manager.id}"]`);
       await managerRow.waitFor();
 
-      const search = page.getByRole("searchbox", { name: "Search sessions" });
-      await search.fill("Created grouping child");
-      await page.getByText("1 matching session.").waitFor();
-      // Leaving flat child search returns to root browsing; creator filters
-      // are no longer offered by the compact view menu.
-      await search.fill("");
+      const browseIds = await rail
+        .locator("a[data-session-row]")
+        .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-session-row")));
+      const dialog = await openWorkspaceSearch(page, "Created grouping child");
+      const matchingSessions = dialog.locator('[aria-label="Matching sessions"]');
+      await matchingSessions.getByRole("button", { name: /Created grouping child/ }).waitFor();
+      expect(await matchingSessions.locator("[data-search-result]").count()).toBe(1);
+      // Workspace search includes the child as a flat result but never changes
+      // the independent browse hierarchy or installs a child-only creator filter.
+      await page.keyboard.press("Escape");
+      await dialog.waitFor({ state: "hidden" });
       await managerRow.waitFor();
+      expect(
+        await rail
+          .locator("a[data-session-row]")
+          .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-session-row"))),
+      ).toEqual(browseIds);
       await page.getByRole("button", { name: /^Session view/ }).click();
       expect(await page.getByText("Selected", { exact: true }).count()).toBe(0);
       await page.getByRole("menuitem", { name: /^Group by/ }).hover();
@@ -1062,19 +1072,28 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await otherPage.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
     expect(await otherPage.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
-    // Search is server-backed: a matching pin remains in the pin section while
-    // unrelated ordinary rows disappear instead of being forced through.
-    const search = pageB.getByRole("searchbox", { name: "Search sessions" });
-    await search.fill("Master pin target");
-    await pageB.getByText("1 matching session.").waitFor();
+    // Server-backed workspace search is a separate dialog, not a rail filter.
+    // Its matching pin appears once; closing it leaves unrelated browse rows
+    // and the member's pinned section intact.
+    const browseIds = await pageB
+      .locator("[data-sessionpin-session-list] a[data-session-row]")
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-session-row")));
+    const dialog = await openWorkspaceSearch(pageB, "Master pin target");
+    const matchingSessions = dialog.locator('[aria-label="Matching sessions"]');
+    await matchingSessions.getByRole("button", { name: /Master pin target/ }).waitFor();
+    expect(await matchingSessions.locator("[data-search-result]").count()).toBe(1);
+    expect(await matchingSessions.getByText("Newer unrelated activity").count()).toBe(0);
+    await pageB.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
     await pinnedB.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
-    expect(await pageB.getByRole("link", { name: /^Open Newer unrelated activity/ }).count()).toBe(
-      0,
-    );
-    await search.fill("");
     await pageB
       .getByRole("link", { name: /^Open Newer unrelated activity/ })
       .waitFor({ timeout: 10_000 });
+    expect(
+      await pageB
+        .locator("[data-sessionpin-session-list] a[data-session-row]")
+        .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-session-row"))),
+    ).toEqual(browseIds);
 
     // Pagination is also exercised through the normal authenticated browser API
     // path. Pins are complete on every page and never consume/duplicate an
@@ -1517,7 +1536,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const page = await context.newPage();
     try {
       await page.goto(webBaseUrl);
-      const workspaceId = await workspaceFromPage(page, "Last activity");
+      await workspaceFromPage(page, "Last activity");
+      // Isolate browse pagination without relying on the retired inline filter.
+      const workspaceResponse = await page.request.post(`${apiBaseUrl}/v1/workspaces`, {
+        data: { name: `Pagination browse ${Date.now()}` },
+      });
+      expect(workspaceResponse.status()).toBe(201);
+      const workspaceId: string = (await workspaceResponse.json()).id;
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      await workspaceFromPage(page, "Last activity");
       const batch = `Expired cursor batch ${Date.now()}`;
       let sentinel: BrowserSession | null = null;
       // Bootstrap authority through the public API, then seed the remaining
@@ -1529,8 +1556,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         workspaceId,
         "Pagination sentinel prompt",
       );
-      // Search also matches the immutable initial prompt. Give this root a
-      // matching title only, so a later rename really removes its membership.
+      // Give the oldest root a unique title for dialog search and later prove
+      // a real archive write removes it from the loaded active browse window.
       const namedSentinel = await page.request.patch(
         `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${sentinel.id}`,
         { data: { title: `${batch} oldest sentinel` } },
@@ -1565,21 +1592,20 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         );
       }
 
-      // Stay in the mounted workspace; search performs the real list refresh.
-      const search = page.getByRole("searchbox", { name: "Search sessions" });
-      await search.waitFor();
-      await page.locator("[data-sessionpin-session-list] a[data-session-row]").first().waitFor({
-        timeout: 30_000,
-      });
+      // Reload the dedicated workspace to obtain its normal unfiltered page.
       const firstPageResponse = page.waitForResponse(
-        (response) =>
-          successfulSessionPageResponse(response, workspaceId, {
-            search: batch,
-            cursor: null,
-          }),
+        (response) => {
+          const url = new URL(response.url());
+          return (
+            successfulSessionPageResponse(response, workspaceId, { cursor: null }) &&
+            url.searchParams.get("limit") === "50" &&
+            !url.searchParams.has("pinsOnly") &&
+            !url.searchParams.has("updatedFrom")
+          );
+        },
         { timeout: 30_000 },
       );
-      await search.fill(batch);
+      await page.reload();
       const firstPage = (await (await firstPageResponse).json()) as BrowserSessionPage;
       expect(firstPage.sessions).toHaveLength(50);
       expect(firstPage.nextCursor).toBeTruthy();
@@ -1594,7 +1620,6 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           const url = new URL(response.url());
           return (
             successfulSessionPageResponse(response, workspaceId, {
-              search: batch,
               cursor: null,
             }) &&
             url.searchParams.has("updatedFrom") &&
@@ -1620,6 +1645,24 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       expect(await visibleRows.count()).toBe(100);
 
+      // Searching an older title uses the global dialog and must not replace
+      // the already-loaded group window or discard its continuation cursor.
+      const beforeSearchIds = await visibleRows.evaluateAll((rows) =>
+        rows.map((row) => row.getAttribute("data-session-row")),
+      );
+      const dialog = await openWorkspaceSearch(page, `${batch} oldest sentinel`);
+      await dialog
+        .locator('[aria-label="Matching sessions"]')
+        .getByRole("button", { name: new RegExp(`${batch} oldest sentinel`) })
+        .waitFor();
+      await page.keyboard.press("Escape");
+      await dialog.waitFor({ state: "hidden" });
+      expect(
+        await visibleRows.evaluateAll((rows) =>
+          rows.map((row) => row.getAttribute("data-session-row")),
+        ),
+      ).toEqual(beforeSearchIds);
+
       // A generic 500 is not treated as cursor expiry: loaded rows stay put and
       // the exact current cursor remains explicitly retryable.
       let injectedFailure = false;
@@ -1628,7 +1671,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         if (
           !injectedFailure &&
           url.searchParams.get("cursor") === filteredFirstPage.nextCursor &&
-          url.searchParams.get("search") === batch
+          !url.searchParams.get("search")
         ) {
           injectedFailure = true;
           await route.fulfill({
@@ -1661,7 +1704,6 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const finalPageResponse = page.waitForResponse(
         (response) =>
           successfulSessionPageResponse(response, workspaceId, {
-            search: batch,
             cursor: filteredFirstPage.nextCursor,
           }),
         { timeout: 10_000 },
@@ -1685,11 +1727,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // A write from another device can change membership outside page one.
       // The exhausted group must revalidate its loaded window on the ordinary
       // poll, without requiring navigation or discarding the other 105 rows.
-      const rename = await page.request.patch(
-        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${sentinel!.id}`,
-        { data: { title: "Moved outside the current search" } },
-      );
-      expect(rename.ok()).toBe(true);
+      const sentinelUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${sentinel!.id}`;
+      const sentinelState = await (await page.request.get(sentinelUrl)).json();
+      const archived = await page.request.put(`${sentinelUrl}/archive`, {
+        data: { archived: true, expectedVersion: sentinelState.archiveVersion },
+      });
+      expect(archived.ok()).toBe(true);
       await page.locator(`a[data-session-row="${sentinel!.id}"]`).waitFor({
         state: "detached",
         timeout: 30_000,
@@ -2810,7 +2853,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await expectTouchTarget(
           navigation.getByRole("button", { name: /^Actions for Mobile pin/ }),
         );
-        await expectTouchTarget(navigation.getByRole("searchbox", { name: "Search sessions" }));
+        await expectTouchTarget(
+          navigation.getByRole("button", { name: "Search sessions", exact: true }),
+        );
         await expectContainedInViewport(navigation, viewport.width);
         await expectNoPageOverflow(page);
         await expectNoAxeViolations(page, ["header", "[data-sessionpin-session-list]"]);
@@ -3201,6 +3246,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 90_000);
 });
+
+async function openWorkspaceSearch(page: Page, query: string) {
+  await page.getByRole("button", { name: "Search sessions", exact: true }).first().click();
+  const dialog = page.getByRole("dialog", { name: "Search sessions", exact: true });
+  await dialog
+    .getByRole("searchbox", { name: "Search session titles and messages", exact: true })
+    .fill(query);
+  return dialog;
+}
 
 type BrowserSession = {
   id: string;

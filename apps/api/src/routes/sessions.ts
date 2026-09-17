@@ -1,4 +1,6 @@
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
+import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
+import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { scheduledSessionIds } from "@opengeni/db";
 import { withSiteSessionOrigin } from "@opengeni/core";
 import { resolveSiteSessionOrigin } from "../site-session-origin";
@@ -677,6 +679,59 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           422,
         );
       }
+      throw error;
+    }
+  });
+
+  app.get("/v1/workspaces/:workspaceId/session-message-search", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
+    const grant = authorization.grant;
+    // A single-session filter is not authority: both searches use the complete
+    // live host/agent list scope, plus ordinary private/archive/RLS boundaries.
+    let authorizationScope;
+    try {
+      authorizationScope = await requireSessionAuthorizationListScope(deps, grant, "http");
+    } catch (error) {
+      throw sessionAuthorizationHttpError(error);
+    }
+    const raw = c.req.query();
+    const parsed = SessionMessageSearchRequest.safeParse({
+      ...raw,
+      ...(raw.limit !== undefined ? { limit: Number(raw.limit) } : {}),
+    });
+    if (!parsed.success)
+      throw new HTTPException(400, { message: "Invalid session message search request" });
+    try {
+      return c.json(
+        await searchSessionMessagesForSubject(
+          db,
+          workspaceId,
+          parsed.data,
+          {
+            subjectId: grant.subjectId,
+            ...(authorizationScope ? { authorizationScope } : {}),
+            personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
+          },
+          { signal: c.req.raw.signal },
+        ),
+      );
+    } catch (error) {
+      if (error instanceof SessionListAccessError)
+        throw new HTTPException(403, { message: error.message });
+      if (error instanceof SessionMessageSearchCursorError)
+        throw new HTTPException(400, { message: error.message });
+      // Clients are told to cancel superseded searches, so an abort here is a
+      // routine client disconnect, never a server failure. Match the existing
+      // client-gone convention (mcp/request-abort.ts): 499 with an empty body,
+      // which a departed client never reads and monitors never count as 5xx.
+      if (c.req.raw.signal.aborted || (error instanceof Error && error.name === "AbortError"))
+        return new Response(null, { status: 499 });
       throw error;
     }
   });

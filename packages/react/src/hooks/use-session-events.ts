@@ -73,6 +73,9 @@ export type UseSessionEventsResult = {
    * "Jump to latest" when the tip is not in memory (history view).
    */
   jumpToLatest: () => Promise<void>;
+  /** Replace history with a bounded window containing this exact durable event. */
+  jumpToSequence: (sequence: number, options?: { signal?: AbortSignal }) => Promise<boolean>;
+  loadingTarget: boolean;
   error: Error | null;
 };
 
@@ -136,6 +139,8 @@ export function useSessionEvents(
   const replay = options.replay ?? "windowed";
   const fullReplay = replay === "full" || after !== 0;
   const streamKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${after}\u0000${fullReplay ? "full" : "windowed"}`;
+  const navigationIdentityRef = useRef({ client, streamKey, enabled });
+  navigationIdentityRef.current = { client, streamKey, enabled };
 
   const [eventWindow, setEventWindow] = useState<BrowserSessionEventWindow>(EMPTY_EVENT_WINDOW);
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
@@ -151,6 +156,8 @@ export function useSessionEvents(
   const [loadingNewer, setLoadingNewer] = useState(false);
   const [loadingOldest, setLoadingOldest] = useState(false);
   const [loadingLatest, setLoadingLatest] = useState(false);
+  const [loadingTarget, setLoadingTarget] = useState(false);
+  const loadingTargetRef = useRef(false);
   const [streamEpoch, setStreamEpoch] = useState(0);
   // "history" = reading a non-tip window; live SSE must not fill the gap.
   const [viewMode, setViewMode] = useState<"live" | "history">("live");
@@ -191,6 +198,8 @@ export function useSessionEvents(
     loadingOlderRef.current = false;
     loadingNewerRef.current = false;
     loadingOldestRef.current = false;
+    loadingTargetRef.current = false;
+    setLoadingTarget(false);
     setLoadingOlder(false);
     setLoadingNewer(false);
     setLoadingOldest(false);
@@ -525,6 +534,7 @@ export function useSessionEvents(
   ]);
 
   const navigationBusy = (): boolean =>
+    loadingTargetRef.current ||
     loadingOlderRef.current ||
     loadingNewerRef.current ||
     loadingOldestRef.current ||
@@ -826,7 +836,102 @@ export function useSessionEvents(
     }
   }, [client, workspaceId, sessionId]);
 
+  const jumpToSequence = useCallback(
+    async (sequence: number, navigationOptions?: { signal?: AbortSignal }): Promise<boolean> => {
+      const signal = navigationOptions?.signal;
+      if (!sessionId || !Number.isSafeInteger(sequence) || sequence < 1) return false;
+      // A navigation that was already cancelled (for example Find closed before
+      // the caller could react) must not disturb any current view state.
+      if (signal?.aborted) return false;
+      // Explicit targets supersede both other targets and adjacent-page requests.
+      const generation = ++navigationGenerationRef.current;
+      const current = () =>
+        generation === navigationGenerationRef.current &&
+        navigationIdentityRef.current.client === client &&
+        navigationIdentityRef.current.streamKey === streamKey &&
+        navigationIdentityRef.current.enabled === enabled;
+      const previousMode = viewModeRef.current;
+      streamAbortRef.current?.abort();
+      generationRef.current += 1;
+      viewModeRef.current = "history";
+      setViewMode("history");
+      loadingOlderRef.current = loadingNewerRef.current = loadingOldestRef.current = false;
+      setLoadingOlder(false);
+      setLoadingNewer(false);
+      setLoadingOldest(false);
+      loadingTargetRef.current = true;
+      setLoadingTarget(true);
+      let published = false;
+      try {
+        const [before, following] = await Promise.all([
+          loadPreviousPage(client, workspaceId, sessionId, sequence + 1, { pageSize: 128 }),
+          loadNextPage(client, workspaceId, sessionId, sequence, { pageSize: 128 }),
+        ]);
+        // Close-during-fetch fence: a pending jump must not replace the window
+        // after its owner (for example ConversationFind) has gone away. The
+        // finally block still settles loadingTarget for this generation.
+        if (signal?.aborted) return false;
+        if (!current()) return false;
+        if (!before.some((event) => event.sequence === sequence)) return false;
+        // Bound each side, keeping the target even if its message alone exceeds
+        // the ordinary byte budget. Never evict the very event being navigated to.
+        const prefix = boundBrowserSessionEventWindow(before, {
+          direction: "newest",
+          maxBytes: SESSION_EVENT_BROWSER_MAX_BYTES / 2,
+        });
+        const retained = boundBrowserSessionEventWindow([...prefix.events, ...following], {
+          direction: "oldest",
+        });
+        if (!retained.events.some((event) => event.sequence === sequence)) return false;
+        streamAbortRef.current?.abort();
+        generationRef.current += 1;
+        const status = observeSessionStatus(retained.events, sessionStatusRef);
+        eventWindowRef.current = retained;
+        oldestSequenceRef.current = retained.events[0]!.sequence;
+        newestSequenceRef.current = maxResumeSequenceOrNull(retained.events);
+        lastSequenceRef.current = Math.max(lastSequenceRef.current, newestSequenceRef.current ?? 0);
+        hasOlderRef.current = !isLogStart(retained.events[0]!);
+        // Compact/byte-bounded pages may be short despite more durable history.
+        // Only an empty forward page proves the end (same rule as loadNewer).
+        hasNewerRef.current =
+          following.length > 0 ||
+          retained.truncated ||
+          (newestSequenceRef.current ?? 0) < lastSequenceRef.current;
+        initialWindowLoadedRef.current = true;
+        viewModeRef.current = "history";
+        setEventWindow(retained);
+        setHasOlder(hasOlderRef.current);
+        setHasNewer(hasNewerRef.current);
+        setInitialLoading(false);
+        setViewMode("history");
+        setNewerError(null);
+        if (status !== undefined) setSessionStatusProjection(status);
+        published = true;
+        return true;
+      } catch (reason) {
+        if (!current() || signal?.aborted) return false;
+        throw reason;
+      } finally {
+        if (current()) {
+          loadingTargetRef.current = false;
+          setLoadingTarget(false);
+          if (!published && previousMode === "live") {
+            viewModeRef.current = "live";
+            setViewMode("live");
+            setStreamEpoch((epoch) => epoch + 1);
+          }
+        }
+      }
+    },
+    [client, workspaceId, sessionId, streamKey, enabled],
+  );
+
   const jumpToLatest = useCallback(async (): Promise<void> => {
+    if (loadingTargetRef.current) {
+      navigationGenerationRef.current += 1;
+      loadingTargetRef.current = false;
+      setLoadingTarget(false);
+    }
     if (!sessionId || navigationBusy()) {
       return;
     }
@@ -895,6 +1000,8 @@ export function useSessionEvents(
     loadOldest,
     loadingLatest: !identityMatches ? false : loadingLatest,
     jumpToLatest,
+    jumpToSequence,
+    loadingTarget: identityMatches && loadingTarget,
     error: identityMatches ? (newerError ?? error) : null,
   };
 }

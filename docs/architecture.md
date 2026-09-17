@@ -20,16 +20,15 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-OpenGeni is a self-hostable, session-based agent runtime. Postgres owns durable
-truth; Temporal coordinates execution; NATS transports reconstructible events.
-The control plane owns identity, tenancy, sessions, human intervention, goals,
+OpenGeni is a self-hostable, session-based agent runtime: Postgres owns durable
+truth, Temporal execution coordination, and NATS reconstructible transport.
+Control-plane ownership: identity, tenancy, sessions, human intervention, goals,
 recovery, compute, files, artifacts, usage, and observability. The API authorizes
 clients and bounded browser access to storage, sandboxes, relays, Codex WebRTC,
-and Gateway realtime WebSockets. Workers run agents in provisioned sandboxes or
-Connected Machines.
+and Gateway realtime WebSockets. Workers run agents in sandboxes or Connected Machines.
 
-The ownership map in §13 links canonical sources for sessions, tools, Knowledge,
-Skills, artifacts and clients.
+§13 maps ownership and canonical sources for sessions, tools, Knowledge, Skills,
+artifacts and clients.
 
 External users require explicit live membership. `asUser()` supplies canonical
 identity; an end-user label does not. Private/shared visibility differs from
@@ -42,8 +41,6 @@ See [product integration](product-integration.md),
 ---
 
 ## 3. Core invariants
-
-Invariants.
 
 ### 3.1 Postgres is durable truth; NATS is transport
 
@@ -77,9 +74,9 @@ Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 ### 3.2 Temporal coordinates; streams stay outside workflow history
 
 Temporal orchestrates workflows, activities, signals, timers and `continueAsNew`.
-Activities read Postgres obligations; duplicate, delayed, lost or closing-run
-signals cannot replace them. Conversation, goals, queues, tokens, tool output
-and provider transcripts stay outside workflow history. Streams use ordinary events.
+Activities read Postgres obligations, never replaced by duplicate, delayed, lost
+or closing-run signals. Conversation, goals, queues, tokens, tool output and
+provider transcripts stay outside workflow history; streams use ordinary events.
 
 Canonical: `apps/worker/src/workflows/session.ts` and
 [`run-lifecycle.md`](run-lifecycle.md).
@@ -107,12 +104,11 @@ cancellation is intent; durable quiescence gates replacements, including closed
 attempts' unresolved writers. After execution, finalization has per-stage
 containment and heartbeat/metric evidence (`agent-turn/finalization-monitor.ts`).
 
-A recoverable activity shutdown creates a transactional workflow-wake
-obligation in Postgres. Delivery remains unacknowledged until the exact closed
-attempt has durable quiescence, and every attempt-owned retained-process
-settlement advances that same outbox row in its settlement transaction. A
-workflow close or writer exit racing reconciliation cannot orphan recovery;
-repeated Pause re-arms a missing quiescence wake.
+Recoverable activity shutdown transactionally creates a Postgres workflow-wake
+obligation. Delivery stays unacknowledged until the exact closed attempt is
+durably quiescent. Each attempt-owned retained-process settlement advances that
+outbox row atomically. Workflow close or writer exit racing reconciliation cannot
+orphan recovery; repeated Pause re-arms missing quiescence wakes.
 
 A command is attempt-owned until durable adoption of its exact provider identity.
 Thereafter turn completion and Steer detach; command cancellation, Pause, and
@@ -127,6 +123,11 @@ never history; running reads do not. Failed/cancelled sessions retain audit only
 Fanout is replaceable and post-commit. Conversation history remains separate:
 sequence cursors bound traversal, and `packages/db/src/session-event-slices.ts`
 transfers large message scalars in bounded slices, not whole histories.
+Literal full-history Find is separately authorized and resumable:
+`packages/db/src/session-message-search.ts` batches ordinary scalars, reusing
+slices for large completed messages. Browsers receive occurrence snippets and
+cursors, never complete payload-history scans. See
+[`session-message-search.md`](session-message-search.md).
 
 Docker/local SDK processes expose turn-scoped handles after a bounded wait.
 They remain on the turn cancellation fence and stop before finalization, allowing
@@ -145,23 +146,21 @@ External SDK history and append verification: [`run-lifecycle.md`](run-lifecycle
 
 ### 3.4 Long runs are bounded by policy and intent, not arbitrary loop caps
 
-Agents may work for days. Call/continuation/duration counts do not prove stalled
-progress. Controls are budget admission, provider capacity, Pause/Cancel, goal
-state and host policy. Recoverable conditions preserve logical turns/sessions
-when safe. Postgres owns continuation obligations; Temporal delivers replaceable
-nudges. Goals never live in `Agent.instructions` or solely workflow memory.
+Agents may work for days; call/continuation/duration counts cannot prove stalled
+progress. Budget admission, provider capacity, Pause/Cancel, goal state and host
+policy govern. Safe recovery preserves logical turns/sessions. Postgres owns
+continuation obligations; Temporal supplies replaceable nudges. Goals never live
+in `Agent.instructions` or solely workflow memory.
 Generic caps cannot replace recovery, pacing, memory or tool-lifecycle fixes.
 
 Canonical: [`goals.md`](goals.md) and [`run-lifecycle.md`](run-lifecycle.md).
 
 Reports—including secondary audits—use native documents. Operational instructions
-route; the Documents Skill guides authoring; goal/artifact domains validate
-persisted requirements and current inspection proof. Chat/code/local-file
+route authoring to the Documents Skill; goal/artifact domains validate persisted
+requirements/current inspection proof. Chat/code/local-file
 exceptions remain. See [`goals.md`](goals.md).
 
 ### 3.5 Each durable store has one job
-
-Stores are not interchangeable:
 
 | Store | Owns | Must not become |
 | --- | --- | --- |
@@ -177,11 +176,10 @@ Stores are not interchangeable:
 [Chat delivery](run-lifecycle.md): lossless content, windowed history.
 
 Knowledge stores exact revisions, evidence and publication receipts in Postgres;
-original files stay in object storage. Scoped access precedes search ranking.
-Chat attachments remain conversation resources. Agents select lasting findings
-and reference sources; supporting evidence is excluded from default discovery.
-Read-only save preparation fetches collections and published/pending matches on
-demand. See [`knowledge.md`](knowledge.md).
+originals stay in object storage. Scoped access precedes ranking. Chat attachments
+remain conversation resources; agents select lasting findings/reference sources.
+Default discovery excludes supporting evidence. Read-only save preparation fetches
+collections and published/pending matches on demand. See [`knowledge.md`](knowledge.md).
 
 Agent learning centralizes Knowledge, instructions and Skills in Automatic,
 Review first and Off settings, with sparse chat/task overrides and immutable
@@ -1311,58 +1309,66 @@ Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.m
 `@opengeni/sdk` owns client contracts; `@opengeni/react` owns hooks/UI.
 `apps/web` consumes them, never owns hidden domain semantics.
 
-`ConnectPanel`, `ConnectionDiscovery` and `McpConnectionCard` share connection
-inventory and OAuth setup across console and embeds. Host presentation filters
-never authorize acquisition. Session-targeted setup preserves exact personal
-consent and tool selection; connection-only setup never mutates a session.
+`ConnectPanel`, `ConnectionDiscovery` and `McpConnectionCard` share console/embed
+connection inventory and OAuth setup. Presentation filters never authorize
+acquisition. Session-targeted setup preserves exact personal consent/tool
+selection; connection-only setup never mutates sessions.
 Canonical mechanics: [shared connection presentation](connection-presentation.md).
 
 `SessionConversation` includes feed, queue/actions, durable composer, model policy,
-human-input forms and history. `ChatComposer` is input-only. Sites supply their
-Site-bound client. Foreground/background share tokens; light embeds set
-`data-og-theme="light"` inside the iframe.
+human-input forms and history; `ChatComposer` is input-only. Sites supply Site-bound
+clients. Foreground/background share tokens; light embeds set iframe
+`data-og-theme="light"`.
 
 `conversationTimeline`, `SessionChrome`, `SessionCommands` and `ChatComposer`
-share reconciliation and controls. Commands mount only in the open activity drawer.
-`SessionConnectionRequest` resolves exact native identities; missing or ambiguous
-matches fail closed. Selection/grant helpers live in `packages/react/src`.
+share reconciliation/controls. Commands mount only in open activity drawers.
+`SessionConnectionRequest` requires exact native identities, failing closed on
+missing/ambiguous matches. Selection/grant helpers: `packages/react/src`.
 
-Sites install exact SDK/React/Codemode/CLI versions from virtual skill file
+Sites install exact SDK/React/Codemode/CLI versions via virtual skill file
 `package-versions.json`: source-manifest defaults or canary
-`OPENGENI_SITE_PACKAGE_VERSIONS`. No worker-directory writes. Only local
-`OPENGENI_LOCAL_SITE_PACKAGES` builds unreleased archives at
-`/opt/opengeni/site-packages`; deployed images do not.
+`OPENGENI_SITE_PACKAGE_VERSIONS`, without worker-directory writes.
+`OPENGENI_LOCAL_SITE_PACKAGES` builds unreleased `/opt/opengeni/site-packages`
+archives locally, never in deployed images.
 
-Timeline history belongs to `packages/react`. `use-session-events.ts` fences
-navigation by session/client lifetime, independently of SSE reconnects. The web
-route supplies source events and keys the timeline by session. Retained event
-identity determines overlap; partial-message row IDs can change on prepend.
-`timeline-anchor.tsx` captures pre-mutation position; `message-timeline.tsx`
-corrects only residual browser-anchor movement, without resuming tip-follow.
-Continued upward input permits bounded older-page loads despite collapsed rows.
-Automatic underfill preserves the tail and offers explicit earlier navigation
-at the window limit. Underfilled history never auto-pages forward; Jump to latest
-restores the live tail. Provider message identity survives normalization and
-coalescing, joining interleaved chunks without merging distinct messages.
-The database reader batches up to 256 events, preserving the default 1 MiB
-full-payload page budget through metadata planning before payload transfer.
+`packages/react` owns timeline history; `use-session-events.ts` fences navigation by
+session/client lifetime independently of SSE reconnects. Web supplies source
+events and session keys. Overlap uses retained event identity; prepends may change
+partial-message row IDs. `timeline-anchor.tsx` captures pre-mutation position;
+`message-timeline.tsx` corrects residual browser-anchor movement without resuming
+tip-follow. Upward input loads bounded older pages despite collapsed rows.
+Underfill preserves tails, offers explicit earlier navigation at limits, never
+auto-pages forward; Jump to latest restores live tails. Normalization/coalescing
+joins interleaved chunks by provider identity without merging distinct messages.
+Pre-transfer metadata planning bounds database batches to 256 events and the
+default 1 MiB full-payload page budget.
 
-Web imports `@opengeni/sdk/browser`. Operator Document-authority and tenancy
-backfills use `@opengeni/sdk/document-authority`; root/`core` retain compatibility.
-Keep non-web methods in optional entries, outside the direct-session bundle;
-bundle-boundary and browser-surface tests enforce this.
+The rail's lazy dialog and route's lazy Find bar search retained user and completed
+assistant text through the browser SDK—not DOM, tool output, reasoning or
+unfinished delta-only messages. Rail providers retain dialog state across session
+navigation, including collapsed/mobile rails. Links carry query, event sequence
+and original UTF-16 offset. `useSessionEvents.jumpToSequence` loads cancellable,
+bounded target windows; `MessageTimeline.searchTarget` owns disclosure/occurrence
+navigation. Browser batches/scan continuations are bounded; counts remain
+provisional until traversal ends. Labeled, bounded Markdown source excerpts
+prevent raw offsets selecting wrong rendered occurrences. Closing Find removes
+highlights but preserves excerpt/reading position; formatted restoration is explicit.
 
-The web session route loads structured questions, command controls, and file
-attachment implementations only when those surfaces mount. Message text and
-repository chips stay eager; local Suspense fallbacks preserve the transcript
-while conditional chunks load. `test/e2e/session-lazy-panels.browser.e2e.ts`
-checks these boundaries against the production build at desktop and mobile sizes.
+Web imports `@opengeni/sdk/browser`; operator Document-authority/tenancy backfills
+use `@opengeni/sdk/document-authority`. Root/`core` retain compatibility.
+Bundle-boundary/browser-surface tests keep non-web methods in optional entries,
+outside direct-session bundles.
 
-Products normally use a server-side SDK proxy and optional React surfaces;
-advanced in-process embedding preserves the same boundaries.
+Web loads structured questions, command controls and file attachments on mount;
+message text and repository chips stay eager. Local Suspense fallbacks preserve
+the transcript. `test/e2e/session-lazy-panels.browser.e2e.ts` checks production
+desktop/mobile chunk boundaries.
 
-The `opengeni-product-integration` Pack is developer guidance, activated only by
-create-time `installedSkillIds`, never installation alone. See
+Products normally use server-side SDK proxies with optional React surfaces;
+in-process embedding preserves these boundaries.
+
+Developer-guidance `opengeni-product-integration` Pack requires create-time
+`installedSkillIds`; installation alone never activates it. See
 `packages/core/src/domain/product-integration-pack.ts` and
 [`product-integration.md`](product-integration.md); migration 0394 requires draining old workers.
 
@@ -1665,12 +1671,12 @@ Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 ### In-conversation connection setup
 
 `SessionCapabilityCard` shares native Connection APIs; hosts retain authorization.
-OAuth never replays tools. Skills retain workspace scope and reviewed hashes.
-Messages authorize the sender's accounts; queued work, retries and children
-retain that identity. Personal schedules have immutable owners. Setup offers
-Personal and Workspace with provider-specific defaults. Explicit choices win;
-reconnect preserves ownership. See [sender-owned connections](design/sender-owned-connections.md)
-for account selection, provider checks and migration.
+OAuth never replays tools. Skills retain workspace scope/reviewed hashes.
+Messages authorize sender accounts; queues, retries and children retain that
+identity. Personal schedules have immutable owners. Personal/Workspace setup
+uses provider defaults unless explicitly chosen; reconnect preserves ownership.
+See [sender-owned connections](design/sender-owned-connections.md) for account
+selection, provider checks and migration.
 
 `apps/worker/src/activities/mcp-credentials.ts` binds native credentials/refresh
 to accepted user, connection, turn and attempt; physical requests recheck authority.
@@ -1690,11 +1696,20 @@ Shared connection presentation and host boundaries: [embedding authority interna
 
 ### Public skill discovery
 
-The workspace-authorized endpoint `GET /v1/workspaces/:workspaceId/skills/search?q=...` uses the existing unauthenticated skills.sh search adapter. Self-hosters need no Vercel account, linking, or key. The upstream compatibility endpoint is undocumented; failures remain visible and retryable rather than appearing as empty results.
+Workspace-authorized `GET /v1/workspaces/:workspaceId/skills/search?q=...` uses the
+unauthenticated skills.sh adapter: no Vercel account, linking or key required.
+The undocumented upstream compatibility endpoint's failures remain visible and
+retryable, never empty results.
 
-`OpenGeniClient.searchPublicSkills` and `SkillDiscovery` from `@opengeni/react/connect` expose search to embedded products. Include `@opengeni/react/connect.css`; the host supplies its query and preview/import callback. Search is debounced, requires two characters, and never installs automatically. Results use the existing source preview and pinned installation flow. Popular and trending feeds are not part of this integration.
+Embeds use `OpenGeniClient.searchPublicSkills`, `SkillDiscovery` from
+`@opengeni/react/connect`, and `@opengeni/react/connect.css`. Hosts supply queries
+and preview/import callbacks. Debounced search requires two characters, never
+auto-installs, and reuses source preview/pinned installation. Popular/trending
+feeds are excluded.
 
-Existing library installations remain manageable, but uninstalled legacy library entries are no longer advertised. Document parsing is included in `bundled_default_skills`, independently of editable-artifact tools.
+Existing library installations remain manageable; uninstalled legacy entries
+are unadvertised. `bundled_default_skills` includes document parsing independently
+of editable-artifact tools.
 
 Plugin marketplace discovery uses `scripts/refresh-plugin-catalog.ts` →
 `data/catalog/plugins-snapshot.json` → the workspace-authorized capabilities

@@ -1,6 +1,6 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { chromium, type Browser, type Page } from "playwright";
-import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort, startProcess, waitFor, type StartedProcess } from "@opengeni/testing";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -50,11 +50,20 @@ const rows = Array.from({ length: 65 }, (_, index) => ({
 type FixtureRow = Omit<(typeof rows)[number], "parentSessionId"> & {
   parentSessionId: string | null;
 };
+const pendingFixtureGateReleases = new Set<() => void>();
+const releaseFixtureGates = () => {
+  for (const resolve of pendingFixtureGateReleases) resolve();
+};
 const deferred = () => {
-  let resolve!: () => void;
+  let complete!: () => void;
   const promise = new Promise<void>((done) => {
-    resolve = done;
+    complete = done;
   });
+  const resolve = () => {
+    pendingFixtureGateReleases.delete(resolve);
+    complete();
+  };
+  pendingFixtureGateReleases.add(resolve);
   return { promise, resolve };
 };
 
@@ -68,12 +77,18 @@ describe("compact session view on the live local workspace route (API fixture)",
     | {
         root: FixtureRow;
         children: FixtureRow[];
+        peers: FixtureRow[];
         mutation?: ReturnType<typeof deferred>;
         mutationStarted: boolean;
         holdRead?: ReturnType<typeof deferred>;
         readStarted: boolean;
+        holdChildRead?: ReturnType<typeof deferred>;
+        childReadStarted?: ReturnType<typeof deferred>;
         failReads: boolean;
         failFirstPage?: boolean;
+        staleFirstPageRoot?: FixtureRow;
+        holdSearch?: ReturnType<typeof deferred>;
+        searchStarted?: boolean;
       }
     | undefined;
   beforeAll(async () => {
@@ -211,7 +226,15 @@ describe("compact session view on the live local workspace route (API fixture)",
         const sortBy = url.searchParams.get("sortBy") ?? "updatedAt";
         const archiveStatus = url.searchParams.get("archiveStatus") ?? "active";
         const fixture = archiveFixture;
-        let selected = (fixture ? [fixture.root, ...fixture.children] : rows).filter(
+        if (fixture && url.searchParams.get("parentSessionId") === fixture.root.id) {
+          const hold = fixture.holdChildRead;
+          fixture.holdChildRead = undefined;
+          fixture.childReadStarted?.resolve();
+          await hold?.promise;
+        }
+        let selected = (
+          fixture ? [fixture.root, ...fixture.children, ...fixture.peers] : rows
+        ).filter(
           (row) =>
             archiveStatus === "all" ||
             (fixture && row.rootSessionId === fixture.root.id
@@ -223,6 +246,10 @@ describe("compact session view on the live local workspace route (API fixture)",
         if (search) selected = selected.filter((row) => row.title.includes(search));
         if (url.searchParams.get("parentSessionId") === "null")
           selected = selected.filter((row) => row.parentSessionId === null);
+        else if (url.searchParams.has("parentSessionId"))
+          selected = selected.filter(
+            (row) => row.parentSessionId === url.searchParams.get("parentSessionId"),
+          );
         if (url.searchParams.get("pinsOnly")) selected = [];
         selected.sort((a, b) =>
           sortBy === "name"
@@ -233,14 +260,29 @@ describe("compact session view on the live local workspace route (API fixture)",
         const offset = Number(url.searchParams.get("cursor") ?? 0);
         const limit = Number(url.searchParams.get("limit") ?? 50);
         const response = {
-          sessions: selected.slice(offset, offset + limit),
+          sessions: selected
+            .slice(offset, offset + limit)
+            .map((row) =>
+              fixture?.staleFirstPageRoot &&
+              limit === 50 &&
+              url.searchParams.get("parentSessionId") === "null" &&
+              row.id === fixture.root.id
+                ? fixture.staleFirstPageRoot
+                : row,
+            ),
           pinned: [],
           nextCursor: offset + limit < selected.length ? String(offset + limit) : null,
           sortBy,
           archiveStatus,
           filtersApplied: true,
         };
-        if (fixture && !url.searchParams.has("pinsOnly")) {
+        if (fixture && search) {
+          const hold = fixture.holdSearch;
+          fixture.holdSearch = undefined;
+          fixture.searchStarted = true;
+          await hold?.promise;
+        }
+        if (fixture && !search && url.searchParams.get("parentSessionId") === "null") {
           const hold = fixture.holdRead;
           fixture.holdRead = undefined;
           fixture.readStarted = true;
@@ -250,6 +292,16 @@ describe("compact session view on the live local workspace route (API fixture)",
         }
         return json(response);
       }
+      if (path.endsWith("/session-message-search"))
+        return json({
+          matches: [],
+          nextCursor: null,
+          hasMore: false,
+          scannedMessages: 0,
+          matchedMessageCount: 0,
+          matchedOccurrenceCount: 0,
+          countIsExact: true,
+        });
       if (path.endsWith("/channels"))
         return json([
           {
@@ -304,7 +356,17 @@ describe("compact session view on the live local workspace route (API fixture)",
       .and(page.locator(":focus"))
       .waitFor();
   }, 60_000);
+  afterEach(async () => {
+    // A handler clears its fixture field when consuming a gate, so cleanup
+    // must retain the resolver independently until the gate actually settles.
+    releaseFixtureGates();
+    archiveFixture = undefined;
+    // Retire the old document before the next case installs another fixture;
+    // released requests must not trigger follow-up reads against that fixture.
+    if (page && !page.isClosed()) await page.goto("about:blank");
+  });
   afterAll(async () => {
+    releaseFixtureGates();
     await Promise.allSettled([browser?.close(), web?.stop()]);
   });
 
@@ -405,11 +467,12 @@ describe("compact session view on the live local workspace route (API fixture)",
   for (const { localArchived, continuationFirst } of [true, false].flatMap((archived) =>
     [false, true].map((first) => ({ localArchived: archived, continuationFirst: first })),
   )) {
-    test(`retained local ${localArchived ? "archive" : "restore"} receipt yields only to later-started child search reads${continuationFirst ? " with stale first-page overlap" : ""}`, async () => {
+    test(`retained local ${localArchived ? "archive" : "restore"} receipt reconciles browse children independently of global search${continuationFirst ? " with stale first-page overlap" : ""}`, async () => {
       const root = {
         ...rows[0]!,
         title: "Nonmatching root",
         archived: !localArchived,
+        treeStats: { directChildren: 55, totalDescendants: 55, truncated: false },
       };
       archiveFixture = {
         root,
@@ -421,21 +484,20 @@ describe("compact session view on the live local workspace route (API fixture)",
           title: `Needle ${String(index).padStart(2, "0")}`,
           archived: false,
         })),
+        peers: continuationFirst
+          ? Array.from({ length: 55 }, (_, index) => ({
+              ...rows[index + 1]!,
+              title: `Unrelated ${String(index).padStart(2, "0")}`,
+              archived: !localArchived,
+            }))
+          : [],
         mutationStarted: false,
         readStarted: false,
         failReads: false,
       };
-      if (continuationFirst) {
-        // A different matching tree keeps pagination reachable while the
-        // mutated tree is suppressed. It must not inherit that tree's receipt.
-        archiveFixture.children.unshift({
-          ...rows[2]!,
-          title: "Needle !unrelated",
-          archived: !localArchived,
-          updatedAt: new Date(Date.now() + 60_000).toISOString(),
-        });
-      }
-      await page.reload({ waitUntil: "networkidle" });
+      await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions`, {
+        waitUntil: "networkidle",
+      });
       await page
         .getByRole("textbox", { name: "Message the agent", exact: true })
         .and(page.locator(":focus"))
@@ -446,6 +508,12 @@ describe("compact session view on the live local workspace route (API fixture)",
       const matchingChildren = rail.locator("a[data-session-row]").filter({ hasText: /Needle \d/ });
       const rootRow = rail.locator(`a[data-session-row][href$="/${root.id}"]`);
       await rootRow.waitFor();
+      await rootRow
+        .locator("xpath=../..")
+        .getByRole("button", { name: "Expand spawned sessions" })
+        .click();
+      await rail.getByText("Needle 00", { exact: true }).waitFor();
+      expect(await matchingChildren.count()).toBe(50);
       archiveFixture.mutation = deferred();
       await rootRow.hover();
       await rail
@@ -457,17 +525,38 @@ describe("compact session view on the live local workspace route (API fixture)",
         .click();
       await page.waitForTimeout(50);
       expect(archiveFixture.mutationStarted).toBe(true);
-      await Promise.all([
-        page.waitForResponse(
-          (response) => new URL(response.url()).searchParams.get("search") === "Needle",
-        ),
-        page.getByLabel("Search sessions", { exact: true }).fill("Needle"),
-      ]);
-      await settleRead();
-      // A successfully returned child-only page cannot revive a pending tree.
+      const openSearch = async (query: string) => {
+        await page.getByRole("button", { name: "Search sessions", exact: true }).first().click();
+        const dialog = page.getByRole("dialog", { name: "Search sessions", exact: true });
+        await dialog
+          .getByRole("searchbox", { name: "Search session titles and messages" })
+          .fill(query);
+        return dialog;
+      };
+      const dialog = await openSearch("Needle");
+      const results = dialog.locator("[data-search-result]");
+      await dialog.getByRole("button", { name: /Needle 00/ }).waitFor();
+      // Global search is flat and defaults to all statuses. Its child-only
+      // results are independent of the rail's pending tree transition.
+      expect(await results.count()).toBe(20);
+      expect(await dialog.getByText("Nonmatching root", { exact: true }).count()).toBe(0);
+      await page.keyboard.press("Escape");
+      await dialog.waitFor({ state: "hidden" });
+      // Start a branch refresh while the mutation is pending, but let the
+      // server evaluate its archive filter only after that mutation commits.
+      // The resulting empty child page must be refreshed when the root later
+      // returns through a continuation, even if the first page stays stale.
+      const delayedChildren = deferred();
+      archiveFixture.holdChildRead = delayedChildren;
+      archiveFixture.childReadStarted = deferred();
+      await invalidate();
+      await archiveFixture.childReadStarted.promise;
+      // Neither search results nor a successful browse read revive a pending tree.
       expect(await matchingChildren.count()).toBe(0);
-      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 1 : 0);
-      // Start another child-only read BEFORE completion, but deliver it AFTER
+      expect(await rootRow.count()).toBe(0);
+      const pendingRows = await rail.locator("a[data-session-row]").count();
+      expect(pendingRows).toBe(continuationFirst ? 49 : 0);
+      // Start another browse read BEFORE completion, but deliver it AFTER
       // the successful receipt and its deliberately failed refresh.
       const delayed = deferred();
       archiveFixture.holdRead = delayed;
@@ -475,78 +564,148 @@ describe("compact session view on the live local workspace route (API fixture)",
       await invalidate();
       await page.waitForTimeout(100);
       expect(archiveFixture.readStarted).toBe(true);
-      // Pending transitions cannot be revived even by a new query.
+      // Pending transitions cannot be revived by an invalidation.
       expect(await matchingChildren.count()).toBe(0);
-      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 1 : 0);
+      expect(await rail.locator("a[data-session-row]").count()).toBe(pendingRows);
       archiveFixture.failReads = true;
       archiveFixture.mutation.resolve();
       await page
         .getByText(localArchived ? "Chat archived" : "Chat restored", { exact: true })
         .waitFor();
       archiveFixture.failReads = false;
+      const [emptyChildrenResponse] = await Promise.all([
+        page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return (
+            url.pathname.endsWith("/sessions") &&
+            url.searchParams.get("parentSessionId") === root.id
+          );
+        }),
+        Promise.resolve().then(() => delayedChildren.resolve()),
+      ]);
+      expect((await emptyChildrenResponse.json()).sessions).toHaveLength(0);
       delayed.resolve();
       await settleRead();
       expect(await matchingChildren.count()).toBe(0);
-      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 1 : 0);
+      expect(await rootRow.count()).toBe(0);
+      expect(await rail.locator("a[data-session-row]").count()).toBe(pendingRows);
 
-      // Another client reverses revision 1 to revision 2; no root matches the
-      // search and the mounted component must retain its own local receipt.
+      // Another client reverses revision 1 to revision 2. Search cannot retire
+      // the rail receipt; only accepted browse evidence can reconcile the tree.
       archiveFixture.root = { ...archiveFixture.root, archived: !localArchived, archiveVersion: 2 };
       if (continuationFirst) {
+        const restoredChildren = deferred();
+        archiveFixture.holdChildRead = restoredChildren;
+        archiveFixture.childReadStarted = deferred();
         // Keep the accepted first page from BEFORE mutation completion. Only
         // the 100-row continuation may confirm membership after the reversal;
-        // it overlaps 49 cached children and adds six continuation-only children.
+        // it overlaps cached roots and adds six continuation-only roots.
         archiveFixture.failFirstPage = true;
         await invalidate();
         await settleRead();
         expect(await matchingChildren.count()).toBe(0);
-        await rail.getByText("Needle !unrelated", { exact: true }).waitFor();
-        await rail.getByRole("button", { name: /^Load older sessions in/ }).click();
-        await rail.getByText("Needle 54", { exact: true }).waitFor();
+        await rail.getByText("Unrelated 00", { exact: true }).waitFor();
+        const [continuationResponse] = await Promise.all([
+          page.waitForResponse((response) => {
+            const url = new URL(response.url());
+            return url.pathname.endsWith("/sessions") && url.searchParams.get("limit") === "100";
+          }),
+          rail.getByRole("button", { name: /^Load older sessions in/ }).click(),
+        ]);
+        const continuationPage = await continuationResponse.json();
+        expect(
+          continuationPage.sessions.find((row: FixtureRow) => row.id === root.id),
+        ).toMatchObject({
+          archived: !localArchived,
+          archiveVersion: 2,
+        });
+        await rootRow.waitFor();
+        await rail.getByText("Unrelated 54", { exact: true }).waitFor();
+        await archiveFixture.childReadStarted.promise;
+        // Root membership and branch materialization are separate commits.
+        // Keep the restoring branch response in flight to prove that seeing
+        // the root is not evidence that its 50 children have rendered yet.
+        expect(await matchingChildren.count()).toBe(0);
+        const [restoredChildrenResponse] = await Promise.all([
+          page.waitForResponse((response) => {
+            const url = new URL(response.url());
+            return (
+              url.pathname.endsWith("/sessions") &&
+              url.searchParams.get("parentSessionId") === root.id
+            );
+          }),
+          Promise.resolve().then(() => restoredChildren.resolve()),
+        ]);
+        expect((await restoredChildrenResponse.json()).sessions).toHaveLength(50);
+        await rail.getByText("Needle 00", { exact: true }).waitFor();
         await settleRead();
-        expect(await matchingChildren.count()).toBe(55);
+        expect(await matchingChildren.count()).toBe(50);
         expect(await rail.getByText("Needle 00", { exact: true }).count()).toBe(1);
-        expect(await rail.getByText("Nonmatching root", { exact: true }).count()).toBe(0);
+        expect(await rootRow.count()).toBe(1);
         // An unrelated failed first-page refresh cannot erase the newer
         // per-row continuation proof or globally retire the local receipt.
         await invalidate();
         await settleRead();
-        expect(await matchingChildren.count()).toBe(55);
+        expect(await matchingChildren.count()).toBe(50);
         archiveFixture.failFirstPage = false;
+        // Even a successful stale first-page invalidation cannot replace the
+        // continuation's newer archive revision with the pre-mutation root.
+        archiveFixture.staleFirstPageRoot = root;
+        await invalidate();
+        await settleRead();
+        expect(await rootRow.count()).toBe(1);
+        expect(await matchingChildren.count()).toBe(50);
+        archiveFixture.staleFirstPageRoot = undefined;
       }
       for (let refresh = 0; refresh < 2; refresh++) {
         await invalidate();
         await rail.getByText("Needle 00", { exact: true }).waitFor();
         await settleRead();
-        expect(await rail.getByText("Nonmatching root", { exact: true }).count()).toBe(0);
+        expect(await rootRow.count()).toBe(1);
       }
-      if (!continuationFirst)
-        await rail.getByRole("button", { name: /^Load older sessions in/ }).click();
+      await rail
+        .getByRole("list", { name: "Spawned sessions from Nonmatching root", exact: true })
+        .getByRole("button", { name: "Show more", exact: true })
+        .click();
       await rail.getByText("Needle 54", { exact: true }).waitFor();
       expect(await matchingChildren.count()).toBe(55);
-      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 56 : 55);
+      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 111 : 56);
       await invalidate();
       await settleRead();
       expect(await matchingChildren.count()).toBe(55);
-      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 56 : 55);
+      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 111 : 56);
       // Failure cannot retire the receipt or grant freshness to old rows.
       archiveFixture.failReads = true;
       await invalidate();
       await settleRead();
       expect(await matchingChildren.count()).toBe(55);
-      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 56 : 55);
+      expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 111 : 56);
       archiveFixture.failReads = false;
-      await Promise.all([
-        page.waitForResponse(
-          (response) => new URL(response.url()).searchParams.get("search") === "Missing",
-        ),
-        page.getByLabel("Search sessions", { exact: true }).fill("Missing"),
-      ]);
+      await openSearch("Missing");
       await settleRead();
-      expect(await rail.locator("a[data-session-row]").count()).toBe(0);
-      await page.getByLabel("Search sessions", { exact: true }).fill("Needle");
-      await rail.getByText("Needle 00", { exact: true }).waitFor();
-      expect(await rail.getByText("Nonmatching root", { exact: true }).count()).toBe(0);
+      expect(await results.count()).toBe(0);
+      expect(await matchingChildren.count()).toBe(55);
+      // A child-only response for the previous dialog query must not populate
+      // a newer query or change the independently expanded browse hierarchy.
+      const oldSearch = deferred();
+      archiveFixture.holdSearch = oldSearch;
+      archiveFixture.searchStarted = false;
+      await dialog.getByRole("searchbox").fill("Needle");
+      await waitFor(() => archiveFixture?.searchStarted === true);
+      await dialog.getByRole("searchbox").fill("Missing");
+      oldSearch.resolve();
+      await settleRead();
+      expect(await results.count()).toBe(0);
+      expect(await matchingChildren.count()).toBe(55);
+      await dialog.getByRole("searchbox").fill("Needle");
+      await dialog.getByRole("button", { name: /Needle 00/ }).waitFor();
+      await dialog.getByRole("button", { name: "More title results" }).click();
+      await dialog.getByRole("button", { name: /Needle 20/ }).waitFor();
+      await dialog.getByRole("button", { name: "More title results" }).click();
+      await dialog.getByRole("button", { name: /Needle 54/ }).waitFor();
+      expect(await results.count()).toBe(15);
+      await page.keyboard.press("Escape");
+      await dialog.waitFor({ state: "hidden" });
       // A delayed accepted-source read must not cross workspace identity, even
       // when returning to the original workspace after its response arrives.
       const oldWorkspaceRead = deferred();
@@ -564,18 +723,72 @@ describe("compact session view on the live local workspace route (API fixture)",
       await page.getByRole("button", { name: /Switch workspace$/ }).click();
       await page.getByRole("menuitem", { name: /Compact view verification/ }).click();
       await page.waitForURL(`**/workspaces/${workspaceId}/sessions`);
-      // Wait for the new workspace composer to mount before typing into its rail.
+      // Wait for the new workspace composer before reopening global search.
       await page
         .getByRole("textbox", { name: "Message the agent", exact: true })
         .and(page.locator(":focus"))
         .waitFor();
       await settleRead();
-      await page.getByLabel("Search sessions", { exact: true }).fill("Needle");
+      await openSearch("Needle");
       // Late composer hydration must not take focus while search is being entered.
       await settleRead();
-      expect(await page.getByLabel("Search sessions", { exact: true }).inputValue()).toBe("Needle");
-      await rail.getByText("Needle 00", { exact: true }).waitFor();
-      archiveFixture = undefined;
+      expect(await dialog.getByRole("searchbox").inputValue()).toBe("Needle");
+      expect(
+        await dialog.getByRole("searchbox").evaluate((input) => input === document.activeElement),
+      ).toBe(true);
+      await dialog.getByRole("button", { name: /Needle 00/ }).waitFor();
+      expect(await matchingChildren.count()).toBe(0);
+      expect(
+        listRequests
+          .filter((url) => url.searchParams.has("parentSessionId"))
+          .every((url) => !url.searchParams.get("search")),
+      ).toBe(true);
+      await page.keyboard.press("Escape");
+      await dialog.waitFor({ state: "hidden" });
     }, 45_000);
   }
+
+  test("failure cleanup releases consumed and unconsumed fixture gates", async () => {
+    const fixture: Record<string, ReturnType<typeof deferred> | undefined> = {
+      mutation: deferred(),
+      holdRead: deferred(),
+      holdChildRead: deferred(),
+      holdSearch: deferred(),
+    };
+    const requests = Object.entries(fixture).map(async ([name, gate]) => {
+      if (name !== "mutation") fixture[name] = undefined;
+      await gate!.promise;
+      return name;
+    });
+    expect(fixture.holdChildRead).toBeUndefined();
+    await expect(
+      (async () => {
+        try {
+          throw new Error("simulated assertion failure after consuming a gate");
+        } finally {
+          releaseFixtureGates();
+        }
+      })(),
+    ).rejects.toThrow("simulated assertion failure");
+    expect(await Promise.all(requests)).toEqual([
+      "mutation",
+      "holdRead",
+      "holdChildRead",
+      "holdSearch",
+    ]);
+    expect(pendingFixtureGateReleases.size).toBe(0);
+
+    // Releasing one case must not pre-resolve a gate registered by the next.
+    const next = deferred();
+    let nextSettled = false;
+    const nextRequest = next.promise.then(() => {
+      nextSettled = true;
+    });
+    await Promise.resolve();
+    expect(nextSettled).toBe(false);
+    releaseFixtureGates();
+    await nextRequest;
+    expect(nextSettled).toBe(true);
+    expect(pendingFixtureGateReleases.size).toBe(0);
+  });
 });

@@ -13,8 +13,10 @@ export function MarkdownText({
   onSandboxFile,
   renderInteractiveBlock,
   renderImage,
+  searchTarget,
 }: {
   text: string;
+  searchTarget?: MarkdownProps["searchTarget"];
   renderImage?: MarkdownProps["renderImage"];
   renderInteractiveBlock?: MarkdownProps["renderInteractiveBlock"];
   compact?: boolean;
@@ -23,6 +25,7 @@ export function MarkdownText({
 }) {
   return (
     <Markdown
+      searchTarget={searchTarget}
       streaming={streaming}
       renderImage={renderImage}
       renderInteractiveBlock={renderInteractiveBlock}

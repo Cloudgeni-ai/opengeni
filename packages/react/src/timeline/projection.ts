@@ -1307,7 +1307,16 @@ export function buildTimeline(
     }
   }
 
+  const sourceEventsById = new Map(events.map((event) => [event.id, event]));
   for (const item of items) {
+    const source = sourceEventsById.get(item.id);
+    const canonical = "annotationSource" in item ? item.annotationSource : undefined;
+    item.sourceEvents = [
+      ...(source ? [{ eventId: source.id, sequence: source.sequence }] : []),
+      ...(canonical && canonical.eventId !== source?.id
+        ? [{ eventId: canonical.eventId, sequence: canonical.sequence }]
+        : []),
+    ];
     if (item.kind === "agent-message") {
       item.text = stripOpaqueCitationTokens(item.text);
     }

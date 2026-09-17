@@ -88,6 +88,77 @@ and `ChatComposer` with the session hooks. These use the normal SDK through
 your authenticated host routes. For custom or compatible frontends, the backend
 `@opengeni/sdk/chat` adapters provide the `createChatHandler` protocol.
 
+### Exact conversation search navigation
+
+`useSessionEvents(sessionId).jumpToSequence(sequence)` replaces the current
+window with at most two bounded cursor reads around an exact durable event.
+It resolves `true` only when that event is retained, `false` for a missing or
+superseded target, and rejects current request errors. `loadingTarget` exposes
+the pending state. New targets supersede older targets/pages; session/client
+changes fence stale results. Search enters history mode; use the existing
+`loadOlder`, `loadNewer`, and `jumpToLatest` controls to navigate onward. It does
+not download the intervening session history.
+Pass `jumpToSequence(sequence, { signal })` to cancel one navigation: an
+aborted signal fences the pending jump before its fetched window is applied
+(the underlying reads may still complete), resolves `false`, and settles
+`loadingTarget` without disturbing any newer navigation that superseded it.
+
+Pass the selected hit to `MessageTimeline` independently of loading:
+
+```tsx
+const history = useSessionEvents(sessionId);
+const [target, setTarget] = useState<TimelineSearchTarget | null>(null);
+
+function selectHit(hit: { sequence: number; eventId: string }, query: string, occurrence = 0) {
+  setTarget({ ...hit, query, occurrence });
+  void history.jumpToSequence(hit.sequence);
+}
+
+<MessageTimeline events={history.events} items={history.timeline} searchTarget={target} />;
+```
+
+The host owns search results, error handling, next/previous controls and query
+state. `TimelineSearchTarget` is exported from the root and `session-ui` entry:
+`{ sequence: number; eventId?: string; query: string; occurrence?: number; offset?: number }`.
+Matching is literal, case-insensitive, non-overlapping; `occurrence` is zero-based
+within the message, defaulting to zero. When the backend all-occurrence search
+returns `messageMatchOffset`, pass it as `offset`: the zero-based UTF-16 position
+of the match in the original message text. An explicit `offset` takes precedence
+over `occurrence` and is validated against the query, so a stale offset simply
+produces no highlight. `buildTimeline` supplies `sourceEvents`
+identities so completed assistant events remain addressable when the renderer
+keeps a first-delta ID. Hosts supplying their own items should preserve those
+identities (or the canonical `annotationSource`).
+
+The active message's group and long-user disclosure open persistently. Setting
+`searchTarget={null}` removes the active highlight without collapsing content or
+restoring a former scroll position. The package mounts its complete bounded
+window. The default Markdown renderer shows a labeled, bounded **message source**
+excerpt for the active match, including Markdown syntax and link destinations;
+closing find removes the highlight but retains that excerpt and its layout.
+An explicit **Show formatted message** action restores the full body; this can
+expand a huge message, so it is never done automatically on closing Find.
+Raw UTF-16 offsets are never applied
+to rendered Markdown text. Custom hosts can use
+`<Markdown searchTarget={searchTarget}>{text}</Markdown>` for the same behavior.
+A custom virtualized renderer receives
+`renderMessageText(text, item, { searchTarget })` and must materialize the exact
+occurrence when that context is non-null. Existing two-argument renderers remain
+compatible. If previous occurrences are omitted from the virtualized DOM, wrap
+the materialized match in an element with `data-og-search-occurrence` (zero-based
+index), `data-og-search-sequence` and `data-og-search-query`, each set from the
+target; when the target carries an `offset`, set `data-og-search-offset` to it
+alongside `data-og-search-occurrence` (which can be zero). This lets navigation
+identify that exact occurrence without recounting an incomplete DOM. Keep the
+materialized window when the context clears to
+preserve position. Navigation waits for the mounted text and highlights the active
+DOM range using the CSS Custom Highlight API, without rewriting React-owned
+text. Explicit source-offset targets require this marker: matching characters
+at the same rendered offset are not proof of source identity. A custom renderer
+that omits source text or puts it in an opaque iframe must reveal that text
+itself. Existing renderers without this mapping remain render-compatible but
+cannot provide exact source-offset navigation.
+
 ## Editable Office artifacts
 
 The optional artifact workbench is isolated from the ordinary session and
