@@ -432,12 +432,21 @@ describe("credential allocator atomic Codex credential allocation", () => {
       // Authoritative usage recovery clears only the exact quota revision.
       const [cooldown] =
         await admin`select exhausted_revision from codex_subscription_credentials where id = ${credentialId}`;
+      // Raw postgres-js returns bigint as a string; production Drizzle maps the
+      // revision to a number before passing it to the safe-integer CAS fence.
+      const observedRevision = Number(cooldown!.exhausted_revision);
       await recordCodexAccountUsage(dbA, ws!.workspaceId, credentialId, {
         checkedAt: new Date(),
         primaryUsedPercent: 0,
         secondaryUsedPercent: 0,
-        clearQuotaCooldownRevision: cooldown!.exhausted_revision,
+        clearQuotaCooldownRevision: observedRevision,
       });
+      const [cleared] = await admin`
+        select exhausted_until, exhausted_kind, exhausted_revision
+        from codex_subscription_credentials where id = ${credentialId}`;
+      expect(cleared!.exhausted_until).toBeNull();
+      expect(cleared!.exhausted_kind).toBeNull();
+      expect(Number(cleared!.exhausted_revision)).toBe(observedRevision + 1);
       if (legacy) {
         expect((await reconcile()).action).toBe("waiting");
         expect((await reconcile()).events).toEqual([]);
