@@ -474,10 +474,24 @@ describe("session control surface architecture", () => {
     expect(list).not.toContain("Filter by</DropdownMenuLabel>");
     expect(list).toContain("archiveStatus: browseStatus");
     expect(list).toContain("sortBy: browseSortBy");
-    expect(list).toContain("updateSearchDraft(event.target.value)");
+    expect(list).toContain("onClick={openSearchDialog}");
+    expect(list).toContain("() => requestSessionSearch(rail.workspaceId)");
     expect(list).not.toContain('"Selected"');
     expect(list).toContain("{ creatorLabels }");
     expect(list).toContain("sessionBrowseResultCount(browseSessions, hierarchyMode)");
+  });
+
+  test("the rail owns the lazy search dialog across conversation navigation", async () => {
+    const rail = await source("components/rail/rail-context.tsx");
+    expect(rail).toContain('lazy(() => import("@/components/session/session-search-dialog"))');
+    expect(rail).toContain("window.addEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
+    expect(rail).toContain("window.removeEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
+    expect(rail).toContain(".detail?.workspaceId !== workspaceId");
+    expect(rail.match(/<SessionSearchDialog\b/g)).toHaveLength(1);
+    expect(rail).toContain("key={`${appContext.accessContext.subjectId}:${workspaceId}`}");
+    expect(rail).toContain("workspaceId={workspaceId}");
+    expect(rail).toContain("open={searchOpen}");
+    expect(rail).toContain("onOpenChange={setSearchOpen}");
   });
 
   test("the retired client-side queue model is gone", async () => {

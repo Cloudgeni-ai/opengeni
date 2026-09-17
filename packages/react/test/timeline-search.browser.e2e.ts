@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chromium, type Browser } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -54,12 +54,73 @@ afterAll(async () => {
   if (buildDirectory) await rm(buildDirectory, { recursive: true, force: true });
 });
 
+/** Wait for the selected range, not merely an old registered highlight or a timer. */
+async function visibleSearchRange(
+  page: Page,
+  expected: { query: string; sequence?: number; occurrence?: number; offset?: number },
+) {
+  const handle = await page.waitForFunction(async (target) => {
+    const snapshot = () => {
+      const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]");
+      if (!scroller) return null;
+      const registry = (CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights;
+      const ranges = [...registry.entries()]
+        .filter(([name]) => name.startsWith("og-search-"))
+        .flatMap(([, value]) => [...value]);
+      if (ranges.length !== 1 || ranges[0]!.toString() !== target.query) return null;
+      const range = ranges[0]!;
+      const marker = range.startContainer.parentElement?.closest<HTMLElement>(
+        "[data-og-search-occurrence]",
+      );
+      if (target.sequence != null && marker?.dataset.ogSearchSequence !== String(target.sequence))
+        return null;
+      if (
+        target.occurrence != null &&
+        marker?.dataset.ogSearchOccurrence !== String(target.occurrence)
+      )
+        return null;
+      if (target.offset != null && marker?.dataset.ogSearchOffset !== String(target.offset))
+        return null;
+      if (target.sequence != null && marker?.dataset.ogSearchQuery !== target.query) return null;
+      const rect = range.getBoundingClientRect();
+      const root = scroller.getBoundingClientRect();
+      if (!rect.height || rect.top < root.top || rect.bottom > root.bottom) return null;
+      return { top: rect.top, bottom: rect.bottom, scrollTop: scroller.scrollTop };
+    };
+    const before = snapshot();
+    if (!before) return false;
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
+    const after = snapshot();
+    return after &&
+      Math.abs(after.top - before.top) <= 1 &&
+      Math.abs(after.scrollTop - before.scrollTop) <= 1
+      ? after
+      : false;
+  }, expected);
+  return (await handle.jsonValue()) as { top: number; bottom: number; scrollTop: number };
+}
+
+async function waitForSearchClosed(page: Page) {
+  await page.waitForFunction(() => {
+    const registry = (CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights;
+    return ![...registry.keys()].some((name) => name.startsWith("og-search-"));
+  });
+}
+
 test("exact occurrences in a huge collapsed message scroll into view and closing find preserves position", async () => {
   const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`${baseUrl}/timeline-scroll-test.html?search`, { waitUntil: "networkidle" });
   await page.waitForFunction(() => !!window.timelineScrollHarness);
+  // Keep the far-apart source fixture: source focus deliberately does not mount
+  // its 800 intervening paragraphs while navigating either occurrence.
+  const source = `first literal [a+b] match\n\n${"Long source paragraph.\n\n".repeat(800)}last literal [a+b] match`;
+  const firstOffset = source.indexOf("[a+b]");
+  const secondOffset = source.lastIndexOf("[a+b]");
+  expect(secondOffset - firstOffset).toBeGreaterThan(10_000);
   await page.evaluate(() =>
     window.timelineScrollHarness!.search({
       sequence: 1040,
@@ -68,43 +129,68 @@ test("exact occurrences in a huge collapsed message scroll into view and closing
       occurrence: 0,
     }),
   );
-  const activeRect = () =>
-    page.evaluate(() => {
-      const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
-      const registry = (CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights;
-      const ranges = [...registry.entries()]
-        .filter(([name]) => name.startsWith("og-search-"))
-        .flatMap(([, value]) => [...value]);
-      const rect = ranges[0]?.getBoundingClientRect();
-      const root = scroller.getBoundingClientRect();
-      return {
-        top: rect?.top ?? -1,
-        bottom: rect?.bottom ?? -1,
-        rootTop: root.top,
-        rootBottom: root.bottom,
-        scrollTop: scroller.scrollTop,
-      };
-    });
-  await page.waitForFunction(() => {
-    const registry = (CSS as unknown as { highlights: Map<string, Set<Range>> }).highlights;
-    return [...registry.keys()].some((name) => name.startsWith("og-search-"));
+  await visibleSearchRange(page, {
+    sequence: 1040,
+    query: "[a+b]",
+    occurrence: 0,
+    offset: firstOffset,
   });
-  await page.waitForTimeout(300);
-  const first = await activeRect();
-  expect(first.top).toBeGreaterThanOrEqual(first.rootTop);
-  expect(first.bottom).toBeLessThanOrEqual(first.rootBottom);
+  const body = page.locator('[data-og-search-item="row-1040"]');
+  expect(await body.locator("mark").textContent()).toBe("[a+b]");
+  expect((await body.textContent())!.length).toBeLessThan(1000);
   await page.evaluate(() =>
     window.timelineScrollHarness!.search({ sequence: 1040, query: "[a+b]", occurrence: 1 }),
   );
-  await page.waitForTimeout(300);
-  const second = await activeRect();
-  expect(second.top).toBeGreaterThanOrEqual(second.rootTop);
-  expect(second.bottom).toBeLessThanOrEqual(second.rootBottom);
-  expect(second.scrollTop - first.scrollTop).toBeGreaterThan(10_000);
+  const second = await visibleSearchRange(page, {
+    sequence: 1040,
+    query: "[a+b]",
+    occurrence: 1,
+    offset: secondOffset,
+  });
+  const selected = body.locator(`[data-og-search-offset="${secondOffset}"]`);
+  const sourceWindow = await selected.evaluate((element) => element.parentElement!.textContent);
+  expect((await body.textContent())!.length).toBeLessThan(1000);
   await page.evaluate(() => window.timelineScrollHarness!.search(null));
-  await page.waitForTimeout(300);
-  const closed = await activeRect();
+  await waitForSearchClosed(page);
+  await page.waitForFunction((offset) => {
+    const marker = document.querySelector<HTMLElement>(
+      `[data-og-search-item="row-1040"] [data-og-search-offset="${offset}"]`,
+    );
+    return (
+      marker?.tagName === "SPAN" && !marker.closest("[data-og-search-item]")?.querySelector("mark")
+    );
+  }, secondOffset);
+  const closed = await selected.evaluate((element) => {
+    const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const rect = range.getBoundingClientRect();
+    const root = scroller.getBoundingClientRect();
+    return {
+      top: rect.top,
+      bottom: rect.bottom,
+      rootTop: root.top,
+      rootBottom: root.bottom,
+      scrollTop: scroller.scrollTop,
+    };
+  });
+  expect(await selected.textContent()).toBe("[a+b]");
+  expect(await selected.evaluate((element) => element.parentElement!.textContent)).toBe(
+    sourceWindow,
+  );
+  expect(closed.top).toBeGreaterThanOrEqual(closed.rootTop);
+  expect(closed.bottom).toBeLessThanOrEqual(closed.rootBottom);
+  expect(Math.abs(closed.top - second.top)).toBeLessThanOrEqual(1);
   expect(Math.abs(closed.scrollTop - second.scrollTop)).toBeLessThanOrEqual(1);
+  await body.getByRole("button", { name: "Show formatted message" }).click();
+  await page.waitForFunction(
+    () =>
+      document.querySelector('[data-og-search-item="row-1040"]')?.querySelectorAll("p").length ===
+      802,
+  );
+  expect(await body.locator("[data-og-search-occurrence]").count()).toBe(0);
+  expect(await body.locator("p").first().textContent()).toBe("first literal [a+b] match");
+  expect(await body.locator("p").last().textContent()).toBe("last literal [a+b] match");
   expect(errors).toEqual([]);
   await page.close();
 }, 60_000);
@@ -118,7 +204,7 @@ test("search opens a settled assistant turn and retains the expansion on close",
     window.timelineScrollHarness!.search({ sequence: 2001, query: "needle" }),
   );
   await page.locator('[data-og-search-item="folded-answer"]').waitFor({ state: "visible" });
-  await page.waitForTimeout(300);
+  await visibleSearchRange(page, { query: "needle" });
   const position = await page.evaluate(() => {
     const root = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
     const rect = document
@@ -135,7 +221,7 @@ test("search opens a settled assistant turn and retains the expansion on close",
   expect(position.top).toBeGreaterThanOrEqual(position.rootTop);
   expect(position.bottom).toBeLessThanOrEqual(position.rootBottom);
   await page.evaluate(() => window.timelineScrollHarness!.search(null));
-  await page.waitForTimeout(300);
+  await waitForSearchClosed(page);
   expect(await page.locator('[data-og-search-item="folded-answer"]').isVisible()).toBe(true);
   const closed = await page.evaluate(
     () => document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!.scrollTop,
@@ -154,7 +240,7 @@ test("a delayed virtualized renderer can materialize an occurrence without earli
     window.timelineScrollHarness!.search({ sequence: 1040, query: "needle", occurrence: 500 }),
   );
   await page.locator('[data-og-search-occurrence="500"]').waitFor({ state: "visible" });
-  await page.waitForTimeout(300);
+  await visibleSearchRange(page, { sequence: 1040, query: "needle", occurrence: 500 });
   const position = await page.evaluate(() => {
     const root = document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
     const rect = document
@@ -171,7 +257,7 @@ test("a delayed virtualized renderer can materialize an occurrence without earli
   expect(position.top).toBeGreaterThanOrEqual(position.rootTop);
   expect(position.bottom).toBeLessThanOrEqual(position.rootBottom);
   await page.evaluate(() => window.timelineScrollHarness!.search(null));
-  await page.waitForTimeout(300);
+  await waitForSearchClosed(page);
   const closed = await page.evaluate(
     () => document.querySelector<HTMLElement>("[data-og-timeline-scroller]")!.scrollTop,
   );
