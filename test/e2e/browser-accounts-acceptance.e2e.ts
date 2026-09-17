@@ -36,6 +36,11 @@ import {
 
 import { createApp } from "../../apps/api/src/app";
 import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
+import {
+  sanitizeRaceProjection,
+  sanitizeRaceRequest,
+  sanitizeRaceResult,
+} from "./browser-account-race-diagnostics";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
@@ -2396,7 +2401,7 @@ async function sessionSet(page: Page): Promise<ManagedAuthSessionSetProjection> 
 }
 
 async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjection, slotId: string) {
-  return await page.evaluate(
+  const result = await page.evaluate(
     async ({
       projection: acceptedProjection,
       slotId: selectedSlotId,
@@ -2419,7 +2424,18 @@ async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjectio
           slotId: selectedSlotId,
         }),
       });
-      return response.status;
+      const payload = await response.json().catch(() => null);
+      const managedAuthCode = payload?.error?.details?.managedAuthCode;
+      return {
+        status: response.status,
+        managedAuthCode:
+          typeof managedAuthCode === "string" && /^[a-z_]{1,80}$/u.test(managedAuthCode)
+            ? managedAuthCode
+            : null,
+        expectedGeneration: acceptedProjection.generation,
+        expectedActorEpoch: acceptedProjection.actorEpoch,
+        responseActorEpoch: response.headers.get("x-opengeni-actor-epoch"),
+      };
     },
     {
       projection,
@@ -2429,6 +2445,47 @@ async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjectio
       contractRevision: MANAGED_AUTH_SESSION_SET_API_CONTRACT_REVISION,
     },
   );
+  return sanitizeRaceResult(result);
+}
+
+// Observe admission overlap without introducing a wait or changing race semantics.
+// Keep only allowlisted metadata; never retain headers, bodies, or query strings.
+const pendingAccountApiRequests = new Map<
+  Request,
+  { method: string; pathname: string; actorEpoch: string | null; authorityHash: string | null }
+>();
+const selectAdmissionDiagnostics: Array<{
+  authorityHash: string | null;
+  pending: Array<{
+    method: string;
+    pathname: string;
+    actorEpoch: string | null;
+    authorityHash: string | null;
+  }>;
+}> = [];
+
+async function observeAccountApiRequest(
+  request: Request,
+  dispatch: () => Response | Promise<Response>,
+) {
+  const metadata = sanitizeRaceRequest({
+    method: request.method,
+    pathname: new URL(request.url).pathname,
+    actorEpoch: request.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER),
+    authorityHash: sessionSetAuthorityHash(request.headers.get("cookie")),
+  });
+  if (metadata.pathname === "/v1/auth/session-set/select") {
+    selectAdmissionDiagnostics.push({
+      authorityHash: metadata.authorityHash,
+      pending: [...pendingAccountApiRequests.values()],
+    });
+  }
+  pendingAccountApiRequests.set(request, metadata);
+  try {
+    return await dispatch();
+  } finally {
+    pendingAccountApiRequests.delete(request);
+  }
 }
 
 async function launchAccountBrowser(engine: EngineName): Promise<Browser> {
@@ -2842,7 +2899,7 @@ beforeAll(async () => {
           completionResponseLoss.firstBody ??= requestBody;
           completionResponseLoss.attempts += 1;
           completionResponseLoss.exactBodies.push(firstBody === null || firstBody === requestBody);
-          const response = await api.fetch(request);
+          const response = await observeAccountApiRequest(request, () => api.fetch(request));
           completionResponseLoss.statuses.push(response.status);
           if (completionResponseLoss.acceptedAt === null && response.ok) {
             completionResponseLoss.acceptedAt = performance.now();
@@ -2882,7 +2939,7 @@ beforeAll(async () => {
             .join(",");
           edgeCookieSummary += `;caseEqual:${lowerCookieHeader === upperCookieHeader}`;
         }
-        const response = await api.fetch(request);
+        const response = await observeAccountApiRequest(request, () => api.fetch(request));
         if (
           response.ok &&
           (new Set([
@@ -4377,11 +4434,29 @@ describe("provider-neutral browser account acceptance", () => {
         sessionSet(page),
         sessionSet(secondTab),
       ]);
+      selectAdmissionDiagnostics.length = 0;
       const raced = await Promise.all([
         raceSelect(page, pageProjection, betaSlot.id),
         raceSelect(secondTab, tabProjection, betaSlot.id),
       ]);
-      expect(raced.sort()).toEqual([200, 409]);
+      const racedStatuses = raced.map(({ status }) => status).sort();
+      if (racedStatuses[0] !== 200 || racedStatuses[1] !== 409) {
+        const currentProjections = await Promise.all(
+          [page, secondTab].map(async (observedPage) => {
+            try {
+              const current = await sessionSet(observedPage);
+              return sanitizeRaceProjection(current);
+            } catch {
+              return { unavailable: true };
+            }
+          }),
+        );
+        console.error(
+          "Account selection race diagnostics",
+          JSON.stringify({ raced, admissions: selectAdmissionDiagnostics, currentProjections }),
+        );
+      }
+      expect(racedStatuses).toEqual([200, 409]);
       pageProblems.crossTabReloadStartedAt = performance.now();
       secondTabProblems.crossTabReloadStartedAt = pageProblems.crossTabReloadStartedAt;
       await Promise.all([
