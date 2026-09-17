@@ -172,6 +172,7 @@ describe("MCP OAuth protocol", () => {
     expect(html).toContain("Home (Personal)");
     expect(html).not.toContain("cursor://");
     expect(html).not.toContain("Resource:");
+    expect(html).not.toContain("letter-spacing");
   });
 
   test("token exchange can use any registered redirect URI for the same client", () => {
@@ -188,9 +189,12 @@ describe("MCP OAuth protocol", () => {
 
   test("continue and expired pages stay client-agnostic", () => {
     const continueHtml = renderMcpOAuthContinuePage("myapp://oauth/callback?code=demo");
-    expect(continueHtml).toContain("Continue authorization");
+    expect(continueHtml).toContain("Returning to the app");
     expect(continueHtml).toContain("myapp://oauth/callback?code=demo");
+    expect(continueHtml).toContain('http-equiv="refresh"');
+    expect(continueHtml).not.toContain("Continue</a>");
     expect(continueHtml).not.toContain("cursor://");
+    expect(continueHtml).not.toContain("letter-spacing");
     expect(renderMcpOAuthExpiredPage("This authorization request expired.")).toContain(
       "Authorization expired",
     );
