@@ -130,6 +130,26 @@ test("HTTP occurrence pagination carries advancing cursors and exact terminal co
   expect(next.matchedMessageCount).toBe(1);
 }, 180_000);
 
+test("HTTP workspace grouping returns one representative and rejects an in-session filter", async () => {
+  const f = await fixture();
+  const app = appWith();
+  const response = await app.request(`${f.path}?query=twice&groupBy=session`, {
+    headers: { authorization: f.authorization },
+  });
+  expect(response.status).toBe(200);
+  const page = SessionMessageSearchResponse.parse(await response.json());
+  expect(page.matches).toHaveLength(1);
+  expect(page.matches[0]!.sessionId).toBe(f.session.id);
+  expect(page.matchedMessageCount).toBe(1);
+  expect(page.matchedOccurrenceCount).toBe(1);
+  expect(page.countIsExact).toBe(true);
+  const invalid = await app.request(
+    `${f.path}?query=twice&groupBy=session&sessionId=${f.session.id}`,
+    { headers: { authorization: f.authorization } },
+  );
+  expect(invalid.status).toBe(400);
+}, 180_000);
+
 test("search filters intersect host list scope, denied scopes reveal no counts, unavailable host fails closed", async () => {
   const f = await fixture();
   const denied = appWith({

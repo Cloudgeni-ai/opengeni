@@ -20,6 +20,7 @@ const Position = z
     minimumMatchOffset: z.number().int().min(0).max(4_294_967_294),
     matched: z.boolean(),
     done: z.boolean(),
+    skipSession: z.boolean().optional(),
   })
   .strict();
 const Cursor = z
@@ -83,6 +84,7 @@ export async function scanSessionMessages(
         request.query,
         request.sessionId ?? null,
         request.archiveStatus ?? "active",
+        ...(request.groupBy ? [{ groupBy: request.groupBy }] : []),
       ]),
     )
     .digest("hex");
@@ -98,7 +100,9 @@ export async function scanSessionMessages(
       if (
         cursor.binding !== binding ||
         cursor.matched > cursor.scanned ||
-        cursor.matched > cursor.occurrences
+        cursor.matched > cursor.occurrences ||
+        (cursor.position.skipSession &&
+          (request.groupBy !== "session" || !cursor.position.done || !cursor.position.matched))
       )
         throw new Error();
       position = cursor.position;
@@ -118,7 +122,9 @@ export async function scanSessionMessages(
   // round trip for the common small-message/no-hit path.
   {
     const boundary = position
-      ? sql`(${e.sessionId} > ${position.sessionId}::uuid or (${e.sessionId} = ${position.sessionId}::uuid and ${position.done ? sql`${e.sequence} > ${position.sequence}` : sql`${e.sequence} >= ${position.sequence}`}))`
+      ? position.skipSession
+        ? sql`${e.sessionId} > ${position.sessionId}::uuid`
+        : sql`(${e.sessionId} > ${position.sessionId}::uuid or (${e.sessionId} = ${position.sessionId}::uuid and ${position.done ? sql`${e.sequence} > ${position.sequence}` : sql`${e.sequence} >= ${position.sequence}`}))`
       : sql`true`;
     // Correlate the exact durable message identity, not turn status or latest
     // model context. The latest full completion for a provider message wins,
@@ -255,6 +261,19 @@ export async function scanSessionMessages(
           matched: true,
           minimumMatchOffset: utf16Offset + found.index + found[0].length,
         };
+        if (request.groupBy === "session") {
+          position = { ...position, done: true, skipSession: true };
+          break;
+        }
+      }
+      if (position!.skipSession) {
+        // Skip both buffered messages and all unbuffered history of this
+        // matching session. The next cursor carries a strict session boundary,
+        // so a prolific message cannot flood the workspace picker with pages.
+        do {
+          identityIndex++;
+        } while (identities[identityIndex]?.sessionId === identity.sessionId);
+        continue;
       }
       const units = slice.unit === "utf16" ? slice.text.length : Array.from(slice.text).length;
       if (matches.length >= (request.limit ?? 20)) {

@@ -16,6 +16,14 @@ Matching uses ECMAScript Unicode simple case folding (`iu`); it does not apply
 locale-dependent lowercasing, Unicode normalization, or multi-character folding
 (`ss` does not match `ß`). Every **non-overlapping occurrence** is returned.
 
+For the workspace picker, optionally pass `groupBy: "session"`. This returns
+only the first occurrence in the first matching message of each session, then
+skips that session's remaining occurrences and messages, including history not
+yet loaded by the scanner. The next cursor advances past the entire matching
+session, so one prolific message cannot flood the picker with repeated pages.
+Combining `groupBy` with `sessionId` is rejected (HTTP 400). Default in-session
+Find and ungrouped workspace search retain every-occurrence behavior.
+
 Sources are durable, visible `user.message` text and full
 `agent.message.completed` text. This includes code blocks and unloaded/old
 history, but not tools, reasoning, `modelContext`, system updates, or session
@@ -49,6 +57,10 @@ offset ascending. This is stable traversal order, not relevance ranking.
 `matchedMessageCount` and `matchedOccurrenceCount` are cumulative counts for this
 traversal. `scannedMessages` counts distinct visited source messages, including a
 large message still being scanned. `countIsExact` is true only at exhaustion.
+With `groupBy: "session"`, both matched counters count returned **session
+representatives**, not full message or occurrence totals within those sessions.
+The skipped history is intentionally not counted. Grouped clients should label
+these as matching sessions, never as complete per-session message/hit counts.
 
 This is a **live traversal, not a database snapshot**. Every page reapplies live
 authority and archive filters. Concurrent appends, deletion, archiving, or
@@ -58,6 +70,7 @@ workspace, subject, resolved host/agent scope, query, session filter, and archiv
 filter. They carry bounded positions/counts, not source message text. Counts
 from a cursor are continuation bookkeeping, never authorization or billing
 evidence. Invalid or changed-scope cursors return HTTP 400.
+Grouping mode is also bound to the cursor; it cannot be switched mid-traversal.
 
 ## Bounded scanning and cancellation
 

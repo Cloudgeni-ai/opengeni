@@ -288,7 +288,7 @@ claim lifecycle, and rollout semantics.
 
 ## Full-history message search
 
-`searchSessionMessages(workspaceId, { query, sessionId?, archiveStatus?, limit?,
+`searchSessionMessages(workspaceId, { query, sessionId?, groupBy?, archiveStatus?, limit?,
 cursor? }, { signal? })` searches durable user and **completed assistant** text,
 including unloaded history. It returns every non-overlapping literal occurrence,
 not tools, reasoning, model context, or delta-only assistant output.
@@ -301,6 +301,13 @@ cursors even on empty pages while `hasMore` is true; counts are provisional unti
 exhaustion. Cancel superseded searches with the third argument's AbortSignal.
 This is a live, authorized traversal rather than a frozen snapshot; restart to
 refresh after concurrent history or visibility changes.
+
+For workspace search, `groupBy: "session"` returns the first hit per matching
+session and skips that session's remaining history, keeping prolific messages
+from filling multiple picker pages. It cannot be combined with `sessionId`.
+In grouped mode both matched counters count session representatives, not full
+per-session message/occurrence totals; `scannedMessages` counts only visited
+messages. Cursors bind the grouping mode. Omit it for every-occurrence Find.
 
 The method and types are exported from the ordinary SDK and browser entry.
 Use `listEventPage` around the hit's sequence for bounded context, and use the

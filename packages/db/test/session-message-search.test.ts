@@ -482,3 +482,94 @@ test("agent list reach intersects host scope before messages and counts", async 
   expect(intersected.matches).toHaveLength(0);
   expect(intersected.page.scannedMessages).toBe(0);
 }, 180_000);
+
+test("workspace grouping skips prolific sessions in both buffered results and continuation", async () => {
+  const sessions = await Promise.all([makeSession(), makeSession()]);
+  const [first, second] = sessions.sort((a, b) => (a.id < b.id ? -1 : 1));
+  const authority = {
+    subjectId,
+    authorizationScope: {
+      kind: "scoped" as const,
+      sessionIds: sessions.map((s) => s.id),
+      rootSessionIds: [],
+    },
+  };
+  await insert(first!.id, 1, "user.message", { text: "group-token ".repeat(1000) });
+  await insert(second!.id, 1, "agent.message.completed", { text: "group-token group-token" });
+  // Both identities fit one batch: only the first occurrence of each is returned.
+  const together = await collect({ query: "group-token", groupBy: "session" }, authority);
+  expect(together.matches.map((m) => [m.sessionId, m.sequence, m.messageMatchOffset])).toEqual([
+    [first!.id, 1, 0],
+    [second!.id, 1, 0],
+  ]);
+  expect(together.page.matchedMessageCount).toBe(2);
+  expect(together.page.matchedOccurrenceCount).toBe(2);
+  expect(together.page.scannedMessages).toBe(2);
+  // Fill the first session beyond the candidate batch. Continuation must use
+  // session-id > boundary, not scan its 80 remaining messages or 999 occurrences.
+  for (let sequence = 2; sequence <= 81; sequence++)
+    await insert(first!.id, sequence, "user.message", { text: "group-token" });
+  const request = { query: "group-token", groupBy: "session" as const, limit: 1 };
+  const page = await searchSessionMessagesForSubject(client.db, workspaceId, request, authority);
+  expect(page.matches.map((m) => m.sessionId)).toEqual([first!.id]);
+  expect(page.hasMore).toBe(true);
+  const next = await searchSessionMessagesForSubject(
+    client.db,
+    workspaceId,
+    { ...request, cursor: page.nextCursor! },
+    authority,
+  );
+  expect(next.matches.map((m) => m.sessionId)).toEqual([second!.id]);
+  expect(next.matchedOccurrenceCount).toBe(2);
+  expect(next.matchedMessageCount).toBe(2);
+  expect(next.scannedMessages).toBe(2);
+  expect(next.countIsExact).toBe(true);
+  // Grouping participates in cursor identity in both directions.
+  await expect(
+    searchSessionMessagesForSubject(
+      client.db,
+      workspaceId,
+      { query: "group-token", cursor: page.nextCursor! },
+      authority,
+    ),
+  ).rejects.toThrow("cursor");
+  const ordinary = await searchSessionMessagesForSubject(
+    client.db,
+    workspaceId,
+    { query: "group-token", limit: 1 },
+    authority,
+  );
+  await expect(
+    searchSessionMessagesForSubject(
+      client.db,
+      workspaceId,
+      { ...request, cursor: ordinary.nextCursor! },
+      authority,
+    ),
+  ).rejects.toThrow("cursor");
+  const unchangedFind = await searchSessionMessagesForSubject(
+    client.db,
+    workspaceId,
+    { query: "group-token", sessionId: first!.id, limit: 50 },
+    { subjectId },
+  );
+  expect(unchangedFind.matches).toHaveLength(50);
+  expect(unchangedFind.matches[49]!.messageMatchOffset).toBe(49 * "group-token ".length);
+}, 180_000);
+
+test("grouped workspace counts still exclude sessions outside authorization scope", async () => {
+  const permitted = await makeSession();
+  const hidden = await makeSession();
+  await insert(permitted.id, 1, "user.message", { text: "group-isolation" });
+  await insert(hidden.id, 1, "user.message", { text: "group-isolation ".repeat(1000) });
+  const page = await collect(
+    { query: "group-isolation", groupBy: "session" },
+    {
+      subjectId,
+      authorizationScope: { kind: "scoped", rootSessionIds: [], sessionIds: [permitted.id] },
+    },
+  );
+  expect(page.matches.map((m) => m.sessionId)).toEqual([permitted.id]);
+  expect(page.page.matchedMessageCount).toBe(1);
+  expect(page.page.scannedMessages).toBe(1);
+}, 180_000);

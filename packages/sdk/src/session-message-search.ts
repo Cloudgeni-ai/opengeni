@@ -2,6 +2,8 @@
 export type SessionMessageSearchRequest = {
   query: string;
   sessionId?: string | undefined;
+  /** Workspace-only first hit per session; cannot combine with sessionId. */
+  groupBy?: "session" | undefined;
   archiveStatus?: "active" | "archived" | "all" | undefined;
   limit?: number | undefined;
   cursor?: string | undefined;
@@ -28,9 +30,9 @@ export type SessionMessageSearchResponse = {
   hasMore: boolean;
   /** Cumulative distinct messages visited in this live traversal. */
   scannedMessages: number;
-  /** Cumulative matching messages, not occurrences. */
+  /** Cumulative matching messages, or session representatives with groupBy=session. */
   matchedMessageCount: number;
-  /** Cumulative non-overlapping literal occurrences. */
+  /** Cumulative occurrences, or session representatives with groupBy=session. */
   matchedOccurrenceCount: number;
   /** True only on exhaustion. Concurrent mutations require a fresh traversal. */
   countIsExact: boolean;

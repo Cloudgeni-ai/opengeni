@@ -89,3 +89,30 @@ test("unsupported servers fail explicitly rather than falling back to titles or 
   await expect(client.searchSessionMessages("workspace", { query: "needle" })).rejects.toThrow();
   expect(calls).toBe(1);
 });
+
+test("workspace grouping is explicitly serialized without changing default Find", async () => {
+  const requests: URL[] = [];
+  const client = new OpenGeniBrowserClient({
+    baseUrl: "https://example.test",
+    apiKey: "test",
+    fetch: async (input) => {
+      requests.push(new URL(String(input)));
+      return new Response(
+        JSON.stringify({
+          matches: [],
+          nextCursor: null,
+          hasMore: false,
+          scannedMessages: 0,
+          matchedMessageCount: 0,
+          matchedOccurrenceCount: 0,
+          countIsExact: true,
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    },
+  });
+  await client.searchSessionMessages("workspace", { query: "x", groupBy: "session" });
+  await client.searchSessionMessages("workspace", { query: "x", sessionId: "session" });
+  expect(requests[0]!.searchParams.get("groupBy")).toBe("session");
+  expect(requests[1]!.searchParams.has("groupBy")).toBe(false);
+});

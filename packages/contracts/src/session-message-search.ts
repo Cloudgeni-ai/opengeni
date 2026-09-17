@@ -5,11 +5,16 @@ export const SessionMessageSearchRequest = z
   .object({
     query: z.string().min(1).max(200),
     sessionId: z.string().uuid().optional(),
+    groupBy: z.literal("session").optional(),
     archiveStatus: z.enum(["active", "archived", "all"]).optional(),
     limit: z.number().int().min(1).max(50).optional(),
     cursor: z.string().min(1).max(4096).optional(),
   })
-  .strict();
+  .strict()
+  .refine((request) => !request.groupBy || !request.sessionId, {
+    message: "groupBy=session is only supported for workspace search without sessionId",
+    path: ["groupBy"],
+  });
 export type SessionMessageSearchRequest = z.infer<typeof SessionMessageSearchRequest>;
 
 export const SessionMessageSearchMatch = z.object({
@@ -34,6 +39,8 @@ export type SessionMessageSearchMatch = z.infer<typeof SessionMessageSearchMatch
  * after an empty page while hasMore is true. Counts describe this live traversal,
  * not a frozen snapshot; restart to reflect concurrent changes. All non-overlapping
  * literal occurrences in user messages and completed assistant messages.
+ * With groupBy=session, matches and both matched counts describe one first-hit
+ * representative per matching session, not full message/occurrence totals.
  */
 export const SessionMessageSearchResponse = z.object({
   matches: z.array(SessionMessageSearchMatch).max(50),

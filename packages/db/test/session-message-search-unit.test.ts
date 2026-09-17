@@ -46,10 +46,15 @@ test("strict bounded request and explicit advancing empty response", () => {
     { query: "x", limit: 51 },
     { query: "x", includeTools: true },
     { query: "x", cursor: "x".repeat(4097) },
+    { query: "x", groupBy: "message" },
+    { query: "x", groupBy: "session", sessionId: "11111111-1111-4111-8111-111111111111" },
   ]) {
     expect(SessionMessageSearchRequest.safeParse(request).success).toBe(false);
   }
   expect(SessionMessageSearchRequest.parse({ query: "  " }).query).toBe("  ");
+  expect(SessionMessageSearchRequest.parse({ query: "x", groupBy: "session" }).groupBy).toBe(
+    "session",
+  );
   expect(
     SessionMessageSearchResponse.parse({
       matches: [],
