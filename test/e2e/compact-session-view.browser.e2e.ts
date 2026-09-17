@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { chromium, type Browser, type Page } from "playwright";
 import { freePort, startProcess, waitFor, type StartedProcess } from "@opengeni/testing";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
@@ -50,11 +50,20 @@ const rows = Array.from({ length: 65 }, (_, index) => ({
 type FixtureRow = Omit<(typeof rows)[number], "parentSessionId"> & {
   parentSessionId: string | null;
 };
+const pendingFixtureGateReleases = new Set<() => void>();
+const releaseFixtureGates = () => {
+  for (const resolve of pendingFixtureGateReleases) resolve();
+};
 const deferred = () => {
-  let resolve!: () => void;
+  let complete!: () => void;
   const promise = new Promise<void>((done) => {
-    resolve = done;
+    complete = done;
   });
+  const resolve = () => {
+    pendingFixtureGateReleases.delete(resolve);
+    complete();
+  };
+  pendingFixtureGateReleases.add(resolve);
   return { promise, resolve };
 };
 
@@ -73,6 +82,8 @@ describe("compact session view on the live local workspace route (API fixture)",
         mutationStarted: boolean;
         holdRead?: ReturnType<typeof deferred>;
         readStarted: boolean;
+        holdChildRead?: ReturnType<typeof deferred>;
+        childReadStarted?: ReturnType<typeof deferred>;
         failReads: boolean;
         failFirstPage?: boolean;
         staleFirstPageRoot?: FixtureRow;
@@ -215,6 +226,12 @@ describe("compact session view on the live local workspace route (API fixture)",
         const sortBy = url.searchParams.get("sortBy") ?? "updatedAt";
         const archiveStatus = url.searchParams.get("archiveStatus") ?? "active";
         const fixture = archiveFixture;
+        if (fixture && url.searchParams.get("parentSessionId") === fixture.root.id) {
+          const hold = fixture.holdChildRead;
+          fixture.holdChildRead = undefined;
+          fixture.childReadStarted?.resolve();
+          await hold?.promise;
+        }
         let selected = (
           fixture ? [fixture.root, ...fixture.children, ...fixture.peers] : rows
         ).filter(
@@ -339,7 +356,17 @@ describe("compact session view on the live local workspace route (API fixture)",
       .and(page.locator(":focus"))
       .waitFor();
   }, 60_000);
+  afterEach(async () => {
+    // A handler clears its fixture field when consuming a gate, so cleanup
+    // must retain the resolver independently until the gate actually settles.
+    releaseFixtureGates();
+    archiveFixture = undefined;
+    // Retire the old document before the next case installs another fixture;
+    // released requests must not trigger follow-up reads against that fixture.
+    if (page && !page.isClosed()) await page.goto("about:blank");
+  });
   afterAll(async () => {
+    releaseFixtureGates();
     await Promise.allSettled([browser?.close(), web?.stop()]);
   });
 
@@ -468,7 +495,9 @@ describe("compact session view on the live local workspace route (API fixture)",
         readStarted: false,
         failReads: false,
       };
-      await page.reload({ waitUntil: "networkidle" });
+      await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions`, {
+        waitUntil: "networkidle",
+      });
       await page
         .getByRole("textbox", { name: "Message the agent", exact: true })
         .and(page.locator(":focus"))
@@ -513,8 +542,15 @@ describe("compact session view on the live local workspace route (API fixture)",
       expect(await dialog.getByText("Nonmatching root", { exact: true }).count()).toBe(0);
       await page.keyboard.press("Escape");
       await dialog.waitFor({ state: "hidden" });
+      // Start a branch refresh while the mutation is pending, but let the
+      // server evaluate its archive filter only after that mutation commits.
+      // The resulting empty child page must be refreshed when the root later
+      // returns through a continuation, even if the first page stays stale.
+      const delayedChildren = deferred();
+      archiveFixture.holdChildRead = delayedChildren;
+      archiveFixture.childReadStarted = deferred();
       await invalidate();
-      await settleRead();
+      await archiveFixture.childReadStarted.promise;
       // Neither search results nor a successful browse read revive a pending tree.
       expect(await matchingChildren.count()).toBe(0);
       expect(await rootRow.count()).toBe(0);
@@ -537,6 +573,17 @@ describe("compact session view on the live local workspace route (API fixture)",
         .getByText(localArchived ? "Chat archived" : "Chat restored", { exact: true })
         .waitFor();
       archiveFixture.failReads = false;
+      const [emptyChildrenResponse] = await Promise.all([
+        page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return (
+            url.pathname.endsWith("/sessions") &&
+            url.searchParams.get("parentSessionId") === root.id
+          );
+        }),
+        Promise.resolve().then(() => delayedChildren.resolve()),
+      ]);
+      expect((await emptyChildrenResponse.json()).sessions).toHaveLength(0);
       delayed.resolve();
       await settleRead();
       expect(await matchingChildren.count()).toBe(0);
@@ -547,6 +594,9 @@ describe("compact session view on the live local workspace route (API fixture)",
       // the rail receipt; only accepted browse evidence can reconcile the tree.
       archiveFixture.root = { ...archiveFixture.root, archived: !localArchived, archiveVersion: 2 };
       if (continuationFirst) {
+        const restoredChildren = deferred();
+        archiveFixture.holdChildRead = restoredChildren;
+        archiveFixture.childReadStarted = deferred();
         // Keep the accepted first page from BEFORE mutation completion. Only
         // the 100-row continuation may confirm membership after the reversal;
         // it overlaps cached roots and adds six continuation-only roots.
@@ -571,6 +621,23 @@ describe("compact session view on the live local workspace route (API fixture)",
         });
         await rootRow.waitFor();
         await rail.getByText("Unrelated 54", { exact: true }).waitFor();
+        await archiveFixture.childReadStarted.promise;
+        // Root membership and branch materialization are separate commits.
+        // Keep the restoring branch response in flight to prove that seeing
+        // the root is not evidence that its 50 children have rendered yet.
+        expect(await matchingChildren.count()).toBe(0);
+        const [restoredChildrenResponse] = await Promise.all([
+          page.waitForResponse((response) => {
+            const url = new URL(response.url());
+            return (
+              url.pathname.endsWith("/sessions") &&
+              url.searchParams.get("parentSessionId") === root.id
+            );
+          }),
+          Promise.resolve().then(() => restoredChildren.resolve()),
+        ]);
+        expect((await restoredChildrenResponse.json()).sessions).toHaveLength(50);
+        await rail.getByText("Needle 00", { exact: true }).waitFor();
         await settleRead();
         expect(await matchingChildren.count()).toBe(50);
         expect(await rail.getByText("Needle 00", { exact: true }).count()).toBe(1);
@@ -678,7 +745,50 @@ describe("compact session view on the live local workspace route (API fixture)",
       ).toBe(true);
       await page.keyboard.press("Escape");
       await dialog.waitFor({ state: "hidden" });
-      archiveFixture = undefined;
     }, 45_000);
   }
+
+  test("failure cleanup releases consumed and unconsumed fixture gates", async () => {
+    const fixture: Record<string, ReturnType<typeof deferred> | undefined> = {
+      mutation: deferred(),
+      holdRead: deferred(),
+      holdChildRead: deferred(),
+      holdSearch: deferred(),
+    };
+    const requests = Object.entries(fixture).map(async ([name, gate]) => {
+      if (name !== "mutation") fixture[name] = undefined;
+      await gate!.promise;
+      return name;
+    });
+    expect(fixture.holdChildRead).toBeUndefined();
+    await expect(
+      (async () => {
+        try {
+          throw new Error("simulated assertion failure after consuming a gate");
+        } finally {
+          releaseFixtureGates();
+        }
+      })(),
+    ).rejects.toThrow("simulated assertion failure");
+    expect(await Promise.all(requests)).toEqual([
+      "mutation",
+      "holdRead",
+      "holdChildRead",
+      "holdSearch",
+    ]);
+    expect(pendingFixtureGateReleases.size).toBe(0);
+
+    // Releasing one case must not pre-resolve a gate registered by the next.
+    const next = deferred();
+    let nextSettled = false;
+    const nextRequest = next.promise.then(() => {
+      nextSettled = true;
+    });
+    await Promise.resolve();
+    expect(nextSettled).toBe(false);
+    releaseFixtureGates();
+    await nextRequest;
+    expect(nextSettled).toBe(true);
+    expect(pendingFixtureGateReleases.size).toBe(0);
+  });
 });
