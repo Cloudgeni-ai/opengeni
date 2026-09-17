@@ -6,6 +6,7 @@ import { testSettings } from "@opengeni/testing";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { apiRequestBindingsForTransportPeer } from "../src/http/request-source";
 import {
+  completeAuthorizationRedirect,
   isMcpOAuthPublicProtocolPath,
   isMcpOAuthResourcePath,
   mcpOAuthBearerToken,
@@ -173,6 +174,38 @@ describe("MCP OAuth protocol", () => {
     expect(html).not.toContain("cursor://");
     expect(html).not.toContain("Resource:");
     expect(html).not.toContain("letter-spacing");
+    expect(html).toContain("event.submitter");
+    expect(html).toContain("submitter.name");
+    expect(html).toContain("button.disabled=true");
+  });
+
+  test("authorization handoff is 200 HTML for loopback and custom-scheme redirects", async () => {
+    const app = new Hono();
+    app.get("/loopback", (c) =>
+      completeAuthorizationRedirect(c, "http://127.0.0.1:4567/callback?code=demo"),
+    );
+    app.get("/https", (c) =>
+      completeAuthorizationRedirect(c, "https://client.example/callback?code=demo"),
+    );
+    app.get("/native", (c) =>
+      completeAuthorizationRedirect(c, "myapp://oauth/callback?code=demo"),
+    );
+
+    for (const [path, redirectTo] of [
+      ["/loopback", "http://127.0.0.1:4567/callback?code=demo"],
+      ["/https", "https://client.example/callback?code=demo"],
+      ["/native", "myapp://oauth/callback?code=demo"],
+    ] as const) {
+      const response = await app.request(path);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("location")).toBeNull();
+      expect(response.headers.get("content-type")).toMatch(/text\/html/);
+      expect(response.headers.get("refresh")).toBe(`0;url=${redirectTo}`);
+      const html = await response.text();
+      expect(html).toContain("location.replace");
+      expect(html).toContain(redirectTo);
+      expect(html).not.toContain("Continue</a>");
+    }
   });
 
   test("token exchange can use any registered redirect URI for the same client", () => {
