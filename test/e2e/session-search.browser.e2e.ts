@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import AxeBuilder from "@axe-core/playwright";
 import {
   appendSessionEventsAndUpdateSession,
@@ -8,6 +8,7 @@ import {
   updateSessionTitle,
 } from "@opengeni/db";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
+import type { SessionMessageSearchResponse } from "../../packages/sdk/src/session-message-search";
 import {
   acquireSharedTestDatabase,
   freePort,
@@ -152,6 +153,33 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       extraHTTPHeaders: ownerHeaders,
     });
     const page = await context.newPage();
+    const searchResponses: Array<Record<string, unknown>> = [];
+    page.on("response", (response) => {
+      const url = new URL(response.url());
+      if (!url.pathname.endsWith("/session-message-search")) return;
+      void response
+        .json()
+        .then((body: SessionMessageSearchResponse) => {
+          searchResponses.push({
+            status: response.status(),
+            sessionId: url.searchParams.get("sessionId"),
+            groupBy: url.searchParams.get("groupBy"),
+            cursorPresent: url.searchParams.has("cursor"),
+            hasMore: body.hasMore,
+            nextCursorPresent: !!body.nextCursor,
+            scannedMessages: body.scannedMessages,
+            matchedOccurrenceCount: body.matchedOccurrenceCount,
+            matches: body.matches?.map((match) => ({
+              sessionId: match.sessionId,
+              title: match.sessionTitle,
+              sequence: match.sequence,
+              role: match.role,
+              offset: match.messageMatchOffset,
+            })),
+          });
+        })
+        .catch(() => undefined);
+    });
     try {
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
@@ -159,13 +187,26 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
 
       // Title-only match: the needle appears in the title/opening message
       // but in no user/assistant message body.
-      const titleMatch = await seedSession(workspaceId, accountId, "Quartzpine release checklist");
+      // Deterministic UUID order forces grouped search to cross the long
+      // assistant session before reaching the later user-message match. This
+      // catches false exhaustion after skipping a full identity scan batch.
+      const titleMatch = await seedSession(
+        workspaceId,
+        accountId,
+        "Quartzpine release checklist",
+        "10000000-0000-4000-8000-000000000001",
+      );
       await seedConversation(workspaceId, titleMatch.id, [
         { user: "Please prepare the release notes for Friday." },
         { assistant: "The release notes are ready for review." },
       ]);
       // User-message match.
-      const userMatch = await seedSession(workspaceId, accountId, "Vendor comparison");
+      const userMatch = await seedSession(
+        workspaceId,
+        accountId,
+        "Vendor comparison",
+        "30000000-0000-4000-8000-000000000001",
+      );
       await seedConversation(workspaceId, userMatch.id, [
         { user: "Can you rank the quartzpine vendors by price?" },
         { assistant: "Ranked by price in the comparison table." },
@@ -173,7 +214,12 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       // Assistant-message match that is old history by the time anyone
       // opens the session: sixty filler turns push it out of the rendered
       // window. `ledger-north` uniquely identifies this exact occurrence.
-      const assistantMatch = await seedSession(workspaceId, accountId, "Proposal review");
+      const assistantMatch = await seedSession(
+        workspaceId,
+        accountId,
+        "Proposal review",
+        "20000000-0000-4000-8000-000000000001",
+      );
       const needleEvents = await seedConversation(workspaceId, assistantMatch.id, [
         { user: "Where did the proposal end up?" },
         { assistant: "The quartzpine proposal is filed under ledger-north." },
@@ -226,11 +272,19 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
 
       await input.fill("quartzpine");
       const results = dialog.locator("[data-search-result]");
-      await waitFor(async () => (await results.count()) === 3, {
-        timeoutMs: 15_000,
-        intervalMs: 150,
-        describe: () => "three quartzpine search results",
-      });
+      let observedResults: string[] = [];
+      await waitFor(
+        async () => {
+          observedResults = await results.allTextContents();
+          return observedResults.length === 3;
+        },
+        {
+          timeoutMs: 15_000,
+          intervalMs: 150,
+          describe: () =>
+            `three quartzpine search results; observed ${JSON.stringify(observedResults)}; wire ${JSON.stringify(searchResponses)}; diagnostics ${(browserDiagnostics.get(context) ?? []).slice(-10).join("; ")}`,
+        },
+      );
 
       // Decoys never surface.
       expect(await dialog.getByText("Decoy note field", { exact: true }).count()).toBe(0);
@@ -298,6 +352,11 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       );
       await expectTextInTimelineView(page, /ledger-north/);
     } finally {
+      await writeFile(
+        `${artifactDir}/session-search-wire.json`,
+        JSON.stringify(searchResponses, null, 2),
+      );
+      await page.screenshot({ path: `${artifactDir}/session-search-desktop-last.png` });
       await context.close();
     }
   }, 120_000);
@@ -602,6 +661,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       );
 
       // Escape closes the dialog without disturbing the conversation.
+      await page.screenshot({ path: `${artifactDir}/session-search-return-restored.png` });
       await page.keyboard.press("Escape");
       await expectHidden(dialog);
     } finally {
@@ -835,8 +895,10 @@ async function seedSession(
   workspaceId: string,
   accountId: string,
   title: string,
+  requestedSessionId?: string,
 ): Promise<{ id: string }> {
   const session = await createSession(dbRef!, {
+    ...(requestedSessionId ? { requestedSessionId } : {}),
     accountId,
     workspaceId,
     initialMessage: title,
@@ -977,24 +1039,24 @@ async function expectExactSearchHighlight(
   offset: number,
 ): Promise<void> {
   await page.waitForFunction(
-    ({ query, sequence, offset }) => {
+    (expectedTarget) => {
       const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]");
       const registry = (CSS as unknown as { highlights?: Map<string, Set<Range>> }).highlights;
       if (!scroller || !registry) return false;
       const viewport = scroller.getBoundingClientRect();
       const ranges = [...registry.entries()]
         .filter(([name]) => name.startsWith("og-search-"))
-        .flatMap(([, ranges]) => [...ranges]);
+        .flatMap(([, highlightRanges]) => [...highlightRanges]);
       return ranges.some((range) => {
         const marker = range.startContainer.parentElement?.closest<HTMLElement>(
           "[data-og-search-occurrence]",
         );
         const rect = range.getBoundingClientRect();
         return (
-          range.toString() === query &&
-          marker?.dataset.ogSearchSequence === String(sequence) &&
-          marker.dataset.ogSearchOffset === String(offset) &&
-          marker.dataset.ogSearchQuery === query &&
+          range.toString() === expectedTarget.query &&
+          marker?.dataset.ogSearchSequence === String(expectedTarget.sequence) &&
+          marker.dataset.ogSearchOffset === String(expectedTarget.offset) &&
+          marker.dataset.ogSearchQuery === expectedTarget.query &&
           rect.height > 0 &&
           rect.top >= viewport.top - 1 &&
           rect.bottom <= viewport.bottom + 1
