@@ -204,23 +204,24 @@ export function newSessionDraftToolPolicy(input: {
   workspaceDefaultMcpServerIds: Iterable<string>;
   catalogReady: boolean;
   explicit: boolean;
+  /** Header switch. Distinct from `explicit`, which pins the tool id list. */
+  customizing?: boolean;
   excludedMcpServerIds?: Iterable<string>;
 }): { tools: ToolRef[]; toolsProvided: boolean; excludedMcpServerIds?: string[] } {
-  if (!input.explicit && input.excludedMcpServerIds !== undefined) {
+  if (!input.catalogReady) return { tools: [], toolsProvided: false };
+  const customizing = input.customizing ?? input.explicit;
+  if (!customizing) return { tools: [], toolsProvided: false };
+  if (input.explicit) {
     return {
-      tools: [],
-      toolsProvided: false,
-      excludedMcpServerIds: [...new Set(input.excludedMcpServerIds)].sort(),
+      tools: buildOpenGeniUiTools(undefined, input.selectedMcpServerIds),
+      toolsProvided: true,
     };
   }
-  if (!input.catalogReady) return { tools: [], toolsProvided: false };
-  const selected = buildOpenGeniUiTools(undefined, input.selectedMcpServerIds);
-  const baseline = buildOpenGeniUiTools(undefined, input.workspaceDefaultMcpServerIds);
-  const equal =
-    canonicalToolIds(selected).join("\u0000") === canonicalToolIds(baseline).join("\u0000");
-  return input.explicit || !equal
-    ? { tools: selected, toolsProvided: true }
-    : { tools: [], toolsProvided: false };
+  return {
+    tools: [],
+    toolsProvided: true,
+    excludedMcpServerIds: [...new Set(input.excludedMcpServerIds ?? [])].sort(),
+  };
 }
 
 /**

@@ -2559,7 +2559,7 @@ describe("new-session draft tool policy", () => {
         catalogReady: true,
         explicit: false,
       }),
-    ).toEqual({ tools: [], toolsProvided: true });
+    ).toEqual({ tools: [], toolsProvided: false });
     expect(
       newSessionDraftToolPolicy({
         selectedMcpServerIds: ["opengeni"],
@@ -2583,7 +2583,21 @@ describe("new-session draft tool policy", () => {
         catalogReady: true,
         explicit: false,
       }),
-    ).toEqual({ tools: [], toolsProvided: true });
+    ).toEqual({ tools: [], toolsProvided: false });
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: ["opengeni"],
+        workspaceDefaultMcpServerIds: ["opengeni", "docs"],
+        catalogReady: true,
+        customizing: true,
+        explicit: false,
+        excludedMcpServerIds: ["docs"],
+      }),
+    ).toEqual({
+      tools: [],
+      toolsProvided: true,
+      excludedMcpServerIds: ["docs"],
+    });
   });
 });
 

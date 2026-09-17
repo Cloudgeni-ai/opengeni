@@ -13,7 +13,11 @@ import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
-import { connectorSelectionUpdate } from "@/lib/composer-connectors";
+import {
+  connectorSelectionUpdate,
+  followWorkspaceConnectorPolicy,
+  sessionConnectorPolicyIsCustomized,
+} from "@/lib/composer-connectors";
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
@@ -157,7 +161,7 @@ import {
   usePersonalResourceAttachment,
 } from "@/lib/use-personal-resource-attachment";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
+import type { LineageNode, SessionRealtimeModel, UpdateSessionToolPolicyRequest } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 const InlineChatImage = lazy(() =>
@@ -1705,6 +1709,9 @@ function SessionChatPane(props: {
   const durableToolsSessionId = useRef(props.session.id);
   const [durableToolsSaving, setDurableToolsSaving] = useState(false);
   const [durableToolsError, setDurableToolsError] = useState<string | null>(null);
+  const [connectorCustomizingOverride, setConnectorCustomizingOverride] = useState<boolean | null>(
+    null,
+  );
   const navigate = useNavigate();
   const launch = props.launch ?? EMPTY_COMPOSER_LAUNCH;
   const launchModel = launch.model;
@@ -1718,6 +1725,7 @@ function SessionChatPane(props: {
       durableToolsSessionId.current = props.session.id;
       setDurableToolsSnapshot(props.session);
       setDurableToolsHydrated(false);
+      setConnectorCustomizingOverride(null);
       return;
     }
     if (!context.workspaceMcpCatalogReady) {
@@ -1755,27 +1763,24 @@ function SessionChatPane(props: {
     durableToolsSnapshot,
     props.session,
   ]);
-  const saveDurableToolPolicy = useCallback(
-    async (next: SessionToolSelection) => {
+  const connectorCustomizing =
+    connectorCustomizingOverride ?? sessionConnectorPolicyIsCustomized(durableToolsSnapshot);
+  const applyDurableToolPolicy = useCallback(
+    async (
+      request: UpdateSessionToolPolicyRequest,
+      optimistic?: SessionToolSelection,
+    ) => {
       if (durableToolsSaveInFlight.current) return;
       durableToolsSaveInFlight.current = true;
       const targetSessionId = props.session.id;
-      setDurableToolSelection({
-        mcpServerIds: new Set(next.mcpServerIds),
-        firstPartyToolIds: new Set(next.firstPartyToolIds),
-      });
+      if (optimistic) setDurableToolSelection(optimistic);
       setDurableToolsSaving(true);
       setDurableToolsError(null);
       try {
         const updated = await context.client.updateSessionToolPolicy(
           props.session.workspaceId,
           targetSessionId,
-          connectorSelectionUpdate(
-            durableToolsSnapshot,
-            durableToolSelection.mcpServerIds,
-            next.mcpServerIds,
-            context.workspaceDefaultToolIds,
-          ),
+          request,
         );
         if (durableToolsSessionId.current !== targetSessionId) return;
         setDurableToolSelection({
@@ -1787,12 +1792,11 @@ function SessionChatPane(props: {
           firstPartyToolIds: new Set(updated.firstPartyMcpTools),
         });
         setDurableToolsSnapshot(updated);
+        setConnectorCustomizingOverride((current) => (current === true ? true : null));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setDurableToolsError(message);
         toast.error("Failed to save session tools", { description: message });
-        // Reconcile with the server after both a 409 and a transport failure;
-        // the failed local click must never be presented as durable truth.
         try {
           const refreshed = await context.client.getSession(
             props.session.workspaceId,
@@ -1808,6 +1812,7 @@ function SessionChatPane(props: {
             firstPartyToolIds: new Set(refreshed.firstPartyMcpTools),
           });
           setDurableToolsSnapshot(refreshed);
+          setConnectorCustomizingOverride((current) => (current === true ? true : null));
         } catch {
           if (durableToolsSessionId.current === targetSessionId) {
             setDurableToolSelection({
@@ -1829,10 +1834,31 @@ function SessionChatPane(props: {
       context.client,
       context.workspaceDefaultToolIds,
       durableToolsSnapshot,
-      durableToolSelection,
       props.session.id,
       props.session.workspaceId,
       selectableToolIds,
+    ],
+  );
+  const saveDurableToolPolicy = useCallback(
+    async (next: SessionToolSelection) => {
+      await applyDurableToolPolicy(
+        connectorSelectionUpdate(
+          durableToolsSnapshot,
+          durableToolSelection.mcpServerIds,
+          next.mcpServerIds,
+          context.workspaceDefaultToolIds,
+        ),
+        {
+          mcpServerIds: new Set(next.mcpServerIds),
+          firstPartyToolIds: new Set(next.firstPartyToolIds),
+        },
+      );
+    },
+    [
+      applyDurableToolPolicy,
+      context.workspaceDefaultToolIds,
+      durableToolsSnapshot,
+      durableToolSelection,
     ],
   );
   const composerPolicyValidRef = useRef(false);
@@ -2589,6 +2615,14 @@ function SessionChatPane(props: {
                   toolsDisabled={
                     composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
                   }
+                  connectorCustomizing={connectorCustomizing}
+                  onConnectorCustomizingChange={(next) => {
+                    setConnectorCustomizingOverride(next);
+                    if (next) return;
+                    void applyDurableToolPolicy(
+                      followWorkspaceConnectorPolicy(durableToolsSnapshot),
+                    );
+                  }}
                   onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
                   variableSets={{
                     selectedCount:

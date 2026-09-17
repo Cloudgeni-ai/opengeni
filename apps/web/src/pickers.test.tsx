@@ -58,6 +58,7 @@ describe("unified session tool picker", () => {
     const root = createRoot(container);
     function Harness() {
       const [selection, setSelection] = useState(latest);
+      const [customizing, setCustomizing] = useState(false);
       return (
         <DropdownMenu>
           <SessionToolsMenuBody
@@ -65,6 +66,8 @@ describe("unified session tool picker", () => {
             servers={[{ id: "linear", name: "Linear" }]}
             firstPartyTools={FIRST_PARTY}
             selection={selection}
+            customizing={customizing}
+            onCustomizingChange={setCustomizing}
             onChange={(next) => {
               latest = next;
               setSelection(next);
@@ -75,6 +78,12 @@ describe("unified session tool picker", () => {
     }
     try {
       await act(async () => root.render(<Harness />));
+      const customize = container.querySelector<HTMLButtonElement>(
+        'button[role="switch"][aria-label="Customize connectors"]',
+      )!;
+      expect(container.querySelector('button[role="switch"][aria-label="Linear"]')).toBeNull();
+      expect(container.querySelector('[aria-label="Linear, off for this session"]')).not.toBeNull();
+      await act(async () => customize.click());
       const linear = container.querySelector<HTMLButtonElement>(
         'button[role="switch"][aria-label="Linear"]',
       )!;
@@ -86,7 +95,9 @@ describe("unified session tool picker", () => {
       expect(latest.mcpServerIds.has("linear")).toBe(false);
       expect(latest.mcpServerIds.has("files")).toBe(true);
       expect([...latest.firstPartyToolIds]).toEqual(["session_get"]);
-      expect(container.querySelectorAll("button[role=switch]")).toHaveLength(1);
+      expect(
+        container.querySelectorAll('button[role="switch"][aria-label="Customize connectors"]'),
+      ).toHaveLength(1);
     } finally {
       await act(async () => root.unmount());
       container.remove();
