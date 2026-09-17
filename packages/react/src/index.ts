@@ -531,6 +531,7 @@ export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export { GeneratedVideoPlayer } from "./components/generated-video-player";
 export type { GeneratedVideoPlayerProps } from "./components/generated-video-player";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export type { TimelineSearchTarget } from "./components/timeline-search";
 export { UserMessageBody, userMessageLikelyNeedsDisclosure } from "./components/user-message-body";
 export type {
   UserMessageBodyProps,

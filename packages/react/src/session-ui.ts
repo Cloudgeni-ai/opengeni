@@ -13,6 +13,7 @@ export type { ApprovalSurfaceProps, ApprovalSurfaceMessages } from "./components
 export type { HumanInputSurfaceProps } from "./components/human-input-surface";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export type { TimelineSearchTarget } from "./components/timeline-search";
 export { createOlderHistoryLoadReceipt } from "./older-history";
 export type { OlderHistoryLoader, OlderHistoryLoadReceipt } from "./older-history";
 export { UserMessageBody, userMessageLikelyNeedsDisclosure } from "./components/user-message-body";

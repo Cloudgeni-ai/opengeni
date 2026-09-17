@@ -473,7 +473,7 @@ export type TurnEndItem = {
   occurredAt: string;
 };
 
-export type TimelineItem =
+export type TimelineItem = (
   | UserMessageItem
   | HumanInputItem
   | AgentMessageItem
@@ -492,7 +492,11 @@ export type TimelineItem =
   | MemoryItem
   | KnowledgeItem
   | FleetDecisionItem
-  | TurnEndItem;
+  | TurnEndItem
+) & {
+  /** Durable identities, independent of renderer/reconciliation keys. */
+  sourceEvents?: readonly { eventId: string; sequence: number }[] | undefined;
+};
 
 /** Activity items cluster between chat messages (reasoning, tools, workers, sandbox, memory). */
 export type ActivityItem =
