@@ -74,10 +74,7 @@ export type UseSessionEventsResult = {
    */
   jumpToLatest: () => Promise<void>;
   /** Replace history with a bounded window containing this exact durable event. */
-  jumpToSequence: (
-    sequence: number,
-    options?: { signal?: AbortSignal },
-  ) => Promise<boolean>;
+  jumpToSequence: (sequence: number, options?: { signal?: AbortSignal }) => Promise<boolean>;
   loadingTarget: boolean;
   error: Error | null;
 };
@@ -840,11 +837,8 @@ export function useSessionEvents(
   }, [client, workspaceId, sessionId]);
 
   const jumpToSequence = useCallback(
-    async (
-      sequence: number,
-      options?: { signal?: AbortSignal },
-    ): Promise<boolean> => {
-      const signal = options?.signal;
+    async (sequence: number, navigationOptions?: { signal?: AbortSignal }): Promise<boolean> => {
+      const signal = navigationOptions?.signal;
       if (!sessionId || !Number.isSafeInteger(sequence) || sequence < 1) return false;
       // A navigation that was already cancelled (for example Find closed before
       // the caller could react) must not disturb any current view state.

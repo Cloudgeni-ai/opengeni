@@ -56,6 +56,37 @@ execute every Site or invoke tools just to display a library grid. Inline HTML
 and saved Sites keep the existing explicit Markdown host callbacks and isolated
 frame; ordinary HTML file downloads do not become executable previews.
 
+## Optional conversation search
+
+Check the installed SDK/React exports before offering full-history Find. With
+compatible versions, `client.searchSessionMessages(workspaceId, { query,
+sessionId, limit, cursor }, { signal })` searches literal, case-insensitive text
+in saved user and completed assistant messages. Omit `sessionId` and set
+`groupBy: "session"` for one representative hit per session in workspace search;
+do not combine those two options. Preserve authenticated host/workspace scope.
+Tools, reasoning, model context, and assistant output with only unfinished
+deltas are not searched. Do not silently fall back to title-only or loaded-DOM
+search when this endpoint is unavailable.
+
+Each request is bounded. An empty page with `hasMore: true` is still searching,
+not “no matches”: follow `nextCursor`, cancel obsolete requests, and expose
+provisional counts until `countIsExact`. Counts describe the live traversal,
+not a snapshot; grouped counts represent sessions, not per-session message
+totals. Retain a bounded hit batch and cursor history rather than downloading
+every message into the browser.
+
+Use a result's durable `sequence` and original-text UTF-16
+`messageMatchOffset` to navigate. React's `useSessionEvents().jumpToSequence`
+loads a bounded target window; pass `{ sequence, eventId, query,
+offset: messageMatchOffset }` as `MessageTimeline.searchTarget` after a
+successful jump. Preserve query and selection in host state, and clear the
+target without scrolling when Find closes. A custom virtualized message
+renderer must consume its search-target render context to reveal the selected
+text. For contextual previews, read bounded events before/after the target,
+render only `payload.text` for user/completed-assistant messages, and keep the
+returned snippet for a large target. Never stringify forensic payloads: they
+may include fields deliberately omitted from the visible conversation.
+
 ## Browser/backend split
 
 The product browser normally sends product-shaped requests to its own same-origin backend. The backend authenticates, resolves the allowed mapping, and calls OpenGeni. Never bundle an organization key into frontend code.

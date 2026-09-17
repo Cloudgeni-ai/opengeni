@@ -1,0 +1,156 @@
+import { afterAll, beforeAll, expect, mock, test } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { act, type ComponentType } from "react";
+import { createRoot } from "react-dom/client";
+import type { TimelineSearchTarget } from "@opengeni/react/session-ui";
+import type { ConversationSearchPage } from "@/lib/use-conversation-search";
+import type { SessionSearchRoute } from "@/lib/session-search-route";
+
+const page: ConversationSearchPage = {
+  matches: [0, 12, 24].map((offset) => ({
+    sessionId: "session",
+    sessionTitle: "Session",
+    eventId: "event",
+    sequence: 7,
+    turnId: null,
+    role: "user",
+    messageId: null,
+    messageMatchOffset: offset,
+    snippet: { text: "test", matchStart: 0, matchEnd: 4 },
+  })),
+  nextCursor: null,
+  hasMore: false,
+  scannedMessages: 1,
+  matchedMessageCount: 1,
+  matchedOccurrenceCount: 3,
+  countIsExact: true,
+};
+const client = { searchSessionMessages: async () => page };
+let ConversationFind: ComponentType<{
+  workspaceId: string;
+  sessionId: string;
+  open: boolean;
+  focusRevision: number;
+  initial: SessionSearchRoute;
+  onClose: () => void;
+  onTarget: (target: TimelineSearchTarget | null) => void;
+  onJump: (sequence: number, options?: { signal?: AbortSignal }) => Promise<boolean>;
+}>;
+
+beforeAll(async () => {
+  GlobalRegistrator.register();
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  mock.module("@/context", () => ({
+    useAppContext: () => ({ client, accessContext: { subjectId: "reader" } }),
+  }));
+  ConversationFind = (await import("./conversation-find")).default;
+});
+afterAll(() => {
+  mock.restore();
+  GlobalRegistrator.unregister();
+});
+
+test("deep-link occurrence stays selected, Enter moves matches, Escape clears without another jump", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const targets: Array<TimelineSearchTarget | null> = [];
+  const jumps: number[] = [];
+  let open = true;
+  const onTarget = (target: TimelineSearchTarget | null) => targets.push(target);
+  const onJump = async (sequence: number) => {
+    jumps.push(sequence);
+    return true;
+  };
+  const render = () =>
+    root.render(
+      <ConversationFind
+        workspaceId="workspace"
+        sessionId="session"
+        open={open}
+        focusRevision={0}
+        initial={{ find: "test", matchSequence: 7, matchOffset: 12 }}
+        onTarget={onTarget}
+        onJump={onJump}
+        onClose={() => {
+          open = false;
+          render();
+        }}
+      />,
+    );
+  try {
+    await act(async () => render());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 220));
+    });
+    expect(targets.at(-1)?.offset).toBe(12);
+    expect(host.textContent).toContain("2 / 3");
+    await act(async () =>
+      host
+        .querySelector("input")!
+        .dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
+    );
+    expect(targets.at(-1)?.offset).toBe(24);
+    expect(host.textContent).toContain("3 / 3");
+    await act(async () =>
+      host
+        .querySelector("input")!
+        .dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true }),
+        ),
+    );
+    expect(targets.at(-1)?.offset).toBe(12);
+    const beforeClose = jumps.length;
+    await act(async () =>
+      host
+        .querySelector("input")!
+        .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })),
+    );
+    expect(targets.at(-1)).toBeNull();
+    expect(jumps.length).toBe(beforeClose);
+    expect(host.textContent).toBe("");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+test("closing while navigation is pending aborts it and suppresses late highlight", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const targets: Array<TimelineSearchTarget | null> = [];
+  let signal: AbortSignal | undefined;
+  let finish!: (value: boolean) => void;
+  const onJump = async (_sequence: number, options?: { signal?: AbortSignal }) => {
+    signal = options?.signal;
+    return await new Promise<boolean>((resolve) => {
+      finish = resolve;
+    });
+  };
+  const onTarget = (target: TimelineSearchTarget | null) => targets.push(target);
+  const render = (open: boolean) =>
+    root.render(
+      <ConversationFind
+        workspaceId="workspace"
+        sessionId="session"
+        open={open}
+        focusRevision={0}
+        initial={{ find: "test", matchSequence: 7 }}
+        onTarget={onTarget}
+        onJump={onJump}
+        onClose={() => render(false)}
+      />,
+    );
+  try {
+    await act(async () => render(true));
+    expect(signal?.aborted).toBe(false);
+    await act(async () => render(false));
+    expect(signal?.aborted).toBe(true);
+    await act(async () => finish(true));
+    expect(targets.every((target) => target === null)).toBe(true);
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});

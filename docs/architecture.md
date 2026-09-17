@@ -1352,6 +1352,17 @@ coalescing, joining interleaved chunks without merging distinct messages.
 The database reader batches up to 256 events, preserving the default 1 MiB
 full-payload page budget through metadata planning before payload transfer.
 
+Session text search connects the workspace rail's lazy search dialog to the
+session route's lazy Find bar. The rail provider retains dialog state across
+session navigation, including on collapsed and mobile rails. Search queries run
+against retained user and completed assistant text through the browser SDK,
+not the mounted DOM. Exact links carry the query, event sequence and original
+UTF-16 match offset; `useSessionEvents.jumpToSequence` loads a bounded target
+window with cancellation, while `MessageTimeline.searchTarget` owns disclosure
+and occurrence navigation. Browser result batches and scan continuations remain
+bounded; counts are provisional until traversal finishes. Tool output, reasoning
+and unfinished delta-only assistant messages are not included.
+
 Web imports `@opengeni/sdk/browser`. Operator Document-authority and tenancy
 backfills use `@opengeni/sdk/document-authority`; root/`core` retain compatibility.
 Keep non-web methods in optional entries, outside the direct-session bundle;

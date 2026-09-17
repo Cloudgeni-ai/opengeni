@@ -112,12 +112,16 @@ export function useTimelineSearchNavigation(
       // A virtualized renderer can explicitly identify the selected occurrence
       // when earlier occurrences are not mounted. Never accept a stale marker
       // belonging to a different sequence, occurrence, or query.
-      const materialized = [...source.querySelectorAll<HTMLElement>("[data-og-search-occurrence]")]
-        .find((element) => element.dataset.ogSearchSequence === String(target.sequence) &&
+      const materialized = [
+        ...source.querySelectorAll<HTMLElement>("[data-og-search-occurrence]"),
+      ].find(
+        (element) =>
+          element.dataset.ogSearchSequence === String(target.sequence) &&
           element.dataset.ogSearchQuery === target.query &&
           (target.offset != null
             ? element.dataset.ogSearchOffset === String(target.offset)
-            : element.dataset.ogSearchOccurrence === String(target.occurrence ?? 0)));
+            : element.dataset.ogSearchOccurrence === String(target.occurrence ?? 0)),
+      );
       const { text, spans } = annotatableText(materialized ?? source);
       // Inside a materialized chunk the match starts at the chunk start;
       // otherwise resolve against the full mounted message text.

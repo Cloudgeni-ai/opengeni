@@ -7,6 +7,7 @@ import { useChannels, useSessionLineage, useWorkspaceSessions } from "@opengeni/
 import { SiteOriginLink } from "@/components/session/site-origin-link";
 import { SiteSessionGroupHeading } from "./site-session-group-heading";
 import { SessionBrowseOrderControls } from "./session-browse-order-controls";
+import { requestSessionSearch } from "@/lib/session-search-route";
 import {
   OpenGeniApiError,
   OpenGeniSessionListCursorError,
@@ -314,6 +315,10 @@ export function SessionList() {
   // Poll so running sessions surface and move to the top without a manual
   // refresh; the previous index relied on a one-shot load.
   const [searchDraft, setSearchDraft] = useState("");
+  const openSearchDialog = useCallback(
+    () => requestSessionSearch(rail.workspaceId),
+    [rail.workspaceId],
+  );
   const [search, setSearch] = useState("");
   const browsePreferenceStorageId = useMemo(
     () => sessionBrowsePreferenceStorageId(context.accessContext.subjectId, rail.workspaceId),
@@ -2540,28 +2545,17 @@ export function SessionList() {
       </div>
 
       <div className="mb-1 ml-2 mr-3 flex shrink-0 items-center gap-1">
-        <label className="relative min-w-0 flex-1">
-          <span className="sr-only">Search sessions</span>
-          <SearchIcon
-            aria-hidden="true"
-            className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-fg-subtle"
-          />
-          <input
-            type="search"
-            value={searchDraft}
-            onChange={(event) => updateSearchDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape" && searchDraft) {
-                event.preventDefault();
-                updateSearchDraft("");
-              }
-            }}
-            maxLength={200}
-            placeholder="Search"
-            aria-label="Search sessions"
-            className="h-7 w-full min-w-0 rounded-md border border-border bg-bg/45 pl-7 pr-2 text-xs text-fg outline-none placeholder:text-fg-subtle hover:border-border-strong focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/40 pointer-coarse:h-11 pointer-coarse:text-base"
-          />
-        </label>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={openSearchDialog}
+          aria-label="Search sessions"
+          className="min-w-0 flex-1 justify-start text-xs text-fg-subtle pointer-coarse:h-11"
+        >
+          <SearchIcon aria-hidden="true" className="size-3.5" />
+          Search sessions
+        </Button>
         {channelMode ? (
           <Tooltip>
             <TooltipTrigger asChild>
@@ -4060,6 +4054,21 @@ export function CollapsedSessionsButton() {
   const tooltip = failed ? "Session history is unavailable" : "Sessions";
   return (
     <div className="flex flex-1 flex-col items-center gap-1 px-2 pt-1">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Search sessions"
+            onClick={() => requestSessionSearch(rail.workspaceId)}
+            className="text-fg-muted hover:text-fg"
+          >
+            <SearchIcon className="size-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="right">Search sessions</TooltipContent>
+      </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>
           <Button

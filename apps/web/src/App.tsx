@@ -39,6 +39,7 @@ import { ProblemPanel } from "@/components/common";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
+import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import {
   parseRootWorkspaceSearch,
@@ -283,8 +284,10 @@ const workspaceSessionsRoute = createRoute({
 const workspaceSessionRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "sessions/$sessionId",
-  validateSearch: (search: Record<string, unknown>): ComposerLaunchSearch =>
-    parseComposerLaunchSearch(search),
+  validateSearch: (search: Record<string, unknown>): ComposerLaunchSearch & SessionSearchRoute => ({
+    ...parseComposerLaunchSearch(search),
+    ...parseSessionSearchRoute(search),
+  }),
   component: SessionView,
 });
 const workspaceAgentsRoute = createRoute({
@@ -615,6 +618,7 @@ function SessionView() {
       sessionId={sessionId}
       launch={launch}
       realtimeAutostartModel={launch.realtime}
+      searchTarget={launch}
     />
   );
 }

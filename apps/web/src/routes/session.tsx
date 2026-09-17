@@ -23,7 +23,9 @@ import {
   MessageTimeline,
   SessionChrome,
   KnowledgeActivityProvider,
+  type TimelineSearchTarget,
 } from "@opengeni/react/session-ui";
+import type { SessionSearchRoute } from "@/lib/session-search-route";
 import {
   creditExhaustedFromEvents,
   conversationTimeline,
@@ -51,6 +53,7 @@ import {
   MenuIcon,
   MessagesSquareIcon,
   PanelsTopLeftIcon,
+  SearchIcon,
   XIcon,
 } from "lucide-react";
 import {
@@ -201,6 +204,8 @@ const MessageForkDialog = lazy(() =>
 );
 
 const MessageActions = lazy(() => import("@/components/session/message-actions"));
+const ConversationFind = lazy(() => import("@/components/session/conversation-find"));
+const EMPTY_SEARCH_TARGET: SessionSearchRoute = {};
 
 const SubagentTree = lazy(() =>
   import("@/components/session/subagents").then((module) => ({ default: module.SubagentTree })),
@@ -241,11 +246,13 @@ export function SessionRoute({
   sessionId,
   launch = EMPTY_COMPOSER_LAUNCH,
   realtimeAutostartModel,
+  searchTarget = EMPTY_SEARCH_TARGET,
 }: {
   workspaceId: string;
   sessionId: string;
   launch?: ComposerLaunchSearch;
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
+  searchTarget?: SessionSearchRoute;
 }) {
   const context = useAppContext();
   const rail = useRail();
@@ -277,6 +284,7 @@ export function SessionRoute({
     loadOldest,
     lastSequence: renderedThroughSequence,
     jumpToLatest,
+    jumpToSequence,
     error: streamError,
   } = useSessionEvents(sessionId);
   const sessionDetailReadOwner = useRef<object>({});
@@ -1009,6 +1017,8 @@ export function SessionRoute({
       session={session}
       events={events}
       timeline={timeline}
+      searchTarget={searchTarget}
+      onJumpToSequence={jumpToSequence}
       initialLoading={initialLoading}
       launch={launch}
       realtimeAutostartModel={realtimeAutostartModel}
@@ -1407,6 +1417,8 @@ function SessionChatPane(props: {
   session: Session;
   events: SessionEvent[];
   timeline: TimelineItem[];
+  searchTarget: SessionSearchRoute;
+  onJumpToSequence: (sequence: number, options?: { signal?: AbortSignal }) => Promise<boolean>;
   initialLoading: boolean;
   launch?: ComposerLaunchSearch;
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
@@ -1443,6 +1455,51 @@ function SessionChatPane(props: {
   onOpenSandboxFile: (path: string, line?: number) => void;
 }) {
   const context = useAppContext();
+  const [findOpen, setFindOpen] = useState(!!props.searchTarget.find);
+  const [findMounted, setFindMounted] = useState(!!props.searchTarget.find);
+  const [findFocusRevision, setFindFocusRevision] = useState(0);
+  const [activeSearchTarget, setActiveSearchTarget] = useState<TimelineSearchTarget | null>(null);
+  const findButton = useRef<HTMLButtonElement>(null);
+  const openFind = useCallback(() => {
+    setFindMounted(true);
+    setFindOpen(true);
+    setFindFocusRevision((value) => value + 1);
+  }, []);
+  const closeFind = useCallback(() => {
+    setFindOpen(false);
+    setActiveSearchTarget(null);
+    requestAnimationFrame(() => findButton.current?.focus({ preventScroll: true }));
+  }, []);
+  useEffect(() => {
+    if (props.searchTarget.find) openFind();
+  }, [
+    props.searchTarget.find,
+    props.searchTarget.matchSequence,
+    props.searchTarget.matchOffset,
+    openFind,
+  ]);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        !(event.ctrlKey || event.metaKey) ||
+        event.altKey ||
+        event.shiftKey ||
+        event.key.toLowerCase() !== "f"
+      )
+        return;
+      const target = event.target;
+      // Dialogs and embedded editors own their own keyboard search behavior.
+      if (
+        target instanceof Element &&
+        target.closest('[role="dialog"], .cm-editor, .xterm, [data-native-find]')
+      )
+        return;
+      event.preventDefault();
+      openFind();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [openFind]);
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
   const fleet = useWorkspaceMachines({
     sessionId: props.session.id,
@@ -2245,12 +2302,42 @@ function SessionChatPane(props: {
       enabled={!terminal && context.clientConfig.fileUploads.enabled === true}
       onFiles={attachments.addFiles}
     >
+      <div className="flex shrink-0 justify-end px-3 py-1">
+        <Button
+          ref={findButton}
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={openFind}
+          aria-label="Find in conversation"
+          title="Find in conversation (Ctrl/Cmd+F)"
+          className="text-xs text-fg-muted"
+        >
+          <SearchIcon className="size-3.5" />
+          Find
+        </Button>
+      </div>
+      {findMounted ? (
+        <Suspense fallback={null}>
+          <ConversationFind
+            workspaceId={props.session.workspaceId}
+            sessionId={props.session.id}
+            open={findOpen}
+            focusRevision={findFocusRevision}
+            initial={props.searchTarget}
+            onClose={closeFind}
+            onTarget={setActiveSearchTarget}
+            onJump={props.onJumpToSequence}
+          />
+        </Suspense>
+      ) : null}
       {terminal ? (
         <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
           <TerminalSessionBanner session={props.session} onNewSession={props.onNewSession} />
           <TerminalSessionArchive session={props.session} eventCount={props.timeline.length} />
         </div>
-      ) : (
+      ) : null}
+      {
         <>
           {/* Credit death also surfaces on an IDLE session: a budget_exhausted
               turn completes "cleanly", so waiting for status === "failed" would
@@ -2329,6 +2416,7 @@ function SessionChatPane(props: {
                 key={props.session.id}
                 className="h-full"
                 items={timelineWithOptimisticSends}
+                searchTarget={activeSearchTarget}
                 events={props.events}
                 status={props.session.status}
                 computeLabel={computeLabel}
@@ -2418,7 +2506,7 @@ function SessionChatPane(props: {
             </KnowledgeActivityProvider>
           </div>
         </>
-      )}
+      }
 
       {forkEventId ? (
         <Suspense fallback={null}>
