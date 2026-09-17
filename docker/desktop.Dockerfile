@@ -259,7 +259,6 @@ FROM debian:13-slim
 
 ARG TERRAFORM_VERSION=1.13.3
 ARG GLAB_VERSION=1.109.0
-ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6
 ARG CHECKOV_VERSION=3.2.526
 ARG NOVNC_REF=v1.5.0
 ARG WEBSOCKIFY_REF=v0.12.0
@@ -448,7 +447,7 @@ RUN set -eux; \
         "${alias_name}" --version; \
     done
 
-# ---- Layer 6: terraform / checkov / az / gh (parity with docker/sandbox.Dockerfile) ----
+# ---- Layer 6: terraform / checkov / gh (desktop intentionally excludes Azure CLI) ----
 RUN set -eux; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     case "${arch}" in amd64) tfa="amd64" ;; arm64|aarch64) tfa="arm64" ;; *) echo "unsupported architecture=${arch}" >&2; exit 1 ;; esac; \
@@ -459,12 +458,6 @@ RUN set -eux; \
     /opt/checkov/bin/pip install --no-cache-dir "checkov==${CHECKOV_VERSION}"; \
     ln -s /opt/checkov/bin/checkov /usr/local/bin/checkov; \
     checkov --version
-RUN set -eux; curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://aka.ms/InstallAzureCLIDeb | bash; az version
-ENV AZURE_EXTENSION_DIR=/opt/az/extensions
-RUN set -eux; \
-    install -d -m 0755 "$AZURE_EXTENSION_DIR"; \
-    az extension add --name azure-devops --version "$AZURE_DEVOPS_EXTENSION_VERSION"; \
-    az repos --help >/dev/null
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     install -d -m 0755 /etc/apt/keyrings; \
@@ -509,7 +502,7 @@ RUN set -eux; \
 
 # Exact native document/spreadsheet/presentation runtime. Keep this exact-source
 # copy after the source-invariant toolchain so remote BuildKit caches can reuse
-# Terraform, Checkov, Azure CLI, GitHub CLI, and ttyd across source revisions.
+# Terraform, Checkov, GitHub CLI, and ttyd across source revisions.
 # The builder still pins every byte and runs real DOCX/XLSX/PPTX plus PNG/WebP
 # smoke probes before this copy, and the final image still doctors that runtime.
 COPY --from=artifact-runtime-builder /opt/opengeni/artifact-runtime /opt/opengeni/artifact-runtime
