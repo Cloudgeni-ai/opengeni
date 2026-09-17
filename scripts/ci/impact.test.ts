@@ -142,6 +142,7 @@ describe("fail-closed change impact", () => {
     expect(sdk.typecheckProjects).toContain("packages/sdk");
     expect(sdk.unitTests).toContain("packages/sdk/test/client.test.ts");
     expect(sdk.e2eTests).toEqual([
+      "packages/react/test/timeline-search.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
       "test/e2e/appearance.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
@@ -529,6 +530,7 @@ describe("fail-closed change impact", () => {
     const tests = discoverTestFiles();
     expect(tests.integration.length).toBeGreaterThan(0);
     expect(tests.e2e).toEqual([
+      "packages/react/test/timeline-search.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
       "test/e2e/appearance.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,

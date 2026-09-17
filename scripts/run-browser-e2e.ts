@@ -28,6 +28,7 @@ const testFiles =
         "./test/e2e/chat-media-entry.browser.e2e.ts",
         "./test/e2e/session-header.browser.e2e.ts",
         "./test/e2e/session-pins.browser.e2e.ts",
+        "./test/e2e/session-search.browser.e2e.ts",
         "./test/e2e/skill-review.browser.e2e.ts",
         "./test/e2e/workspace-pause-timers.browser.e2e.ts",
         "./test/e2e/session-rail-row-metadata.browser.e2e.ts",

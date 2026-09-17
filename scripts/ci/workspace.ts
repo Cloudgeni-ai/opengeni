@@ -77,6 +77,8 @@ export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
     "is retained for dedicated session-header acceptance outside default CI",
   "test/e2e/session-pins.browser.e2e.ts":
     "requires dedicated FORCE-RLS visual evidence and is owned by the curated browser-acceptance gate",
+  "test/e2e/session-search.browser.e2e.ts":
+    "requires real history-search API and responsive browser evidence and is owned by the curated interaction gate",
   "test/e2e/slack-oauth.browser.e2e.ts":
     "requires dedicated Slack OAuth acceptance outside default CI",
   "test/e2e/timeline-scroll.browser.e2e.ts":

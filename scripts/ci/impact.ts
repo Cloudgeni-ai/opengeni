@@ -355,6 +355,13 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/session-capability-cards.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/session-search.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/api-router",
+    "@opengeni/db",
+    "@opengeni/testing",
+  ],
   "test/e2e/session-lazy-panels.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -385,6 +392,7 @@ const BROWSER_ACCEPTANCE_TESTS: Readonly<Record<BrowserAcceptanceLane, readonly 
     "test/e2e/timeline-tip-follow.browser.e2e.ts",
     "test/e2e/lossless-message.browser.e2e.ts",
     "test/e2e/user-message-disclosure.browser.e2e.ts",
+    "test/e2e/session-search.browser.e2e.ts",
     "test/e2e/realtime-demo.browser.e2e.ts",
     "test/e2e/source-packages-control-center.browser.e2e.ts",
   ],
