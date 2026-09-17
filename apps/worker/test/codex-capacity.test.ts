@@ -7,6 +7,8 @@ import {
   refreshCodexUsageAndRepairCapacityWaiters,
   signalCodexCapacityWakeTargets,
 } from "../src/activities/codex-capacity";
+import { selectCodexCredentialLeaseForTurn } from "../src/activities/codex-rotation";
+import { unresolvedCodexCredentialFailures } from "../../../packages/db/src/codex-failure-eligibility";
 
 function account(
   id: string,
@@ -39,6 +41,101 @@ function account(
 }
 
 describe("Codex capacity availability diagnostics", () => {
+  test("same turn waits without reset, resumes after a fenced clear, then acquires the same account", () => {
+    const metadata = {
+      codexCredentialFailedIds: ["reset"],
+      codexCredentialFailureCooldownRevisions: { reset: 1 },
+    };
+    const context: CodexCapacitySelectionContext = {
+      accounts: [
+        account("reset", {
+          exhaustedRevision: 1,
+          exhaustedKind: "quota",
+          exhaustedUntil: new Date("2100-01-01"),
+        }),
+      ],
+      activeCredentialId: "reset",
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+      existingCredentialId: null,
+      policyScope: null,
+      unavailableDiagnostics: [],
+      sessionId: "same-turn",
+      sessionPinnedCredentialId: "reset",
+      sessionPinSource: "policy",
+      sessionLastCredentialId: "reset",
+      policyHash: null,
+    };
+    for (let i = 0; i < 3; i++) {
+      context.failedCredentialIds = unresolvedCodexCredentialFailures(metadata, context.accounts);
+      expect(codexCapacityDecision(context)).toMatchObject({
+        kind: "unavailable",
+        resetKind: "bounded_refresh",
+      });
+    }
+    context.accounts[0]!.exhaustedUntil = new Date(0);
+    expect(codexCapacityDecision(context)).toMatchObject({
+      kind: "unavailable",
+      resetKind: "bounded_refresh",
+    });
+    context.accounts = [account("reset", { exhaustedRevision: 2 })];
+    context.failedCredentialIds = unresolvedCodexCredentialFailures(metadata, context.accounts);
+    expect(codexCapacityDecision(context)).toMatchObject({
+      kind: "available",
+      credentialId: "reset",
+    });
+    expect(
+      selectCodexCredentialLeaseForTurn({ ...context, context, now: new Date() }).credentialId,
+    ).toBe("reset");
+
+    context.accounts = [
+      account("reset", {
+        exhaustedRevision: 3,
+        exhaustedKind: "rate_limit",
+        exhaustedUntil: new Date("2100-01-01"),
+      }),
+    ];
+    context.failedCredentialIds = unresolvedCodexCredentialFailures(metadata, context.accounts);
+    expect(codexCapacityDecision(context).kind).toBe("unavailable");
+  });
+
+  test("failed IDs, failover exhaustion, model policy, manual pins and rotation off agree with execution", () => {
+    const base: CodexCapacitySelectionContext = {
+      accounts: [account("a"), account("b")],
+      activeCredentialId: "a",
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+      existingCredentialId: null,
+      policyScope: null,
+      unavailableDiagnostics: [],
+      sessionId: "parity",
+      sessionPinnedCredentialId: null,
+      sessionPinSource: null,
+      sessionLastCredentialId: null,
+      policyHash: null,
+    };
+    for (const overrides of [
+      { failedCredentialIds: ["a", "b"] },
+      { failoverExhausted: true },
+      { modelId: "codex/allowed", accounts: [account("a", { allowedModelIds: ["codex/other"] })] },
+      {
+        sessionPinnedCredentialId: "a",
+        sessionPinSource: "manual" as const,
+        accounts: [account("a", { primaryUsedPercent: 100 }), account("b")],
+      },
+      {
+        rotationEnabled: false,
+        accounts: [account("a", { primaryUsedPercent: 100 }), account("b")],
+      },
+    ]) {
+      const context = { ...base, ...overrides };
+      expect(codexCapacityDecision(context).kind).toBe("unavailable");
+      expect(
+        selectCodexCredentialLeaseForTurn({ ...context, context, now: new Date() }).credentialId,
+      ).toBeNull();
+    }
+  });
+
   test("eligibleCount uses the allocator's full health predicate", () => {
     const future = new Date("2100-01-01T00:00:00.000Z");
     const context: CodexCapacitySelectionContext = {

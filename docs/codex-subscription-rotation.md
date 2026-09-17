@@ -144,6 +144,20 @@ provider backpressure is never cleared by quota telemetry. Sharded policy pins r
 sticky throughout 90–99% and are rewritten only after actual exhaustion or another
 definitive health failure.
 
+Same-turn failure receipts retain the failed credential IDs and failover accounting,
+but automatic selection excludes only unresolved failures. Each new definitive
+cooldown refusal captures its cooldown revision. A later explicitly cleared cooldown
+at a newer revision releases that selection exclusion; healthy-looking cached usage
+or token refresh alone does not. Legacy ID-only receipts cannot establish whether a
+cooldown clear followed this failure and remain excluded, as do status-failure receipts.
+An explicit account selection or a new turn remains the recovery path for those
+ambiguous legacy receipts.
+Capacity reconciliation and lease acquisition apply this same recovery fence and the
+accepted turn's model allowlist. An all-excluded typed quota pool keeps bounded live
+refresh enabled, so a reset can recover the same turn without false resume loops.
+Manual pins, rotation-off selection, failover limits and definitive-failure replay
+safety remain unchanged; no reset credit is consumed by this recovery path.
+
 The effective pool's active credential is a cursor, not a sticky lease. Pin source is
 load-bearing: a `manual` (or defensively unlabeled) pin is user intent and never
 silently fails over; if it is capped, the turn enters the same durable capacity

@@ -34,6 +34,12 @@ test("live refresh targets quota cooldowns but not generic or legacy cooldowns",
   ).toBe(true);
   expect(
     codexAccountNeedsLiveCapacityRefresh(
+      acct("expired-quota", { exhaustedUntil: new Date(0), exhaustedKind: "quota" }),
+      NOW,
+    ),
+  ).toBe(true);
+  expect(
+    codexAccountNeedsLiveCapacityRefresh(
       acct("rate", { exhaustedUntil: until, exhaustedKind: "rate_limit" }),
       NOW,
     ),
