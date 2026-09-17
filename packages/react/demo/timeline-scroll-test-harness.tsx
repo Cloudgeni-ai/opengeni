@@ -67,22 +67,35 @@ function reprojectedItem(timelineItem: TimelineItem): TimelineItem {
   return timelineItem;
 }
 
-function VirtualSearchBody({ text, target }: { text: string; target: TimelineSearchTarget | null }) {
+function VirtualSearchBody({
+  text,
+  target,
+}: {
+  text: string;
+  target: TimelineSearchTarget | null;
+}) {
   const [materialized, setMaterialized] = useState<TimelineSearchTarget | null>(null);
   useEffect(() => {
     if (!target) return;
     const timer = setTimeout(() => setMaterialized(target), 50);
     return () => clearTimeout(timer);
   }, [target]);
-  return <div>
-    <p>{text.slice(0, 10)}</p>
-    {materialized ? <div style={{ paddingTop: 2000 }}>
-      <span data-og-search-occurrence={materialized.occurrence ?? 0}
-        data-og-search-sequence={materialized.sequence} data-og-search-query={materialized.query}>
-        {materialized.query}
-      </span>
-    </div> : null}
-  </div>;
+  return (
+    <div>
+      <p>{text.slice(0, 10)}</p>
+      {materialized ? (
+        <div style={{ paddingTop: 2000 }}>
+          <span
+            data-og-search-occurrence={materialized.occurrence ?? 0}
+            data-og-search-sequence={materialized.sequence}
+            data-og-search-query={materialized.query}
+          >
+            {materialized.query}
+          </span>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function Harness() {
@@ -236,32 +249,36 @@ function Harness() {
           searchTarget={searchTarget}
           hasOlder
           renderMessageText={
-            virtualSearchFixture ? (text, _item, context) => <VirtualSearchBody text={text} target={context.searchTarget} /> : searchFixture
-              ? undefined
-              : (text, timelineItem) => {
-                  const isStream = timelineItem.id === "stream-1";
-                  const sequence = Number(timelineItem.id.replace("row-", ""));
-                  const baseHeight = compactTail
-                    ? 48
-                    : isStream
-                      ? streamed
-                        ? 220
-                        : 48
-                      : 34 + (sequence % 7) * 13;
-                  // Models delayed image/font/tool-fold measurement strictly ABOVE the
-                  // reader (anchored near row 1040). Native scroll anchoring owns this
-                  // compensation; browsers intentionally suppress it when the anchor
-                  // node's own style mutates, so growth never touches the anchor row.
-                  const delayedGrowth = !isStream && grown && sequence < 1_035 ? 57 : 0;
-                  return (
-                    <div
-                      data-timeline-row={timelineItem.id}
-                      style={{ minHeight: baseHeight + delayedGrowth }}
-                    >
-                      {text}
-                    </div>
-                  );
-                }
+            virtualSearchFixture
+              ? (text, _item, context) => (
+                  <VirtualSearchBody text={text} target={context.searchTarget} />
+                )
+              : searchFixture
+                ? undefined
+                : (text, timelineItem) => {
+                    const isStream = timelineItem.id === "stream-1";
+                    const sequence = Number(timelineItem.id.replace("row-", ""));
+                    const baseHeight = compactTail
+                      ? 48
+                      : isStream
+                        ? streamed
+                          ? 220
+                          : 48
+                        : 34 + (sequence % 7) * 13;
+                    // Models delayed image/font/tool-fold measurement strictly ABOVE the
+                    // reader (anchored near row 1040). Native scroll anchoring owns this
+                    // compensation; browsers intentionally suppress it when the anchor
+                    // node's own style mutates, so growth never touches the anchor row.
+                    const delayedGrowth = !isStream && grown && sequence < 1_035 ? 57 : 0;
+                    return (
+                      <div
+                        data-timeline-row={timelineItem.id}
+                        style={{ minHeight: baseHeight + delayedGrowth }}
+                      >
+                        {text}
+                      </div>
+                    );
+                  }
           }
         />
       </section>

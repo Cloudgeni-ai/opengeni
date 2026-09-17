@@ -31,7 +31,10 @@ describe("web app-shell chunk boundary", () => {
 
     // app-shell recursively includes dependencies: this shared intent contract
     // must remain a leaf, not gain an import of the dialog or search controller.
-    const intent = await readFile(new URL("./lib/session-search-route.ts", import.meta.url), "utf8");
+    const intent = await readFile(
+      new URL("./lib/session-search-route.ts", import.meta.url),
+      "utf8",
+    );
     expect(intent).not.toMatch(/^\s*import\s+(?!type\b)/mu);
     expect(intent).not.toMatch(/\b(?:import|require)\s*\(/u);
     expect(intent).not.toMatch(/^\s*export\s+.*\bfrom\s+["']/mu);
