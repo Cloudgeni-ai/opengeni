@@ -1,5 +1,6 @@
 ---
 "@opengeni/contracts": minor
+"@opengeni/api-router": minor
 "@opengeni/db": minor
 "@opengeni/sdk": minor
 "@opengeni/react": minor
