@@ -73,7 +73,9 @@ export function SearchResultsView(props: {
   const saveScroll = useRetainedScroll(
     list,
     props.scrollPosition,
-    props.active !== false && !props.loading,
+    // Title results are interactive while the independent message scan runs.
+    // Loading only prevents persistence when it has replaced the actual rows.
+    props.active !== false && !!props.query.trim() && !props.error && props.results.length > 0,
     props.results,
   );
   function onKeyDown(event: KeyboardEvent) {
@@ -137,8 +139,10 @@ export function SearchResultsView(props: {
               <div className="truncate text-sm font-medium text-fg">
                 <SearchText text={result.title} query={props.query} />
               </div>
-              <div className="mt-1 truncate text-xs text-fg-subtle">{result.subtitle}</div>
-              {result.snippet ? (
+              {result.subtitle && result.subtitle !== "Message match" ? (
+                <div className="mt-1 truncate text-xs text-fg-subtle">{result.subtitle}</div>
+              ) : null}
+              {result.snippet && result.snippet.trim() !== result.title.trim() ? (
                 <p className="mt-2 line-clamp-3 break-words text-sm leading-relaxed text-fg-muted">
                   <SearchText text={result.snippet} query={props.query} />
                 </p>

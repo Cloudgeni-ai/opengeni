@@ -43,7 +43,7 @@ describe("exact timeline search", () => {
         },
       },
     });
-    (globalThis as any).Highlight = class {};
+    (globalThis as any).Highlight = class extends Set<Range> {};
     try {
       const view = await renderComponent(
         <MessageTimeline

@@ -2278,14 +2278,14 @@ function SessionChatPane(props: {
     (
       text: string,
       item: AgentMessageItem | UserMessageItem,
-      context: { searchTarget: TimelineSearchTarget | null },
+      renderContext: { searchTarget: TimelineSearchTarget | null },
     ) => {
       if (item.kind === "user-message") {
         return (
           <UserMessageBody
             workspaceId={props.session.workspaceId}
             item={item}
-            searchTarget={context.searchTarget}
+            searchTarget={renderContext.searchTarget}
           />
         );
       }
@@ -2293,7 +2293,7 @@ function SessionChatPane(props: {
         <div data-testid="assistant-markdown">
           <MarkdownText
             text={text}
-            searchTarget={context.searchTarget}
+            searchTarget={renderContext.searchTarget}
             streaming={item.kind === "agent-message" && item.streaming}
             onSandboxFile={props.onOpenSandboxFile}
             renderInteractiveBlock={renderInteractiveBlock}
