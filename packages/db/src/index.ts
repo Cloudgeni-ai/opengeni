@@ -27974,7 +27974,12 @@ export async function quarantineCodexCredentialForLease(
         const [credential] = await tx
           .select({
             version: schema.codexSubscriptionCredentials.version,
-            exhaustedRevision: schema.codexSubscriptionCredentials.exhaustedRevision,
+            // Only cooldown quarantine requires the 0383 columns. Preserve the
+            // older status-only path; its failure receipt is deliberately null.
+            exhaustedRevision:
+              input.quarantine.kind === "cooldown"
+                ? schema.codexSubscriptionCredentials.exhaustedRevision
+                : sql<number>`0`,
           })
           .from(schema.codexSubscriptionCredentials)
           .where(

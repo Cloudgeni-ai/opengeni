@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import { unresolvedCodexCredentialFailures } from "../src/codex-failure-eligibility";
 
 const recovered = {
@@ -14,6 +15,20 @@ const metadata = {
 };
 
 describe("same-turn definitive failure recovery", () => {
+  test("status quarantine does not acquire a new pre-0383 column dependency", async () => {
+    const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+    const quarantine = source.slice(
+      source.indexOf("export async function quarantineCodexCredentialForLease("),
+    );
+    const credentialRead = quarantine.slice(
+      quarantine.indexOf("const [credential] = await tx"),
+      quarantine.indexOf("if (!credential)"),
+    );
+    expect(credentialRead).toMatch(
+      /exhaustedRevision:\s*input\.quarantine\.kind === "cooldown"\s*\? schema\.codexSubscriptionCredentials\.exhaustedRevision\s*: sql<number>`0`/u,
+    );
+  });
+
   test("a newer cleared cooldown releases selection, not the failure ledger", () => {
     expect(unresolvedCodexCredentialFailures(metadata, [recovered])).toEqual([]);
     expect(metadata.codexCredentialFailedIds).toEqual(["a"]);
