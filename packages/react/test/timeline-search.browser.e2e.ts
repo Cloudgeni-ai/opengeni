@@ -59,7 +59,12 @@ async function visibleSearchRange(
   page: Page,
   expected: { query: string; sequence?: number; occurrence?: number; offset?: number },
 ) {
-  const handle = await page.waitForFunction(async (target) => {
+  // Playwright polls the predicate's immediate truthiness: an async predicate
+  // returns a truthy Promise even when it later resolves to false. Keep both
+  // the predicate and its cross-animation-frame stability check synchronous.
+  const probe = await page.evaluateHandle((target) => {
+    let anchor: { top: number; bottom: number; scrollTop: number } | null = null;
+    let stableFrames = 0;
     const snapshot = () => {
       const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]");
       if (!scroller) return null;
@@ -87,20 +92,58 @@ async function visibleSearchRange(
       if (!rect.height || rect.top < root.top || rect.bottom > root.bottom) return null;
       return { top: rect.top, bottom: rect.bottom, scrollTop: scroller.scrollTop };
     };
-    const before = snapshot();
-    if (!before) return false;
-    await new Promise<void>((resolve) =>
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-    );
-    const after = snapshot();
-    return after &&
-      Math.abs(after.top - before.top) <= 1 &&
-      Math.abs(after.scrollTop - before.scrollTop) <= 1
-      ? after
-      : false;
+    return () => {
+      const current = snapshot();
+      // Keep the starting snapshot for both RAF intervals: comparing only
+      // adjacent samples would accept cumulative one-pixel-per-frame drift.
+      if (
+        current &&
+        anchor &&
+        Math.abs(current.top - anchor.top) <= 1 &&
+        Math.abs(current.scrollTop - anchor.scrollTop) <= 1
+      )
+        stableFrames++;
+      else {
+        stableFrames = 0;
+        anchor = current;
+      }
+      return current && stableFrames >= 2 ? current : false;
+    };
   }, expected);
-  return (await handle.jsonValue()) as { top: number; bottom: number; scrollTop: number };
+  try {
+    const handle = await page.waitForFunction((poll) => poll(), probe, { polling: "raf" });
+    try {
+      return (await handle.jsonValue()) as { top: number; bottom: number; scrollTop: number };
+    } finally {
+      await handle.dispose();
+    }
+  } finally {
+    await probe.dispose();
+  }
 }
+
+test("visibleSearchRange waits for a delayed highlight instead of returning false", async () => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent(
+      '<div data-og-timeline-scroller style="height: 200px"><span>needle</span></div>',
+    );
+    await page.evaluate(() => {
+      setTimeout(() => {
+        const range = document.createRange();
+        range.selectNodeContents(document.querySelector("span")!);
+        const registry = (CSS as unknown as { highlights: Map<string, unknown> }).highlights;
+        const HighlightClass = (window as unknown as { Highlight: new (range: Range) => unknown })
+          .Highlight;
+        registry.set("og-search-delayed-probe", new HighlightClass(range));
+      }, 250);
+    });
+    const position = await visibleSearchRange(page, { query: "needle" });
+    expect(position).toEqual({ top: expect.any(Number), bottom: expect.any(Number), scrollTop: 0 });
+  } finally {
+    await page.close();
+  }
+}, 60_000);
 
 async function waitForSearchClosed(page: Page) {
   await page.waitForFunction(() => {
@@ -108,6 +151,34 @@ async function waitForSearchClosed(page: Page) {
     return ![...registry.keys()].some((name) => name.startsWith("og-search-"));
   });
 }
+
+test("visibleSearchRange rejects cumulative drift across two animation frames", async () => {
+  const page = await browser.newPage();
+  try {
+    await page.setContent(
+      '<div data-og-timeline-scroller style="height: 200px"><span>needle</span></div>',
+    );
+    const settledTop = await page.evaluate(() => {
+      const range = document.createRange();
+      range.selectNodeContents(document.querySelector("span")!);
+      const rect = range.getBoundingClientRect();
+      let reads = 0;
+      // Each RAF poll moves one pixel until the eighth snapshot. Adjacent
+      // differences pass a one-pixel tolerance, but two-frame drift does not.
+      range.getBoundingClientRect = () =>
+        new DOMRect(rect.x, rect.y + Math.min(++reads, 8), rect.width, rect.height);
+      const registry = (CSS as unknown as { highlights: Map<string, unknown> }).highlights;
+      const HighlightClass = (window as unknown as { Highlight: new (range: Range) => unknown })
+        .Highlight;
+      registry.set("og-search-drift-probe", new HighlightClass(range));
+      return rect.top + 8;
+    });
+    const position = await visibleSearchRange(page, { query: "needle" });
+    expect(position.top).toBe(settledTop);
+  } finally {
+    await page.close();
+  }
+}, 60_000);
 
 test("exact occurrences in a huge collapsed message scroll into view and closing find preserves position", async () => {
   const page = await browser.newPage({ viewport: { width: 1100, height: 900 } });
