@@ -55,7 +55,7 @@ Fresh-create latency remains an observed SLO, not a code-level promise. The exis
 A sandbox environment version's `defaultVariableSetIds` are decrypted and merged in listed order, then layered **below** the session's ordered explicit Variable Sets in the env-injection chain:
 
 ```
-deployment allowlist < git identity < ordered Rig defaults < ordered explicit session sets < run-scoped GitHub auth
+deployment allowlist < git identity < ordered sandbox environment defaults < ordered explicit session sets < run-scoped GitHub auth
 ```
 
 A later entry wins on a name collision. Sandbox Environment defaults preserve their listed order; explicit session sets then preserve their own listed order, so any explicit session entry overrides an earlier Sandbox Environment default with the same variable name. Scope never changes precedence. See [`variable-sets.md`](variable-sets.md) for the rest of that layering (permissioned secret access, exact content, reserved names, and the managed-sandbox-only scope).

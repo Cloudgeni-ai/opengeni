@@ -366,7 +366,7 @@ function CreateRigForm({
             id="rig-description"
             value={description}
             onChange={(event) => setDescription(event.target.value)}
-            placeholder="What this machine is for"
+            placeholder="What this environment is for"
             className="h-9"
           />
         </div>

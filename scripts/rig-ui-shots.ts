@@ -111,7 +111,7 @@ async function main() {
         );
       },
       prepare: async (page) => {
-        await page.getByText("No rigs yet").waitFor({ timeout: 15_000 });
+        await page.getByText("No sandbox environments yet").waitFor({ timeout: 15_000 });
       },
     },
     {
@@ -131,7 +131,7 @@ async function main() {
       name: "03-create-form",
       url: `${base}/rigs`,
       prepare: async (page) => {
-        await page.getByRole("button", { name: "New rig" }).first().click();
+        await page.getByRole("button", { name: "New sandbox environment" }).first().click();
         await page.getByText(/Image, setup script/).click();
         await page.getByLabel("Setup script").waitFor({ timeout: 10_000 });
       },
@@ -241,7 +241,7 @@ async function main() {
         });
       },
       prepare: async (page) => {
-        await page.getByText(/don't have access to rigs/).waitFor({ timeout: 15_000 });
+        await page.getByText(/don't have access to sandbox environments/).waitFor({ timeout: 15_000 });
       },
     },
   ];

@@ -19179,7 +19179,7 @@ export class RigChangeAlreadyVerifyingError extends Error {
 
 export class RigImageOverrideUnsupportedError extends Error {
   constructor() {
-    super("Rig image overrides are unsupported; Rigs use the deployment platform sandbox image");
+    super("Sandbox environment image overrides are unsupported; sandbox environments use the deployment platform sandbox image");
     this.name = "RigImageOverrideUnsupportedError";
   }
 }
@@ -73570,7 +73570,7 @@ export async function getScheduledTargetSessionExecution(
           )
         : null;
     if (session.rigId && session.rigVersionId && !rigMetadata) {
-      throw new Error("scheduled target session Rig version is unavailable");
+      throw new Error("scheduled target session sandbox environment version is unavailable");
     }
     const rigDefaultVariableSets = await Promise.all(
       (rigMetadata?.version.defaultVariableSetIds ?? []).map(async (variableSetId) => {
@@ -73585,7 +73585,7 @@ export async function getScheduledTargetSessionExecution(
         );
         if (!defaultSet) {
           throw new Error(
-            `scheduled target Rig default Variable Set is unavailable: ${variableSetId}`,
+            `scheduled target sandbox environment default Variable Set is unavailable: ${variableSetId}`,
           );
         }
         return { id: defaultSet.id, generation: defaultSet.generation };
