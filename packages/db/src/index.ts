@@ -19152,7 +19152,9 @@ export class RigChangeTransitionError extends Error {
     public readonly fromStatus: string,
     public readonly toStatus: string,
   ) {
-    super(`Rig change ${changeId} is ${fromStatus} (terminal); cannot transition to ${toStatus}`);
+    super(
+      `Sandbox Environment change ${changeId} is ${fromStatus} (terminal); cannot transition to ${toStatus}`,
+    );
     this.name = "RigChangeTransitionError";
   }
 }
@@ -19164,7 +19166,7 @@ export class RigActiveVersionChangedError extends Error {
     public readonly actualVersionId: string | null,
   ) {
     super(
-      `Rig ${rigId} moved since verification: expected active ${expectedVersionId}, current active ${actualVersionId ?? "none"}`,
+      `Sandbox Environment ${rigId} moved since verification: expected active ${expectedVersionId}, current active ${actualVersionId ?? "none"}`,
     );
     this.name = "RigActiveVersionChangedError";
   }
@@ -19172,7 +19174,7 @@ export class RigActiveVersionChangedError extends Error {
 
 export class RigChangeAlreadyVerifyingError extends Error {
   constructor(public readonly changeId: string) {
-    super(`Rig change ${changeId} is already verifying`);
+    super(`Sandbox Environment change ${changeId} is already verifying`);
     this.name = "RigChangeAlreadyVerifyingError";
   }
 }
@@ -19459,7 +19461,7 @@ export async function createRig(
             })}::jsonb, ${input.allowOrganization === true}
           ) as value`,
         );
-        if (!row) throw new Error("Failed to create scoped rig");
+        if (!row) throw new Error("Failed to create scoped sandbox environment");
         return row.value;
       },
     );
@@ -19479,7 +19481,7 @@ export async function createRig(
         })
         .returning();
       if (!rigRow) {
-        throw new Error("Failed to create rig");
+        throw new Error("Failed to create sandbox environment");
       }
       const content = input.initialVersion ?? {};
       const [versionRow] = await scopedDb
@@ -19501,7 +19503,7 @@ export async function createRig(
         })
         .returning();
       if (!versionRow) {
-        throw new Error("Failed to create initial rig version");
+        throw new Error("Failed to create initial sandbox environment version");
       }
       return mapRig(rigRow, mapRigVersion(versionRow), 1);
     },
@@ -19690,7 +19692,7 @@ export async function updateRig(
       .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)))
       .returning();
     if (!row) {
-      throw new Error(`Rig not found: ${rigId}`);
+      throw new Error(`Sandbox Environment not found: ${rigId}`);
     }
     const { activeVersion, versionCount } = await loadRigActiveAndCount(
       scopedDb,
@@ -19785,7 +19787,7 @@ export async function updateScopedRig(
         ${input.allowOrganization === true}
       ) as value`,
     );
-    if (!row?.value) throw new Error(`Rig not found: ${rigId}`);
+    if (!row?.value) throw new Error(`Sandbox Environment not found: ${rigId}`);
     return row.value;
   });
 }
@@ -20521,7 +20523,7 @@ export async function createRigVersion(
       .for("update")
       .limit(1);
     if (!rig) {
-      throw new Error(`Rig not found: ${rigId}`);
+      throw new Error(`Sandbox Environment not found: ${rigId}`);
     }
     const [{ max } = { max: 0 }] = await scopedDb
       .select({
@@ -20563,7 +20565,7 @@ export async function createRigVersion(
       })
       .returning();
     if (!row) {
-      throw new Error("Failed to create rig version");
+      throw new Error("Failed to create sandbox environment version");
     }
     await scopedDb
       .update(schema.rigs)
@@ -20592,7 +20594,7 @@ export async function createRigVersionForChangePromotion(
       .for("update")
       .limit(1);
     if (!rig) {
-      throw new Error(`Rig not found: ${rigId}`);
+      throw new Error(`Sandbox Environment not found: ${rigId}`);
     }
     const [currentChange] = await scopedDb
       .select()
@@ -20607,7 +20609,7 @@ export async function createRigVersionForChangePromotion(
       .for("update")
       .limit(1);
     if (!currentChange) {
-      throw new Error(`Rig change not found: ${changeId}`);
+      throw new Error(`Sandbox Environment change not found: ${changeId}`);
     }
     if (currentChange.status === "merged" || currentChange.status === "rejected") {
       throw new RigChangeTransitionError(changeId, currentChange.status, "merged");
@@ -20680,7 +20682,7 @@ export async function createRigVersionForChangePromotion(
       })
       .returning();
     if (!versionRow) {
-      throw new Error("Failed to create rig version");
+      throw new Error("Failed to create sandbox environment version");
     }
     const [changeRow] = await scopedDb
       .update(schema.rigChanges)
@@ -20694,7 +20696,7 @@ export async function createRigVersionForChangePromotion(
       )
       .returning();
     if (!changeRow) {
-      throw new Error(`Rig change not found: ${changeId}`);
+      throw new Error(`Sandbox Environment change not found: ${changeId}`);
     }
     await scopedDb
       .update(schema.rigs)
@@ -21006,7 +21008,7 @@ export async function claimRigVersionProviderImageBuild(
 ): Promise<RigProviderImageBuildClaim> {
   const candidate = RigProviderImageContract.parse(input.image);
   if (candidate.status !== "building") {
-    throw new Error("Rig provider image build claims require status=building");
+    throw new Error("Sandbox Environment provider image build claims require status=building");
   }
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
@@ -21020,7 +21022,7 @@ export async function claimRigVersionProviderImageBuild(
       )
       .for("update")
       .limit(1);
-    if (!row) throw new Error(`Rig version not found: ${input.versionId}`);
+    if (!row) throw new Error(`Sandbox Environment version not found: ${input.versionId}`);
 
     const existing = row.providerImages[candidate.backend];
     if (existing) {
@@ -21094,7 +21096,7 @@ export async function finalizeRigVersionProviderImageBuild(
 ): Promise<boolean> {
   const finalized = RigProviderImageContract.parse(input.image);
   if (finalized.status === "building") {
-    throw new Error("Rig provider image finalization requires a terminal status");
+    throw new Error("Sandbox Environment provider image finalization requires a terminal status");
   }
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
@@ -21108,7 +21110,7 @@ export async function finalizeRigVersionProviderImageBuild(
       )
       .for("update")
       .limit(1);
-    if (!row) throw new Error(`Rig version not found: ${input.versionId}`);
+    if (!row) throw new Error(`Sandbox Environment version not found: ${input.versionId}`);
     const current = row.providerImages[finalized.backend];
     if (
       current?.status !== "building" ||
@@ -21179,7 +21181,7 @@ export async function activateRigVersion(
       .for("update")
       .limit(1);
     if (!rig) {
-      throw new Error(`Rig not found: ${rigId}`);
+      throw new Error(`Sandbox Environment not found: ${rigId}`);
     }
     const [target] = await scopedDb
       .select({ id: schema.rigVersions.id })
@@ -21193,7 +21195,7 @@ export async function activateRigVersion(
       )
       .limit(1);
     if (!target) {
-      throw new Error(`Rig version not found: ${versionId}`);
+      throw new Error(`Sandbox Environment version not found: ${versionId}`);
     }
     await scopedDb
       .update(schema.rigVersions)
@@ -21217,7 +21219,7 @@ export async function activateRigVersion(
       )
       .returning();
     if (!row) {
-      throw new Error(`Rig version not found: ${versionId}`);
+      throw new Error(`Sandbox Environment version not found: ${versionId}`);
     }
     await scopedDb
       .update(schema.rigs)
@@ -21263,7 +21265,7 @@ export async function createRigChange(
         )
         .returning();
       if (!row) {
-        throw new Error("Failed to create rig change");
+        throw new Error("Failed to create sandbox environment change");
       }
       return mapRigChange(row);
     },
@@ -21423,7 +21425,7 @@ export async function updateRigChangeStatus(
       .for("update")
       .limit(1);
     if (!current) {
-      throw new Error(`Rig change not found: ${changeId}`);
+      throw new Error(`Sandbox Environment change not found: ${changeId}`);
     }
     const terminal = current.status === "merged" || current.status === "rejected";
     if (terminal) {
@@ -21457,7 +21459,7 @@ export async function updateRigChangeStatus(
       )
       .returning();
     if (!row) {
-      throw new Error(`Rig change not found: ${changeId}`);
+      throw new Error(`Sandbox Environment change not found: ${changeId}`);
     }
     return mapRigChange(row);
   });
@@ -21482,7 +21484,7 @@ export async function beginRigChangeVerificationAttempt(
       .for("update")
       .limit(1);
     if (!current) {
-      throw new Error(`Rig change not found: ${changeId}`);
+      throw new Error(`Sandbox Environment change not found: ${changeId}`);
     }
     if (current.status === "verifying") {
       if (input.allowAlreadyVerifying) {
@@ -21526,7 +21528,7 @@ export async function beginRigChangeVerificationAttempt(
       )
       .returning();
     if (!row) {
-      throw new Error(`Rig change not found: ${changeId}`);
+      throw new Error(`Sandbox Environment change not found: ${changeId}`);
     }
     return mapRigChange(row);
   });

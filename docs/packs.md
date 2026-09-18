@@ -6,12 +6,12 @@ Capability Packs are role-oriented bundles that compose existing OpenGeni primit
 
 - exact Plugin, Skill, Integration-instance, and Integration-Facet components;
 - legacy inline Skills that the v2 installer migrates into ordinary immutable Skill components;
-- an explicit Rig requirement; legacy `sandboxImage` declarations are blocked for v2 installs while Rig image overrides are disabled;
+- an explicit Sandbox Environment requirement; legacy `sandboxImage` declarations are blocked for v2 installs while Sandbox Environment image overrides are disabled;
 - MCP tool selections, connector requirements, and optional knowledge;
 - a Variable Set requirement;
 - scheduled-task templates and task metadata.
 
-The built-in `marketing-social-daily-analysis` Pack connects social accounts, attaches marketing knowledge, and creates an ordinary scheduled agent run. It has no component or Rig plan, so it remains compatible with the dedicated simple Pack enable route.
+The built-in `marketing-social-daily-analysis` Pack connects social accounts, attaches marketing knowledge, and creates an ordinary scheduled agent run. It has no component or Sandbox Environment plan, so it remains compatible with the dedicated simple Pack enable route.
 
 The built-in `pr-review` Pack installs the ordinary `pr-review` Skill, then
 uses provider app registrations and authenticated webhooks to create ordinary
@@ -34,22 +34,22 @@ The user-facing model is intentionally simpler than the storage model:
 
 - **Pack — what:** a reviewed solution recipe that adds or references Skills, Integrations, templates, policies, and automations.
 - **Connection — whose account:** one authenticated Gmail, Linear, Slack, or other provider account. Provider credentials never move into a Pack or Variable Set.
-- **Compute environment — where:** the normal OpenGeni compute choice, or a compatible versioned Rig only when the Pack genuinely requires special tooling.
+- **Compute environment — where:** the normal OpenGeni compute choice, or a compatible versioned Sandbox Environment only when the Pack genuinely requires special tooling.
 - **Configuration & secrets — extra runtime values:** an existing encrypted Variable Set selected only when the Pack declares required variable names.
 
-Most Packs require neither special compute nor extra configuration, so those choices stay hidden. A Pack never changes the workspace's default compute, embeds account credentials, or owns secret values. Pack-created scheduled work may inherit the selected Rig and Variable Set; unrelated workspace sessions do not.
+Most Packs require neither special compute nor extra configuration, so those choices stay hidden. A Pack never changes the workspace's default compute, embeds account credentials, or owns secret values. Pack-created scheduled work may inherit the selected Sandbox Environment and Variable Set; unrelated workspace sessions do not.
 
-The portable Pack manifest is the **blueprint**. Installation preview resolves it into an exact workspace-local **installation plan**: pinned component versions, named Integration instances, and any selected Rig or Variable Set. Users review the plan; they do not manually author database UUIDs or content digests in the ordinary product flow.
+The portable Pack manifest is the **blueprint**. Installation preview resolves it into an exact workspace-local **installation plan**: pinned component versions, named Integration instances, and any selected Sandbox Environment or Variable Set. Users review the plan; they do not manually author database UUIDs or content digests in the ordinary product flow.
 
 ## Invariants
 
-1. **A Pack is composition, not a parallel runtime.** Pack-created work still uses ordinary sessions, Skills, Integration adapters, Rigs, Connections, Variable Sets, and scheduled tasks.
-2. **Review precedes mutation.** Component resolution, the exact manifest digest, Rig compatibility, and required Variable Set names are returned by installation preview. Install rejects source drift and unresolved required components.
+1. **A Pack is composition, not a parallel runtime.** Pack-created work still uses ordinary sessions, Skills, Integration adapters, Sandbox Environments, Connections, Variable Sets, and scheduled tasks.
+2. **Review precedes mutation.** Component resolution, the exact manifest digest, Sandbox Environment compatibility, and required Variable Set names are returned by installation preview. Install rejects source drift and unresolved required components.
 3. **Ownership is shared and reversible.** Pack ownership uses the same normalized component ledgers as direct installs and Plugins. Uninstall removes only the Pack's owner edges; exact components retained by another direct, Plugin, Pack, or migration owner remain active.
 4. **Only active owners affect runtime.** An `installing`, `needs_attention`, or `disabled` Pack owner does not make an otherwise unowned component executable. A partially completed Pack therefore cannot leak a half-installed runtime.
-5. **V2 runtime comes from components plus a Rig on the platform base.** A v2 installation is identified by its frozen `manifestSnapshot` and `manifestDigest`. The worker does not directly load that manifest's inline Skills or `sandboxImage`; the installer migrates those Skills and selects a Rig. A manifest that still requires `sandboxImage` is blocked instead of replacing the deployment-owned sandbox beneath that Rig.
+5. **V2 runtime comes from components plus a Sandbox Environment on the platform base.** A v2 installation is identified by its frozen `manifestSnapshot` and `manifestDigest`. The worker does not directly load that manifest's inline Skills or `sandboxImage`; the installer migrates those Skills and selects a Sandbox Environment. A manifest that still requires `sandboxImage` is blocked instead of replacing the deployment-owned sandbox beneath that Sandbox Environment.
 6. **Connections remain independent.** A Pack may adopt an exact named Integration instance or Facet binding, but uninstalling the Pack never deletes the underlying Connection.
-7. **Tenant boundaries are enforced twice.** Pack installation, selected Rig, component ledger, and operation rows are workspace/account scoped under FORCE RLS, and database triggers reject cross-tenant Rig or ledger references.
+7. **Tenant boundaries are enforced twice.** Pack installation, selected Sandbox Environment, component ledger, and operation rows are workspace/account scoped under FORCE RLS, and database triggers reject cross-tenant Sandbox Environment or ledger references.
 8. **Session-selected Skills never activate by installation alone.** A Pack Skill with `activationMode: "session_selected"` remains installed and reviewable but is excluded from the worker's workspace Skill resolution. Session creation must explicitly name its installed capability ID; OpenGeni then freezes the exact immutable artifact into that session's `skills`.
 
 ## Manifest composition
@@ -83,18 +83,18 @@ Inline Skills default to `activationMode: "workspace_managed"` for compatibility
 enter every agent in the workspace. A selected Skill is copied onto the session
 at creation, so later Pack updates do not silently rewrite an existing session.
 
-### Rig requirements and legacy images
+### Sandbox Environment requirements and legacy images
 
 New Pack definitions should use `rig`:
 
 - `required` defaults to `true`;
-- `rigId` pins the Pack to one workspace Rig and cannot be overridden by the caller;
-- `requireVerified` requires the selected Rig's active version health to be passing;
+- `rigId` pins the Pack to one workspace Sandbox Environment and cannot be overridden by the caller;
+- `requireVerified` requires the selected Sandbox Environment's active version health to be passing;
 - `description` explains the compute requirement in review UI.
 
-Legacy `sandboxImage` still makes Rig selection required for a v2 manifest, but preview reports the installation blocked while explicit Rig images are disabled. Historical Rig image fields are not accepted as compatibility because runtime ignores them. The Pack must migrate to the deployment platform image. Once installable, the installer stores `selectedRigId`; Pack-created scheduled tasks inherit it, and each resulting session freezes the Rig version that is active when that session is created.
+Legacy `sandboxImage` still makes Sandbox Environment selection required for a v2 manifest, but preview reports the installation blocked while explicit Sandbox Environment images are disabled. Historical Sandbox Environment image fields are not accepted as compatibility because runtime ignores them. The Pack must migrate to the deployment platform image. Once installable, the installer stores `selectedRigId`; Pack-created scheduled tasks inherit it, and each resulting session freezes the Sandbox Environment version that is active when that session is created.
 
-`sandboxProviderImages` is retained as legacy manifest provenance. V2 installation does not copy or execute that Pack field directly. Provider-native acceleration belongs to the selected Rig's verified active version; see [`rigs.md`](rigs.md).
+`sandboxProviderImages` is retained as legacy manifest provenance. V2 installation does not copy or execute that Pack field directly. Provider-native acceleration belongs to the selected Sandbox Environment's verified active version; see [`rigs.md`](rigs.md).
 
 ## Installation lifecycle
 
@@ -120,7 +120,7 @@ The optional body contains `rigId` and `variableSetId`. The response includes:
 - the current installation version, if any;
 - action: `install`, `update`, or `repair`;
 - every component's `ready`, `missing`, or `mismatch` result;
-- the selected Rig and its `ready`, `missing`, `mismatch`, or `unverified` result;
+- the selected Sandbox Environment and its `ready`, `missing`, `mismatch`, or `unverified` result;
 - required Variable Set validation;
 - explicit blockers and a top-level `ready` decision;
 - legacy inline-Skill count and legacy image provenance for migration review.
@@ -141,7 +141,7 @@ The request supplies:
 - `expectedInstallationVersion` for update or repair;
 - optional metadata.
 
-The durable operation journal and workspace-local advisory locks make retries resumable and component identity deterministic. Admission row-locks a workspace-registered manifest and rechecks its canonical digest, so concurrent register/replace/unregister cannot freeze a source that was already stale when the operation linearized. Reusing the same idempotency key for a different request is rejected, and a second request cannot re-enter an operation that is still running. A failed `pending` operation may resume with the same key; after a browser reload, a newly previewed request with the current installation version may safely supersede it under the same Pack lock. A database-time heartbeat keeps live work fresh. An abandoned `running` claim becomes recoverable after 15 minutes: the same key may reclaim it, or a newly previewed key may take over only when the frozen manifest, Rig, and metadata intent are identical. Every heartbeat/finalize/defer presents the admitted operation version, so an older handler cannot overwrite the recovered result. A stale installation version or changed manifest returns `409` without superseding a recovery path.
+The durable operation journal and workspace-local advisory locks make retries resumable and component identity deterministic. Admission row-locks a workspace-registered manifest and rechecks its canonical digest, so concurrent register/replace/unregister cannot freeze a source that was already stale when the operation linearized. Reusing the same idempotency key for a different request is rejected, and a second request cannot re-enter an operation that is still running. A failed `pending` operation may resume with the same key; after a browser reload, a newly previewed request with the current installation version may safely supersede it under the same Pack lock. A database-time heartbeat keeps live work fresh. An abandoned `running` claim becomes recoverable after 15 minutes: the same key may reclaim it, or a newly previewed key may take over only when the frozen manifest, Sandbox Environment, and metadata intent are identical. Every heartbeat/finalize/defer presents the admitted operation version, so an older handler cannot overwrite the recovered result. A stale installation version or changed manifest returns `409` without superseding a recovery path.
 
 The installer migrates inline Skills, adopts exact referenced components, records the Pack component ledger, removes stale owner edges only after the replacement plan completes, and finally activates the Pack. A failed operation leaves the Pack `needs_attention`; retry the same request with the same idempotency key, or review the current plan again to start an OCC-fenced replacement operation.
 
@@ -177,7 +177,7 @@ all Pack lifecycle state belongs to `pack_installations`. This preserves
 existing built-in and metadata/task-template Packs without allowing composed
 Packs to bypass review.
 
-Pre-v2 active installation rows have no `manifestSnapshot` and no `manifestDigest`. The worker retains their old direct Pack Skill/image behavior for rollback compatibility. Any v2 install/update freezes the manifest and moves the Pack to component/Rig runtime; the two models are never combined for one installation.
+Pre-v2 active installation rows have no `manifestSnapshot` and no `manifestDigest`. The worker retains their old direct Pack Skill/image behavior for rollback compatibility. Any v2 install/update freezes the manifest and moves the Pack to component/Sandbox Environment runtime; the two models are never combined for one installation.
 
 ## Variable Sets, Connections, and scheduled tasks
 
@@ -189,13 +189,13 @@ Pack template creation produces ordinary scheduled tasks with:
 
 - `agentConfig.tools`, resources, prompt, and Pack/template metadata;
 - the Pack installation's selected Variable Set, when present;
-- the Pack installation's selected Rig, when present.
+- the Pack installation's selected Sandbox Environment, when present.
 
-The scheduled task and its sessions then follow the normal Temporal, authorization, Connection, Rig, and runtime paths.
+The scheduled task and its sessions then follow the normal Temporal, authorization, Connection, Sandbox Environment, and runtime paths.
 
 ## HTTP example
 
-Preview a registered image Pack against a chosen Rig:
+Preview a registered image Pack against a chosen Sandbox Environment:
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/packs/$PACK_ID/installation-preview" \
@@ -228,7 +228,7 @@ The built-in Pack exposes:
 - optional document knowledge through the docs MCP server;
 - a daily analysis scheduled-task template.
 
-Because it currently declares no component or Rig plan, it may still be enabled with the simple compatibility route:
+Because it currently declares no component or Sandbox Environment plan, it may still be enabled with the simple compatibility route:
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/packs/marketing-social-daily-analysis/enable" \
@@ -281,7 +281,7 @@ The SDK exposes:
 - `previewPackUninstall`
 - `uninstallPack`
 
-`@opengeni/react` mirrors the lifecycle through `usePacks`. The web Capabilities page is review-first: it selects a Rig and Variable Set, displays exact component status and migration facts, supports install/update/repair, and previews shared-owner retention before uninstall.
+`@opengeni/react` mirrors the lifecycle through `usePacks`. The web Capabilities page is review-first: it selects a Sandbox Environment and Variable Set, displays exact component status and migration facts, supports install/update/repair, and previews shared-owner retention before uninstall.
 
 ## Canonical implementation
 

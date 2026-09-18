@@ -601,7 +601,7 @@ function packRigBlocker(rig: PackRigResolution, legacyImage: string | null): str
     return "Verify the selected compute environment before installing this Pack";
   }
   if (legacyImage) {
-    return `This Pack requires the retired explicit sandbox image ${legacyImage}; Rig-bound Packs currently must use the deployment-managed platform sandbox`;
+    return `This Pack requires the retired explicit sandbox image ${legacyImage}; Packs with a Sandbox Environment must use the deployment-managed platform sandbox`;
   }
   return "The selected compute environment does not satisfy this Pack's requirement";
 }

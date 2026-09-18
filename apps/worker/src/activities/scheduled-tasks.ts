@@ -637,7 +637,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             )
           : null;
       if (generatedTarget && task.rigId && (!acceptedRig || !acceptedRig.activeVersion)) {
-        throw new Error(`rig has no active version to bind: ${task.rigId}`);
+        throw new Error(`sandbox environment has no active version to bind: ${task.rigId}`);
       }
       const acceptedRigDefaultVariableSets = acceptedRig?.activeVersion
         ? await Promise.all(
@@ -652,7 +652,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 variableSetId,
               );
               if (!variableSet) {
-                throw new Error(`rig default Variable Set not found: ${variableSetId}`);
+                throw new Error(
+                  `sandbox environment default Variable Set not found: ${variableSetId}`,
+                );
               }
               return { id: variableSet.id, generation: variableSet.generation };
             }),
@@ -1033,7 +1035,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             if (task.rigId) {
               const rig = acceptedRig;
               if (!rig || !rig.activeVersion) {
-                throw new Error(`rig has no active version to bind: ${task.rigId}`);
+                throw new Error(`sandbox environment has no active version to bind: ${task.rigId}`);
               }
               frozenRigId = rig.id;
               frozenRigVersionId =
@@ -1041,7 +1043,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   (resource) => resource.resourceKind === "rig" && resource.resourceId === rig.id,
                 )?.resourceVersionId ?? rig.activeVersion.id;
               if (frozenRigVersionId !== rig.activeVersion.id) {
-                throw new Error("scheduled run rig version changed during admission");
+                throw new Error(
+                  "scheduled run sandbox environment version changed during admission",
+                );
               }
             }
             let session: Awaited<ReturnType<typeof createSession>>;

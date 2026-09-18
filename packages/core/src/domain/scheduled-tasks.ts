@@ -742,7 +742,7 @@ export async function validateScheduledTaskTarget(input: {
   }
   if ((session.rigId ?? null) !== (input.rigId ?? null)) {
     throw new HTTPException(422, {
-      message: "target session rig does not match the scheduled task",
+      message: "target session sandbox environment does not match the scheduled task",
     });
   }
   if (

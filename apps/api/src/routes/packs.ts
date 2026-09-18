@@ -540,7 +540,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (capabilityPackRequiresInstallationPlan(pack)) {
       throw new HTTPException(409, {
         message:
-          "This Pack uses component or Rig requirements. Preview and install it through the Pack installation flow.",
+          "This Pack uses component or Sandbox Environment requirements. Preview and install it through the Pack installation flow.",
       });
     }
     await assertPackSandboxImageCompatible(db, workspaceId, pack);

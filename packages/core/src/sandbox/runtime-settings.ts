@@ -284,7 +284,7 @@ export async function resolveSessionSandboxRuntime(
       : Promise.resolve(null),
   ]);
   if (session.rigVersionId && !rigVersion) {
-    throw new Error(`Frozen rig version ${session.rigVersionId} is unavailable`);
+    throw new Error(`Frozen sandbox environment version ${session.rigVersionId} is unavailable`);
   }
   const legacy = legacySandboxRuntimeFromPacks(packs);
   // A Rig is always a setup/check layer over the deployment-owned platform
