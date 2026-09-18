@@ -993,12 +993,14 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // MCP operation ledger/command capability (which grants no direct DML), and
     // the 0470 organization integration policy tables (SELECT-only at runtime),
     // and the 0477 protected managed sign-in ledger and five runtime capabilities.
-    // Preserve those exact expected boundary gaps while continuing to
+    // It also retains the three Pack tables removed from the runtime contract
+    // by 0482. Preserve those exact expected boundary gaps while continuing to
     // reject every other posture violation in this
     // rolling-compatibility test.
     const expectedPost0353EvaluatorGaps = [
       "runtime privilege tables are missing: connect_attempts, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, organization_integration_policies, organization_integration_policy_operations, session_attempt_model_context_snapshots, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads",
       "protected tables are missing: agent_instruction_operations, agent_learning_revisions, agent_learning_snapshots, connect_attempts, external_identities, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, knowledge_entries, knowledge_entry_decisions, knowledge_entry_links, knowledge_entry_operations, knowledge_entry_revisions, knowledge_entry_search, knowledge_entry_vectors, knowledge_index_jobs, knowledge_review_batches, managed_sign_in_method_operations, mcp_operations, organization_integration_policies, organization_integration_policy_operations, session_attempt_model_context_snapshots, skill_config_conversion_receipts, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads",
+      "RLS tables are absent from the declared contract: pack_installation_components, pack_installations, workspace_packs",
       "target-schema runtime capability knowledge_index_claim(text, integer, integer) is missing or ambiguous",
       "target-schema runtime capability knowledge_index_work(uuid, uuid, uuid, jsonb) is missing or ambiguous",
       "target-schema runtime capability knowledge_entry_apply(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
