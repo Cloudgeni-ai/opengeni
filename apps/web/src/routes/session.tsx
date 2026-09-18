@@ -15,6 +15,8 @@ import type { NativeConnectRequest } from "@/components/capabilities/native-conn
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 import {
   admissionRecheckControl,
+  admissionControlNeedsRefresh,
+  recheckSessionAdmission,
   SessionAdmissionNotice,
 } from "@/components/session/session-admission-notice";
 import {
@@ -1027,6 +1029,7 @@ export function SessionRoute({
     <SessionChatPane
       key={session.id}
       session={session}
+      admissionSessionControl={sessionSeed?.effectiveControl ?? session.effectiveControl}
       events={events}
       timeline={timeline}
       searchTarget={searchTarget}
@@ -1427,6 +1430,8 @@ function useSessionEditableArtifactSummaries(input: {
 
 function SessionChatPane(props: {
   session: Session;
+  /** Keep the raw detail snapshot: the general route projection prefers queue control. */
+  admissionSessionControl: Session["effectiveControl"];
   events: SessionEvent[];
   timeline: TimelineItem[];
   searchTarget: SessionSearchRoute;
@@ -2176,7 +2181,13 @@ function SessionChatPane(props: {
   ]);
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
   const admissionControl = admissionRecheckControl(
-    props.session.effectiveControl,
+    props.admissionSessionControl,
+    props.queue.effectiveControl,
+    composer.effectiveControl,
+  );
+  const admissionRefreshRequired = admissionControlNeedsRefresh(
+    admissionControl,
+    props.admissionSessionControl,
     props.queue.effectiveControl,
     composer.effectiveControl,
   );
@@ -2634,16 +2645,20 @@ function SessionChatPane(props: {
             session={props.session}
             canControl={workspacePermissions.includes("sessions:control")}
             paused={admissionControl.state === "paused"}
+            refreshRequired={admissionRefreshRequired}
             busy={composer.resuming || composer.pausing || composer.sending || props.queue.mutating}
-            onRecheck={async () => {
-              const control = admissionControl;
-              if (control.state === "paused") return;
-              await context.client.resumeSession(props.session.workspaceId, props.session.id, {
-                clientEventId: crypto.randomUUID(),
-                expectedControlEtag: control.controlEtag,
-              });
-              await Promise.all([props.onReloadSession(), props.queue.refresh()]);
-            }}
+            onRecheck={() =>
+              recheckSessionAdmission({
+                control: admissionControl,
+                refreshOnly: admissionRefreshRequired,
+                resume: (control) =>
+                  context.client.resumeSession(props.session.workspaceId, props.session.id, {
+                    clientEventId: crypto.randomUUID(),
+                    expectedControlEtag: control.controlEtag,
+                  }),
+                refresh: [props.onReloadSession, props.queue.refresh],
+              })
+            }
           />
           <SessionChrome
             sessionStatus={props.session.status}

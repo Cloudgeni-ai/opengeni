@@ -19,6 +19,7 @@ createRoot(document.getElementById("root")!).render(
         canControl
         paused={false}
         busy={false}
+        refreshRequired={new URLSearchParams(window.location.search).has("refresh")}
         onRecheck={async () => {
           throw new Error("private server detail");
         }}

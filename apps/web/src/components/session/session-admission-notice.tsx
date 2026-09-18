@@ -19,6 +19,48 @@ export function admissionRecheckControl(
   }, sessionControl);
 }
 
+export function admissionControlNeedsRefresh(
+  control: Session["effectiveControl"],
+  ...observed: (Session["effectiveControl"] | null | undefined)[]
+): boolean {
+  return observed.some(
+    (candidate) =>
+      candidate?.controlVersion === control.controlVersion &&
+      (candidate.state !== control.state || candidate.controlEtag !== control.controlEtag),
+  );
+}
+
+/** A rejected fenced request refreshes reads, never replays the mutation. */
+export async function recheckSessionAdmission({
+  control,
+  refreshOnly,
+  resume,
+  refresh,
+}: {
+  control: Session["effectiveControl"];
+  refreshOnly: boolean;
+  resume: (control: Session["effectiveControl"]) => Promise<unknown>;
+  refresh: (() => Promise<void>)[];
+}): Promise<void> {
+  let rejected = false;
+  let failure: unknown;
+  if (!refreshOnly && control.state !== "paused") {
+    try {
+      await resume(control);
+    } catch (error) {
+      rejected = true;
+      failure = error;
+    }
+  }
+  // Wait for both reads even when one rejects, so the pending state covers
+  // the complete reconciliation. Preserve the original mutation failure.
+  const reads = await Promise.allSettled(refresh.map((read) => read()));
+  if (rejected) throw failure;
+  if (reads.some((read) => read.status === "rejected")) {
+    throw new Error("Session status could not be refreshed");
+  }
+}
+
 // Read only the public reason. Older servers omit this optional projection;
 // unknown future reasons get safe copy, never raw database diagnostics.
 function admissionReason(session: Session): string | null {
@@ -44,12 +86,14 @@ export function SessionAdmissionNotice({
   canControl,
   paused,
   busy,
+  refreshRequired = false,
   onRecheck,
 }: {
   session: Session;
   canControl: boolean;
   paused: boolean;
   busy: boolean;
+  refreshRequired?: boolean;
   /** Existing authorized Resume request, followed by a fresh session read. */
   onRecheck: () => Promise<void>;
 }) {
@@ -61,7 +105,7 @@ export function SessionAdmissionNotice({
   if (!reason) return null;
 
   async function recheck() {
-    if (pending.current || busy || paused || !canControl) return;
+    if (pending.current || busy || (paused && !refreshRequired) || !canControl) return;
     pending.current = true;
     setChecking(true);
     setFailed(false);
@@ -84,7 +128,10 @@ export function SessionAdmissionNotice({
           automatically.
         </p>
       </div>
-      {paused ? (
+      {refreshRequired ? (
+        <p className="mt-2">Session controls changed. Refresh the status before rechecking.</p>
+      ) : null}
+      {paused && !refreshRequired ? (
         <p className="mt-2">
           This workstream is also paused. Use the existing Resume controls when you are ready;
           rechecking does not clear that pause.
@@ -99,7 +146,13 @@ export function SessionAdmissionNotice({
           aria-describedby={descriptionId}
           onClick={() => void recheck()}
         >
-          {checking ? "Rechecking…" : "Recheck and resume"}
+          {checking
+            ? refreshRequired
+              ? "Refreshing…"
+              : "Rechecking…"
+            : refreshRequired
+              ? "Refresh session status"
+              : "Recheck and resume"}
         </Button>
       ) : (
         <p className="mt-2">
@@ -108,7 +161,9 @@ export function SessionAdmissionNotice({
       )}
       {failed ? (
         <p role="alert" className="mt-2">
-          The recheck could not be confirmed. Check the session status before trying again.
+          {refreshRequired
+            ? "Session status could not be refreshed. Try refreshing again."
+            : "The recheck could not be confirmed. Check the session status before trying again."}
         </p>
       ) : null}
     </Notice>

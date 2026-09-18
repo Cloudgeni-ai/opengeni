@@ -3,7 +3,12 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { Session } from "@opengeni/sdk";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { admissionRecheckControl, SessionAdmissionNotice } from "./session-admission-notice";
+import {
+  admissionRecheckControl,
+  admissionControlNeedsRefresh,
+  recheckSessionAdmission,
+  SessionAdmissionNotice,
+} from "./session-admission-notice";
 
 beforeAll(() => {
   if (!globalThis.document) GlobalRegistrator.register();
@@ -76,6 +81,111 @@ describe("session admission notice", () => {
     const paused = control("paused", 4);
     expect(admissionRecheckControl(paused, active, active)).toBe(paused);
     expect(admissionRecheckControl(active, paused, undefined)).toBe(paused);
+  });
+
+  test("preserves newest accepted pause with reversed response order", () => {
+    const paused = control("paused", 12);
+    const active = control("active", 11);
+    expect(admissionRecheckControl(active, active, paused)).toBe(paused);
+    expect(admissionRecheckControl(paused, active, active)).toBe(paused);
+    expect(admissionRecheckControl(active, paused, active)).toBe(paused);
+  });
+
+  test("equal-version state or ETag disagreement requires read-only refresh", async () => {
+    const active = control("active", 10);
+    const paused = control("paused", 10);
+    expect(admissionControlNeedsRefresh(paused, active)).toBe(true);
+    expect(admissionControlNeedsRefresh(active, { ...active, controlEtag: "other" })).toBe(true);
+    expect(admissionControlNeedsRefresh(paused, control("active", 9), paused)).toBe(false);
+    const resume = mock(async () => {});
+    const refresh = mock(async () => {});
+    await render({
+      paused: true,
+      refreshRequired: true,
+      onRecheck: () =>
+        recheckSessionAdmission({ control: paused, refreshOnly: true, resume, refresh: [refresh] }),
+    });
+    expect(container.querySelector("button")?.textContent).toBe("Refresh session status");
+    await act(async () => container.querySelector("button")!.click());
+    expect(resume).not.toHaveBeenCalled();
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  test("racing pause rejection refreshes both reads once without replaying Resume", async () => {
+    const conflict = Object.assign(new Error("private conflict detail"), { status: 409 });
+    const resume = mock(async () => {
+      throw conflict;
+    });
+    let refreshedControl = control("active", 10);
+    const detail = mock(async () => {
+      refreshedControl = control("paused", 11);
+    });
+    const queue = mock(async () => {});
+    await expect(
+      recheckSessionAdmission({
+        control: refreshedControl,
+        refreshOnly: false,
+        resume,
+        refresh: [detail, queue],
+      }),
+    ).rejects.toBe(conflict);
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(detail).toHaveBeenCalledTimes(1);
+    expect(queue).toHaveBeenCalledTimes(1);
+    const latest = admissionRecheckControl(refreshedControl, control("active", 10));
+    await render({ paused: latest.state === "paused" });
+    expect(container.querySelector("button")).toBeNull();
+    expect(container.textContent).not.toContain("private conflict");
+  });
+
+  test("rejected resume stays pending until both refreshes settle and keeps safe error", async () => {
+    let finish!: () => void;
+    const resume = mock(async () => {
+      throw new Error("secret rejection");
+    });
+    const firstRead = mock(async () => {
+      throw new Error("secret read error");
+    });
+    const secondRead = mock(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await render({
+      onRecheck: () =>
+        recheckSessionAdmission({
+          control: control("active", 10),
+          refreshOnly: false,
+          resume,
+          refresh: [firstRead, secondRead],
+        }),
+    });
+    await act(async () => container.querySelector("button")!.click());
+    expect(container.querySelector("button")!.disabled).toBe(true);
+    await act(async () => finish());
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("secret");
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(firstRead).toHaveBeenCalledTimes(1);
+    expect(secondRead).toHaveBeenCalledTimes(1);
+  });
+
+  test("successful recheck refreshes once; refresh failure does not retry mutation", async () => {
+    const resume = mock(async () => {});
+    const refresh = mock(async () => {
+      throw new Error("read failed");
+    });
+    await expect(
+      recheckSessionAdmission({
+        control: control("active", 10),
+        refreshOnly: false,
+        resume,
+        refresh: [refresh],
+      }),
+    ).rejects.toThrow("Session status could not be refreshed");
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   for (const [reason, copy] of [
@@ -173,9 +283,13 @@ describe("session admission notice", () => {
     expect(wiring).toContain("context.client.resumeSession");
     expect(wiring).toContain("expectedControlEtag: control.controlEtag");
     expect(wiring).toContain('paused={admissionControl.state === "paused"}');
-    expect(wiring).toContain("const control = admissionControl");
-    expect(wiring).toContain('if (control.state === "paused") return');
-    expect(wiring).toContain("props.onReloadSession()");
+    expect(wiring).toContain("control: admissionControl");
+    expect(wiring).toContain("refreshOnly: admissionRefreshRequired");
+    expect(wiring).toContain("refresh: [props.onReloadSession, props.queue.refresh]");
+    expect(route).toContain(
+      "admissionSessionControl={sessionSeed?.effectiveControl ?? session.effectiveControl}",
+    );
+    expect(route).toContain("admissionRecheckControl(\n    props.admissionSessionControl,");
     expect(wiring).not.toContain("asUser");
     expect(wiring).not.toContain("grant");
   });
