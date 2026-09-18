@@ -158,12 +158,11 @@ For deeper implementation decisions, read selectively:
 - [Implementation checklist](references/implementation-overview.md)
 - [External users and embedded connection setup](references/external-users-and-connect.md)
 
-This tree is the canonical developer guide for both repository installation and
-the generated OpenGeni Product Integration Pack. It does not define a runtime
+This tree is the canonical developer guide for product integration. It does not define a runtime
 profile API, schedule Skill fields, or a new registry. Any references to an
 integration's "runtime profile" mean configuration owned by the customer's code,
-not a new OpenGeni resource. The Pack remains inactive until explicitly selected
-for a coding session.
+not a new OpenGeni resource. Use this Skill for a coding session, not an end-user
+runtime session.
 
 ## Choose The Credential
 
@@ -254,10 +253,8 @@ Children inherit and can only narrow; scheduled-task `agentConfig` and automatio
 Skills, grant tools, or disable eager `skill_read`. Keep the selection stable on
 keyed-create retries. Never try to control it through arbitrary session metadata.
 
-Pack installation `manifestSnapshot` is historical JSON, not a current admission
-contract. Preserve it alongside `manifestDigest`; do not normalize its Skill
-labels or replay old headerless Skills as new session input. New inputs require
-valid `SKILL.md` frontmatter, which owns the name and description.
+New Skill inputs require valid `SKILL.md` frontmatter, which owns the name and
+description. Do not replay old headerless Skills as new session input.
 
 ## Prompt And Context Contract
 

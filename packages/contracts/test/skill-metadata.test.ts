@@ -1,13 +1,11 @@
 import { expect, test } from "bun:test";
 import {
   AutomationSessionTemplate,
-  CapabilityPackSkill,
+  SkillArtifactDefinition,
   SessionSkill,
   SessionSkills,
   StoredSessionSkills,
   StoredAutomationSessionTemplate,
-  StoredCapabilityPack,
-  PackInstallation,
 } from "../src/index";
 
 const files = [
@@ -17,57 +15,13 @@ const files = [
   },
 ];
 
-test("installation audit snapshots preserve historical manifests instead of admitting them again", () => {
-  const historical = {
-    id: "legacy-pack",
-    name: "Historical Pack",
-    description: "Original description",
-    role: "agent",
-    category: "test",
-    version: "1",
-    skills: [
-      {
-        name: "Original Name",
-        description: "Original descriptor",
-        files: [{ path: "SKILL.md", content: "Original headerless instructions" }],
-      },
-    ],
-    extension: { retained: true },
-  };
-  const wire = {
-    id: crypto.randomUUID(),
-    accountId: crypto.randomUUID(),
-    workspaceId: crypto.randomUUID(),
-    packId: historical.id,
-    status: "disabled" as const,
-    version: 1,
-    manifestSnapshot: historical,
-    manifestDigest: "a".repeat(64),
-    selectedRigId: null,
-    installedBySubjectId: "user:original",
-    metadata: {},
-    enabledAt: "2026-01-01T00:00:00Z",
-    updatedAt: "2026-01-01T00:00:00Z",
-  };
-  expect(PackInstallation.parse(wire)).toEqual(wire);
-  expect(StoredCapabilityPack.safeParse(historical).success).toBe(false);
-  const yamlManifest = { ...historical, skills: [{ ...historical.skills[0], files }] };
-  expect(
-    PackInstallation.parse({ ...wire, manifestSnapshot: yamlManifest }).manifestSnapshot,
-  ).toEqual(yamlManifest);
-  expect(StoredCapabilityPack.parse(yamlManifest).skills[0]!.description).toBe(
-    "Run deployment checks",
-  );
-  expect(PackInstallation.safeParse({ ...wire, manifestSnapshot: [] }).success).toBe(false);
-});
-
-test("inline and Pack Skills derive metadata from files without duplicate input fields", () => {
+test("inline and portable Skills derive metadata from files without duplicate input fields", () => {
   expect(SessionSkill.parse({ files })).toEqual({
     name: "deploy",
     description: "Run deployment checks",
     files,
   });
-  expect(CapabilityPackSkill.parse({ files, activationMode: "session_selected" })).toEqual({
+  expect(SkillArtifactDefinition.parse({ files, activationMode: "session_selected" })).toEqual({
     name: "deploy",
     description: "Run deployment checks",
     files,
@@ -92,7 +46,7 @@ test("missing frontmatter cannot enter session or Pack context through inline co
     files: [{ path: "SKILL.md", content: "Instructions" }],
   };
   expect(() => SessionSkill.parse(legacy)).toThrow("safe name");
-  expect(() => CapabilityPackSkill.parse(legacy)).toThrow("safe name");
+  expect(() => SkillArtifactDefinition.parse(legacy)).toThrow("safe name");
 });
 
 test("session deduplication compares the derived metadata and exact files", () => {
@@ -134,7 +88,7 @@ test("every inline admission rejects non-text, oversized and conflicting folder 
   ];
   for (const candidate of invalidFiles) {
     expect(SessionSkill.safeParse({ files: candidate }).success).toBe(false);
-    expect(CapabilityPackSkill.safeParse({ files: candidate }).success).toBe(false);
+    expect(SkillArtifactDefinition.safeParse({ files: candidate }).success).toBe(false);
     expect(
       AutomationSessionTemplate.safeParse({ prompt: "Use Skill", skills: [{ files: candidate }] })
         .success,
@@ -148,37 +102,15 @@ test("every inline admission rejects non-text, oversized and conflicting folder 
   expect(SessionSkill.parse({ files: text }).files).toEqual(text);
 });
 
-test("stored metadata is derived without rewriting historical files or manifests", () => {
+test("stored metadata is derived without rewriting historical files or session templates", () => {
   const legacy = { name: "old-label", description: "Old database description", files };
   const template = { prompt: "Use the deployment Skill", skills: [legacy] };
-  const manifest = {
-    id: "deploy-pack",
-    name: "Deployment",
-    description: "Deployment workflows",
-    role: "engineering",
-    category: "development",
-    version: "1.0.0",
-    skills: [legacy],
-    automationTemplates: [
-      {
-        id: "deploy",
-        name: "Deploy",
-        description: "Deploy a service",
-        adapterId: "signed-json.v1",
-        eventTypes: ["deploy"],
-        sessionTemplate: template,
-      },
-    ],
-  };
-  const historicalBytes = JSON.stringify(manifest);
+  const historicalBytes = JSON.stringify(template);
   expect(StoredSessionSkills.parse([legacy])).toEqual(SessionSkills.parse([{ files }]));
   expect(StoredAutomationSessionTemplate.parse(template).skills).toEqual(
     SessionSkills.parse([{ files }]),
   );
-  const projected = StoredCapabilityPack.parse(manifest);
-  expect(projected.skills[0]!.description).toBe("Run deployment checks");
-  expect(projected.automationTemplates![0]!.sessionTemplate.skills[0]!.name).toBe("deploy");
-  expect(JSON.stringify(manifest)).toBe(historicalBytes);
+  expect(JSON.stringify(template)).toBe(historicalBytes);
   expect(SessionSkill.safeParse(legacy).success).toBe(false);
 });
 

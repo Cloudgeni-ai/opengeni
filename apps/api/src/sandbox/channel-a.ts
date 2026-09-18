@@ -787,7 +787,7 @@ async function withChannelAOperation<T>(
 
   // One session has one logical runtime across turns and every API-direct
   // surface. Without this, Terminal/Files/Browser/Computer/viewers could rearm
-  // a stale deployment image after the worker had resolved a newer Pack/Rig or
+
   // deployment image for the same durable sandbox group.
   const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
 

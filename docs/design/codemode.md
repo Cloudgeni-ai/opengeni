@@ -22,7 +22,7 @@ approval policy, and MCP discovery, `packages/runtime` freezes one
 The model-facing MCP adapter and Codemode dispatcher both invoke that same
 environment. A display name or generated JavaScript path is never parsed back
 into authority. All first-party OpenGeni, Files, Docs, Codex Apps, capability,
-pack, interaction, and per-session MCP tools admitted to the attempt can enter
+interaction and per-session MCP tools admitted to the attempt can enter
 the catalog. Codemode never rediscovers or reconnects an MCP server.
 
 The catalog is persisted in `session_attempt_tool_catalogs` before Codemode is

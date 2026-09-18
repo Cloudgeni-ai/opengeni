@@ -60,10 +60,8 @@ export async function requireVariableSetForApi(
 }
 
 /**
- * Validates an variableSet attachment supplied in a request payload (session
- * create, scheduled task create/update, pack enable). Requires the
- * `variable-sets:use` permission unless the attachment was already authorized
- * (pack-installation-inherited attachments), and maps a missing or
+ * Validates a Variable Set attachment supplied in a session or task request.
+ * Requires attach and use permissions, and maps a missing or
  * cross-variable set to 422 because the id is payload, not the route
  * target. RLS plus the workspace_id clause make cross-workspace ids
  * indistinguishable from missing ones.
@@ -73,13 +71,10 @@ export async function validateVariableSetAttachment(
   grant: AccessGrant,
   workspaceId: string,
   variableSetId: string,
-  options: { preauthorized?: boolean } = {},
 ): Promise<VariableSet> {
   requireVariableSetEncryption(deps.settings);
-  if (!options.preauthorized) {
-    requirePermission(grant, "variable-sets:attach");
-    requirePermission(grant, "variable-sets:use");
-  }
+  requirePermission(grant, "variable-sets:attach");
+  requirePermission(grant, "variable-sets:use");
   const variableSet = await getVariableSet(
     deps.db,
     { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },

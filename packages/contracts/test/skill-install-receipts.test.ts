@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { InstalledPlugin, PackInstallation } from "../src";
+import { InstalledPlugin } from "../src";
 
 test("composite installation responses preserve pending and customized Skill receipts", () => {
   const id = "11111111-1111-4111-8111-111111111111";
@@ -20,5 +20,4 @@ test("composite installation responses preserve pending and customized Skill rec
       skillWrites,
     }).skillWrites,
   ).toEqual(skillWrites);
-  expect(PackInstallation.shape.skillWrites.parse(skillWrites)).toEqual(skillWrites);
 });

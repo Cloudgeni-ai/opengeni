@@ -202,10 +202,10 @@ describe("IntegrationRow", () => {
       <>
         <IntegrationRow
           model={model({
-            id: "pack:infra-ops",
+            id: "skill:infra-ops",
             name: "Infrastructure operations",
             chip: { label: "Not installed", tone: "idle" },
-            accessibleDetail: "Pack, curated by OpenGeni",
+            accessibleDetail: "Skill, curated by OpenGeni",
           })}
           onOpen={() => {}}
         />
@@ -218,9 +218,9 @@ describe("IntegrationRow", () => {
     try {
       expect(
         rendered.container
-          .querySelector('button[data-integration-row="pack:infra-ops"]')
+          .querySelector('button[data-integration-row="skill:infra-ops"]')
           ?.getAttribute("aria-label"),
-      ).toBe("Infrastructure operations. Pack, curated by OpenGeni. Not installed");
+      ).toBe("Infrastructure operations. Skill, curated by OpenGeni. Not installed");
       // Nothing meaningful to add: the name reads exactly as it did before.
       expect(
         rendered.container

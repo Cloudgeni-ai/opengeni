@@ -1,7 +1,7 @@
 # OpenGeni Review Bot
 
-OpenGeni Review Bot is the built-in `pr-review` Capability Pack. It adds a
-provider-neutral pull-request adapter, a reviewed `pr-review` Skill, and setup
+OpenGeni Review Bot provides a provider-neutral pull-request adapter, a
+reviewed `pr-review` Skill, and setup
 for narrowly scoped provider credentials. It does not add another execution
 engine: authenticated provider deliveries enter the generic automation
 substrate and accepted runs create ordinary OpenGeni sessions.
@@ -11,8 +11,7 @@ Azure DevOps pull requests through one normalized event contract.
 
 ## Setup
 
-1. Install the `pr-review` Pack from **Capabilities** through the normal Pack
-   preview/install flow.
+1. Open **Plugins** and find **PR Review**.
 2. For GitHub, choose **Install on GitHub** and authorize the deployment-owned
    **OpenGeni Lens** App as the personal-account owner or an active organization
    owner. GitHub's installation screen is the repository picker; the callback
@@ -144,27 +143,27 @@ of silently falling back to OpenGeni credits.
 
 ## Generic automation composition
 
-The Pack composes with [`automations.md`](automations.md) instead of owning a
+PR Review composes with [`automations.md`](automations.md) instead of owning a
 second webhook or run lifecycle:
 
 - the provider registration atomically creates one generic automation source;
   that source owns the adapter ID, opaque endpoint, encrypted ingress secret,
-  non-secret provider configuration, status, and version, and is fenced to the
-  exact Pack installation plus provider connector so only the Pack setup API
-  can rotate or change it;
-- a repository binding atomically creates one Pack-owned generic trigger whose
+  non-secret provider configuration, status, and version. The fixed
+  `source-control.pull-request.v1` adapter restricts mutation to the PR Review
+  setup API;
+- a repository binding atomically creates one generic trigger whose
   immutable revision freezes exact repository matching and session parameters;
 - a verified delivery becomes a bounded normalized generic event;
 - delivery deduplication is `(source, provider delivery key)` plus an exact raw
   digest, while logical-review deduplication is `(trigger, repository + PR +
   head SHA)`;
-- the accepted generic run freezes the source version, trigger revision, Pack
-  installation, normalized event, and rendered session execution;
+- the accepted generic run freezes the source version, trigger revision,
+  normalized event, and rendered session execution;
 - the generic Temporal dispatcher links the run to an ordinary session with
   create idempotency `automation-run:<runId>`.
 
-Disabling the Pack, source registration, or repository trigger prevents new
-dispatch. Dispatch rechecks all three authorities in the same transaction that
+Disabling the source registration or repository trigger prevents new
+dispatch. Dispatch rechecks their authority in the same transaction that
 creates and links the session. Historical events, runs, and sessions remain
 auditable.
 
@@ -186,7 +185,7 @@ generic source owns only webhook verification. At Git credential use time, the
 worker requires the exact live root session, turn, and attempt linked to the
 generic run, then rechecks:
 
-- active Pack installation, source, trigger revision, registration, and
+- active source, trigger revision, registration, and
   repository binding;
 - exact automation run/session linkage and `pull_request_review` policy role;
 - exact provider, repository ID/URI, installation or project ID, credential
@@ -197,7 +196,7 @@ decrypt the exact GitLab/Azure credential. Credentials are seeded off-manifest
 for Git and provider CLIs; they never enter prompts, history, events, repository
 URLs, or sandbox manifests. An ordinary session cannot imitate this authority.
 
-The Pack requires managed compute. It rejects `selfhosted` because an
+PR Review requires managed compute. It rejects `selfhosted` because an
 unattended automation must not clone onto a connected user's machine.
 
 ## Review behavior
@@ -262,12 +261,12 @@ GET /v1/pr-review/github/oauth/callback
 ```
 
 `DELETE` is an audit-preserving disable. The opt-in SDK surface is
-`@opengeni/sdk/pr-review`. Registrations and repository bindings own Pack
+`@opengeni/sdk/pr-review`. Registrations and repository bindings own review
 sources and triggers, so their setup routes are the only mutation authority;
-the generic automation routes cannot claim or alter those Pack-owned rows.
+the generic automation routes cannot claim or alter those review rows.
 
-- Pack, adapter, Skill, verification, and normalization:
-  `packages/core/src/domain/packs.ts`, `packages/core/src/domain/pr-review.ts`
+- Setup, adapter, Skill, verification, and normalization:
+  `packages/core/src/domain/pr-review.ts`
 - generic event/run/session substrate: `packages/core/src/domain/automations.ts`,
   `packages/db/src/automations.ts`, `apps/api/src/routes/automations.ts`,
   `apps/worker/src/activities/automations.ts`

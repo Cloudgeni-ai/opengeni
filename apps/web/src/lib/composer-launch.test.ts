@@ -15,7 +15,7 @@ describe("parseComposerLaunchSearch", () => {
         latency: "fast",
         realtime: "opengeni-gateway/openai/gpt-realtime-2.1",
         channelId: "00000000-0000-4000-8000-0000000000a1",
-        skillCapabilityId: "skill:pack-inline/opengeni-product-integration@abc",
+        skillCapabilityId: "skill:product-integration@abc",
       }),
     ).toEqual({
       model: "codex/gpt-5.6-sol",
@@ -23,7 +23,7 @@ describe("parseComposerLaunchSearch", () => {
       latency: "fast",
       realtime: "opengeni-gateway/openai/gpt-realtime-2.1",
       channelId: "00000000-0000-4000-8000-0000000000a1",
-      skillCapabilityId: "skill:pack-inline/opengeni-product-integration@abc",
+      skillCapabilityId: "skill:product-integration@abc",
     });
   });
 
@@ -54,12 +54,12 @@ describe("parseComposerLaunchSearch", () => {
       effort: "low",
       latency: "standard",
       realtime: "gpt-live-1-boulder-alpha",
-      skillCapabilityId: "skill:pack-inline/opengeni-product-integration@abc",
+      skillCapabilityId: "skill:product-integration@abc",
     });
     expect(composerLaunchSearchKey(full)).toContain("gpt-5.6-sol");
     expect(composerLaunchSearchAfterPolicyApply(full)).toEqual({
       realtime: "gpt-live-1-boulder-alpha",
-      skillCapabilityId: "skill:pack-inline/opengeni-product-integration@abc",
+      skillCapabilityId: "skill:product-integration@abc",
     });
     expect(composerLaunchSearchAfterPolicyApply({ model: "gpt-5.6-sol" })).toEqual({});
     expect(composerLaunchSearchKey({})).toBeNull();

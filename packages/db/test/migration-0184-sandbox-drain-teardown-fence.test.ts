@@ -66,6 +66,8 @@ const withheldMigrationNames = [
   "0468_knowledge_relationship_projection.sql",
   "0469_knowledge_source_discovery.sql",
   "0478_sender_owned_connections.sql",
+  // The destructive removal must follow the historical 0402/0433 readers.
+  "0482_remove_packs.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

@@ -6,7 +6,7 @@ Variable sets are named encrypted secret collections with one explicit owner sco
 - **Workspace:** discoverable only in the origin workspace. This is the default and preserves legacy `/environments` behavior.
 - **Only me:** owned by the authenticated active organization member, private by default, and discoverable from any workspace that member currently accesses.
 
-A variable set is attached to runnable things — a session, a scheduled task, or a capability pack installation that declares it uses one — and its values are injected only after exact runtime authority is revalidated. A session may select up to 25 explicit Variable Sets in ordered low-to-high precedence. The legacy singular `variableSetId` remains an alias for the final, highest-precedence explicit set.
+A variable set is attached to runnable things — a session or a scheduled task — and its values are injected only after exact runtime authority is revalidated. A session may select up to 25 explicit Variable Sets in ordered low-to-high precedence. The legacy singular `variableSetId` remains an alias for the final, highest-precedence explicit set.
 
 The chat composer presents explicit sets **highest priority first**. It reverses
 enabled rows when writing the existing low-to-high API selection, and reverses
@@ -50,7 +50,7 @@ rewritten by an older release cannot be reconstructed.
 
 ## Deliberate v1 storage decision
 
-`docs/packs.md` states that connector secrets should live behind `credentialRef` in an external broker, not in Postgres. Scoped Variable Sets deliberately differ: they DO store secret values in Postgres, encrypted with an operator key that lives only in the deployment's secret set. The current lossless `v2:` envelope preserves every UTF-16 code unit and the reader retains historical `v1:` compatibility; a future keyed envelope or external reference can still use another prefix without a schema change. Use `credentialRef` connectors for OAuth-broker-shaped credentials; use Variable Sets for plain `NAME=value` material an agent process expects.
+Scoped Variable Sets store secret values in Postgres encrypted with an operator key held in the deployment secret set. The lossless `v2:` envelope preserves every UTF-16 code unit; the reader retains historical `v1:` compatibility. Use Connections for provider credentials and Variable Sets for plain `NAME=value` material an agent process expects.
 
 ## Configuration
 
@@ -166,7 +166,6 @@ Attachment points:
   inherit a once snapshot; machine updates already coalesced into the accepted
   turn remain part of that exact turn. A nonowner in a shared session cannot
   attach or resolve the owner's personal fixed resources.
-- `POST /v1/workspaces/:id/packs/:packId/enable` accepts `variableSetId` when a pack declares a `variable set` block and requires both attachment permissions; required variables are checked by **name**. Scheduled tasks created from that installation's templates inherit the attachment without re-checking either permission on the caller — both were authorized at enable time.
 
 An organization- or user-scoped `variableSetId` may originate in another workspace in the same organization when its scoped authority makes it visible from the target workspace. Unknown, inaccessible, workspace-scoped foreign, and cross-organization ids return `422 unknown variableSetId`; RLS makes those cases indistinguishable by design.
 

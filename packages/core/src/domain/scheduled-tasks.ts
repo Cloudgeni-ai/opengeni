@@ -218,9 +218,6 @@ export async function createValidatedScheduledTask(input: {
   // scheduledTaskToolsProvided). Absent tools get the workspace's enabled
   // capability MCP servers, mirroring session creation.
   toolsProvided?: boolean;
-  // Set for pack-installation-inherited attachments that were already
-  // authorized with variable-sets:use when the pack was enabled.
-  variableSetPreauthorized?: boolean;
   sessionAuthorization?: SessionAuthorizationPort | null | undefined;
   authorizationSurface?: SessionAuthorizationSurface | undefined;
 }): Promise<ScheduledTask> {
@@ -240,8 +237,7 @@ export async function createValidatedScheduledTask(input: {
   }
   if (learningContext?.actor.kind === "human" && learning)
     learningContext.actor.settingsScopes = [learning.scope];
-  // API parsing fills this default, but pack installers and older internal
-  // callers can still invoke the shared validator with the pre-action shape.
+  // Internal callers can omit the action; agent turns are the default.
   const action = input.payload.action ?? ({ kind: "agent_turn" } as const);
   const knowledgeAction = input.payload.agentConfig.knowledgeSource ?? null;
   if (knowledgeAction) {
@@ -307,7 +303,6 @@ export async function createValidatedScheduledTask(input: {
       input.grant,
       input.grant.workspaceId,
       input.payload.variableSetId,
-      { preauthorized: input.variableSetPreauthorized ?? false },
     );
   }
   // The rig is stored on the task and resolved to its ACTIVE version per fire
@@ -1616,7 +1611,7 @@ async function validateScheduledTaskAgentConfig(input: {
   // A task whose creator did not choose tools gets the workspace's exact
   // session defaults (or the deployment compatibility default), exactly like
   // a session created without a tools key. Scheduled runs are sessions too;
-  // "no MCP servers at all" was a trap every pack/template instantiation path
+
   // kept falling into (a maintenance task that cannot reach its workspace's
   // notebook MCP cannot do its job).
   const tools =

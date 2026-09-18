@@ -197,7 +197,7 @@ export const AGENT_INSTRUCTIONS_CORE_PLACEHOLDER = "{{core}}";
  */
 export const DEFAULT_AGENT_INSTRUCTIONS = [
   "You are an OpenGeni workspace agent.",
-  "Follow the user's task and any enabled pack or skill instructions for the current role.",
+  "Follow the user's task and the applicable Skill instructions for the current role.",
   "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
   "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
   "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
@@ -782,7 +782,7 @@ const SettingsSchema = z.object({
   // the verified, self-contained native artifact runtime at its fixed image
   // paths. Disabled by default so arbitrary/custom provider images never make
   // document/spreadsheet/presentation skills appear when their runtime is
-  // absent. Per-pack/per-rig image overrides fail closed in the worker even
+
   // when this base-image contract is enabled.
   sandboxArtifactRuntimeEnabled: EnvBoolean.default(false),
   dockerExposedPorts: z.string().default(""),

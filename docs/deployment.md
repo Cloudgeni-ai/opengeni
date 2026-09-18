@@ -1975,7 +1975,7 @@ That is `docker/sandbox.Dockerfile` for Docker and `docker/desktop.Dockerfile` f
 Modal Computer/Browser. Do not enable the flag on a desktop digest published
 before the kernel was installed, and do not point Modal at headless
 `opengeni-sandbox` to obtain the kernel.
-Production Docker/Modal references must be digest-pinned; pack, sandbox environment, mutable,
+Production Docker/Modal references must be digest-pinned; sandbox environment, mutable,
 self-hosted, and mismatched images fail closed. The worker runs the absolute
 runtime doctor inside the actual box before the model starts. `bun run dev`
 automatically caches an exact clean-HEAD CI runtime when available, source-tags

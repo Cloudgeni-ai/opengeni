@@ -95,6 +95,9 @@ export type CodexEncryptedArtifactRejection = {
   kind: "encrypted_content_rejected";
 };
 
+/** Exact Codex `error.code` for an opaque artifact the backend can no longer use. */
+export const CODEX_ENCRYPTED_CONTENT_REJECTION_CODE = "invalid_encrypted_content";
+
 /**
  * Classify only the provider's definitive request rejection for an opaque
  * reasoning artifact that it can no longer decrypt/parse. A Codex transport
@@ -113,6 +116,14 @@ export function classifyCodexEncryptedArtifactRejection(
         ? (value.error as Record<string, unknown>)
         : null;
     const status = Number(value.status ?? body?.status);
+    // The exact provider error code names this family without a message
+    // match: production compaction requests have been rejected with it while
+    // the human-readable text varied. It is never a generic 400.
+    const exactCode =
+      typeof body?.code === "string" ? body.code : typeof value.code === "string" ? value.code : "";
+    if (status === 400 && exactCode === CODEX_ENCRYPTED_CONTENT_REJECTION_CODE) {
+      return { status: 400, kind: "encrypted_content_rejected" };
+    }
     const message = [
       typeof value.message === "string" ? value.message : "",
       typeof body?.message === "string" ? body.message : "",

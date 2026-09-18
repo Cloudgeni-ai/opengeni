@@ -890,7 +890,7 @@ concrete `tools/call` and authentication fails, the event includes that tool
 name and remains actionable.
 
 Session creation persists skill selection but never starts a sandbox. At turn
-execution, bundled, curated, pack, and inline session Skills use the shared
+execution, bundled, curated, and inline session Skills use the shared
 descriptor index and eager sandbox-free `skill_read`. Only an explicit
 `skill_checkout` copies a selected Skill directory to the filesystem.
 The worker builds the configured Skill descriptor catalog during each turn-attempt
@@ -1434,7 +1434,7 @@ subsequent fresh checkpoint makes the archive current. This operation does not
 resume a turn, modify session history, or claim recovery of unavailable writes.
 
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
-directory Image layers user files onto the currently selected sandbox environment/pack/base
+directory Image layers user files onto the currently selected sandbox environment/base
 image instead of replacing the whole machine. Existing serialized sessions keep
 their recorded `snapshot_filesystem` or tar mode and remain recoverable. Warm
 checkpoint attempts use the configured interval as a hard minimum even after a
@@ -2282,6 +2282,26 @@ identity; an unusable remote-compaction blob is omitted because no portable
 plaintext exists. Credential identity is irrelevant. A generic 400, a different
 provider error, or a rejection that invalidates none of that exact candidate set is terminal
 rather than an equivalent retry loop.
+
+The family is recognized either by the exact provider code
+`invalid_encrypted_content` or by the decrypt/parse sentence family, and the
+remote-compaction request is in scope: `shouldRecoverCompactionProviderFailure`
+lets a `CompactionProviderResponseError` carrying that rejection reach the same
+invalidation settlement instead of settling `context_compaction_failed`, because
+the compaction request sends the same opaque artifacts as the ordinary request
+that preceded it.
+
+Every other definitive provider rejection of the compaction request (HTTP 400,
+413, or 422) remains terminal, but it is no longer opaque. The worker persists a
+closed `providerRejection` record on both the `turn.failed` payload and the
+`session.context.compaction.skipped` landmark: `httpStatus`, the provider
+`type` and `code`, the rejected `param` path (for example
+`input[12].encrypted_content`), and the provider request id. The provider
+message is never persisted because it can quote conversation input. The failure
+text names those identifiers and states that repeating the request fails the
+same way until the conversation changes; the timeline's compaction pill shows
+the same identifiers instead of the generic "request it again to retry" copy,
+which only applies to a transient failure.
 
 Subscription, model, and provider-route changes never alter canonical history
 or a saved approval RunState. Responses consumes canonical history directly;

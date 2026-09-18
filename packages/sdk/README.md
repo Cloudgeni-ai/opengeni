@@ -215,8 +215,8 @@ session. There is no organization-wide Skill registry or Skill inheritance in
 this integration contract. See the canonical guide for the complete route map,
 security boundary, and delivery checklist.
 
-Installed Pack Skills normally remain workspace-managed. A Pack may instead
-mark guidance as `session_selected`; installation then exposes it to no agent
+Installed Skills can be workspace-managed or marked `session_selected`.
+Session-selected guidance is exposed to no agent
 until `createSession` names the reviewed immutable component in
 `installedSkillIds`. OpenGeni copies that exact artifact into the new session,
 so omitting the field from customer-facing creates is a real contamination
@@ -997,7 +997,6 @@ Every public endpoint group has typed methods:
 | Variable sets | `listVariableSets`, `createVariableSet`, `getVariableSet`, `updateVariableSet`, `deleteVariableSet`, `setVariableSetVariable`, `deleteVariableSetVariable`; generic reads are metadata-only, while dedicated permissioned exact-value reads are part of the held client train |
 | Files | `uploadFile`, `beginFileUpload`, `completeFileUpload`, `getFile`, `createFileDownloadUrl` |
 | Documents | `createDocumentBase`, `listDocumentBases`, `getDocumentBase`, `addDocument`, `listDocuments`, `reindexDocument`, `searchDocuments`, `searchKnowledge` (effective organization + workspace + immutable initiating-user personal scope) |
-| Packs | `listPacks`, `registerPack`, `getPack`, `enablePack`, `deletePack`, `listPackInstallations` |
 | Capabilities | `listCapabilities`, `createCapability`, `enableCapability`, `disableCapability`, `discoverMcpCapabilities` |
 | Plugin packages | `previewPlugin`, `installPlugin`, `previewPluginUninstall`, `uninstallPlugin` |
 | API Integrations | `listIntegrationDefinitions`, `listApiIntegrations`, `previewApiIntegration`, `startApiIntegrationOAuth`, `installApiIntegration`, `previewApiIntegrationUninstall`, `uninstallApiIntegration`, `listIntegrationFacets`, `configureIntegrationFacet`, `pauseIntegrationFacet`, `resumeIntegrationFacet`, `removeIntegrationFacet`, `browseGoogleDriveFacetSource`, `saveGoogleDriveFacetSource` |

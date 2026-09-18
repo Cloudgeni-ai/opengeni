@@ -179,7 +179,6 @@ import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerIntegrationFacetRoutes } from "./routes/integration-facets";
 import { registerInteractionResourceRoutes } from "./routes/interaction-resources";
 import { registerPrReviewRoutes } from "./routes/pr-review";
-import { registerPackRoutes } from "./routes/packs";
 import { registerAutomationRoutes } from "./routes/automations";
 import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
@@ -1323,7 +1322,6 @@ export function createAppComposition(deps: AppDependencies): {
   registerEnvironmentRoutes(app, routeDeps);
   registerChannelRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
-  registerPackRoutes(app, routeDeps);
   registerAutomationRoutes(app, routeDeps);
   registerPrReviewRoutes(app, routeDeps);
   registerPluginRoutes(app, routeDeps);
@@ -2431,26 +2429,7 @@ const routeLabelPatterns: Array<{
     pattern: /^\/v1\/workspaces\/[^/]+\/environments\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/environments/:id",
   },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs$/,
-    label: "/v1/workspaces/:workspaceId/packs",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs\/installations$/,
-    label: "/v1/workspaces/:workspaceId/packs/installations",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs\/marketing-social-daily-analysis\/scheduled-tasks$/,
-    label: "/v1/workspaces/:workspaceId/packs/marketing-social-daily-analysis/scheduled-tasks",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs\/[^/]+\/enable$/,
-    label: "/v1/workspaces/:workspaceId/packs/:id/enable",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs\/[^/]+$/,
-    label: "/v1/workspaces/:workspaceId/packs/:id",
-  },
+
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/preview$/,
     label: "/v1/workspaces/:workspaceId/plugins/preview",

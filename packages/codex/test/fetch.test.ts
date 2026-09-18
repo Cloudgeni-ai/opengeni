@@ -118,6 +118,37 @@ describe("Codex encrypted artifact rejection classifier", () => {
     });
   });
 
+  test("accepts the exact provider error code without a message match", () => {
+    // Production compaction requests were rejected with this code while the
+    // human-readable text did not match the sentence patterns above.
+    const coded = {
+      status: 400,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+      error: {
+        type: "invalid_request_error",
+        code: "invalid_encrypted_content",
+        message: "Invalid encrypted reasoning artifact",
+      },
+    };
+    expect(classifyCodexEncryptedArtifactRejection(coded)).toEqual({
+      status: 400,
+      kind: "encrypted_content_rejected",
+    });
+    expect(classifyCodexEncryptedArtifactRejection(new Error("wrapped", { cause: coded }))).toEqual(
+      { status: 400, kind: "encrypted_content_rejected" },
+    );
+    expect(classifyCodexEncryptedArtifactRejection({ ...coded, status: 500 })).toBeNull();
+    expect(
+      classifyCodexEncryptedArtifactRejection({
+        ...coded,
+        error: { ...coded.error, code: "invalid_value" },
+      }),
+    ).toBeNull();
+    expect(
+      classifyCodexEncryptedArtifactRejection({ ...coded, headers: new Headers() }),
+    ).toBeNull();
+  });
+
   test.each([
     markedError("Encrypted content could not be decrypted", 500),
     markedError("Input JSON could not be parsed"),

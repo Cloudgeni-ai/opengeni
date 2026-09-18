@@ -12,6 +12,7 @@ import { TurnExecutionPolicyV1, type ResourceRef } from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
 import * as opengeniDb from "@opengeni/db";
 import {
+  CODEX_TRANSPORT_ERROR_HEADER,
   codexRequestStorage,
   codexSubscriptionFetch,
   type CodexRequestContext,
@@ -39,6 +40,7 @@ import {
 import {
   CompactionNeededError,
   CompactionProviderResponseError,
+  compactionProviderFailureDiagnostics,
   EmptyCompactionSummaryError,
   SandboxConfigError,
   SandboxExecReadinessError,
@@ -128,6 +130,8 @@ import {
   shouldPrefetchManagedSandbox,
   shouldDeferNonEagerToolPreparation,
   shouldRecoverCompactionProviderFailure,
+  compactionFailureTurnEventPayload,
+  COMPACTION_PROVIDER_REJECTION_GUIDANCE,
   shouldRunTurnEndWorkspacePersistence,
   shouldStartPeriodicWorkspaceSnapshot,
   stableHumanInputRequestId,
@@ -154,7 +158,6 @@ import {
   SandboxSiblingWarmingTimeoutError,
   sandboxLeaseHolderIdForAttempt,
 } from "../src/sandbox-resume";
-import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 import { attachPendingUpdatesBeforePreparingModelInput } from "../src/activities/agent-turn/stream-attempt";
 
@@ -2944,27 +2947,6 @@ describe("turn-start pointer reconcile classification (issue #341 invariant B)",
 });
 
 describe("turn-time Modal private-registry warm", () => {
-  test("warms the pack-resolved Modal image ref before sandbox creation", async () => {
-    const packImage = "acr.example.com/cloudgeni/f4c-gecko@sha256:abc";
-    const runSettings = settingsWithPackSandboxImage(
-      testSettings({
-        sandboxBackend: "modal",
-        modalImageRef: undefined,
-        modalImageRegistrySecret: "acr-credentials-gecko",
-      }),
-      packImage,
-    );
-    const ensureRegistryImage = mock(async (_settings: Settings) => undefined);
-
-    await ensureTurnModalRegistryImage(runSettings, "modal", ensureRegistryImage);
-
-    expect(ensureRegistryImage).toHaveBeenCalledTimes(1);
-    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRef).toBe(packImage);
-    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRegistrySecret).toBe(
-      "acr-credentials-gecko",
-    );
-  });
-
   test("keeps non-modal or public-image turns on the no-op path", async () => {
     const ensureRegistryImage = mock(async (_settings: Settings) => undefined);
     await ensureTurnModalRegistryImage(
@@ -3320,10 +3302,6 @@ describe("lazy sandbox provisioner single-flight", () => {
       "Independent workspace reads after the personal-resource fence",
       authorize,
     );
-    const packRead = governanceSource.indexOf(
-      "resolveWorkspacePackRuntime(db, input.workspaceId)",
-      overlappedReads,
-    );
     const rigRead = governanceSource.indexOf(
       "await materializeRigVersionForAttempt(db",
       overlappedReads,
@@ -3343,8 +3321,7 @@ describe("lazy sandbox provisioner single-flight", () => {
     const gitAssert = credentialsSource.indexOf("assertGitHubResourcesRemainAuthorized(");
     expect(authorize).toBeGreaterThan(0);
     expect(overlappedReads).toBeGreaterThan(authorize);
-    expect(packRead).toBeGreaterThan(overlappedReads);
-    expect(rigRead).toBeGreaterThan(packRead);
+    expect(rigRead).toBeGreaterThan(overlappedReads);
     expect(policyRead).toBeGreaterThan(rigRead);
     expect(governanceCall).toBeGreaterThan(-1);
     expect(credentialsCall).toBeGreaterThan(governanceCall);
@@ -5793,6 +5770,76 @@ describe("transient provider error classifier", () => {
       ),
     ).toBe(false);
     expect(shouldRecoverCompactionProviderFailure(new EmptyCompactionSummaryError())).toBe(false);
+  });
+
+  test("a Codex encrypted-content rejection of the compaction request recovers through artifact invalidation", () => {
+    const rejected = Object.assign(new Error("Invalid encrypted reasoning artifact"), {
+      status: 400,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+      error: {
+        type: "invalid_request_error",
+        code: "invalid_encrypted_content",
+        message: "Invalid encrypted reasoning artifact",
+      },
+    });
+    const wrapped = new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(rejected),
+      rejected,
+    );
+    expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(true);
+    // A generic invalid request on the same transport stays terminal.
+    const generic = Object.assign(new Error("Invalid value"), {
+      status: 400,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+      error: { type: "invalid_request_error", code: "invalid_value", message: "Invalid value" },
+    });
+    expect(
+      shouldRecoverCompactionProviderFailure(
+        new CompactionProviderResponseError(compactionProviderFailureDiagnostics(generic), generic),
+      ),
+    ).toBe(false);
+  });
+
+  test("a definitive provider rejection names the field and drops the retry promise", () => {
+    const rejected = new CompactionProviderResponseError({
+      httpStatus: 400,
+      type: "invalid_request_error",
+      code: "unknown_parameter",
+      param: "input[12].encrypted_content",
+      requestId: "e63ad2c3-fab4-44e4-b458-3f5008f3c18f",
+    });
+    const payload = compactionFailureTurnEventPayload(rejected);
+    expect(payload).toEqual({
+      error: expect.stringContaining(
+        "the model provider rejected the compaction request (HTTP 400 invalid_request_error unknown_parameter; param input[12].encrypted_content; request e63ad2c3-fab4-44e4-b458-3f5008f3c18f)",
+      ),
+      code: "context_compaction_failed",
+      retryable: false,
+      recovery: "user_message",
+      compacted: false,
+      providerRejection: {
+        httpStatus: 400,
+        type: "invalid_request_error",
+        code: "unknown_parameter",
+        param: "input[12].encrypted_content",
+        requestId: "e63ad2c3-fab4-44e4-b458-3f5008f3c18f",
+      },
+    });
+    expect(payload.error).toContain(COMPACTION_PROVIDER_REJECTION_GUIDANCE);
+    expect(payload.error).not.toContain("Request it again");
+    // Transient and empty-summary failures keep the existing shape.
+    expect(
+      compactionFailureTurnEventPayload(
+        new CompactionProviderResponseError({ httpStatus: 503, code: "server_error" }),
+      ),
+    ).not.toHaveProperty("providerRejection");
+    expect(compactionFailureTurnEventPayload(null, { error: "custom" })).toEqual({
+      error: "custom",
+      code: "context_compaction_failed",
+      retryable: false,
+      recovery: "user_message",
+      compacted: false,
+    });
   });
 
   test("a 503 recovers the same turn after backpressure pacing, independent of goal state", () => {

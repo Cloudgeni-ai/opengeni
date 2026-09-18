@@ -7,6 +7,7 @@ import {
   composeAgentInstructions,
   requestRemoteCompactionV2,
   serializedToolsForRemoteCompaction,
+  compactionProviderRejection,
   EmptyCompactionSummaryError,
   SUMMARY_BUFFER_TOKENS,
   type ModelResponseUsage,
@@ -31,7 +32,7 @@ import { type SessionEvent } from "@opengeni/contracts";
 import { acceptsPromptCacheKeyForTurn } from "./codex";
 import {
   safeErrorDiagnostic,
-  compactionFailureReasonFromError,
+  compactionFailureTurnEventPayload,
   isCompactionSummaryFailure,
   shouldRecoverCompactionProviderFailure,
 } from "./errors";
@@ -409,22 +410,16 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
           {
             clearRequestedCompaction: true,
             publishLiveEvents: publishCompactionLiveEvents,
+            providerRejection: compactionProviderRejection(error),
           },
         );
         if (!isCompactionSummaryFailure(error)) throw error;
-        const errorMessage = String(compactionFailureReasonFromError(error));
         if (
           !(await eventing.settle!({
             events: [
               {
                 type: "turn.failed",
-                payload: {
-                  error: errorMessage,
-                  code: "context_compaction_failed",
-                  retryable: false,
-                  recovery: "user_message",
-                  compacted: false,
-                },
+                payload: compactionFailureTurnEventPayload(error),
               },
               {
                 type: "session.status.changed",
@@ -579,22 +574,16 @@ export async function runPostAgentCompaction(
           {
             clearRequestedCompaction: true,
             publishLiveEvents: publishCompactionLiveEvents,
+            providerRejection: compactionProviderRejection(error),
           },
         );
         if (!isCompactionSummaryFailure(error)) throw error;
-        const errorMessage = String(compactionFailureReasonFromError(error));
         if (
           !(await eventing.settle!({
             events: [
               {
                 type: "turn.failed",
-                payload: {
-                  error: errorMessage,
-                  code: "context_compaction_failed",
-                  retryable: false,
-                  recovery: "user_message",
-                  compacted: false,
-                },
+                payload: compactionFailureTurnEventPayload(error),
               },
               {
                 type: "session.status.changed",
@@ -731,12 +720,12 @@ export async function runPostAgentCompaction(
         {
           clearRequestedCompaction: forced,
           publishLiveEvents: publishCompactionLiveEvents,
+          providerRejection: compactionProviderRejection(compactError),
         },
       );
       if (!isCompactionSummaryFailure(compactError)) throw compactError;
       const deferredSteer = await settleDeferredSteerAfterCompaction();
       if (deferredSteer) return { exit: deferredSteer };
-      const errorMessage = String(compactionFailureReasonFromError(compactError));
       observability.error("context compaction failed", {
         sessionId: input.sessionId,
         turnId: attempt.turnId,
@@ -747,13 +736,7 @@ export async function runPostAgentCompaction(
           events: [
             {
               type: "turn.failed",
-              payload: {
-                error: errorMessage,
-                code: "context_compaction_failed",
-                retryable: false,
-                recovery: "user_message",
-                compacted: false,
-              },
+              payload: compactionFailureTurnEventPayload(compactError),
             },
             { type: "session.status.changed", payload: { status: "idle" } },
           ],

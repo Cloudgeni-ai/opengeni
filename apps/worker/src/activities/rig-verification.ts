@@ -60,7 +60,6 @@ import {
 import type { Context } from "@temporalio/activity";
 import type { ControlActivityServices } from "./types";
 import { rigProviderImageSourceImage } from "./sandbox-images";
-import { resolveWorkspacePackRuntime, type WorkspacePackRuntime } from "./packs";
 import { currentActivityContext } from "./streaming";
 
 type RigSetupHook = typeof import("@opengeni/runtime").runRigSetupHook;
@@ -1287,13 +1286,10 @@ export async function buildVerifiedRigProviderImage(input: {
 
 export function settingsForRigVerification(
   settings: ControlActivityServices["settings"],
-  packRuntime: WorkspacePackRuntime,
   rigImage: string | null,
 ): ControlActivityServices["settings"] {
   // Rig verification must prove setup and provider-image materialization on
-  // the deployment-owned platform base. Legacy Pack and historical Rig image
-  // values are intentionally ignored here.
-  void packRuntime;
+  // the deployment-owned platform base. Historical Rig image values are ignored.
   void rigImage;
   return settings;
 }
@@ -1384,12 +1380,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
             change,
             candidateVersion,
           );
-          const packRuntime = await resolveWorkspacePackRuntime(db, input.workspaceId);
-          const runSettings = settingsForRigVerification(
-            settings,
-            packRuntime,
-            candidateVersion.image,
-          );
+          const runSettings = settingsForRigVerification(settings, candidateVersion.image);
           const providerImageContentHash = rigProviderImageContentHash({
             backend: runSettings.sandboxBackend,
             sourceImage: rigProviderImageSourceImage(runSettings, runSettings.sandboxBackend),
@@ -1583,8 +1574,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           metadata: { versionId: version.id },
         });
         try {
-          const packRuntime = await resolveWorkspacePackRuntime(db, input.workspaceId);
-          const runSettings = settingsForRigVerification(settings, packRuntime, version.image);
+          const runSettings = settingsForRigVerification(settings, version.image);
           const providerImageContentHash = rigProviderImageContentHash({
             backend: runSettings.sandboxBackend,
             sourceImage: rigProviderImageSourceImage(runSettings, runSettings.sandboxBackend),

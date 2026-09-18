@@ -69,7 +69,7 @@ const SECTION_COPY: Record<WorkspaceSettingsSection, { title: string; descriptio
   },
   plugins: {
     title: "Capabilities",
-    description: "Manage connectors, skills, and packs available to your workspace.",
+    description: "Manage Plugins, Skills, and integrations for your workspace.",
   },
   models: {
     title: "Models",

@@ -103,7 +103,6 @@ import { createListModelsAttemptToolDefinition } from "./list-models";
 import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
-import type { RuntimeSkillActivation } from "@opengeni/runtime";
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -125,7 +124,6 @@ export type PrepareTurnToolRuntimeDeps = {
         input: import("../types").RunKnowledgeSourceSyncBatchInput,
       ) => Promise<import("../types").RunKnowledgeSourceSyncBatchResult>)
     | undefined;
-  selectedSkillActivations: readonly RuntimeSkillActivation[];
   input: RunAgentTurnInput;
   catalogSourceSettings: Settings;
   db: ActivityServices["db"];
@@ -605,7 +603,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   });
   const selectedSkills = [
     ...bundledSkills,
-    ...deps.selectedSkillActivations.map((entry) => ({ id: entry.id, artifact: entry.artifact })),
     ...session.skills.map((skill) => ({
       id: `session:${session.id}:${skill.name}`,
       artifact: skill,

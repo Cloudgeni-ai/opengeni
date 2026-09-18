@@ -125,9 +125,7 @@ export type SandboxResumeServices = {
   db: Database;
   settings: Settings;
   objectStorage?: ObjectStorage | null;
-  /** Exact settings before a verified rig provider image overlaid the logical
-   * pack/deployment image. Fresh-create NotFound fallback must preserve an
-   * ID-only logical base instead of selecting the provider default. */
+
   logicalFallbackSettings?: Settings;
   sandboxMetrics?: RuntimeMetricsHooks;
   /** Structured logger for lifecycle decisions (holder release reasons). Falls

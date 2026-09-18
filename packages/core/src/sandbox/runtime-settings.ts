@@ -1,18 +1,11 @@
 import type { Settings } from "@opengeni/config";
 import {
-  CapabilityPack,
-  StoredCapabilityPack,
   type RigVersion,
   type Session,
   type SandboxBackend,
   type SandboxOs,
 } from "@opengeni/contracts";
-import {
-  getRigVersion,
-  getWorkspacePack,
-  listPackInstallations,
-  type Database,
-} from "@opengeni/db";
+import { getRigVersion, type Database } from "@opengeni/db";
 import { resolveModalCheckpointProviderBinding } from "@opengeni/runtime/sandbox";
 import {
   rigProviderImageContentHash,
@@ -49,76 +42,6 @@ export function managedSessionGroupOs(
   sessionOs: SandboxOs,
 ): SandboxOs {
   return sessionBackend === "selfhosted" ? "linux" : sessionOs;
-}
-
-/** Pre-V2 Packs are the sole compatibility path where a Pack can still own a
- * sandbox image. V2 installations select a Rig instead. Keep this predicate at
- * the shared runtime boundary so turns, API-direct tools, viewers, Browser and
- * Computer cannot resolve different physical machines for the same session. */
-export function packInstallationUsesLegacyRuntime(input: {
-  manifestSnapshot: unknown | null;
-  manifestDigest: string | null;
-}): boolean {
-  return input.manifestSnapshot === null && input.manifestDigest === null;
-}
-
-export async function resolveWorkspaceLegacyRuntimePacks(
-  db: Database,
-  workspaceId: string,
-): Promise<CapabilityPack[]> {
-  const installations = await listPackInstallations(db, workspaceId);
-  const packs: CapabilityPack[] = [];
-  for (const installation of installations) {
-    if (installation.status !== "active" || !packInstallationUsesLegacyRuntime(installation)) {
-      continue;
-    }
-    const registration = await getWorkspacePack(db, workspaceId, installation.packId);
-    if (!registration)
-      throw new Error(`Enabled Pack ${installation.packId} has no registered manifest`);
-    const parsed = StoredCapabilityPack.safeParse(registration.pack);
-    if (!parsed.success)
-      throw new Error(
-        `Enabled Pack ${installation.packId} requires repair: ${parsed.error.message}`,
-      );
-    packs.push(parsed.data);
-  }
-  return packs;
-}
-
-export function legacySandboxRuntimeFromPacks(packs: readonly CapabilityPack[]): {
-  sandboxImage: string | null;
-  sandboxProviderImages: CapabilityPack["sandboxProviderImages"] | null;
-} {
-  const imagePacks = packs.filter(
-    (pack) => typeof pack.sandboxImage === "string" && pack.sandboxImage.trim().length > 0,
-  );
-  if (imagePacks.length > 1) {
-    const ids = imagePacks
-      .map((pack) => pack.id)
-      .sort()
-      .join(", ");
-    throw new Error(
-      `Multiple enabled packs declare a sandbox image (${ids}). Only one enabled pack per workspace may declare sandboxImage; disable the others and retry.`,
-    );
-  }
-  return {
-    sandboxImage: imagePacks[0]?.sandboxImage?.trim() ?? null,
-    sandboxProviderImages: imagePacks[0]?.sandboxProviderImages ?? null,
-  };
-}
-
-export function settingsWithPackSandboxImage(
-  settings: Settings,
-  sandboxImage: string | null,
-  sandboxProviderImages: CapabilityPack["sandboxProviderImages"] | null = null,
-): Settings {
-  if (!sandboxImage) return settings;
-  return {
-    ...settings,
-    dockerImage: sandboxImage,
-    modalImageRef: sandboxImage,
-    modalImageId: sandboxProviderImages?.modal?.imageId,
-  };
 }
 
 export function settingsWithRigImage(settings: Settings, rigImage: string | null): Settings {
@@ -277,22 +200,15 @@ export async function resolveSessionSandboxRuntime(
   settings: Settings,
   session: Pick<Session, "workspaceId" | "sandboxBackend" | "rigId" | "rigVersionId">,
 ): Promise<SessionSandboxRuntime> {
-  const [packs, rigVersion] = await Promise.all([
-    resolveWorkspaceLegacyRuntimePacks(db, session.workspaceId),
+  const rigVersion =
     session.rigId && session.rigVersionId
-      ? getRigVersion(db, session.workspaceId, session.rigId, session.rigVersionId)
-      : Promise.resolve(null),
-  ]);
+      ? await getRigVersion(db, session.workspaceId, session.rigId, session.rigVersionId)
+      : null;
   if (session.rigVersionId && !rigVersion) {
     throw new Error(`Frozen sandbox environment version ${session.rigVersionId} is unavailable`);
   }
-  const legacy = legacySandboxRuntimeFromPacks(packs);
-  // A Rig is always a setup/check layer over the deployment-owned platform
-  // sandbox. Legacy pre-v2 Pack image compatibility remains available only to
-  // rig-less sessions; it cannot replace the base beneath a Rig.
-  const logicalSettings = rigVersion
-    ? settings
-    : settingsWithPackSandboxImage(settings, legacy.sandboxImage, legacy.sandboxProviderImages);
+  // Setup and checks always layer on the deployment-owned sandbox image.
+  const logicalSettings = settings;
   return {
     settings: {
       ...logicalSettings,

@@ -45,7 +45,6 @@ import {
   listEnabledMcpCapabilityServers,
   listInstalledApiIntegrations,
   listInstalledSkills,
-  listPackInstallations,
   listSocialConnections,
   mcpServerIdForCapability,
   upsertCapabilityCatalogItem,
@@ -62,7 +61,6 @@ import {
 import { hasPermission } from "../access";
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
-import { listCapabilityPacks, listWorkspaceCapabilityPacks } from "./packs";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
@@ -84,8 +82,6 @@ export async function buildCapabilityCatalog(input: {
   const [
     persistedItems,
     capabilityInstallations,
-    packInstallations,
-    workspacePacks,
     socialConnections,
     workspaceConnections,
     curatedLibrarySkills,
@@ -95,8 +91,6 @@ export async function buildCapabilityCatalog(input: {
   ] = await Promise.all([
     listCapabilityCatalogItems(input.db, input.workspaceId),
     listCapabilityInstallations(input.db, input.workspaceId),
-    listPackInstallations(input.db, input.workspaceId),
-    listWorkspaceCapabilityPacks(input.db, input.workspaceId),
     listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
     listConnectionsMetadata(input.db, input.workspaceId, null),
     discoverCuratedSkillLibraryItems(),
@@ -118,16 +112,7 @@ export async function buildCapabilityCatalog(input: {
       .filter((skill) => skill.owners.some((owner) => owner.kind === "direct"))
       .map((skill) => [skill.capabilityId, skill]),
   );
-  const activePackIds = new Set(
-    packInstallations
-      .filter((installation) => installation.status === "active")
-      .map((installation) => installation.packId),
-  );
-  const builtInPackIds = new Set(listCapabilityPacks().map((pack) => pack.id));
   const builtIns = [
-    ...workspacePacks.map((pack) =>
-      packCatalogItem(pack, builtInPackIds.has(pack.id) ? "built_in" : "manual"),
-    ),
     ...configuredMcpCatalogItems(input.settings),
     ...providerIntegrationCatalogItems(socialConnections),
     fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
@@ -159,7 +144,7 @@ export async function buildCapabilityCatalog(input: {
       const projected =
         item.kind === "skill"
           ? applyInstalledSkillEnablement(item, installedSkillById.get(item.id))
-          : applyCapabilityEnablement(item, capabilityInstallationById.get(item.id), activePackIds);
+          : applyCapabilityEnablement(item, capabilityInstallationById.get(item.id));
       // An installed connector can become unrunnable after a lifecycle or
       // ownership change. Use the execution registry rather than presenting
       // its stale catalog definition as a selectable tool.
@@ -194,11 +179,7 @@ export async function createCatalogItem(input: {
   payload: CreateCapabilityCatalogItemRequest;
 }): Promise<CapabilityCatalogItem> {
   const id = input.payload.id?.trim() || generatedCapabilityId(input.payload);
-  if (id.startsWith("pack:")) {
-    throw new HTTPException(422, {
-      message: "packs are managed by OpenGeni and cannot be manually created",
-    });
-  }
+
   if (id.startsWith("skill:")) {
     throw new HTTPException(422, {
       message: "Skills are installed through the Skill library or source import flow",
@@ -304,11 +285,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       message: "Install Plugins through the Plugin Package flow",
     });
   }
-  if (item.kind === "pack") {
-    throw new HTTPException(409, {
-      message: "Install Packs through the Pack installation preview flow",
-    });
-  }
+
   if (item.kind === "mcp" && !item.runtime.available) {
     throw new HTTPException(422, {
       message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled",
@@ -812,11 +789,7 @@ export async function disableCapability(input: {
       message: "Remove Plugins through the Plugin Package flow",
     });
   }
-  if (item.kind === "pack") {
-    throw new HTTPException(409, {
-      message: "Uninstall Packs through the Pack uninstall preview flow",
-    });
-  }
+
   if (item.source === "built_in" || item.source === "configured") {
     throw new HTTPException(409, {
       message:
@@ -1150,52 +1123,6 @@ async function requireCatalogItem(
     throw new HTTPException(404, { message: "capability not found" });
   }
   return item;
-}
-
-function packCatalogItem(
-  pack: ReturnType<typeof listCapabilityPacks>[number],
-  source: "built_in" | "manual",
-): CapabilityCatalogItem {
-  const customMetadata = { ...pack.metadata };
-  for (const key of [
-    "packId",
-    "version",
-    "connectors",
-    "knowledge",
-    "scheduledTaskTemplates",
-    "sandboxImage",
-    "sandboxProviderImages",
-    "skills",
-  ]) {
-    delete customMetadata[key];
-  }
-  return CapabilityCatalogItem.parse({
-    id: `pack:${pack.id}`,
-    kind: "pack",
-    source,
-    name: pack.name,
-    description: pack.description,
-    category: pack.category,
-    tags: [pack.role, pack.category, "pack"],
-    tools: pack.tools,
-    runtime: {
-      available: true,
-      notes: "Enables role-scoped tools, connectors, knowledge, and scheduled-task templates.",
-    },
-    metadata: {
-      ...customMetadata,
-      packId: pack.id,
-      version: pack.version,
-      connectors: pack.connectors,
-      knowledge: pack.knowledge,
-      scheduledTaskTemplates: pack.scheduledTaskTemplates,
-      ...(pack.variableSet ? { variableSet: pack.variableSet } : {}),
-      // Runtime composition surface only: skill names, never file content.
-      ...(pack.sandboxImage ? { sandboxImage: pack.sandboxImage } : {}),
-      ...(pack.sandboxProviderImages ? { sandboxProviderImages: pack.sandboxProviderImages } : {}),
-      ...(pack.skills.length > 0 ? { skills: pack.skills.map((skill) => skill.name) } : {}),
-    },
-  });
 }
 
 function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] {
@@ -1624,18 +1551,9 @@ function socialProviderConnectionCounts(item: CapabilityCatalogItem): {
 export function applyCapabilityEnablement(
   item: CapabilityCatalogItem,
   installation: CapabilityInstallation | undefined,
-  activePackIds: Set<string>,
 ): CapabilityCatalogItem {
   if (item.kind === "skill" || item.kind === "api" || item.kind === "plugin") {
     return { ...item, enabled: false, enabledReason: null, connectionRef: null };
-  }
-  if (item.kind === "pack") {
-    const enabled = activePackIds.has(packIdFromCapabilityId(item.id));
-    return {
-      ...item,
-      enabled,
-      enabledReason: enabled ? "enabled" : null,
-    };
   }
   if (isSocialProviderIntegration(item)) {
     // Provider-integration state is derived from every authoritative visible
@@ -1744,7 +1662,7 @@ function applyCapabilityLifecycle(item: CapabilityCatalogItem): CapabilityCatalo
 
   const installed = item.enabled;
   const actions: CapabilityAction[] = installed
-    ? item.kind === "pack" || item.kind === "skill" || item.kind === "plugin"
+    ? item.kind === "skill" || item.kind === "plugin"
       ? ["configure", "update", "uninstall", "inspect"]
       : ["configure", "disconnect", "inspect"]
     : item.kind === "mcp" || item.kind === "api"
@@ -1948,10 +1866,6 @@ function generatedCapabilityId(payload: CreateCapabilityCatalogItemRequest): str
 
 function publicRegistryCapabilityId(name: string, version: string, endpointUrl: string): string {
   return `mcp-registry:${slugify(name)}-${shortHash(`${name}:${version}:${endpointUrl}`)}`;
-}
-
-function packIdFromCapabilityId(capabilityId: string): string {
-  return capabilityId.replace(/^pack:/, "");
 }
 
 function uniqueTags(tags: string[]): string[] {

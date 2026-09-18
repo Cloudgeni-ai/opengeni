@@ -31,9 +31,7 @@ import {
   dbSql,
   setSessionGoalStatusWithEvent,
   encryptEnvironmentValue,
-  enablePackInstallation,
   loadVariableSetForRun,
-  registerWorkspacePack,
   setVariableSetVariable,
   getSession,
   getSessionTurn,
@@ -1089,80 +1087,6 @@ describe("worker activities integration", () => {
     expect(request).not.toContain("input_image");
     expect(request).not.toContain("direct model vision context");
     expect(request).toContain(`files/${fileId}/large.png`);
-  });
-
-  test("fails the turn plainly when two enabled packs declare sandbox images", async () => {
-    const grant = await testGrant(dbClient.db);
-    const imagePack = (id: string, image: string) => ({
-      id,
-      name: `Pack ${id}`,
-      description: "Image-declaring pack for runtime composition tests.",
-      role: "infrastructure",
-      category: "infrastructure",
-      version: "0.1.0",
-      sandboxImage: image,
-      skills: [],
-      tools: [],
-      connectors: [],
-      knowledge: [],
-      scheduledTaskTemplates: [],
-      metadata: {},
-    });
-    for (const [packId, image] of [
-      ["img-a", "example.com/a@sha256:aaaa"],
-      ["img-b", "example.com/b@sha256:bbbb"],
-    ] as const) {
-      await registerWorkspacePack(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        pack: imagePack(packId, image),
-      });
-      await enablePackInstallation(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        packId,
-        metadata: {},
-      });
-    }
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "run",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "run" } },
-    ]);
-    const activities = createWorkerActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([{ outputText: "should not run", chunks: ["never"] }]),
-      }),
-    });
-
-    const result = await activities.runAgentTurn({
-      attemptId: crypto.randomUUID(),
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      trigger: { kind: "next" },
-      workflowId: "workflow-pack-image-conflict",
-      workflowRunId: crypto.randomUUID(),
-    });
-    expect(result.status).toBe("failed");
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
-    const failure = events.find((event) => event.type === "turn.failed");
-    expect(failure).toBeDefined();
-    expect(JSON.stringify(failure!.payload)).toContain(
-      "Multiple enabled packs declare a sandbox image (img-a, img-b)",
-    );
-    expect(latestStatus(events)).toBe("failed");
   });
 
   test("marks session failed when scripted model throws", async () => {

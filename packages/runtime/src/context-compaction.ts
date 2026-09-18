@@ -1253,22 +1253,88 @@ export class CompactionProviderResponseError extends Error {
   readonly status?: number;
   readonly code?: string;
   readonly type?: string;
+  /** Provider-named request field that was rejected (`error.param`), bounded. */
+  readonly param?: string;
   override readonly cause?: unknown;
 
   constructor(diagnostics: Record<string, unknown> = {}, cause?: unknown) {
     const compact = JSON.stringify(diagnostics).slice(0, 2_000);
+    const rejection = compactionProviderRejectionFromDiagnostics(diagnostics);
     super(
-      `Compaction provider request failed; active history was preserved${compact ? ` (${compact})` : ""}`,
+      `${
+        rejection
+          ? `Compaction provider request was rejected (${describeCompactionProviderRejection(rejection)})`
+          : "Compaction provider request failed"
+      }; active history was preserved${compact ? ` (${compact})` : ""}`,
     );
     this.name = "CompactionProviderResponseError";
     this.diagnostics = diagnostics;
     if (typeof diagnostics.httpStatus === "number") this.status = diagnostics.httpStatus;
     if (typeof diagnostics.code === "string") this.code = diagnostics.code;
     if (typeof diagnostics.type === "string") this.type = diagnostics.type;
+    if (typeof diagnostics.param === "string") this.param = diagnostics.param;
     if (cause !== undefined) {
       Object.defineProperty(this, "cause", { value: cause, enumerable: false });
     }
   }
+}
+
+/**
+ * Closed, content-free description of a definitive provider rejection of the
+ * compaction request. Every field is a bounded provider-owned identifier
+ * (status, error type/code, rejected parameter path, request id); the provider
+ * message is never carried because it can quote conversation input.
+ */
+export type CompactionProviderRejection = {
+  httpStatus: number;
+  type: string | null;
+  code: string | null;
+  param: string | null;
+  requestId: string | null;
+};
+
+/**
+ * HTTP statuses that prove the provider parsed and refused the exact request.
+ * Repeating the same request cannot succeed; only changed input can.
+ */
+const DEFINITIVE_PROVIDER_REJECTION_STATUSES = new Set([400, 413, 422]);
+
+export function compactionProviderRejectionFromDiagnostics(
+  diagnostics: Record<string, unknown>,
+): CompactionProviderRejection | null {
+  const httpStatus = diagnostics.httpStatus;
+  if (typeof httpStatus !== "number" || !DEFINITIVE_PROVIDER_REJECTION_STATUSES.has(httpStatus)) {
+    return null;
+  }
+  const text = (value: unknown): string | null =>
+    typeof value === "string" && value.length > 0 ? value : null;
+  return {
+    httpStatus,
+    type: text(diagnostics.type),
+    code: text(diagnostics.code),
+    param: text(diagnostics.param),
+    requestId: text(diagnostics.requestId),
+  };
+}
+
+export function compactionProviderRejection(error: unknown): CompactionProviderRejection | null {
+  return error instanceof CompactionProviderResponseError
+    ? compactionProviderRejectionFromDiagnostics(error.diagnostics)
+    : null;
+}
+
+/** Human-readable, content-free summary such as `HTTP 400 invalid_request_error; param input[3].encrypted_content`. */
+export function describeCompactionProviderRejection(
+  rejection: CompactionProviderRejection,
+): string {
+  const parts = [
+    `HTTP ${rejection.httpStatus}${rejection.type ? ` ${rejection.type}` : ""}${
+      rejection.code ? ` ${rejection.code}` : ""
+    }`,
+  ];
+  if (rejection.param) parts.push(`param ${rejection.param}`);
+  if (rejection.requestId) parts.push(`request ${rejection.requestId}`);
+  return parts.join("; ");
 }
 
 export function findCompactionNeededError(

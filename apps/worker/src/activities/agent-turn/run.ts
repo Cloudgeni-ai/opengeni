@@ -510,7 +510,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           });
           const {
             runtimePreparationStartedAt,
-            packRuntime,
             rigVersion,
             rigName,
             agentHumanInputEnabled,
@@ -1229,7 +1228,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ];
           const toolRuntime = await prepareTurnToolRuntime({
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
-            selectedSkillActivations: packRuntime.skillActivations,
             input,
             catalogSourceSettings,
             db,

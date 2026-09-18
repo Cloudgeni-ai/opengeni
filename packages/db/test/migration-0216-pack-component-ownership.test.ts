@@ -21,8 +21,10 @@ describe("Pack component ownership expand migration", () => {
     }
     expect(migration).toContain("NOT VALID");
     expect(migration).toContain("VALIDATE CONSTRAINT");
-    expect(FORCE_RLS_TABLES).toContain("pack_installation_components");
-    expect(RUNTIME_FULL_DML_TABLES).toContain("pack_installation_components");
+    // The historical expansion remains replayable, but the current runtime no
+    // longer grants or requires the removed table.
+    expect([...FORCE_RLS_TABLES] as string[]).not.toContain("pack_installation_components");
+    expect([...RUNTIME_FULL_DML_TABLES] as string[]).not.toContain("pack_installation_components");
   });
 
   test("creates a normalized FORCE-RLS component ledger", () => {

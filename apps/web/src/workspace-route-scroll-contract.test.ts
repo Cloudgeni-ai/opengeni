@@ -27,7 +27,6 @@ const workspaceRouteContracts = {
     kind: "self-managed",
     source: "routes/priority.tsx",
   },
-  workspacePacksRoute: { kind: "redirect" },
   workspaceCapabilitiesRoute: {
     kind: "self-managed",
     source: "routes/capabilities.tsx",

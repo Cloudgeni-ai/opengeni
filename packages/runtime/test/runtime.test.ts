@@ -4290,7 +4290,7 @@ describe("runtime event normalization", () => {
   // weakening the absent-memory/per-session no-op assertions below.
   const HISTORICAL_DEFAULT_INSTRUCTIONS = [
     "You are an OpenGeni workspace agent.",
-    "Follow the user's task and any enabled pack or skill instructions for the current role.",
+    "Follow the user's task and the applicable Skill instructions for the current role.",
     "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
     "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
     "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
@@ -11762,8 +11762,8 @@ describe("runtime Skill activation", () => {
     ]);
   });
 
-  test("pack skills join the explicit skill index", () => {
-    const composition = composeRuntimeSkills([packActivation(infraSkill)]);
+  test("session Skills join the explicit skill index", () => {
+    const composition = composeRuntimeSkills([sessionActivation(infraSkill)]);
     const artifact = composition.artifacts.find((entry) => entry.name === "infra-ops");
     expect(artifact?.files.find((file) => file.path === "SKILL.md")?.content).toContain(
       "# Infra ops",
@@ -11779,22 +11779,22 @@ describe("runtime Skill activation", () => {
     expect(infra?.id).toBeDefined();
   });
 
-  test("an explicit pack description cannot override SKILL.md frontmatter", () => {
+  test("an explicit session description cannot override SKILL.md frontmatter", () => {
     expect(() =>
       composeRuntimeSkills([
-        packActivation({ ...infraSkill, description: "Explicit description." }),
+        sessionActivation({ ...infraSkill, description: "Explicit description." }),
       ]),
     ).toThrow("must match SKILL.md frontmatter");
   });
 
-  test("a Pack may explicitly contribute Checkov like any other Skill", () => {
+  test("a session may explicitly select Checkov like any other Skill", () => {
     const composition = composeRuntimeSkills([
-      packActivation({
+      sessionActivation({
         name: "checkov",
         files: [
           {
             path: "SKILL.md",
-            content: "---\nname: checkov\ndescription: Pack-provided checkov.\n---\n",
+            content: "---\nname: checkov\ndescription: Session-selected checkov.\n---\n",
           },
         ],
       }),
@@ -11803,27 +11803,27 @@ describe("runtime Skill activation", () => {
     const index = composition.index;
     const checkovEntries = index.filter((entry) => entry.name === "checkov");
     expect(checkovEntries).toHaveLength(1);
-    expect(checkovEntries[0]?.description).toBe("Pack-provided checkov.");
+    expect(checkovEntries[0]?.description).toBe("Session-selected checkov.");
   });
 
-  test("a Pack owner wins only when it owns the identical installed artifact", () => {
+  test("a session selection deduplicates an identical installed artifact", () => {
     const loaded = loadSkillLibrarySkill("azure-verified-modules");
     const artifact = runtimeArtifact(loaded.skill);
     const composition = composeRuntimeSkills([
       installedActivation(loaded),
       {
-        source: "pack",
-        id: `pack:solution:${artifact.name}`,
+        source: "session",
+        id: `session:solution:${artifact.name}`,
         artifact,
-        reason: "owned by solution Pack",
+        reason: "selected for solution session",
       },
     ]);
     const entries = composition.index.filter((entry) => entry.name === loaded.skill.name);
     expect(entries).toHaveLength(1);
     expect(composition.selections).toContainEqual(
       expect.objectContaining({
-        id: `pack:solution:${artifact.name}`,
-        source: "pack",
+        id: `session:solution:${artifact.name}`,
+        source: "session",
         contentSha256: loaded.entry.contentSha256,
       }),
     );
@@ -11834,13 +11834,13 @@ describe("runtime Skill activation", () => {
     expect(() =>
       composeRuntimeSkills([
         installedActivation(loaded),
-        packActivation({
+        sessionActivation({
           name: loaded.skill.name,
-          description: "Divergent Pack override.",
+          description: "Divergent session override.",
           files: [
             {
               path: "SKILL.md",
-              content: `---\nname: ${loaded.skill.name}\ndescription: Divergent Pack override.\n---\n# Divergent Pack override\n`,
+              content: `---\nname: ${loaded.skill.name}\ndescription: Divergent session override.\n---\n# Divergent session override\n`,
             },
           ],
         }),
@@ -11851,7 +11851,7 @@ describe("runtime Skill activation", () => {
   test("rejects unsafe activated Skill content instead of mounting it", () => {
     expect(() =>
       composeRuntimeSkills([
-        packActivation({
+        sessionActivation({
           name: "bad",
           files: [
             { path: "SKILL.md", content: "x" },
@@ -11862,7 +11862,7 @@ describe("runtime Skill activation", () => {
     ).toThrow("Invalid Skill file path");
     expect(() =>
       composeRuntimeSkills([
-        packActivation({
+        sessionActivation({
           name: "no-entry",
           files: [{ path: "references/only.md", content: "x" }],
         }),
@@ -11870,13 +11870,13 @@ describe("runtime Skill activation", () => {
     ).toThrow("missing a top-level SKILL.md");
     expect(() =>
       composeRuntimeSkills([
-        packActivation({
+        sessionActivation({
           name: "dup",
           files: [
             { path: "SKILL.md", content: "---\nname: dup\ndescription: Duplicate fixture\n---\na" },
           ],
         }),
-        packActivation({
+        sessionActivation({
           name: "dup",
           files: [
             { path: "SKILL.md", content: "---\nname: dup\ndescription: Duplicate fixture\n---\nb" },
@@ -11886,7 +11886,7 @@ describe("runtime Skill activation", () => {
     ).toThrow('Conflicting Skill definitions for "dup"');
     expect(() =>
       composeRuntimeSkills([
-        packActivation({
+        sessionActivation({
           name: "bad/name",
           files: [{ path: "SKILL.md", content: "x" }],
         }),
@@ -11896,7 +11896,7 @@ describe("runtime Skill activation", () => {
 
   test("buildOpenGeniAgent keeps configured activations without SDK load_skill", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
-      skillActivations: [packActivation(infraSkill)],
+      skillActivations: [sessionActivation(infraSkill)],
     });
     expect(
       ((agent as any).capabilities as Array<{ type?: string }>).some(
@@ -11913,7 +11913,7 @@ describe("runtime Skill activation", () => {
   });
 
   test("capability construction does not emit load_skill", () => {
-    const capabilities = buildAgentCapabilities(testSettings(), [packActivation(infraSkill)], {
+    const capabilities = buildAgentCapabilities(testSettings(), [sessionActivation(infraSkill)], {
       editableArtifactToolsAvailable: true,
       videoGenerationAvailable: true,
     });
@@ -11921,7 +11921,7 @@ describe("runtime Skill activation", () => {
       (capabilities as Array<{ type?: string }>).some((capability) => capability.type === "skills"),
     ).toBe(false);
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
-      skillActivations: [packActivation(infraSkill)],
+      skillActivations: [sessionActivation(infraSkill)],
     });
     const toolNames = ((agent as { tools?: Array<{ name?: string }> }).tools ?? []).map(
       (tool) => tool.name,
@@ -11929,7 +11929,7 @@ describe("runtime Skill activation", () => {
     expect(toolNames).not.toContain("load_skill");
     expect(toolNames).toContain("skill_read");
     expect(
-      composeRuntimeSkills([packActivation(infraSkill)]).index.map((entry) => entry.name),
+      composeRuntimeSkills([sessionActivation(infraSkill)]).index.map((entry) => entry.name),
     ).toContain("infra-ops");
   });
 
@@ -11947,7 +11947,7 @@ describe("runtime Skill activation", () => {
         "opengeni-sites",
       ]),
     );
-    const configured = composeRuntimeSkills([packActivation(infraSkill)]);
+    const configured = composeRuntimeSkills([sessionActivation(infraSkill)]);
     expect(configured.configuredDescriptors).toEqual([
       expect.objectContaining({
         name: "infra-ops",
@@ -11969,7 +11969,7 @@ describe("runtime Skill activation", () => {
         ...(sandboxBackend === "selfhosted"
           ? { activeSandboxBackend: sandboxBackend, sandboxWorkspaceRoot: "/srv/agent" }
           : {}),
-        skillActivations: [packActivation(infraSkill)],
+        skillActivations: [sessionActivation(infraSkill)],
       });
       const inspection = persistentAgentInstructionInspectionFor(agent);
       expect(inspection.layers.find((layer) => layer.id === "skill_catalog")?.content).toContain(
@@ -11993,7 +11993,7 @@ describe("runtime Skill activation", () => {
       );
       expect(body.files[0]?.content).toContain("# Infra ops");
       expect(
-        readRuntimeSkill(composeRuntimeSkills([packActivation(infraSkill)]), {
+        readRuntimeSkill(composeRuntimeSkills([sessionActivation(infraSkill)]), {
           skill: "infra-ops",
           paths: ["references/runbook.md"],
         }).files?.[0]?.content,
@@ -12034,7 +12034,7 @@ describe("runtime Skill activation", () => {
     expect(() =>
       buildOpenGeniAgent(testSettings(), [], {
         skillCatalog: [],
-        skillActivations: [packActivation(infraSkill)],
+        skillActivations: [sessionActivation(infraSkill)],
       }),
     ).toThrow("either host Skill catalog/reader or runtime Skill activations");
   });
@@ -12104,16 +12104,16 @@ function installedActivation(loaded: ReturnType<typeof loadSkillLibrarySkill>) {
   };
 }
 
-function packActivation(artifact: {
+function sessionActivation(artifact: {
   name: string;
   description?: string | null;
   files: readonly { path: string; content: string }[];
 }) {
   return {
-    source: "pack" as const,
-    id: `pack:test:${artifact.name}`,
+    source: "session" as const,
+    id: `session:test:${artifact.name}`,
     artifact,
-    reason: "owned by test Pack",
+    reason: "explicitly selected for test session",
   };
 }
 

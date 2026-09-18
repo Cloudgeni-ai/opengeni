@@ -800,14 +800,6 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/plugins/example%2Fplugin`)).toBe(
       "/v1/workspaces/:workspaceId/plugins/:pluginKey",
     );
-    expect(
-      routeLabel(`/v1/workspaces/${workspace}/packs/marketing-social-daily-analysis/enable`),
-    ).toBe("/v1/workspaces/:workspaceId/packs/:id/enable");
-    expect(
-      routeLabel(
-        `/v1/workspaces/${workspace}/packs/marketing-social-daily-analysis/scheduled-tasks`,
-      ),
-    ).toBe("/v1/workspaces/:workspaceId/packs/marketing-social-daily-analysis/scheduled-tasks");
     expect(routeLabel(`/v1/workspaces/${workspace}/social/connections`)).toBe(
       "/v1/workspaces/:workspaceId/social/connections",
     );

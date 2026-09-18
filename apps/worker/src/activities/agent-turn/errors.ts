@@ -11,6 +11,9 @@ import {
   ActiveBackendUnresolvableError,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
+  compactionProviderRejection,
+  describeCompactionProviderRejection,
+  type CompactionProviderRejection,
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
   isModalTaskExecStartDnsResolutionError,
@@ -31,6 +34,7 @@ import { RetainedAttachmentTransportLimitError } from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {
   CodexReloginRequired,
+  classifyCodexEncryptedArtifactRejection,
   classifyCodexResponseTimeoutError,
   classifyCodexUsageLimitError,
   isCodexTransportError,
@@ -577,7 +581,21 @@ export function safeErrorForTelemetry(error: unknown): Error {
   return safe;
 }
 
+/**
+ * Guidance appended to a definitive provider rejection. Repeating the exact
+ * request cannot succeed, so the generic "send another message to retry"
+ * advice is wrong here: a new prompt re-sends the same rejected history.
+ */
+export const COMPACTION_PROVIDER_REJECTION_GUIDANCE =
+  "The provider refused this exact request, so repeating it fails the same way until the conversation changes. If a new message fails again, start a new session.";
+
 export function compactionFailureReasonFromError(error: unknown): string {
+  const rejection = compactionProviderRejection(error);
+  if (rejection) {
+    return compactionFailureReason(
+      `the model provider rejected the compaction request (${describeCompactionProviderRejection(rejection)}). Active history was preserved. ${COMPACTION_PROVIDER_REJECTION_GUIDANCE}`,
+    );
+  }
   if (
     error instanceof CompactionProviderResponseError ||
     error instanceof EmptyCompactionSummaryError
@@ -586,6 +604,34 @@ export function compactionFailureReasonFromError(error: unknown): string {
   }
   const errorName = error instanceof Error && error.name ? error.name : "unknown error";
   return compactionFailureReason(`unexpected ${errorName}`);
+}
+
+/**
+ * Exact `turn.failed` payload for a terminal compaction failure. A definitive
+ * provider rejection additionally carries its closed identifier record so the
+ * timeline, API consumers, and operators can name the rejected field without
+ * parsing the message.
+ */
+export function compactionFailureTurnEventPayload(
+  error: unknown,
+  overrides: { error?: string } = {},
+): {
+  error: string;
+  code: "context_compaction_failed";
+  retryable: false;
+  recovery: "user_message";
+  compacted: false;
+  providerRejection?: CompactionProviderRejection;
+} {
+  const rejection = compactionProviderRejection(error);
+  return {
+    error: overrides.error ?? compactionFailureReasonFromError(error),
+    code: "context_compaction_failed",
+    retryable: false,
+    recovery: "user_message",
+    compacted: false,
+    ...(rejection ? { providerRejection: rejection } : {}),
+  };
 }
 
 export function isCompactionSummaryFailure(error: unknown): boolean {
@@ -597,6 +643,11 @@ export function isCompactionSummaryFailure(error: unknown): boolean {
 export function shouldRecoverCompactionProviderFailure(error: unknown): boolean {
   if (!(error instanceof CompactionProviderResponseError)) return false;
   if (isCodexTransportError(error) && classifyCodexUsageLimitError(error)) return true;
+  // Codex may reject an opaque artifact it minted itself on the compaction
+  // request exactly as it can on an ordinary request. Failure settlement
+  // invalidates only the exact participating artifacts and recovers the same
+  // logical turn; when nothing can be invalidated it fails closed there.
+  if (classifyCodexEncryptedArtifactRejection(error)) return true;
   return agentRunFailurePayload(error).retryable === true;
 }
 
