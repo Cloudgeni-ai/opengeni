@@ -7,6 +7,8 @@ import {
   blockSessionWorkBeforeAttemptClaim,
   peekSessionWork,
   isSessionEventPersistenceError,
+  lockSessionEventWriteRows,
+  nestedPostgresSqlState,
   addSessionSystemUpdate,
   listOutstandingSessionSystemUpdates,
   claimPendingSessionWorkflowWakes,
@@ -217,6 +219,38 @@ describe("transactional session workflow wake outbox", () => {
       expect(turns).toEqual(acceptedTurns);
       expect(turns).toHaveLength(1);
       expect(turns[0]).toMatchObject({ status: "queued", executionGeneration: 0 });
+      // A pre-upgrade writer ignores the TypeScript admission field. The
+      // installed DB trigger still rejects its INSERT before any claim commits.
+      let legacyFailure: unknown;
+      try {
+        await withWorkspaceRls(client.db, workspaceId, (db) =>
+          db.transaction(async (tx) => {
+            await lockSessionEventWriteRows(tx as unknown as typeof db, {
+              workspaceId,
+              controlLock: "share",
+              sessionIds: [sessionId],
+            });
+            await tx.insert(schema.sessionTurnAttempts).values({
+              id: crypto.randomUUID(),
+              accountId: ctx.grant.accountId,
+              workspaceId,
+              sessionId,
+              turnId: turns[0]!.id,
+              executionGeneration: 1,
+              temporalWorkflowId: claimInput.workflowId,
+              temporalWorkflowRunId: crypto.randomUUID(),
+              temporalActivityId: crypto.randomUUID(),
+              verifiedControlRevision: peek.admissionFence!.controlVersion,
+              authorityEpoch: 1,
+              authorityVisibility: "workspace_shared",
+              mcpApprovalPolicies: {},
+            });
+          }),
+        );
+      } catch (error) {
+        legacyFailure = error;
+      }
+      expect(nestedPostgresSqlState(legacyFailure)).toBe("OG003");
       expect(
         await shared.admin`select id from session_turn_attempts where session_id = ${sessionId}`,
       ).toHaveLength(0);
@@ -337,7 +371,7 @@ describe("transactional session workflow wake outbox", () => {
   });
 
   test("new Send and Steer recheck a block, stale failures cannot reblock, and cancellation wins", async () => {
-    for (const action of ["send", "steer", "cancel"] as const) {
+    for (const action of ["send", "steer", "cancel", "pause"] as const) {
       const ctx = await fixture();
       await send(ctx, "original accepted input");
       const workspaceId = ctx.grant.workspaceId!;
@@ -356,7 +390,7 @@ describe("transactional session workflow wake outbox", () => {
       expect((await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, input)).action).toBe(
         "blocked",
       );
-      if (action === "cancel") {
+      if (action === "cancel" || action === "pause") {
         await withWorkspaceRls(client.db, workspaceId, (db) =>
           db.transaction((tx) =>
             mutateSessionControlInTransaction(tx as unknown as typeof db, {
@@ -369,10 +403,32 @@ describe("transactional session workflow wake outbox", () => {
             }),
           ),
         );
-        expect(
-          (await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, input)).action,
-        ).toBe("terminal");
+        if (action === "cancel")
+          expect(
+            (await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, input)).action,
+          ).toBe("terminal");
         expect(await peekSessionWork(client.db, workspaceId, sessionId)).toEqual({ kind: "idle" });
+        if (action === "pause") {
+          expect(
+            (await getSession(client.db, workspaceId, sessionId))?.admissionBlock,
+          ).not.toBeNull();
+          await withWorkspaceRls(client.db, workspaceId, (db) =>
+            db.transaction((tx) =>
+              mutateSessionControlInTransaction(tx as unknown as typeof db, {
+                accountId: ctx.grant.accountId,
+                workspaceId,
+                sessionId,
+                actor: { type: "human", subjectId: ctx.grant.subjectId },
+                operationKey: crypto.randomUUID(),
+                action: "resume",
+              }),
+            ),
+          );
+          expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toBeNull();
+          expect(await peekSessionWork(client.db, workspaceId, sessionId)).toEqual({
+            kind: "runnable",
+          });
+        }
       } else {
         await send(ctx, "new authorized input", action);
         expect(

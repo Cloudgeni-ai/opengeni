@@ -1039,7 +1039,8 @@ raw SQL text, a raw driver cause, or bound parameters.
 
 An activity failure can occur before that transaction creates its attempt row.
 The turn worker exports a stable typed Temporal disposition. Operational
-database failures remain retryable. Other typed persistence rejections park
+database failures remain retryable. Other typed persistence rejections at the
+exact `session_attempts.claim` stage with `retryOutcome = not_retryable` park
 accepted work in `sessions.admission_block` with `status = requires_action`,
 a sanitized SQLSTATE and `retryPolicy = explicit_recheck`; they are not terminal
 failures and do not consume or rewrite queued turns, pending machine input,
@@ -1077,8 +1078,9 @@ Migration 0483 is additive rolling storage. Its attempt-insert trigger prevents
 old binaries from claiming through a stored block, but old workers can still
 retry that rejection and old API workers do not implement explicit recheck.
 Complete the API/control/turn-worker rollout before relying on the new behavior.
-The workflow command change is patch-gated; pre-patch histories retain their
-recorded command shapes until a fresh workflow run. No migration backfills or
+The workflow command change is patch-gated at each admission peek; pre-patch
+commands retain their recorded shapes while the next live admission cycle can
+activate the fix without a workflow restart. No migration backfills or
 repairs authority, accepted input, or live session state.
 
 Older workers could misclassify an application SQLSTATE from a session-level

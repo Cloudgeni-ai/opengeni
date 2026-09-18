@@ -380,7 +380,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   const preserveQuiescenceWake = patched("session-quiescence-reconciliation-wake-v1");
   const staleControlSignalIsOnlyWakeHint = patched("session-control-stale-wake-v1");
   const unclaimedAttemptRecovery = patched("session-unclaimed-attempt-recovery-v1");
-  const durableAdmissionBlocking = patched("session-durable-admission-block-v1");
+  let durableAdmissionBlocking = false;
   // PR #2208 changed a typed-cancelled result from a plain re-peek into a
   // recoverDispatch activity. Version that new command so histories which
   // already recorded the legacy re-peek remain deterministic on replay.
@@ -591,6 +591,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     const closeSignalVersion = signalVersion;
     const closeNonControlSignalVersion = nonControlSignalVersion;
     const workflowId = workflowInfo().workflowId;
+    // Re-evaluate at the changed command, not only workflow entry. A replay
+    // without the marker keeps its old shape; the next live admission cycle
+    // can activate this fix without waiting for continueAsNew.
+    durableAdmissionBlocking = patched("session-durable-admission-block-v1");
     const peek = await activity.peekSessionWork({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,

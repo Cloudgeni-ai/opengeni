@@ -283,10 +283,18 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
 export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
   const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
   const retryableCode = retryableDatabaseFailureCode(error);
+  const rejectedClaim =
+    persistenceFailure?.details.stage === "session_attempts.claim" &&
+    persistenceFailure.details.retryOutcome === "not_retryable" &&
+    !retryableCode;
   const detail: PreClaimFailureDetail = {
-    disposition: retryableCode ? "retryable" : persistenceFailure ? "blocked" : "permanent",
+    disposition: rejectedClaim
+      ? "blocked"
+      : persistenceFailure || retryableCode
+        ? "retryable"
+        : "permanent",
     code: retryableCode ?? persistenceFailure?.details.code ?? "claim_invariant",
-    ...(persistenceFailure && !retryableCode
+    ...(persistenceFailure && rejectedClaim
       ? {
           sqlState: persistenceFailure.details.sqlState,
           reason:

@@ -5385,8 +5385,16 @@ describe("transient provider error classifier", () => {
         stage: "other_stage",
       });
       expect(preClaimAdmissionFailure(unrelated)).toMatchObject({
-        details: [{ reason: "database_claim_rejected" }],
+        details: [{ disposition: "retryable", code: "db_failure" }],
       });
+      expect(
+        preClaimAdmissionFailure(
+          new SessionEventPersistenceError({
+            ...failure.details,
+            retryOutcome: "exhausted",
+          }),
+        ),
+      ).toMatchObject({ details: [{ disposition: "retryable", code: "db_failure" }] });
     }
     expect(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))).toMatchObject({
       type: "OpenGeniPreClaimFailure",

@@ -18,7 +18,7 @@ ALTER TABLE sessions ADD CONSTRAINT sessions_admission_block_shape CHECK (
     AND admission_block->>'attemptId' ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
     AND jsonb_typeof(admission_block->'fence') = 'object'
     AND admission_block->'fence' ?& ARRAY['lastSequence','controlVersion']
-    AND admission_block->'fence' - ARRAY['lastSequence','controlVersion'] = '{}'::jsonb
+    AND (admission_block->'fence') - ARRAY['lastSequence','controlVersion'] = '{}'::jsonb
     AND jsonb_typeof(admission_block#>'{fence,lastSequence}') = 'number'
     AND jsonb_typeof(admission_block#>'{fence,controlVersion}') = 'number'
     AND admission_block#>>'{fence,lastSequence}' ~ '^[0-9]+$'
