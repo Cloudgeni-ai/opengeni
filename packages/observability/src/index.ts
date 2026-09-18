@@ -1,6 +1,17 @@
 import { createHash } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { SandboxBackend } from "@opengeni/contracts";
+import { currentTraceContext, validTraceContext, type TraceContext } from "./trace-context";
+import { ExportQueue } from "./export-queue";
+import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
+export type { FailureDiagnosticInput } from "./failure-diagnostic";
+export {
+  currentTraceContext,
+  withTraceContext,
+  parseTraceparent,
+  traceparent,
+  type TraceContext,
+} from "./trace-context";
 
 export type AttributeValue = string | number | boolean | null | undefined;
 export type Attributes = Record<string, AttributeValue>;
@@ -13,6 +24,9 @@ export type ObservabilitySettings = {
   observabilityMetricsEnabled: boolean;
   observabilityOtlpEndpoint?: string | undefined;
   observabilityOtlpHeaders: string;
+  /** Explicit restricted OTLP logs destination; never falls back to the public exporter. */
+  observabilityDiagnosticsEndpoint?: string | undefined;
+  observabilityDiagnosticsHeaders?: string | undefined;
   sandboxOwnershipEnabled?: boolean | undefined;
   sandboxLazyProvisionEnabled?: boolean | undefined;
   rigVerificationLeaseOwnershipEnabled?: boolean | undefined;
@@ -489,12 +503,33 @@ type MetricRegistration = {
 };
 
 export class Observability {
+  private spanBatch: unknown[] = [];
+  private spanBatchScheduled = false;
+  private readonly diagnosticQueue = new ExportQueue((outcome) => {
+    this.incrementCounter({
+      name: "opengeni_diagnostic_exports_total",
+      help: "Protected diagnostic export outcomes.",
+      labels: { outcome },
+    });
+  });
   private readonly registry = new Registry();
   private readonly counters = new Map<string, Counter<string>>();
   private readonly gauges = new Map<string, Gauge<string>>();
   private readonly histograms = new Map<string, Histogram<string>>();
   private readonly registrations = new Map<string, MetricRegistration>();
-  private readonly pendingExports = new Set<Promise<void>>();
+  private readonly exportQueue = new ExportQueue((outcome) => {
+    this.incrementCounter({
+      name: "opengeni_telemetry_exports_total",
+      help: "Bounded telemetry export outcomes.",
+      labels: { outcome },
+    });
+    if (outcome === "failed")
+      this.warn("OTLP span export failed", {
+        errorClass: "TelemetryExportError",
+        errorCode: "otlp_export_failed",
+        origin: "observability",
+      });
+  }, 8);
   private readonly now: () => number;
   private readonly exporter: (
     url: string,
@@ -631,6 +666,7 @@ export class Observability {
       }
       return;
     }
+    const context = currentTraceContext();
     const record = {
       timestamp: new Date(this.now()).toISOString(),
       level,
@@ -639,6 +675,7 @@ export class Observability {
       environment: this.settings.environment,
       component: this.options.component,
       ...cleanAttributes(publicAttributes),
+      ...(context ? { traceId: context.traceId, spanId: context.spanId } : {}),
     };
     const serialized = JSON.stringify(record);
     if (level === "warn") {
@@ -650,10 +687,25 @@ export class Observability {
     }
   }
 
-  startSpan(name: string, attributes: Attributes = {}): Span {
-    const traceId = randomHex(16);
+  startSpan(
+    name: string,
+    attributes: Attributes = {},
+    options: { parent?: TraceContext | null; links?: TraceContext[]; startTimeMs?: number } = {},
+  ): Span {
+    const parent =
+      options.parent === null
+        ? undefined
+        : validTraceContext(options.parent ?? currentTraceContext());
+    const links = (options.links ?? []).slice(0, 8).flatMap((link) => {
+      const valid = validTraceContext(link);
+      return valid ? [valid] : [];
+    });
+    const traceId = parent?.traceId ?? randomHex(16);
     const spanId = randomHex(8);
-    const startMs = this.now();
+    const now = this.now();
+    const startMs = Number.isFinite(options.startTimeMs)
+      ? Math.min(now, Math.max(0, options.startTimeMs!))
+      : now;
     let ended = false;
     return {
       traceId,
@@ -671,7 +723,9 @@ export class Observability {
         this.exportSpan({
           traceId,
           spanId,
-          name,
+          ...(parent ? { parentSpanId: parent.spanId } : {}),
+          links,
+          name: boundedOtlpString(name),
           startMs,
           endMs: this.now(),
           attributes: {
@@ -806,11 +860,54 @@ export class Observability {
     return await this.registry.metrics();
   }
 
-  /** Wait for every OTLP export accepted before or during this drain. */
-  async flush(): Promise<void> {
-    while (this.pendingExports.size > 0) {
-      await Promise.allSettled([...this.pendingExports]);
+  /** Emit a closed protected record independently of application persistence. */
+  recordFailureDiagnostic(input: FailureDiagnosticInput): string {
+    const record = failureDiagnostic(input, this.settings.deploymentRevision);
+    const endpoint = this.settings.observabilityDiagnosticsEndpoint;
+    if (!endpoint) {
+      this.incrementCounter({
+        name: "opengeni_diagnostic_exports_total",
+        help: "Protected diagnostic export outcomes.",
+        labels: { outcome: "disabled" },
+      });
+      return record.diagnosticId;
     }
+    const context = currentTraceContext();
+    const body = {
+      resourceLogs: [
+        {
+          resource: { attributes: otlpAttributes(this.resourceAttributes) },
+          scopeLogs: [
+            {
+              scope: { name: "@opengeni/observability/diagnostics", version: "1" },
+              logRecords: [
+                {
+                  timeUnixNano: millisToNanos(this.now()),
+                  severityNumber: 17,
+                  severityText: "ERROR",
+                  ...(context ? { traceId: context.traceId, spanId: context.spanId } : {}),
+                  body: { stringValue: JSON.stringify(record) },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    this.diagnosticQueue.enqueue(() =>
+      this.exporter(
+        `${endpoint.replace(/\/$/, "")}/v1/logs`,
+        body,
+        parseHeaders(this.settings.observabilityDiagnosticsHeaders ?? ""),
+      ),
+    );
+    return record.diagnosticId;
+  }
+
+  /** Best-effort bounded drain, including when a custom transport never settles. */
+  async flush(timeoutMs = 1_000): Promise<void> {
+    this.submitSpanBatch();
+    await Promise.all([this.exportQueue.flush(timeoutMs), this.diagnosticQueue.flush(timeoutMs)]);
   }
 
   private counter(name: string, help: string, labelNames: string[]): Counter<string> {
@@ -882,6 +979,8 @@ export class Observability {
   private exportSpan(span: {
     traceId: string;
     spanId: string;
+    parentSpanId?: string;
+    links: TraceContext[];
     name: string;
     startMs: number;
     endMs: number;
@@ -891,7 +990,6 @@ export class Observability {
     if (!this.settings.observabilityOtlpEndpoint) {
       return;
     }
-    const endpoint = `${this.settings.observabilityOtlpEndpoint.replace(/\/$/, "")}/v1/traces`;
     const body = {
       resourceSpans: [
         {
@@ -908,6 +1006,8 @@ export class Observability {
                 {
                   traceId: span.traceId,
                   spanId: span.spanId,
+                  ...(span.parentSpanId ? { parentSpanId: span.parentSpanId } : {}),
+                  links: span.links,
                   name: span.name,
                   kind: 1,
                   startTimeUnixNano: millisToNanos(span.startMs),
@@ -921,22 +1021,29 @@ export class Observability {
         },
       ],
     };
-    let pendingExport: Promise<void>;
-    pendingExport = Promise.resolve()
-      .then(() =>
-        this.exporter(endpoint, body, parseHeaders(this.settings.observabilityOtlpHeaders)),
-      )
-      .catch(() => {
-        this.warn("OTLP span export failed", {
-          errorClass: "TelemetryExportError",
-          errorCode: "otlp_export_failed",
-          origin: "observability",
-        });
-      })
-      .finally(() => {
-        this.pendingExports.delete(pendingExport);
+    this.spanBatch.push(body.resourceSpans[0]);
+    if (!this.spanBatchScheduled) {
+      this.spanBatchScheduled = true;
+      queueMicrotask(() => {
+        this.spanBatchScheduled = false;
+        this.submitSpanBatch();
       });
-    this.pendingExports.add(pendingExport);
+    }
+    if (this.spanBatch.length >= 32) this.submitSpanBatch();
+  }
+
+  private submitSpanBatch(): void {
+    if (!this.spanBatch.length || !this.settings.observabilityOtlpEndpoint) return;
+    const resourceSpans = this.spanBatch;
+    this.spanBatch = [];
+    const endpoint = `${this.settings.observabilityOtlpEndpoint.replace(/\/$/, "")}/v1/traces`;
+    this.exportQueue.enqueue(() =>
+      this.exporter(
+        endpoint,
+        { resourceSpans },
+        parseHeaders(this.settings.observabilityOtlpHeaders),
+      ),
+    );
   }
 }
 
@@ -1517,6 +1624,7 @@ async function defaultExporter(
       ...headers,
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(1_000),
   });
   if (!response.ok) {
     throw new Error(`OTLP endpoint returned HTTP ${response.status}`);

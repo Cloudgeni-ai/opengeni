@@ -10,7 +10,7 @@ import {
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
 } from "@opengeni/db";
-import { sandboxOperationMetricObserver } from "@opengeni/observability";
+import { sandboxOperationMetricObserver, withTraceContext } from "@opengeni/observability";
 import {
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
@@ -151,7 +151,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
   // final model checkpoint happens while the activity still owns its complete
   // turn graph and must not suppress collection after that graph is released.
   const turnCompletionMemoryCollector = createModelCheckpointMemoryCollector();
-  return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
+  const runAgentTurn = async (
+    input: RunAgentTurnInput,
+    resolvedServices: ActivityServices,
+    activitySpan: ReturnType<ActivityServices["observability"]["startSpan"]>,
+  ): Promise<RunAgentTurnResult> => {
     const {
       settings,
       catalogSourceSettings = settings,
@@ -168,7 +172,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       connectionCredentials,
       personalGitHubCredentials,
       startVideoGenerationWorkflow,
-    } = await services();
+    } = resolvedServices;
     const activityContext = currentActivityContext();
     const cancellationSignal = activityContext?.cancellationSignal;
     // Temporal cancellation is not the only way an activity loses ownership:
@@ -206,11 +210,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     });
     const dispatchId = activityContext?.info.activityId ?? randomUUID();
     const activityStarted = performance.now();
-    const activitySpan = observability.startSpan("worker.run_agent_segment", {
-      "opengeni.session_id": input.sessionId,
-      "opengeni.workflow_id": input.workflowId,
-      "opengeni.trigger_kind": input.trigger.kind,
-    });
     const acknowledgeLostAttemptOwnership = (): void => {
       // A stale terminal/recovery settlement can lose either to a benign
       // successor or to Pause/Steer closing this exact attempt. Only the
@@ -1726,6 +1725,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         stopLeaseHeartbeat,
         turnCompletionMemoryCollector,
       });
+    }
+  };
+  return async (input: RunAgentTurnInput): Promise<RunAgentTurnResult> => {
+    const resolvedServices = await services();
+    const span = resolvedServices.observability.startSpan(
+      "worker.run_agent_segment",
+      {
+        "opengeni.trigger_kind": input.trigger.kind,
+      },
+      { parent: null },
+    );
+    try {
+      return await withTraceContext(span, () => runAgentTurn(input, resolvedServices, span));
+    } catch (error) {
+      span.end({ error });
+      throw error;
+    } finally {
+      span.end();
     }
   };
 }

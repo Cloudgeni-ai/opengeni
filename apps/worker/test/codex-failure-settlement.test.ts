@@ -298,6 +298,36 @@ function codexFailureDeps(
   };
 }
 
+test("persistence failure diagnostic is captured before a failing settlement dependency", async () => {
+  const source = databaseReadFailure("accounts");
+  const { deps } = codexFailureDeps({ error: source });
+  const calls: unknown[] = [];
+  Object.assign(deps.observability, {
+    recordFailureDiagnostic: (input: unknown) => {
+      calls.push(input);
+      return "diagnostic-1";
+    },
+  });
+  const blocked = new Error("later dependency unavailable");
+  // A failure after capture cannot prevent enqueue; no real database is needed.
+  Object.defineProperty(deps.attempt, "turnId", {
+    get: () => {
+      if (calls.length) throw blocked;
+      return "turn-1";
+    },
+  });
+  await expect(settleTurnFailure(deps as any)).rejects.toBe(blocked);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({
+    error: source,
+    code: "db_failure",
+    sqlState: "08006",
+    stage: "failure_settlement",
+    attempts: 1,
+    retryDecision: "not_retryable",
+  });
+});
+
 describe("definitive Codex failure settlement", () => {
   test("routes a typed pre-dispatch deadline loss through lease-loss recovery", async () => {
     const leaseLoss = spyOn(opengeniDb, "settleCodexCredentialLeaseLoss").mockResolvedValue({

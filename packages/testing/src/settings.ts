@@ -39,6 +39,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     observabilityMetricsEnabled: true,
     observabilityOtlpEndpoint: undefined,
     observabilityOtlpHeaders: "",
+    observabilityDiagnosticsEndpoint: undefined,
+    observabilityDiagnosticsHeaders: "",
     analyticsEnabled: false,
     analyticsConsentRequired: true,
     analyticsReoClientId: undefined,

@@ -907,7 +907,7 @@ describe("observability", () => {
         },
       });
       obs.startSpan("worker.operation").end();
-      await Bun.sleep(0);
+      await obs.flush();
     } finally {
       console.warn = originalWarn;
     }

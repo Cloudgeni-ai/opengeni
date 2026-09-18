@@ -285,6 +285,8 @@ const SettingsSchema = z.object({
   observabilityMetricsEnabled: EnvBoolean.default(true),
   observabilityOtlpEndpoint: z.string().url().optional(),
   observabilityOtlpHeaders: z.string().default(""),
+  observabilityDiagnosticsEndpoint: z.string().url().optional(),
+  observabilityDiagnosticsHeaders: z.string().default(""),
   analyticsEnabled: EnvBoolean.default(false),
   analyticsConsentRequired: EnvBoolean.default(true),
   analyticsReoClientId: z
@@ -2816,6 +2818,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       optional("OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT") ?? optional("OTEL_EXPORTER_OTLP_ENDPOINT"),
     observabilityOtlpHeaders:
       optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
+    observabilityDiagnosticsEndpoint: optional("OPENGENI_OBSERVABILITY_DIAGNOSTICS_ENDPOINT"),
+    observabilityDiagnosticsHeaders: optional("OPENGENI_OBSERVABILITY_DIAGNOSTICS_HEADERS"),
     analyticsEnabled: optional("OPENGENI_ANALYTICS_ENABLED"),
     analyticsConsentRequired: optional("OPENGENI_ANALYTICS_CONSENT_REQUIRED"),
     analyticsReoClientId: optional("OPENGENI_ANALYTICS_REO_CLIENT_ID"),
