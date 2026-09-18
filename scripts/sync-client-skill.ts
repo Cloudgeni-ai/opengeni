@@ -31,7 +31,9 @@ export async function checkClientSkill(): Promise<void> {
     actual = await files(destination);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    throw new Error("Bundled client Skill is missing; run bun run sync:client-skill", { cause: error });
+    throw new Error("Bundled client Skill is missing; run bun run sync:client-skill", {
+      cause: error,
+    });
   }
   if (
     expected.size !== actual.size ||
