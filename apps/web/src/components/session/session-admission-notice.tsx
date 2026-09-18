@@ -3,6 +3,22 @@ import { useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
 
+/** Stream, detail, and mutation receipts can arrive in different orders. */
+export function admissionRecheckControl(
+  sessionControl: Session["effectiveControl"],
+  ...observed: (Session["effectiveControl"] | null | undefined)[]
+): Session["effectiveControl"] {
+  return observed.reduce<Session["effectiveControl"]>((latest, candidate) => {
+    if (!candidate) return latest;
+    if (candidate.controlVersion > latest.controlVersion) return candidate;
+    // A tie must not turn a known pause into an actionable recheck.
+    if (candidate.controlVersion === latest.controlVersion && candidate.state === "paused") {
+      return candidate;
+    }
+    return latest;
+  }, sessionControl);
+}
+
 // Read only the public reason. Older servers omit this optional projection;
 // unknown future reasons get safe copy, never raw database diagnostics.
 function admissionReason(session: Session): string | null {

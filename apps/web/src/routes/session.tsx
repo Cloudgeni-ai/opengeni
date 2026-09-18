@@ -13,7 +13,10 @@ import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
-import { SessionAdmissionNotice } from "@/components/session/session-admission-notice";
+import {
+  admissionRecheckControl,
+  SessionAdmissionNotice,
+} from "@/components/session/session-admission-notice";
 import {
   connectorSelectionUpdate,
   followWorkspaceConnectorPolicy,
@@ -2172,6 +2175,11 @@ function SessionChatPane(props: {
     retryOptimisticMessage,
   ]);
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
+  const admissionControl = admissionRecheckControl(
+    props.session.effectiveControl,
+    props.queue.effectiveControl,
+    composer.effectiveControl,
+  );
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     props.session.status,
     (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
@@ -2625,12 +2633,10 @@ function SessionChatPane(props: {
             key={`${props.session.workspaceId}:${props.session.id}`}
             session={props.session}
             canControl={workspacePermissions.includes("sessions:control")}
-            paused={
-              (composer.effectiveControl ?? props.session.effectiveControl).state === "paused"
-            }
+            paused={admissionControl.state === "paused"}
             busy={composer.resuming || composer.pausing || composer.sending || props.queue.mutating}
             onRecheck={async () => {
-              const control = composer.effectiveControl ?? props.session.effectiveControl;
+              const control = admissionControl;
               if (control.state === "paused") return;
               await context.client.resumeSession(props.session.workspaceId, props.session.id, {
                 clientEventId: crypto.randomUUID(),

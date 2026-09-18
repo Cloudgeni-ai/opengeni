@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { Session } from "@opengeni/sdk";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { SessionAdmissionNotice } from "./session-admission-notice";
+import { admissionRecheckControl, SessionAdmissionNotice } from "./session-admission-notice";
 
 beforeAll(() => {
   if (!globalThis.document) GlobalRegistrator.register();
@@ -52,6 +52,32 @@ async function render(overrides: Partial<Parameters<typeof SessionAdmissionNotic
 }
 
 describe("session admission notice", () => {
+  function control(state: "active" | "paused", version: number) {
+    return {
+      state,
+      controlVersion: version,
+      controlEtag: `${state}-${version}`,
+    } as Session["effectiveControl"];
+  }
+
+  test("newer external pause wins over stale queue and composer snapshots", () => {
+    const paused = control("paused", 3);
+    expect(admissionRecheckControl(paused, control("active", 1), control("active", 2))).toBe(
+      paused,
+    );
+    expect(admissionRecheckControl(control("active", 1), paused, control("active", 2))).toBe(
+      paused,
+    );
+  });
+
+  test("newer mutation receipt wins and equal versions preserve a known pause", () => {
+    const active = control("active", 4);
+    expect(admissionRecheckControl(control("paused", 3), null, active)).toBe(active);
+    const paused = control("paused", 4);
+    expect(admissionRecheckControl(paused, active, active)).toBe(paused);
+    expect(admissionRecheckControl(active, paused, undefined)).toBe(paused);
+  });
+
   for (const [reason, copy] of [
     ["database_claim_rejected", "access or safety check"],
     ["initiator_membership_required", "person who started this work"],
@@ -146,6 +172,8 @@ describe("session admission notice", () => {
     expect(wiring).toContain('workspacePermissions.includes("sessions:control")');
     expect(wiring).toContain("context.client.resumeSession");
     expect(wiring).toContain("expectedControlEtag: control.controlEtag");
+    expect(wiring).toContain('paused={admissionControl.state === "paused"}');
+    expect(wiring).toContain("const control = admissionControl");
     expect(wiring).toContain('if (control.state === "paused") return');
     expect(wiring).toContain("props.onReloadSession()");
     expect(wiring).not.toContain("asUser");
