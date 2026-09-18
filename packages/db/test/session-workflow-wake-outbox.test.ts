@@ -195,15 +195,25 @@ describe("transactional session workflow wake outbox", () => {
         ).action,
       ).toBe("blocked");
       await send(ctx, "new explicit direction", delivery);
-      expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toBeNull();
+      const rechecked = await getSession(client.db, workspaceId, sessionId);
+      expect(rechecked?.admissionBlock).toBeNull();
       const prior = await getSessionTurn(client.db, workspaceId, claim.turn.id);
       if (delivery === "send") {
-        expect(prior?.status).toBe("recovering");
-        expect((await getSession(client.db, workspaceId, sessionId))?.activeTurnId).toBe(
-          claim.turn.id,
-        );
+        expect(prior).toMatchObject({
+          status: "recovering",
+          activeAttemptId: null,
+          cancelReason: null,
+          finishedAt: null,
+        });
+        expect(rechecked).toMatchObject({ status: "recovering", activeTurnId: claim.turn.id });
       } else {
-        expect(prior?.status).toBe("cancelled");
+        expect(prior).toMatchObject({
+          status: "superseded",
+          cancelReason: "steer",
+          activeAttemptId: null,
+        });
+        expect(prior?.finishedAt).toBeString();
+        expect(rechecked).toMatchObject({ status: "queued", activeTurnId: null });
       }
     }
   });
@@ -228,8 +238,8 @@ describe("transactional session workflow wake outbox", () => {
             workspaceId,
             sessionId,
             sequence: locks.sessions[0]!.lastSequence + 1,
-            type: "goal.updated",
-            payload: { admissionCursorRegression: true },
+            type: "agent.message.delta",
+            payload: { text: "admission cursor regression" },
             occurredAt: new Date(),
           });
         }),
