@@ -205,7 +205,7 @@ export async function resolveSessionSandboxRuntime(
       ? await getRigVersion(db, session.workspaceId, session.rigId, session.rigVersionId)
       : null;
   if (session.rigVersionId && !rigVersion) {
-    throw new Error(`Frozen rig version ${session.rigVersionId} is unavailable`);
+    throw new Error(`Frozen sandbox environment version ${session.rigVersionId} is unavailable`);
   }
   // Setup and checks always layer on the deployment-owned sandbox image.
   const logicalSettings = settings;

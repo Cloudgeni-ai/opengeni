@@ -3028,7 +3028,9 @@ describe("StartupPhaseRow", () => {
 
     const text = r.container.textContent ?? "";
     expect(text).toContain("Model request dispatched");
-    expect(text).toContain("Includes overlapping sandbox, rig, repository, and runtime setup");
+    expect(text).toContain(
+      "Includes overlapping sandbox startup, custom environment setup, repository preparation, and runtime setup",
+    );
     expect(text).toContain("27.5s");
 
     await r.unmount();

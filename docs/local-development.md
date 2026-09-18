@@ -176,11 +176,11 @@ using the Docker backend.
 For Modal runs, configure the Modal sandbox variables in `.env.example`. Private
 registry images use `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET`; the global
 `OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot and remains the logical base
-image identity for every Rig. Optional `OPENGENI_MODAL_SANDBOX_CPU` and
+image identity for every Sandbox Environment. Optional `OPENGENI_MODAL_SANDBOX_CPU` and
 `OPENGENI_MODAL_SANDBOX_MEMORY_MIB` values reserve physical CPU cores and MiB of
 memory for every new box and remain stable through resume and replacement.
-A verified Rig provider image may accelerate physical cold create,
-but never replaces that logical lease identity. Explicit Rig image overrides
+A verified Sandbox Environment provider image may accelerate physical cold create,
+but never replaces that logical lease identity. Explicit Sandbox Environment image overrides
 are disabled. The registry
 Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
 `OPENGENI_MODAL_TOKEN_SECRET` client, so embedded hosts do not need to also set

@@ -300,7 +300,7 @@ then distinct (no dropped charge) while a same-execution retry still dedupes.
 ## 6. Scheduled occurrence authority survives crash, retry, and task edits
 
 **The failure mode.** A retryable scheduled activity could combine a newer
-mutable task prompt/policy with an older Connection or Variable Set/Rig grant,
+mutable task prompt/policy with an older Connection or Variable Set/Sandbox Environment grant,
 consume a `once` grant twice, lose a concurrent cold-reusable occurrence, or
 retry a permanent revocation forever. Pre-change Temporal histories also lack a
 recorded producer key, and historical agent runs used `dispatched` as a terminal
@@ -347,9 +347,9 @@ writer. It never synthesizes accepted execution from current task state.
 Two boundaries are deliberately permissive so the cutover cannot brick
 existing automation: agent tasks written by service, API-key, or delegated
 principals keep running without a human revision authorizer as long as they
-delegate no personal authority (user-scoped Variable Set or Rig,
+delegate no personal authority (user-scoped Variable Set or Sandbox Environment,
 personal-resource ledger, Connection, or user-scoped xAI); workspace and
-organization Variable Sets and Rigs keep using ordinary workspace authority; and byte caps apply only to create/update ingress and to newly
+organization Variable Sets and Sandbox Environments keep using ordinary workspace authority; and byte caps apply only to create/update ingress and to newly
 accepted execution snapshots, never to reading a stored row. A stored task that
 cannot be represented as an accepted execution settles its occurrence as a
 visible `scheduled_execution_unrepresentable` block rather than a retrying

@@ -2523,7 +2523,7 @@ async function createSessionForRequestInFileScope(
       if (payload.rigId) {
         throw new HTTPException(422, {
           message: rig
-            ? `rig ${payload.rigId} has no active version to bind`
+            ? `sandbox environment ${payload.rigId} has no active version to bind`
             : `unknown rigId: ${payload.rigId}`,
         });
       }
@@ -2875,7 +2875,7 @@ async function createSessionForRequestInFileScope(
         throw new HTTPException(422, {
           message: variableSetMismatch
             ? "sandbox:'shared' requires the same variableSet / same environment as the creator's box (the box variable set/environment is fixed at creation); omit sandbox or pass 'new' when attaching a different variableSet/environment."
-            : "sandbox:'shared' requires the same rig as the creator's box (the box's rig setup is fixed at creation); omit sandbox or pass 'new' when binding a different rig.",
+            : "sandbox:'shared' requires the same sandbox environment as the creator's box (setup is fixed at creation); omit sandbox or pass 'new' when selecting a different sandbox environment.",
         });
       }
       // Inherited default: deterministic separation on the genuine shared-state
@@ -2938,7 +2938,7 @@ async function createSessionForRequestInFileScope(
         )
       ) {
         throw new HTTPException(422, {
-          message: `sandbox group ${sandboxChoice.groupId} runs a different rig (the box's rig setup is fixed at creation); create with the group's rig or omit sandbox for an own box.`,
+          message: `sandbox group ${sandboxChoice.groupId} uses a different sandbox environment (setup is fixed at creation); select the group's sandbox environment or omit sandbox for a separate box.`,
         });
       }
     }

@@ -55,7 +55,7 @@ queue and control hooks plus pure timeline projection, without importing the
 styled workbench graph. Pass a proxy implementing the subpath's narrow
 `SessionClientLike` plus host-safe workspace/session aliases through each
 hook's `{ client, workspaceId }` override when workspace-global provider
-behavior is not appropriate. The proxy does not need billing, rigs, files,
+behavior is not appropriate. The proxy does not need billing, sandbox environments, files,
 terminal, workbench, or workspace-administration methods; workspace-level
 Resume is optional.
 
@@ -829,7 +829,7 @@ MCP-server replacement makes an inherited strict tool ref invalid, the create
 fails validation; replace `tools` in the same request rather than silently
 dropping a strict tool. A top-level create has no parent snapshot: omitted
 resources, skills, and MCP servers remain empty, while omitted tools continue to receive
-workspace-default capability MCP refs. Variable sets, rigs, model selection,
+workspace-default capability MCP refs. Variable sets, sandbox environments, model selection,
 persona instructions, goals, and sandbox placement retain their own existing
 resolution rules and are not part of this context snapshot.
 
@@ -1098,7 +1098,7 @@ approvals. Hooks outside that baseline export exact structural refinements:
 `SessionReadClientLike`, `GoalClientLike`, `SessionLineageClientLike`, and
 `FileAttachmentClientLike`. A host proxy therefore implements only the methods
 used by the mounted hooks; it does not stub workspace administration, billing,
-rig, connected-machine, or unrelated workbench APIs.
+sandbox environment, connected-machine, or unrelated workbench APIs.
 
 Generated-image timeline rows carry a compact permanent artifact receipt. A
 host using the styled `MessageTimeline` can pass `loadRetainedArtifact`; the

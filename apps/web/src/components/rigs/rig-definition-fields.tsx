@@ -79,7 +79,8 @@ export function RigDefinitionFields({
           spellCheck={false}
         />
         <p className="text-2xs text-fg-subtle">
-          Bash, run at first boot of every sandbox on this rig. Must be safe to re-run.
+          Bash, run at first boot of every sandbox on this sandbox environment. Must be safe to
+          re-run.
         </p>
       </div>
 
@@ -160,7 +161,8 @@ export function RigDefinitionFields({
         <div className="grid gap-2">
           <Label>Default variable sets</Label>
           <p className="-mt-1 text-2xs text-fg-subtle">
-            Preselected on new sessions that pick this rig. A session can still override them.
+            Preselected on new sessions that pick this sandbox environment. A session can still
+            override them.
           </p>
           <div className="grid gap-1 sm:grid-cols-2">
             {compatibleVariableSets.map((variableSet) => {

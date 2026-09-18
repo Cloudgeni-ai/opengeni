@@ -2478,7 +2478,7 @@ function ManagedSandboxFields(props: {
           <Notice
             tone="failed"
             className="p-2.5 text-xs"
-            title="Couldn’t verify the selected Variable Set or Rig"
+            title="Couldn’t verify the selected Variable Set or Sandbox Environment"
             action={
               <Button
                 type="button"
@@ -2503,7 +2503,7 @@ function ManagedSandboxFields(props: {
         <div className="flex items-center justify-between gap-3 px-3 py-2">
           <Label className="flex shrink-0 items-center gap-1.5 text-xs">
             <ServerCogIcon className="size-3 shrink-0 text-fg-subtle" />
-            Rig
+            Sandbox Environment
           </Label>
           <Select
             value={draft.rigId}

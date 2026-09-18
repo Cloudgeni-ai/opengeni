@@ -1117,7 +1117,7 @@ describe("api key permission options", () => {
       "Machines",
       "GitHub",
       "Goals",
-      "Rigs",
+      "Sandbox Environments",
       "Artifacts",
       "Admin & account",
     ]);

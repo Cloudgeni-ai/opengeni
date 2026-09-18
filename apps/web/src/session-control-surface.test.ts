@@ -273,7 +273,7 @@ describe("session control surface architecture", () => {
     expect(route).toContain(
       "selectedRigDefaultVariableSetIds: selectedRigDefaultVariableSetIdsKey",
     );
-    expect(route).toContain("Couldn’t verify the selected Variable Set or Rig");
+    expect(route).toContain("Couldn’t verify the selected Variable Set or Sandbox Environment");
     expect(route).toContain("onRetry: () => void refreshPersonalResourceCatalogs()");
     expect(establishedRoute).toContain("<SessionVariableSetPicker");
     expect(establishedPicker).toContain("<VariableSetShortlistEditor");

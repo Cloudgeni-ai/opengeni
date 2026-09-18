@@ -167,7 +167,7 @@ work, not a new conversational answer to the active wait.
 
 An owner-authored `personalResourceAttachment` is part of that same accepted
 work transaction for create, Send, and Steer. The server derives the fixed
-personal Variable Set/Rig/selected Connected Machine closure from the locked session; callers never issue
+personal Variable Set/Sandbox Environment/selected Connected Machine closure from the locked session; callers never issue
 a grant and then send work in a second operation. `once` is consumed against
 the logical turn id, so every recovery attempt for that turn copies the same
 immutable snapshot. It is never copied to a queue edit, goal continuation, or
@@ -1354,7 +1354,7 @@ rolls only the exact warming epoch back to cold, and fails the turn rather than
 rapidly creating sibling boxes. Any later display/setup failure follows the same
 owned cleanup path.
 
-After a managed lease is warm, immutable Rig setup has a second, setup-specific
+After a managed lease is warm, immutable Sandbox Environment setup has a second, setup-specific
 single-flight boundary. One worker claims the exact `(lease epoch, provider
 instance, setup spec hash)` receipt and runs the existing marker-guarded script;
 sibling turns join or reuse its durable completion instead of entering the
@@ -1365,7 +1365,7 @@ script; after the bounded claim deadline, a successor re-enters the same
 box-local marker and records completion. Failed setup remains fail-closed and
 retryable. Per-turn Git/run credentials, Codemode tokens, Azure login,
 repository clone authority, file resources, and generated media are always
-prepared privately after the shared Rig boundary.
+prepared privately after the shared Sandbox Environment boundary.
 
 Lazy establishment observes one correlation-qualified logical provision at a
 time. Its terminal durable `sandbox.provision` event records a closed structural
@@ -1434,7 +1434,7 @@ subsequent fresh checkpoint makes the archive current. This operation does not
 resume a turn, modify session history, or claim recovery of unavailable writes.
 
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
-directory Image layers user files onto the currently selected rig/base
+directory Image layers user files onto the currently selected sandbox environment/base
 image instead of replacing the whole machine. Existing serialized sessions keep
 their recorded `snapshot_filesystem` or tar mode and remain recoverable. Warm
 checkpoint attempts use the configured interval as a hard minimum even after a
@@ -2315,16 +2315,16 @@ between supported providers; `remote_v2` sessions remain Codex-only.
 
 The user-visible startup critical path is also durable and phase-specific. The
 existing `turn.queued`/`turn.started`, `sandbox.operation.*`, `rig.setup.*`, and
-`agent.model.request` events reconstruct queueing, box establishment, rig,
+`agent.model.request` events reconstruct queueing, box establishment, sandbox environment,
 repository/file work, and provider first byte. Compact
 `turn.startup.phase.started|completed|failed` checkpoints fill the two gaps for
 tool connection and model-request preparation; terminal payloads contain only a
 closed phase name and non-negative `durationMs`. In particular, lazy
 `sandbox.provision` completes as soon as the box is established, before owned
-rig/repository/file setup, so “Starting sandbox” never absorbs unrelated work.
+sandbox environment/repository/file setup, so “Starting sandbox” never absorbs unrelated work.
 Model-request preparation is an enclosing span: it begins when control enters
 the runtime and ends at the provider transport boundary, so it may include the
-sandbox, rig, repository, and other setup rows whose starts appear below it.
+sandbox, sandbox environment, repository, and other setup rows whose starts appear below it.
 The timeline labels that overlap explicitly instead of presenting the parent as
 an additional sequential wait.
 

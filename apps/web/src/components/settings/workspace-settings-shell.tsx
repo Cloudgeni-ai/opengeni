@@ -111,7 +111,7 @@ const WORKSPACE_PAGE_GROUPS = [
       },
       {
         to: "/workspaces/$workspaceId/rigs" as const,
-        label: "Rigs",
+        label: "Sandbox Environments",
         icon: BoxIcon,
       },
       {
