@@ -62,9 +62,26 @@ CREATE TEMP TABLE removed_pack_triggers ON COMMIT DROP AS
 SELECT trigger.id FROM automation_triggers trigger JOIN automation_sources source ON source.id=trigger.source_id
 WHERE source.adapter_id<>'source-control.pull-request.v1'
   AND (trigger.pack_installation_id IS NOT NULL OR source.id IN (SELECT id FROM removed_pack_sources));
+CREATE TEMP TABLE removed_pack_events ON COMMIT DROP AS
+SELECT event.id FROM automation_trigger_events event
+WHERE event.source_id IN (SELECT id FROM removed_pack_sources)
+  OR EXISTS (SELECT 1 FROM jsonb_array_elements(event.matched_trigger_revisions) matched
+    JOIN removed_pack_triggers removed ON removed.id::text=matched->>'triggerId');
 
 DO $preflight$
 BEGIN
+  -- Historical rows can violate the former application-only source/trigger
+  -- ownership invariant. Remove exclusively Pack events, but never erase an
+  -- event that also records independent work. Refuse that ambiguous cutover.
+  IF EXISTS (SELECT 1 FROM automation_trigger_events event
+    WHERE event.id IN (SELECT id FROM removed_pack_events) AND (
+      EXISTS (SELECT 1 FROM jsonb_array_elements(event.matched_trigger_revisions) matched
+        WHERE NOT EXISTS (SELECT 1 FROM removed_pack_triggers removed WHERE removed.id::text=matched->>'triggerId'))
+      OR EXISTS (SELECT 1 FROM automation_runs run WHERE run.event_id=event.id
+        AND run.trigger_id NOT IN (SELECT id FROM removed_pack_triggers))
+      OR EXISTS (SELECT 1 FROM automation_run_event_links link JOIN automation_runs run ON run.id=link.run_id
+        WHERE link.event_id=event.id AND run.trigger_id NOT IN (SELECT id FROM removed_pack_triggers))))
+  THEN RAISE EXCEPTION 'Resolve mixed Pack and independent automation events before removal' USING ERRCODE='55000'; END IF;
   IF EXISTS (SELECT 1 FROM capability_operations
     WHERE status IN ('pending','running','outcome_unknown')
       AND (target_kind='pack' OR (target_kind='facet_binding' AND target_id IN (SELECT id::text FROM removed_pack_bindings))))
@@ -132,10 +149,10 @@ WHERE installation.id IN (SELECT plugin_installation_id FROM removed_pack_facets
 DELETE FROM automation_run_event_links WHERE run_id IN (
   SELECT id FROM automation_runs WHERE source_id IN (SELECT id FROM removed_pack_sources)
     OR trigger_id IN (SELECT id FROM removed_pack_triggers)
-) OR event_id IN (SELECT id FROM automation_trigger_events WHERE source_id IN (SELECT id FROM removed_pack_sources));
+) OR event_id IN (SELECT id FROM removed_pack_events);
 DELETE FROM automation_runs WHERE source_id IN (SELECT id FROM removed_pack_sources)
   OR trigger_id IN (SELECT id FROM removed_pack_triggers);
-DELETE FROM automation_trigger_events WHERE source_id IN (SELECT id FROM removed_pack_sources);
+DELETE FROM automation_trigger_events WHERE id IN (SELECT id FROM removed_pack_events);
 DELETE FROM automation_trigger_revisions WHERE trigger_id IN (SELECT id FROM removed_pack_triggers);
 DELETE FROM automation_triggers WHERE id IN (SELECT id FROM removed_pack_triggers);
 DELETE FROM automation_webhook_endpoints WHERE source_id IN (SELECT id FROM removed_pack_sources);

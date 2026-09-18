@@ -474,7 +474,7 @@ internal work tracking is maintained separately.
 4. **Search and install.** Integrate a real discovery provider, pin source bytes
    server-side and install through the same governance. Verify discovery versus
    URL resolution, unsupported-file errors, source failures, duplicate names,
-   mode behavior, and protection of customized/Pack-owned Skills.
+   mode behavior, and protection of customized or Plugin-owned Skills.
 5. **Checkout and publish.** Materialize only on demand; publish directories
    through the same revision service. Verify round trips, explicit deletions,
    safe paths, no symlink escape, unchanged-file preservation and stale edits.

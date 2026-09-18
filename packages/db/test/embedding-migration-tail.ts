@@ -36,4 +36,7 @@ export const embeddingMigrationTail = [
   "0468_knowledge_relationship_projection.sql",
   "0469_knowledge_source_discovery.sql",
   "0478_sender_owned_connections.sql",
+  // Replayed 0402/0433 still consume historical Pack tables. Remove them only
+  // after those earlier accepted-work and Skill cutovers have completed.
+  "0482_remove_packs.sql",
 ];

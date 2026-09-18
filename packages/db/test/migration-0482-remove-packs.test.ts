@@ -180,6 +180,64 @@ test("removes Packs under a non-bypass owner while preserving independent Skill 
     await fixture.admin`UPDATE automation_runs SET status='dispatched' WHERE id=${retainedRun.runId}`;
     const retainedRunBefore =
       await fixture.admin`SELECT row_to_json(r) AS value FROM automation_runs r WHERE id=${retainedRun.runId}`;
+    const sharedSource = await createAutomationSource(client.db, {
+      ...tenant,
+      webhookSecretEncrypted: "fixture-secret",
+      request: {
+        name: "Independent events",
+        adapterId: "signed-json.v1",
+        webhookSecret: "fixture-secret",
+        configuration: {},
+      },
+    });
+    const sharedTrigger = async (name: string) =>
+      await createAutomationTrigger(client!.db, {
+        ...tenant,
+        adapterId: sharedSource.adapterId,
+        request: {
+          sourceId: sharedSource.id,
+          name,
+          eventTypes: ["build.failed"],
+          configuration: {},
+          parameters: {},
+          sessionTemplate,
+          status: "active",
+        },
+      });
+    const detachedPackTrigger = await sharedTrigger("Historical Pack trigger");
+    const independentTrigger = await sharedTrigger("Independent trigger");
+    const detachedRun = await seedRun(
+      sharedSource.id,
+      detachedPackTrigger.id,
+      sharedSource.adapterId,
+    );
+    const independentRun = await seedRun(
+      sharedSource.id,
+      independentTrigger.id,
+      sharedSource.adapterId,
+    );
+    await fixture.admin`UPDATE automation_runs SET status='failed' WHERE id=${detachedRun.runId}`;
+    const mixedEvent = await recordAutomationEvent(client.db, {
+      ...tenant,
+      sourceId: sharedSource.id,
+      sourceVersion: 1,
+      sourceConfiguration: {},
+      matchedTriggerRevisions: [
+        { triggerId: detachedPackTrigger.id, revision: 1 },
+        { triggerId: independentTrigger.id, revision: 1 },
+      ],
+      deliveryKey: crypto.randomUUID(),
+      requestDigest: "d".repeat(64),
+      normalizedEvent: {
+        adapterId: sharedSource.adapterId,
+        eventType: "build.failed",
+        occurrenceKey: crypto.randomUUID(),
+        occurredAt: null,
+        subject: null,
+        resource: null,
+        payload: {},
+      },
+    });
     const [independentOperation] = await fixture.admin`INSERT INTO capability_operations
       (account_id,workspace_id,idempotency_key,request_digest,kind,target_kind,target_id,created_by_subject_id)
       VALUES(${grant.accountId},${grant.workspaceId},${crypto.randomUUID()},${"c".repeat(64)},'install','plugin','independent-plugin',${grant.subjectId}) RETURNING id`;
@@ -193,7 +251,7 @@ test("removes Packs under a non-bypass owner while preserving independent Skill 
     await fixture.admin`UPDATE automation_sources SET pack_installation_id=${pack!.id},pack_connector_id='events'
       WHERE id IN (${registration.sourceId},${ordinary.id})`;
     await fixture.admin`UPDATE automation_triggers SET pack_installation_id=${pack!.id},pack_template_id='review'
-      WHERE id IN (${repository.triggerId},${ordinaryTrigger.id})`;
+      WHERE id IN (${repository.triggerId},${ordinaryTrigger.id},${detachedPackTrigger.id})`;
     const reviewBefore =
       await fixture.admin`SELECT row_to_json(r) AS value FROM pr_review_app_registrations r WHERE id=${registration.id}`;
     const bindingBefore =
@@ -287,6 +345,15 @@ test("removes Packs under a non-bypass owner while preserving independent Skill 
     client = undefined;
     await expect(
       migrate(fixture.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] }),
+    ).rejects.toThrow("Resolve mixed Pack and independent automation events");
+    expect(
+      await fixture.admin`SELECT id FROM automation_trigger_events WHERE id=${mixedEvent.event.id}`,
+    ).toHaveLength(1);
+    // Remove only this intentionally ambiguous fixture before testing a valid
+    // destructive cutover. The migration never rewrites or erases shared history.
+    await fixture.admin`DELETE FROM automation_trigger_events WHERE id=${mixedEvent.event.id}`;
+    await expect(
+      migrate(fixture.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] }),
     ).rejects.toThrow("Settle Pack automation runs");
     expect(
       await fixture.admin`SELECT id FROM automation_runs WHERE id=${removedRun.runId}`,
@@ -377,6 +444,27 @@ test("removes Packs under a non-bypass owner while preserving independent Skill 
       ).toHaveLength(0);
     expect(
       await fixture.admin`SELECT preference_id FROM skill_source_bindings WHERE preference_id=${installed.shared!.skillReceipt.skillId}`,
+    ).toHaveLength(1);
+    expect(
+      await fixture.admin`SELECT id FROM automation_sources WHERE id=${sharedSource.id}`,
+    ).toHaveLength(1);
+    expect(
+      await fixture.admin`SELECT id FROM automation_triggers WHERE id=${detachedPackTrigger.id}`,
+    ).toHaveLength(0);
+    expect(
+      await fixture.admin`SELECT id FROM automation_trigger_events WHERE id=${detachedRun.eventId}`,
+    ).toHaveLength(0);
+    expect(
+      await fixture.admin`SELECT id FROM automation_runs WHERE id=${detachedRun.runId}`,
+    ).toHaveLength(0);
+    expect(
+      await fixture.admin`SELECT id FROM automation_triggers WHERE id=${independentTrigger.id}`,
+    ).toHaveLength(1);
+    expect(
+      await fixture.admin`SELECT id FROM automation_trigger_events WHERE id=${independentRun.eventId}`,
+    ).toHaveLength(1);
+    expect(
+      await fixture.admin`SELECT id FROM automation_runs WHERE id=${independentRun.runId} AND status='queued'`,
     ).toHaveLength(1);
     // A committed retry is a ledger no-op, including Skill event count.
     await migrate(fixture.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });

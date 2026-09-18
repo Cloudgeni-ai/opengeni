@@ -41,7 +41,6 @@ test("shipped knowledge and integration guidance never sends users to retired wr
     "docs-site/concepts/memory-and-knowledge.mdx",
     "docs-site/guides/integrate-your-product.mdx",
     "docs-site/reference/sdk.mdx",
-    "packages/core/src/domain/product-integration-skill.gen.ts",
   ]) {
     const text = await readFile(new URL(path, root), "utf8");
     expect(text, path).not.toMatch(/memory_(save|correct|search|propose)/);
