@@ -2,7 +2,6 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   AutomationAcceptedExecution,
   AutomationSessionTemplate,
-  CapabilityPack,
   type FirstPartyMcpToolName,
   NewSessionDraftOptions,
   ScheduledTaskAgentConfig,
@@ -21,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 
 import { migrate } from "../src/migrate";
+import { migrateBefore } from "./helpers/historical-schema";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const migrationName = "0402_session_input_wait_and_background_command_results.sql";
@@ -568,7 +568,7 @@ describe("migration 0402 session input wait and background command results", () 
       await owned.admin`alter table scheduled_task_runs enable trigger user`;
     }
 
-    await migrate(owned.ownerUrl, undefined, {
+    await migrateBefore(owned.ownerUrl, "0482_remove_packs.sql", {
       applicationDatabaseRoles: [owned.ownerRole],
     });
 
@@ -699,8 +699,11 @@ describe("migration 0402 session input wait and background command results", () 
       AutomationAcceptedExecution.parse(persistedSelections?.automationAcceptedExecution)
         .sessionTemplate.firstPartyMcpTools,
     ).toEqual(migratedTools);
-    const parsedRegisteredPack = CapabilityPack.parse(persistedSelections?.registeredPack);
-    const parsedInstalledPack = CapabilityPack.parse(persistedSelections?.installedPack);
+    // Assert archived JSON directly; there is no current Pack runtime contract.
+    const parsedRegisteredPack = persistedSelections?.registeredPack as {
+      automationTemplates: { sessionTemplate: { firstPartyMcpTools: string[] } }[];
+    };
+    const parsedInstalledPack = persistedSelections?.installedPack as typeof parsedRegisteredPack;
     expect(
       parsedRegisteredPack.automationTemplates?.[0]?.sessionTemplate.firstPartyMcpTools,
     ).toEqual(migratedTools);

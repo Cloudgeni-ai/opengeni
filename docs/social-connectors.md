@@ -81,7 +81,7 @@ store, even though it does not publish to the provider. Pair either reply tool
 with a `requireApproval` policy when a human should sign off on every outbound
 post.
 
-Aggregate Pack tools remain provider-neutral: `social_connections_list`,
+Aggregate analysis tools remain provider-neutral: `social_connections_list`,
 `social_posts_recent`, and `social_daily_analysis_context` compose X and Reddit
 data for cross-provider workflows. The older `social_search_live`,
 `social_mentions_live`, `social_thread_fetch`, `social_posts_sync`, and
@@ -103,7 +103,7 @@ The intended pattern — opengeni owns connector + schedule, the prompt owns
 judgment:
 
 1. Connect X/Reddit (above) and put mission/brand-voice knowledge in a
-   document base (e.g. the marketing pack's `marketing-playbook`).
+   document base (e.g. a team-owned `marketing-playbook`).
 2. Create a scheduled task (interval or calendar) whose prompt directs the
    agent to: search/fetch mentions with the live tools, judge relevance
    against the playbook documents, and write reply drafts into a document or

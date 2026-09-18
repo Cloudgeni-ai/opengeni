@@ -939,7 +939,7 @@ lane and must explicitly authorize it.
 ### Default no-effects canary
 
 1. Create a disposable, isolated canary account/workspace/session with no repos,
-   variables, credentials, MCP servers, packs, file resources, or sandbox.
+   variables, credentials, MCP servers, file resources, or sandbox.
 2. Run the real `sessionWorkflow` on a dedicated canary task queue.
 3. Register only the canary queue's `runAgentTurn` override: first dispatch
    claims canonically, heartbeats, and ignores cancellation without calling a

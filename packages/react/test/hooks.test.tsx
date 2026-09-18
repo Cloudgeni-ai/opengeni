@@ -34,7 +34,7 @@ import { FILE_ONLY_MESSAGE_TEXT, useComposer } from "../src/hooks/use-composer";
 import { useEnvironments } from "../src/hooks/use-environments";
 import { useGoal } from "../src/hooks/use-goal";
 import { useLastStartedTurnPolicy } from "../src/hooks/use-last-started-turn-policy";
-import { usePacks } from "../src/hooks/use-packs";
+
 import { useWorkspaceSessions } from "../src/hooks/use-workspace-sessions";
 import { useSessionControl } from "../src/hooks/use-session-control";
 import { useSessionLineage } from "../src/hooks/use-session-lineage";
@@ -5644,90 +5644,6 @@ describe("useEnvironments", () => {
       "delete:env-1",
       "list",
     ]);
-    await hook.unmount();
-  });
-});
-
-describe("usePacks", () => {
-  test("previews, installs, and safely uninstalls a pack", async () => {
-    let installed = false;
-    const installation = {
-      id: "inst-1",
-      accountId: "acc",
-      workspaceId: WORKSPACE_ID,
-      packId: "autonomous-devops",
-      status: "active" as const,
-      version: 1,
-      manifestSnapshot: null,
-      manifestDigest: "a".repeat(64),
-      selectedRigId: null,
-      installedBySubjectId: "user:test",
-      metadata: {},
-      enabledAt: "",
-      updatedAt: "",
-    };
-    const client = fakeClient({
-      listPacks: async () => ({
-        packs: [{ id: "autonomous-devops", name: "Autonomous DevOps" } as never],
-        installations: installed ? [installation] : [],
-      }),
-      previewPackInstallation: async (_ws, packId) => ({
-        packId,
-        packVersion: "1.0.0",
-        manifestDigest: "a".repeat(64),
-        installationVersion: null,
-        action: "install",
-        ready: true,
-        blockers: [],
-        components: [],
-        rig: {
-          required: false,
-          status: "not_required",
-          requestedRigId: null,
-          rigId: null,
-          rigVersionId: null,
-          name: null,
-          image: null,
-        },
-        variableSetId: null,
-        legacyInlineSkillCount: 0,
-        legacySandboxImage: null,
-      }),
-      installPack: async (_ws, packId) => {
-        installed = true;
-        return { ...installation, packId };
-      },
-      previewPackUninstall: async (_ws, packId) => ({
-        packId,
-        installed,
-        installationVersion: installation.version,
-        components: [],
-      }),
-      uninstallPack: async (_ws, packId) => {
-        installed = false;
-        return { packId, status: "uninstalled", retainedComponents: [] };
-      },
-    });
-    const hook = await renderHook(() => usePacks({ client, workspaceId: WORKSPACE_ID }), undefined);
-    await flush();
-    expect(hook.result.current.packs.map((pack) => pack.id)).toEqual(["autonomous-devops"]);
-    expect(hook.result.current.installationFor("autonomous-devops")).toBeNull();
-    await flushing(async () => {
-      const preview = await hook.result.current.previewInstallation("autonomous-devops");
-      await hook.result.current.install("autonomous-devops", {
-        expectedManifestDigest: preview!.manifestDigest,
-        idempotencyKey: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      });
-    });
-    expect(hook.result.current.installationFor("autonomous-devops")?.status).toBe("active");
-    await flushing(async () => {
-      const preview = await hook.result.current.previewUninstall("autonomous-devops");
-      await hook.result.current.uninstall("autonomous-devops", {
-        expectedInstallationVersion: preview!.installationVersion!,
-        idempotencyKey: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-      });
-    });
-    expect(hook.result.current.installationFor("autonomous-devops")).toBeNull();
     await hook.unmount();
   });
 });

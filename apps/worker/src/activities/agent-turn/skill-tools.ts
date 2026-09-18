@@ -140,11 +140,7 @@ export function createWorkspaceSkillTools(input: {
           id: entry.id,
           name: entry.artifact.name,
           description: entry.artifact.description || entry.artifact.name,
-          source: entry.id.startsWith("builtin:")
-            ? ("builtin" as const)
-            : entry.id.startsWith("session:")
-              ? ("session" as const)
-              : ("pack" as const),
+          source: entry.id.startsWith("builtin:") ? ("builtin" as const) : ("session" as const),
         })),
       ],
       publicSearch: createPublicSkillSearchClient(input.settings),

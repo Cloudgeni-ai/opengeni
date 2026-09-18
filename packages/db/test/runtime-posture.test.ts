@@ -735,6 +735,12 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0482 removes the three full-DML, FORCE-RLS Pack tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? -3
+            : 0) +
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_READ_ONLY_TABLES ||
           tables === RUNTIME_DML_TABLES
@@ -760,7 +766,15 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2;
+      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3;
+      for (const removed of [
+        "workspace_packs",
+        "pack_installations",
+        "pack_installation_components",
+      ]) {
+        expect(FORCE_RLS_TABLES as readonly string[]).not.toContain(removed);
+        expect(RUNTIME_TABLE_PRIVILEGES[removed]).toBeUndefined();
+      }
       for (const table of [
         "organization_integration_policies",
         "organization_integration_policy_operations",

@@ -336,7 +336,7 @@ const SCENARIOS: Scenario[] = [
         id: "policy",
         kind: "single_select",
         prompt:
-          "The agent found a policy conflict between the workspace pack image pin, the session-level sandbox backend override, and the Connected Machine route that was seeded at create time. How should it resolve the conflict before mutating /workspace?",
+          "The agent found a policy conflict between the workspace sandbox environment, the session-level sandbox backend override, and the Connected Machine route that was seeded at create time. How should it resolve the conflict before mutating /workspace?",
         label: "Resolve compute conflict",
         helpText:
           "This prompt is intentionally long to stress wrapping above the composer, especially on narrow viewports where the form already competes with SessionChrome and the composer.",

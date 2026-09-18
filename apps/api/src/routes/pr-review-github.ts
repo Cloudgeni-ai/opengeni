@@ -2,7 +2,6 @@ import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import {
   AUTOMATION_WEBHOOK_MAX_BYTES,
-  OPENGENI_PR_REVIEW_PACK_ID,
   PrReviewManagedGitHubSetup,
   type AccessGrant,
   type GitHubInstallationBindingCandidate,
@@ -10,22 +9,19 @@ import {
 } from "@opengeni/contracts";
 import {
   automationRequestDigest,
-  getCapabilityPack,
   hasPermission,
-  PR_REVIEW_AUTOMATION_TEMPLATE_ID,
-  prReviewPackConnectorId,
   requireAutomationAdapter,
   requireAccessGrantAuthorization,
   externalActorContinuationForAuthorization,
   requirePermission,
   verifyPrReviewWebhook,
   type ApiRouteDeps,
+  PR_REVIEW_AUTOMATION_SETUP,
 } from "@opengeni/core";
 import {
   AutomationDeliveryConflictError,
   encryptVariableSetValue,
   getAutomationSourceSecret,
-  getPackInstallation,
   listPrReviewAppRegistrations,
   listPrReviewRepositoryBindings,
   nestedPostgresSqlState,
@@ -136,7 +132,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
     const grant = access.grant;
-    await requireActivePack(deps, workspaceId);
+
     const missing = prReviewGitHubAppMissingSettings(deps.settings);
     const configured = missing.length === 0;
     const registrations = (
@@ -208,7 +204,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     const state = requireStateQuery(c, "missing OpenGeni Lens installation state");
     const payload = requireFreshState(state, deps, "pr_review_github_authority", workspaceId);
     await requirePrReviewManageGrant(c, deps, workspaceId, payload);
-    await requireActivePack(deps, workspaceId);
+
     assertManagedCompute(deps);
     requireConfiguredApp(deps);
     const discoveryState = createSignedState(deps.githubStateSecret, {
@@ -238,7 +234,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
         throw new HTTPException(400, { message: "invalid OpenGeni Lens installation" });
       }
       await requirePrReviewManageGrant(c, deps, workspaceId, payload);
-      await requireActivePack(deps, workspaceId);
+
       assertManagedCompute(deps);
       const registrations = await listPrReviewAppRegistrations(
         deps.db,
@@ -284,7 +280,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     const payload = requireFreshState(state, deps, "pr_review_github_install");
     requireStateCookie(c, state);
     await requirePrReviewManageGrant(c, deps, payload.workspaceId!, payload);
-    await requireActivePack(deps, payload.workspaceId!);
+
     assertManagedCompute(deps);
     const setupAction = c.req.query("setup_action");
     if (setupAction === "request") return c.html(setupPendingHtml());
@@ -341,7 +337,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     const payload = requireFreshState(state, deps);
     requireStateCookie(c, state);
     const grant = await requirePrReviewManageGrant(c, deps, payload.workspaceId!, payload);
-    const packInstallation = await requireActivePack(deps, grant.workspaceId);
+
     assertManagedCompute(deps);
     requireConfiguredApp(deps);
 
@@ -416,12 +412,8 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     if (repositoryIds.size !== proof.repositories.length) {
       throw new HTTPException(409, { message: "GitHub returned duplicate repository identities" });
     }
-    const template = getCapabilityPack(OPENGENI_PR_REVIEW_PACK_ID)?.automationTemplates?.find(
-      (candidate) => candidate.id === PR_REVIEW_AUTOMATION_TEMPLATE_ID,
-    );
-    if (!template) {
-      throw new HTTPException(503, { message: "PR Review automation template is unavailable" });
-    }
+    const template = PR_REVIEW_AUTOMATION_SETUP;
+
     const encryptionKey = environmentsEncryptionKeyBytes(deps.settings);
     if (!encryptionKey) {
       throw new HTTPException(503, {
@@ -454,9 +446,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
             ),
             repositories: proof.repositories,
             createdBySubjectId: grant.subjectId,
-            packInstallationId: packInstallation.id,
-            packConnectorId: prReviewPackConnectorId("github"),
-            packTemplateId: template.id,
+
             adapterId: template.adapterId,
             eventTypes: template.eventTypes,
             configuration: template.configuration,
@@ -506,7 +496,7 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
     const payload = requireFreshState(state, deps, "pr_review_github_selection", workspaceId);
     requireStateCookie(c, state);
     await requirePrReviewManageGrant(c, deps, workspaceId, payload);
-    await requireActivePack(deps, workspaceId);
+
     const selected = c.req.query("installation_id");
     if (selected === "new") return redirectToInstallation(c, deps, state);
     const installationId = positiveInteger(selected);
@@ -530,16 +520,6 @@ function requireConfiguredApp(deps: ApiRouteDeps): void {
       message: JSON.stringify({ message: "OpenGeni Lens is not configured", missing }),
     });
   }
-}
-
-async function requireActivePack(deps: ApiRouteDeps, workspaceId: string) {
-  const installation = await getPackInstallation(deps.db, workspaceId, OPENGENI_PR_REVIEW_PACK_ID);
-  if (installation?.status !== "active") {
-    throw new HTTPException(409, {
-      message: "Install and enable the OpenGeni Review Bot Pack first",
-    });
-  }
-  return installation;
 }
 
 function assertManagedCompute(deps: ApiRouteDeps): void {

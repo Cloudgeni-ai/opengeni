@@ -740,8 +740,6 @@ state remains application-owned; durable draft and session state remain in
   reads and create/update/remove/set/delete operations. Dedicated permissioned
   exact-value reveal is part of the held React/UI train rather than an
   implicit field on ordinary reads.
-- `usePacks()` — capability packs + installations with
-  register/enable/remove and `installationFor(packId)`.
 - `useWorkspaces()` — the caller's workspaces with create/update (client-only;
   not bound to the provider's workspace).
 - `useBillingUsage({ accountId?, workspaceId? })` — credit balance + recent

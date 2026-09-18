@@ -19,8 +19,7 @@ const skillCapabilityId = "skill:release-operator-browser";
 const pluginKey = "example/research";
 const skillUrl = "https://github.com/acme/skills/tree/main/release-operator";
 const pluginUrl = "https://plugins.example.test/research.json";
-const packId = "infra-ops-browser";
-const packManifestDigest = "e".repeat(64);
+
 const apiContractRevision = OPENGENI_API_CONTRACT_REVISION;
 let webBaseUrl = "";
 
@@ -35,8 +34,6 @@ type UiState = {
   pluginInstallRequests: Record<string, unknown>[];
   skillRemoveRequests: Record<string, unknown>[];
   pluginRemoveRequests: Record<string, unknown>[];
-  packInstalled: boolean;
-  packUninstallRequests: Record<string, unknown>[];
 };
 
 describe("Bundles section browser acceptance", () => {
@@ -298,64 +295,10 @@ describe("Bundles section browser acceptance", () => {
       await context.close();
     }
   }, 60_000);
-
-  // A Pack lists through the same uniform row as every other Bundle, and its
-  // two destructive verbs release ownership, so the whole chain - open the row,
-  // read the installed identity, uninstall, confirm - is exercised for real.
-  test("a Pack row opens its plan, names the installed identity, and uninstalls", async () => {
-    const state = readyState({ packInstalled: true });
-    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-    const page = await context.newPage();
-    try {
-      await installApi(page, state);
-      await openCapabilities(page);
-      await setTheme(page, "light");
-
-      await page.getByRole("tab", { name: "Plugins", exact: true }).click();
-      await page.getByText("Workflow templates", { exact: true }).click();
-      const packRow = page.getByRole("button", { name: /Infrastructure operations/ });
-      await expectVisible(packRow);
-      await expectText(packRow, "Infrastructure operations");
-      await expectText(packRow, "Installed");
-      expect((await packRow.textContent()) ?? "").not.toContain("Curated by OpenGeni");
-      await packRow.click();
-      const dialog = page.locator(`[data-pack-dialog="${packId}"]`);
-      await expectVisible(dialog);
-      // The version, role, category, and installed digest a repair turns on.
-      const identity = dialog.locator(`[data-pack-identity="${packId}"]`);
-      await expectText(identity, "v1.4.0");
-      await expectText(identity, "infrastructure");
-      await expectText(identity, "operations");
-      await expectText(identity, packManifestDigest.slice(0, 12));
-      await expectText(identity, "Pinned infrastructure automation capabilities.");
-      await expectText(dialog, "Ready to install");
-      await assertAccessibleAndBounded(page, `[data-pack-dialog="${packId}"]`);
-      await dialog.screenshot({ path: `${evidenceDir}pack-detail-dialog-light.png` });
-
-      // Unregistering a live installation is the one order that cannot work.
-      expect(await dialog.getByRole("button", { name: "Unregister" }).isDisabled()).toBe(true);
-
-      await dialog.getByRole("button", { name: "Uninstall" }).click();
-      // Two dialogs are mounted now; the confirmation is the one that names it.
-      const confirm = page
-        .getByRole("dialog")
-        .filter({ hasText: "Uninstall Infrastructure operations?" });
-      await expectText(confirm, "Retained by another Pack");
-      await confirm.getByRole("button", { name: "Uninstall Pack" }).click();
-      expect(state.packUninstallRequests).toHaveLength(1);
-      expect(state.packUninstallRequests[0]).toMatchObject({ expectedInstallationVersion: 4 });
-      await expectHidden(dialog.getByRole("button", { name: "Uninstall", exact: true }));
-      expect(await dialog.getByRole("button", { name: "Unregister" }).isDisabled()).toBe(false);
-    } finally {
-      await context.close();
-    }
-  }, 90_000);
 });
 
 function readyState(
-  patch: Partial<
-    Pick<UiState, "canManage" | "skillInstalled" | "pluginInstalled" | "packInstalled">
-  > = {},
+  patch: Partial<Pick<UiState, "canManage" | "skillInstalled" | "pluginInstalled">> = {},
 ): UiState {
   return {
     canManage: true,
@@ -368,8 +311,7 @@ function readyState(
     pluginInstallRequests: [],
     skillRemoveRequests: [],
     pluginRemoveRequests: [],
-    packInstalled: false,
-    packUninstallRequests: [],
+
     ...patch,
   };
 }
@@ -441,6 +383,11 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === "/v1/access/me") return json(access(state.canManage));
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/model-catalog`) return json({ models: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/pr-review/registrations`)
+      return json({ registrations: [], repositories: [] });
+    if (url.pathname === `/v1/workspaces/${workspaceId}/pr-review/github`)
+      return json({ status: "unavailable", installations: [], missing: [], installUrl: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`)
       return json({
         provider: "skills_sh",
@@ -465,35 +412,7 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       return json({ connections: connections() });
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({
-        packs: [capabilityPack()],
-        installations: state.packInstalled ? [packInstallation()] : [],
-      });
-    }
-    if (
-      request.method() === "POST" &&
-      decodeURIComponent(url.pathname) ===
-        `/v1/workspaces/${workspaceId}/packs/${packId}/installation-preview`
-    ) {
-      return json(packInstallationPreview(state));
-    }
-    if (
-      request.method() === "GET" &&
-      decodeURIComponent(url.pathname) ===
-        `/v1/workspaces/${workspaceId}/packs/${packId}/uninstall-preview`
-    ) {
-      return json(packUninstallPreview());
-    }
-    if (
-      request.method() === "DELETE" &&
-      decodeURIComponent(url.pathname) ===
-        `/v1/workspaces/${workspaceId}/packs/${packId}/installation`
-    ) {
-      state.packUninstallRequests.push(request.postDataJSON() as Record<string, unknown>);
-      state.packInstalled = false;
-      return json({ packId, status: "uninstalled", retainedComponents: [skillCapabilityId] });
-    }
+
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {
@@ -720,9 +639,9 @@ function workspace() {
 }
 
 function capabilityCatalog(state: UiState) {
-  if (!state.skillInstalled) return { items: [packCatalogItem()], installations: [] };
+  if (!state.skillInstalled) return { items: [], installations: [] };
   return {
-    items: [installedSkillItem(), packCatalogItem()],
+    items: [installedSkillItem()],
     installations: [
       {
         id: "00000000-0000-4000-8000-000000000721",
@@ -785,148 +704,6 @@ function installedSkillItem() {
       contentSha256: "b".repeat(64),
       installedSkill: { source: "github" },
     },
-  };
-}
-
-/**
- * The Pack's catalog row. Its `source` is the fact the Bundles row reads for
- * provenance, so an admin-registered Pack must not be projected as built in.
- */
-function packCatalogItem() {
-  return {
-    id: `pack:${packId}`,
-    kind: "pack",
-    source: "manual",
-    name: "Infrastructure operations",
-    description: "Pinned infrastructure automation capabilities.",
-    category: "operations",
-    tags: ["infrastructure", "operations", "pack"],
-    homepageUrl: null,
-    endpointUrl: null,
-    installUrl: null,
-    authModel: null,
-    providerDomain: null,
-    surfaceType: null,
-    transport: null,
-    mcpUrl: null,
-    authKind: null,
-    credentialFacts: [],
-    tier: "community",
-    provenance: null,
-    logoAssetPath: null,
-    importBatchId: null,
-    stale: false,
-    staleAt: null,
-    tools: [],
-    runtime: { available: true, notes: null },
-    lifecycle: {
-      status: "available",
-      readiness: "ready",
-      detail: "available",
-      managedBy: "workspace",
-    },
-    actions: ["inspect"],
-    enabled: false,
-    enabledReason: null,
-    connectionRef: null,
-    metadata: { packId, version: "1.4.0" },
-  };
-}
-
-function capabilityPack() {
-  return {
-    id: packId,
-    name: "Infrastructure operations",
-    description: "Pinned infrastructure automation capabilities.",
-    role: "infrastructure",
-    category: "operations",
-    version: "1.4.0",
-    skills: [],
-    components: [
-      {
-        key: "skills/release-operator",
-        kind: "skill",
-        capabilityId: skillCapabilityId,
-        contentSha256: "b".repeat(64),
-        required: true,
-      },
-    ],
-    tools: [],
-    connectors: [],
-    knowledge: [],
-    scheduledTaskTemplates: [],
-    metadata: {},
-  };
-}
-
-function packInstallation() {
-  return {
-    id: "00000000-0000-4000-8000-000000000731",
-    accountId,
-    workspaceId,
-    packId,
-    status: "active",
-    version: 4,
-    manifestSnapshot: capabilityPack(),
-    manifestDigest: packManifestDigest,
-    selectedRigId: null,
-    installedBySubjectId: subjectId,
-    metadata: {},
-    enabledAt: "2026-08-11T00:00:00.000Z",
-    updatedAt: "2026-08-11T00:00:00.000Z",
-  };
-}
-
-function packInstallationPreview(state: UiState) {
-  return {
-    packId,
-    packVersion: "1.4.0",
-    manifestDigest: packManifestDigest,
-    installationVersion: state.packInstalled ? 4 : null,
-    action: state.packInstalled ? "update" : "install",
-    ready: true,
-    blockers: [],
-    components: [
-      {
-        key: "skills/release-operator",
-        kind: "skill",
-        capabilityId: skillCapabilityId,
-        required: true,
-        status: "ready",
-        expectedDigest: "b".repeat(64),
-        actualDigest: "b".repeat(64),
-        resolvedId: skillCapabilityId,
-        label: "release-operator",
-      },
-    ],
-    rig: {
-      required: false,
-      status: "not_required",
-      requestedRigId: null,
-      rigId: null,
-      rigVersionId: null,
-      name: null,
-      image: null,
-    },
-    variableSetId: null,
-    legacyInlineSkillCount: 0,
-    legacySandboxImage: null,
-  };
-}
-
-function packUninstallPreview() {
-  return {
-    packId,
-    installed: true,
-    installationVersion: 4,
-    components: [
-      {
-        key: "skills/release-operator",
-        kind: "skill",
-        capabilityId: skillCapabilityId,
-        retainedByOtherOwners: true,
-      },
-    ],
   };
 }
 

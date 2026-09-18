@@ -17,7 +17,7 @@ import {
   resolveRigProviderImageSelection,
   rigProviderImageSourceImage,
   settingsWithRigProviderImage,
-} from "../src/activities/packs";
+} from "../src/activities/sandbox-images";
 import {
   rigPlatformChecksForSettings,
   rigProviderImageContentMarkerCommand,
@@ -411,19 +411,13 @@ describe("build-once rig provider image runtime", () => {
       modalImageRef: "deployment:latest",
       modalImageId: "im-deployment",
     });
-    const packRuntime = {
-      sandboxImage: "pack:stable",
-      sandboxProviderImages: { modal: { imageId: "im-pack" } },
-      skills: [],
-    };
-
-    const verification = settingsForRigVerification(deployment, packRuntime, null);
+    const verification = settingsForRigVerification(deployment, null);
     expect(verification).toBe(deployment);
     expect(verification.modalImageRef).toBe("deployment:latest");
     expect(verification.modalImageId).toBe("im-deployment");
     expect(rigProviderImageSourceImage(verification, "modal")).toBe("im-deployment");
 
-    const rigOverride = settingsForRigVerification(deployment, packRuntime, "rig:pinned");
+    const rigOverride = settingsForRigVerification(deployment, "rig:pinned");
     expect(rigOverride).toBe(deployment);
   });
 });

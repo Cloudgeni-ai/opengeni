@@ -11,7 +11,7 @@ export function pluginRetentionReason(component: Component): string {
     reasons.push("Managed outside this workspace.");
   if (component.retentionReasons.includes("other_owners")) {
     const names = component.remainingOwners
-      .filter((owner) => owner.kind === "plugin" || owner.kind === "pack")
+      .filter((owner) => owner.kind === "plugin")
       .map((owner) => owner.name);
     if (names.length) reasons.push(`Also included in ${[...new Set(names)].join(", ")}.`);
     if (component.remainingOwners.some((owner) => owner.kind === "direct"))

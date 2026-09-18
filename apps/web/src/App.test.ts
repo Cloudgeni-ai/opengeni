@@ -2,11 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Permission } from "@opengeni/contracts";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
-import {
-  capabilityErrorToast,
-  filterCapabilityCatalogItems,
-  summarizePackContents,
-} from "./lib/capabilities";
+import { capabilityErrorToast, filterCapabilityCatalogItems } from "./lib/capabilities";
 import { projectSessionTimeline, summarizeSessionFailure } from "./lib/events";
 import {
   buildApiKeyPermissionGroups,
@@ -2043,69 +2039,6 @@ describe("capability catalog helpers", () => {
         'MCP capability "4fetch" could not be enabled because OpenGeni could not initialize api.4fetch.com. Check the endpoint configuration or try again.',
     });
   });
-
-  test("summarizes pack contents from tools and metadata", () => {
-    const summary = summarizePackContents(
-      capabilityItem({
-        id: "pack:marketing-social-daily-analysis",
-        kind: "pack",
-        name: "Marketing social daily analysis",
-        tools: [
-          { kind: "mcp", id: "docs" },
-          { kind: "mcp", id: "opengeni" },
-        ],
-        metadata: {
-          skill: "social-media-marketing",
-          firstPartyMcpTools: ["social_posts_recent"],
-          connectors: [
-            {
-              id: "x",
-              name: "X",
-              authModel: "oauth2_authorization_code_pkce",
-              providers: ["x"],
-              scopes: ["tweet.read"],
-              required: false,
-            },
-          ],
-          knowledge: [
-            {
-              id: "marketing-playbook",
-              name: "Marketing playbook",
-              description: "Brand voice and campaign context.",
-            },
-          ],
-          scheduledTaskTemplates: [
-            {
-              id: "daily-social-analysis",
-              name: "Daily social analysis",
-              defaultSchedule: {
-                type: "calendar",
-                timeZone: "UTC",
-                hour: 9,
-                minute: 0,
-              },
-            },
-          ],
-        },
-      }),
-    );
-
-    expect(summary).toMatchObject({
-      hasContents: true,
-      mcpServerIds: ["docs", "opengeni"],
-      firstPartyMcpTools: ["social_posts_recent"],
-      skills: ["social-media-marketing"],
-      connectors: [{ id: "x", name: "X", scopes: ["tweet.read"] }],
-      knowledge: [{ id: "marketing-playbook", name: "Marketing playbook" }],
-      scheduledTaskTemplates: [
-        {
-          id: "daily-social-analysis",
-          name: "Daily social analysis",
-          scheduleSummary: "Calendar at 09:00 UTC",
-        },
-      ],
-    });
-  });
 });
 
 describe("scheduled task form helpers", () => {
@@ -2843,12 +2776,12 @@ describe("entitlement formatting", () => {
       entitlementEntries({
         "sessions.max": 10,
         "models.allowed": ["gpt-5.6-sol"],
-        "packs.custom": true,
+        "test.custom": true,
       }),
     ).toEqual([
       { name: "models.allowed", value: "gpt-5.6-sol" },
-      { name: "packs.custom", value: "enabled" },
       { name: "sessions.max", value: "10" },
+      { name: "test.custom", value: "enabled" },
     ]);
   });
 });

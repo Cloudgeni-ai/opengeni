@@ -180,10 +180,8 @@ image identity for every Rig. Optional `OPENGENI_MODAL_SANDBOX_CPU` and
 `OPENGENI_MODAL_SANDBOX_MEMORY_MIB` values reserve physical CPU cores and MiB of
 memory for every new box and remain stable through resume and replacement.
 A verified Rig provider image may accelerate physical cold create,
-but never replaces that logical lease identity. V2 capability Packs select a Rig
-for setup/check composition and cannot require an explicit sandbox image while
-Rig image overrides are disabled. Rig-less pre-v2 Pack rows retain their
-historical turn-time image warmup only for rollback compatibility. The registry
+but never replaces that logical lease identity. Explicit Rig image overrides
+are disabled. The registry
 Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
 `OPENGENI_MODAL_TOKEN_SECRET` client, so embedded hosts do not need to also set
 standard `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` env vars or provide a

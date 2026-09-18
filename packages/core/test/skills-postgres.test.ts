@@ -27,8 +27,6 @@ import {
   appendSessionEvents,
   applySessionTurnSettlement,
   claimSessionWorkForAttempt,
-  preparePackInstallationOperation,
-  finalizePackInstallationOperation,
   preparePluginPackageInstall,
   finalizePluginPackageInstall,
   deleteWorkspace,
@@ -52,12 +50,7 @@ import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import type { SkillSaveInput } from "@opengeni/contracts";
-import {
-  CapabilityPack,
-  stableJson,
-  skillReviewHumanInput,
-  type SkillReviewReference,
-} from "@opengeni/contracts";
+import { stableJson, skillReviewHumanInput, type SkillReviewReference } from "@opengeni/contracts";
 import { approveSkill, listSkills, readSkill, restoreSkill, saveSkill } from "../src/domain/skills";
 import { serializeHumanInputRequests } from "../../runtime/src/run-events";
 
@@ -290,6 +283,10 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null) {
   const turnId = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
   await shared!.admin.begin(async (sql) => {
+    await sql`select set_config('opengeni.account_id',${context.accountId},true),
+      set_config('opengeni.workspace_id',${context.workspaceId},true),
+      set_config('opengeni.subject_id',${subjectId},true)`;
+    await sql`select set_config('opengeni.session_variable_set_attachments_v1','1',true)`;
     await sql`select set_config('opengeni.session_inference_claim','1',true)`;
     await sql`insert into session_turns(id,account_id,workspace_id,session_id,trigger_event_id,temporal_workflow_id,
       status,source,position,prompt,model,reasoning_effort,sandbox_backend,execution_generation,
@@ -329,7 +326,7 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null) {
 }
 
 describe("unified Skill real PostgreSQL lifecycle", () => {
-  for (const kind of ["pack", "plugin"] as const) {
+  for (const kind of ["plugin"] as const) {
     for (const scenario of [
       "suggest",
       "automatic",
@@ -346,23 +343,6 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
         const key = crypto.randomUUID();
         const digest = (value: string) => createHash("sha256").update(value).digest("hex");
         const scope = { ...f.context, subjectId: f.human.actor.subjectId };
-        const pack = CapabilityPack.parse({
-          id: `composite-${key}`,
-          name: "Composite test",
-          description: "Composite publication test",
-          role: "test",
-          category: "test",
-          version: "1",
-        });
-        const packInput = {
-          ...scope,
-          pack,
-          manifestDigest: digest(stableJson(pack)),
-          selectedRigId: null,
-          metadata: {},
-          idempotencyKey: crypto.randomUUID(),
-          requestDigest: digest(key),
-        };
         const pluginInput = {
           ...scope,
           pluginKey: `plugin/composite/${key}`,
@@ -371,16 +351,13 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
           description: "Composite publication test",
           category: "test",
           tags: [],
-          manifestDigest: digest(stableJson(pack)),
+          manifestDigest: digest(stableJson({ components: [], bom: [] })),
           manifest: { components: [], bom: [] },
           idempotencyKey: crypto.randomUUID(),
           requestDigest: digest(key),
         };
-        const preparedPack =
-          kind === "pack" ? await preparePackInstallationOperation(client.db, packInput) : null;
-        const preparedPlugin =
-          kind === "plugin" ? await preparePluginPackageInstall(client.db, pluginInput) : null;
-        const ownerId = preparedPack?.installation.id ?? preparedPlugin!.pluginInstallationId;
+        const preparedPlugin = await preparePluginPackageInstall(client.db, pluginInput);
+        const ownerId = preparedPlugin.pluginInstallationId;
         const content = skillMarkdown("Do not publish before composite commit");
         const install: InstallPortableSkillInput = {
           ...scope,
@@ -484,23 +461,14 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
             .admin`UPDATE session_turn_attempts SET state='closed',outcome='completed',closed_at=now() WHERE id=${f.agent.actor.attemptId}`;
         }
         const finalize = async (db: Database) =>
-          preparedPack
-            ? finalizePackInstallationOperation(db, {
-                ...scope,
-                operationId: preparedPack.operationId,
-                operationVersion: preparedPack.operationVersion,
-                packInstallationId: ownerId,
-                packId: pack.id,
-                result: { status: "installed", packId: pack.id },
-              })
-            : finalizePluginPackageInstall(db, {
-                ...scope,
-                operationId: preparedPlugin!.operationId,
-                pluginInstallationId: ownerId,
-                retainedFacetInstallationIds: [retainedChild.facetInstallationId],
-                retainedBindingIds: [],
-                result: { status: "installed" },
-              });
+          finalizePluginPackageInstall(db, {
+            ...scope,
+            operationId: preparedPlugin!.operationId,
+            pluginInstallationId: ownerId,
+            retainedFacetInstallationIds: [retainedChild.facetInstallationId],
+            retainedBindingIds: [],
+            result: { status: "installed" },
+          });
         await expect(
           client.db.transaction(async (tx) => {
             await finalize(tx as unknown as Database);
@@ -569,9 +537,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
         const [historical] = await shared!
           .admin`SELECT * FROM preference_registry_canonical_snapshot_at(${f.context.accountId},${f.context.workspaceId},${scope.subjectId},${clock!.at})`;
         expect(historical!.canonical_descriptors).toEqual([]);
-        const replay = preparedPack
-          ? await preparePackInstallationOperation(client.db, packInput)
-          : await preparePluginPackageInstall(client.db, pluginInput);
+        const replay = await preparePluginPackageInstall(client.db, pluginInput);
         expect(replay.replayResult?.skillPublications ?? []).toEqual(
           finalized.skillPublications ?? [],
         );

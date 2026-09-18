@@ -54,7 +54,7 @@ Then open the smallest source files that answer the question:
   fabricated sessions. See `docs/remote-mcp-credentials.md` for cutover status.
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
 - Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn/`.
-- Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/packs.md` and `docs/capabilities.md` (capability packs / MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
+- Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/capabilities.md` (Plugins, Skills, and the MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
 - Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
@@ -142,7 +142,7 @@ Keep these concepts straight while working:
 - **Sandbox rotation wait**: a recovering turn fenced by an active managed-sandbox rotation parks on its exact sandbox group and lease epoch. Every authoritative rotation-ending or epoch-advancing transaction durably wakes that waiter; the workflow does not repeatedly reserve turn-worker slots while the same transition remains pending.
 - **Goal**: optional durable per-session objective that flips "stop" into an explicit act — while active, the session workflow synthesizes continuation turns until the agent calls `goal_complete`/`goal_pause` or a user interrupts. The mechanism behind long-running autonomous runs. See `docs/goals.md`.
 - **Session memory (three stores, three jobs)**: `session_history_items` is exact accepted conversation truth fed to the model (default read path); `agent_run_states` is the serialized RunState blob, used only to resume a turn paused for a human approval; `session_events` is the exact append-only human-audit timeline for accepted payloads and is never fed back to the model. Protocol/size projections are deterministic and must not classify or rewrite content. Sandbox recovery state lives separately in `sandbox_session_envelopes`. See `docs/run-lifecycle.md`.
-- **Variable Set**: named organization-, workspace-, or organization-user-owned collection of authenticated-encrypted secret env vars, attached to a session/scheduled-task/pack and injected into the sandbox at run time. Attachment and runtime use require independent `variable-sets:attach` and `variable-sets:use` authority; exact plaintext access is a separate explicit permissioned operation with metadata-only audit. Never expose values through unrelated list/detail projections. See `docs/variable-sets.md`.
+- **Variable Set**: named organization-, workspace-, or organization-user-owned collection of authenticated-encrypted secret env vars, attached to a session/scheduled-task and injected into the sandbox at run time. Attachment and runtime use require independent `variable-sets:attach` and `variable-sets:use` authority; exact plaintext access is a separate explicit permissioned operation with metadata-only audit. Never expose values through unrelated list/detail projections. See `docs/variable-sets.md`.
 - **Event log**: append-only session timeline with per-session sequence numbers. It supports replay, SSE reconnect, UI timeline projection, and auditing.
 - **SSE/NATS split**: Postgres is replay/source of truth. NATS is live fanout. If live events are missed, API should backfill from Postgres by sequence.
 - **Temporal**: orchestration, signals, timers, schedules, and worker dispatch. Token streams/tool output should not be pushed through workflow history unless the code intentionally changes that design.
@@ -153,7 +153,7 @@ Keep these concepts straight while working:
 - **Tools**: currently MCP-first. Tool refs select configured MCP servers. Built-ins are defaults, not limits.
 - **Object storage**: stores uploaded bytes. Database stores metadata/object keys. Sandbox file access is normally via manifest/mount/injection based on current runtime code.
 - **Scheduled task**: persisted schedule plus agent config that dispatches one or more session turns through Temporal scheduling.
-- **Automation**: an authenticated external event accepted by a source and matched by an immutable trigger revision into one deduplicated logical run. Temporal dispatches an ordinary session; provider-specific review or incident features are adapters and Packs over this substrate.
+- **Automation**: an authenticated external event accepted by a source and matched by an immutable trigger revision into one deduplicated logical run. Temporal dispatches an ordinary session; provider-specific review or incident features are adapters over this substrate.
 - **Knowledge**: canonical source content, findings and groups in Postgres, with original files in object storage and rebuildable search indexes. First-party `knowledge_*` tools use accepted Agent learning policy: Automatic publishes, Review first stages a nonblocking revision, and Off disables agent writes. Search defaults to published records; explicit `view: "needs_review"` lets agents inspect and update pending entries and collections without approving them. Pending content is unapproved context, never behavioral authority. Reuse IDs/current versions instead of duplicating proposals on each scheduled run. Connected-source schedules run ordinary agents with frozen source selections; source fetching is an attempt-bound tool. Conversation history and temporary task notes remain separate. See `docs/knowledge.md`.
 
 ## Source Discovery Workflow
@@ -184,7 +184,7 @@ Before editing, identify which layer owns the behavior:
 - Sandbox resources: resource validation, manifest building, object storage, sandbox environment.
 - MCP tools: config parsing, runtime tool preparation, API MCP servers.
 - Scheduling: scheduled task contracts/routes/core domain helpers, Temporal schedule mapping, dispatch activity.
-- Event-triggered automation: automation contracts/routes/core adapter registry, FORCE-RLS source/event/run state, bounded Temporal dispatch, and the provider adapter or Pack layered above it.
+- Event-triggered automation: automation contracts/routes/core adapter registry, FORCE-RLS source/event/run state, bounded Temporal dispatch, and the provider adapter layered above it.
 - UI: `apps/web` API helpers/types/components.
 
 For pull-request delivery, preserve immutable candidates across a moving base:

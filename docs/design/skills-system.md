@@ -26,7 +26,7 @@ read-version pins or introduce remote preview as a prerequisite.
 - Unify portable Skills and preference-registry Skills. Two editing interfaces
   are fine; two independently writable versions of the same Skill are not.
 - Instructions remain always-on rules; Memory holds facts and outcomes;
-  Documents are evidence. Plugins and Packs compose/distribute capabilities,
+  Documents are evidence. Plugins compose/distribute capabilities,
   including Skills. None becomes another Skill store.
 - Provide a first-class Skills destination under Capabilities. Agent Knowledge
   may show authored/managed Skills from that same system.
@@ -84,10 +84,8 @@ Proposed behavior: an unmodified Skill can receive an authorized source update;
 a customized Skill retains its content and reports that an update is available.
 No automatic merge or new fork-management UI is required.
 
-Pack refreshes must obey the same protection. An update to a Skill must not
-accidentally repoint unrelated plugin facets or disrupt another owner's
-installation. Preserve existing ownership rather than treating a Pack as only
-a disposable source label.
+Plugin refreshes must obey the same protection. A Skill update must not
+repoint unrelated Plugin facets or disrupt another owner's installation.
 
 ## 3. Agent tools
 
@@ -238,15 +236,14 @@ exception. Keep historical rows and hashes immutable. Convert legacy active
 content through new valid revisions, preserving the body and using existing
 metadata where frontmatter is absent; existing valid frontmatter wins over
 conflicting database labels. Invalid or ambiguous inputs need explicit repair,
-not silent omission. Conversion, restore, inline/Pack compatibility, and
+not silent omission. Conversion, restore, inline configuration, and
 database projection consistency must be verified before this cutover ships.
 
-Stored inline/session, Pack, and automation read projections discard historical
+Stored inline/session and automation read projections discard historical
 name/description caches and derive them through the same strict file contract.
 This does not rewrite stored manifest bytes or digests, nor synthesize missing
 headers at runtime. New caller-supplied metadata must still match frontmatter.
-Malformed stored Packs report a repair error instead of disappearing from the
-catalog. Plain legacy inline content still needs explicit maintenance conversion;
+Plain legacy inline content still needs explicit maintenance conversion;
 the projection is not evidence that that rollout work is complete.
 
 ### Bundled guidance: one selector, individual inclusion rules
@@ -314,7 +311,7 @@ bundled Skills are selected; an empty index must not advertise a hidden
 management Skill. Learning Off does not itself disable Skill reading or imply
 that management guidance should disappear. Installed workspace Skills remain
 shared as agreed; restricting platform bundles is not a new per-agent ACL for
-authored, installed, repository, Pack, or inline session content.
+authored, installed, repository or inline session content.
 
 Compute backend does not determine whether packaged bytes can be read. Actual
 workflow requirements may still matter to a specific inclusion rule, but do not
@@ -375,7 +372,7 @@ file readback, and overflow/error checks. HTTP lifecycle and service-install
 Learning-mode tests have passed on PostgreSQL on intermediate branch heads;
 the integrated final head still requires re-verification. The typed public
 bundled selection and composite per-Skill outcome notices are implemented.
-Composite publication now waits for enclosing Pack/Plugin ownership finalization;
+Composite publication now waits for enclosing Plugin ownership finalization;
 the latest integrated PostgreSQL run remains a release gate.
 
 Current main has been merged and the unpublished Skill migration renumbered to
@@ -396,14 +393,13 @@ remain exact, and duplicate frontmatter names still require that override.
 Frontmatter migration uses the shared YAML parser, preserves valid YAML bytes,
 and derives database descriptor columns from those files. Current legacy
 configuration is archived before conversion; archives are runtime-inaccessible
-and follow workspace deletion. Historical Pack snapshots remain exact audit
-JSON, not revalidated or normalized as new execution input. Expired legacy
+and follow workspace deletion. Expired legacy
 Skills must remain absent from the active index after migration. Real-PostgreSQL
 tests cover these migration boundaries; the latest assertions remain a rollout
 gate until executed on the integrated head. See `docs/skills-lifecycle.md`.
 
 The catalog now has cursor-based metadata pagination end to end. Source-removal
-receipts are surfaced by Skill, Pack, and Plugin API responses and UI messages;
+receipts are surfaced by Skill and Plugin API responses and UI messages;
 customized guidance remaining active is distinguished from deactivation.
 Worker install retries consult their original-request receipt before remote
 source resolution. Startup contribution accounting now uses the actual bounded
@@ -478,7 +474,7 @@ internal work tracking is maintained separately.
 4. **Search and install.** Integrate a real discovery provider, pin source bytes
    server-side and install through the same governance. Verify discovery versus
    URL resolution, unsupported-file errors, source failures, duplicate names,
-   mode behavior, and protection of customized/Pack-owned Skills.
+   mode behavior, and protection of customized or Plugin-owned Skills.
 5. **Checkout and publish.** Materialize only on demand; publish directories
    through the same revision service. Verify round trips, explicit deletions,
    safe paths, no symlink escape, unchanged-file preservation and stale edits.

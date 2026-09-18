@@ -25,7 +25,7 @@ import {
   type TestServices,
 } from "@opengeni/testing";
 import { createRigVerificationActivities } from "../../apps/worker/src/activities/rig-verification";
-import { settingsWithRigImage } from "../../apps/worker/src/activities/packs";
+import { settingsWithRigImage } from "../../apps/worker/src/activities/sandbox-images";
 import type { ActivityServices } from "../../apps/worker/src/activities/types";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;

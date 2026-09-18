@@ -320,7 +320,6 @@ export {
   type EffectiveSkillSelection,
   type InstalledSkillActivation,
   type NativeToolSkillSet,
-  type PackSkillActivation,
   type RuntimeSkillActivation,
   type RuntimeSkillArtifact,
   type RuntimeSkillArtifactFile,
@@ -2008,12 +2007,7 @@ export type BuildAgentOptions = {
   // timeline message. Omitted ⇒ the composed instructions are byte-identical to
   // a workspace-only persona.
   sessionInstructions?: string;
-  /**
-   * Exact Skill activations admitted for this turn. Optional/domain Skills
-   * enter only through an explicit installation, Pack owner, or session
-   * selection; native tool-bound Skills are derived separately from the exact
-   * executable tool catalog.
-   */
+
   skillActivations?: readonly RuntimeSkillActivation[];
   /** Host-owned descriptors and reader; mutually exclusive with skillActivations. */
   skillCatalog?: readonly SkillCatalogDescriptor[];
@@ -4162,7 +4156,7 @@ export async function prepareAgentTools(
         //    reject the bearer at the initialize/tools-list handshake, so a 401/403
         //    (or a missing/failed token) drops the server.
         //  - an optional ToolRef: either an auto-attached workspace-default
-        //    capability MCP or a client/pack-selected portable ref. A
+
         //    broken/expired credential or unavailable endpoint skips the server
         //    with a warning, never killing the turn before the model runs. Bare
         //    refs stay strict (below), preserving the fail-loud default.
@@ -8752,7 +8746,7 @@ export function buildManifest(
   }
   // No extraPathGrants here: remote sandbox clients (Modal) reject manifests
   // that carry them at create/apply time, which broke every Modal session.
-  // Pack, selected-library, session, and artifact skills are represented by
+
   // sandbox-safe in-memory or staged local-dir sources, so no host path grant
   // is required here.
   return new Manifest({

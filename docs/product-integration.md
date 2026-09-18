@@ -23,17 +23,10 @@ value. Personal workspaces are excluded from this service-provisioning model.
 The separate verified `asUser` lane can access its own provisioned Personal
 workspace; an unscoped service key cannot. See the external-user section below.
 
-The built-in `opengeni-product-integration` Pack is guidance for the coding
-session that builds this integration, not for the resulting product chatbot.
-Its Skill is session-selected: installation alone does not add it to any agent.
-Use **Start with Pack** in the web console, or create the implementation session
-with the reviewed Skill component ID in `installedSkillIds`. Never include that
-ID in customer-facing session creation.
-The Pack content is generated from `.agents/skills/opengeni-client`, with only
-an explicit install-name/description/activation wrapper. After editing the
-developer guide, run `bun scripts/sync-product-integration-skill.ts`; use
-`bun run check:product-integration-skill` to detect drift. Published runtime
-packages contain the generated content and do not read repository Markdown.
+The repository Skill `.agents/skills/opengeni-client` guides the coding agent
+that builds this integration, not the resulting product chatbot. Use it in the
+implementation session; never attach implementation guidance to customer-facing
+runtime sessions. The product continues to own its own session Skill catalog.
 When a create uses an idempotency key, its ordered `installedSkillIds`
 selection is immutable: a retry may repeat it exactly, but changing or removing
 the selection conflicts instead of replaying a differently configured session.
@@ -398,9 +391,9 @@ operation.
 ## Skills are external product data
 
 Ordinary OpenGeni sessions include the `builtin:opengeni-help` descriptor by
-default. Its guide can be read without a sandbox or Pack installation and points
+default. Its guide can be read without a sandbox and points
 to the official documentation at https://docs.opengeni.ai/llms.txt. It covers
-product questions; the larger implementation Pack remains session-selected.
+product questions. Use the repository opengeni-client Skill for implementation work.
 
 Control OpenGeni's bundled guidance separately from your product Skills with
 `CreateSessionRequest.bundledSkillIds`. Omit it for the default bundles; pass
@@ -460,7 +453,7 @@ sessions. The external backend remains the source of truth and passes the exact
 selected Skills inline per product-created session.
 
 Do not confuse inline session Skills with workspace `agentInstructions`,
-session `instructions`, instruction policies, preference descriptors, Packs,
+session `instructions`, instruction policies, preference descriptors,
 or MCP tools. Those have separate authority and lifecycle contracts.
 
 ## Product context and tools

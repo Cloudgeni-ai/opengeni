@@ -319,7 +319,7 @@ describe("compact session view on the live local workspace route (API fixture)",
       if (path.endsWith("/model-catalog") || path.endsWith("/models")) return json({ models: [] });
       if (path.endsWith("/capabilities")) return json({ items: [], installations: [] });
       if (path.endsWith("/skills")) return json({ skills: [] });
-      if (path.endsWith("/packs")) return json({ packs: [], installations: [] });
+
       if (path.endsWith("/connections")) return json({ connections: [] });
       if (path.endsWith("/integrations")) return json({ integrations: [] });
       if (path.endsWith("/connection-authorities")) return json({ authorities: [] });

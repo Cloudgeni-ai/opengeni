@@ -715,7 +715,7 @@ describe("API Integration persistence", () => {
     });
   }, 60_000);
 
-  test("binds an exact workspace Connection and preserves Pack-owned runtime components", async () => {
+  test("binds an exact workspace Connection and preserves independently owned runtime components", async () => {
     if (!available || !client || !shared) return;
     const wrongKindConnection = await createConnection(client.db, {
       accountId: first.accountId,
@@ -761,16 +761,16 @@ describe("API Integration persistence", () => {
         (account_id, workspace_id, facet_installation_id, owner_kind, owner_id, removable)
       values
         (${first.accountId}, ${first.workspaceId}, ${installed.integrationFacetInstallationId},
-         'pack', 'pack:inventory-operations', false),
+         'migration', 'inventory-operations', false),
         (${first.accountId}, ${first.workspaceId}, ${installed.apiFacetInstallationId},
-         'pack', 'pack:inventory-operations', false)
+         'migration', 'inventory-operations', false)
     `;
     await shared.admin`
       insert into integration_facet_binding_owners
         (account_id, workspace_id, binding_id, owner_kind, owner_id, removable)
       values
         (${first.accountId}, ${first.workspaceId}, ${installed.instanceId},
-         'pack', 'pack:inventory-operations', false)
+         'migration', 'inventory-operations', false)
     `;
     const preview = await getApiIntegrationUninstallPreview(
       client.db,
@@ -782,7 +782,7 @@ describe("API Integration persistence", () => {
     expect(preview).toMatchObject({
       removesRuntimeIntegration: false,
       removesDefinition: false,
-      remainingOwners: [{ kind: "pack", id: "pack:inventory-operations", removable: false }],
+      remainingOwners: [{ kind: "migration", id: "inventory-operations", removable: false }],
     });
     expect(
       await uninstallApiIntegration(client.db, {
@@ -798,7 +798,7 @@ describe("API Integration persistence", () => {
       capabilityId: input.capabilityId,
       instanceKey: installed.instanceKey,
       status: "retained_by_other_owners",
-      remainingOwners: [{ kind: "pack", id: "pack:inventory-operations", removable: false }],
+      remainingOwners: [{ kind: "migration", id: "inventory-operations", removable: false }],
       definitionStatus: "retained",
     });
     expect(await listInstalledApiIntegrations(client.db, first.workspaceId)).toHaveLength(1);
