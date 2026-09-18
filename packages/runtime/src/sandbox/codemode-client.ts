@@ -119,6 +119,7 @@ if (crypto.createHash('sha256').update(JSON.stringify({version: 1, files})).dige
       "Managed Codemode client delivery requires sandbox file ingress; update the sandbox provider adapter",
     );
   const stage = `/workspace/.opengeni/codemode-clients/stage-${randomUUID()}.json`;
+  let installationFailure: { error: unknown } | undefined;
   try {
     await editor.createFile({
       type: "create_file",
@@ -144,9 +145,38 @@ for (const name of ['package.json', 'ogtool', 'client.mjs']) {
         "Managed Codemode client delivery failed; verify Node and sandbox file ingress, then retry with the same worker release",
       );
     }
-  } finally {
-    await editor.deleteFile({ type: "delete_file", path: stage }).catch(() => {});
+  } catch (error) {
+    installationFailure = { error };
   }
+  let cleanupFailure: Error | undefined;
+  try {
+    await editor.deleteFile({ type: "delete_file", path: stage });
+  } catch (editorFailure) {
+    // A provider can support ingress but lose its delete reply. Remove only
+    // this exact attempt's staging file, through the same command fence.
+    try {
+      const cleanup = await run(
+        `node -e ${quote(`require('node:fs').rmSync(${JSON.stringify(stage)}, {force: true})`)}`,
+      );
+      if (sandboxCommandExitCode(cleanup) !== 0) {
+        throw new Error("Staging file removal failed", { cause: editorFailure });
+      }
+    } catch (commandFailure) {
+      cleanupFailure = new AggregateError(
+        [editorFailure, commandFailure],
+        "Both cleanup paths failed",
+        { cause: commandFailure },
+      );
+    }
+  }
+  if (cleanupFailure) {
+    throw new AggregateError(
+      installationFailure ? [installationFailure.error, cleanupFailure] : [cleanupFailure],
+      "Managed Codemode client staging cleanup failed; restore sandbox file ingress/command execution before retrying",
+      { cause: installationFailure?.error ?? cleanupFailure },
+    );
+  }
+  if (installationFailure) throw installationFailure.error;
 }
 
 export function managedCodemodeClientEnvironment(directory: string): string[] {

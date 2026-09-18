@@ -30,14 +30,16 @@ async function shell(cmd: string, environment: Record<string, string> = {}) {
   return { stdout, stderr, exitCode };
 }
 
-function fileSession(corrupt = false) {
+function fileSession(corrupt = false, failDelete = false, staged: string[] = []) {
   return {
     createEditor: () => ({
       createFile: async ({ path, diff }: { path: string; diff: string }) => {
+        staged.push(path);
         await mkdir(dirname(path), { recursive: true });
         await writeFile(path, diff.slice(1) + (corrupt ? "corrupt" : "\n"));
       },
       deleteFile: async ({ path }: { path: string }) => {
+        if (failDelete) throw new Error("provider delete unavailable");
         await rm(path, { force: true });
       },
     }),
@@ -107,6 +109,36 @@ describe("managed release-owned Codemode delivery", () => {
     await expect(
       installManagedCodemodeClient(fileSession(true) as never, client, shell),
     ).rejects.toThrow("delivery failed");
+  });
+
+  test("cleans the exact ingress file through the command fence when editor deletion fails", async () => {
+    const client: ManagedCodemodeClient = {
+      version: 1,
+      files: {
+        ogtool: "#!/usr/bin/env node\nconsole.log('cleanup-test');\n",
+        "client.mjs": "export const release = 'cleanup';\n",
+        "package.json": '{"type":"commonjs"}\n',
+      },
+    };
+    const directory = managedCodemodeClientDirectory(client);
+    const staged: string[] = [];
+    try {
+      await installManagedCodemodeClient(fileSession(false, true, staged) as never, client, shell);
+      expect(staged).toHaveLength(1);
+      expect(await Bun.file(staged[0]!).exists()).toBe(false);
+      await rm(directory, { recursive: true, force: true });
+      await expect(
+        installManagedCodemodeClient(
+          fileSession(false, true, staged) as never,
+          client,
+          async (cmd) => (cmd.includes("rmSync") ? { exitCode: 1 } : await shell(cmd)),
+        ),
+      ).rejects.toThrow("staging cleanup failed");
+      expect(staged).toHaveLength(2);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      for (const path of staged) await rm(path, { force: true });
+    }
   });
 
   test("release bundle accepts canonical catalog, rejects legacy/tampered digests, and uses the same authorized journal", async () => {

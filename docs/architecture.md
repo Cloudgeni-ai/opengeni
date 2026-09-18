@@ -1158,15 +1158,7 @@ before a catalog can be published. In-process local model tools
 bind only to the final combined local-plus-MCP attempt environment used by
 Codemode, never to a provisional local-only gateway.
 
-Managed sandbox client delivery is owned by
-`packages/runtime/src/sandbox/codemode-client.ts`. Worker and published runtime
-builds bundle the CLI and ESM client from the same source release. Managed setup
-verifies and installs those bytes at immutable content-addressed paths; each exec
-selects its release through `PATH` and `OPENGENI_CODEMODE_CLIENT_MODULE`, without
-mutating warm manifests or replacing sandboxes. Connected Machines retain their
-connection-bound native client. This delivery never changes catalog hashing,
-authorization, or the journal. Rollout requires the matching worker/runtime
-artifact; rebuilding desktop images alone cannot update existing warm boxes.
+Managed-client delivery: `packages/runtime/src/sandbox/codemode-client.ts`.
 
 Codemode adds only attempt scope, active-attempt fencing, its durable operation
 journal, sandbox delivery, and recovery semantics. Input and authorization
