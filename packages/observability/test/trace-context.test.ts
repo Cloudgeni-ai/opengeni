@@ -1,5 +1,106 @@
 import { expect, test } from "bun:test";
 import { createObservability, withTraceContext, parseTraceparent, traceparent } from "../src";
+import { validTraceContext } from "../src/trace-context";
+
+test("trace identities reject accessors, prototypes, coercion and hostile descriptor traps", async () => {
+  const traceId = "a".repeat(32);
+  const spanId = "b".repeat(16);
+  let unsafeCalls = 0;
+  const unsafe = () => {
+    unsafeCalls++;
+    return "SECRET_GETTER";
+  };
+  const inputs = [
+    {
+      get traceId() {
+        return unsafe();
+      },
+      spanId,
+    },
+    {
+      traceId,
+      get spanId() {
+        return unsafe();
+      },
+    },
+    Object.create({ traceId, spanId }),
+    {
+      traceId: {
+        toString: () => {
+          unsafeCalls++;
+          return traceId;
+        },
+        toJSON: unsafe,
+      },
+      spanId,
+    },
+    { traceId, spanId: new String(spanId) },
+    new Proxy(
+      {},
+      {
+        getOwnPropertyDescriptor() {
+          throw new Error("SECRET_TRAP");
+        },
+      },
+    ),
+    { traceId: "0".repeat(32), spanId },
+  ];
+  const bodies: unknown[] = [];
+  const obs = createObservability(
+    {
+      serviceName: "test",
+      environment: "test",
+      observabilityStructuredLogs: true,
+      observabilityMetricsEnabled: false,
+      observabilityOtlpHeaders: "",
+      observabilityOtlpEndpoint: "http://collector",
+    },
+    {
+      component: "api",
+      exporter: async (_url, body) => {
+        bodies.push(body);
+      },
+    },
+  );
+  for (const input of inputs) {
+    expect(validTraceContext(input)).toBeUndefined();
+    const span = obs.startSpan("hostile", {}, { parent: input, links: [input] });
+    span.addLink?.(input);
+    expect(span.traceId).not.toBe(traceId);
+    withTraceContext(input, () => expect(obs.startSpan("isolated").traceId).not.toBe(traceId));
+    span.end();
+  }
+  const valid = { traceId, spanId, toJSON: unsafe };
+  const snapshot = validTraceContext(valid);
+  valid.traceId = "SECRET_MUTATION";
+  expect(snapshot).toEqual({ traceId, spanId });
+  withTraceContext(
+    {
+      traceId,
+      spanId,
+      get addLink() {
+        unsafe();
+        return undefined;
+      },
+    },
+    () => {
+      expect(obs.startSpan("safe-scope").traceId).toBe(traceId);
+    },
+  );
+  const safe = obs.startSpan("safe", {}, { links: [snapshot!] });
+  safe.addLink?.({ traceId, spanId });
+  safe.end();
+  await obs.flush();
+  expect(unsafeCalls).toBe(0);
+  expect(JSON.stringify(bodies)).not.toContain("SECRET");
+  const spans = (bodies as any[]).flatMap((body) =>
+    body.resourceSpans.flatMap((r: any) => r.scopeSpans[0].spans),
+  );
+  expect(
+    spans.filter((s) => s.name === "hostile").every((s) => !s.parentSpanId && s.links.length === 0),
+  ).toBe(true);
+  expect(spans.find((s) => s.name === "safe").links).toEqual([{ traceId, spanId }]);
+});
 
 test("interleaved async operations export exact parent identity without cross-request inheritance", async () => {
   const bodies: any[] = [];

@@ -6,11 +6,24 @@ export type TraceContext = { traceId: string; spanId: string };
 type ActiveContext = TraceContext & { addLink?: ((link: TraceContext) => void) | undefined };
 const storage = new AsyncLocalStorage<ActiveContext | undefined>();
 
-export function validTraceContext(value: TraceContext | undefined): TraceContext | undefined {
-  if (!value) return undefined;
-  if (!/^[0-9a-f]{32}$/.test(value.traceId) || /^0+$/.test(value.traceId)) return undefined;
-  if (!/^[0-9a-f]{16}$/.test(value.spanId) || /^0+$/.test(value.spanId)) return undefined;
-  return { traceId: value.traceId, spanId: value.spanId };
+function ownData(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function validTraceContext(value: unknown): TraceContext | undefined {
+  // Snapshot primitive own data once. Never invoke getters, coercion or toJSON.
+  const traceId = ownData(value, "traceId");
+  const spanId = ownData(value, "spanId");
+  if (typeof traceId !== "string" || typeof spanId !== "string") return undefined;
+  if (!/^[0-9a-f]{32}$/.test(traceId) || /^0+$/.test(traceId)) return undefined;
+  if (!/^[0-9a-f]{16}$/.test(spanId) || /^0+$/.test(spanId)) return undefined;
+  return { traceId, spanId };
 }
 
 export function currentTraceContext(): TraceContext | undefined {
@@ -20,12 +33,25 @@ export function currentTraceContext(): TraceContext | undefined {
 /** Scoped run, never enterWith: interleaved requests cannot inherit each other's spans. */
 export function withTraceContext<T>(context: ActiveContext | undefined, run: () => T): T {
   const valid = validTraceContext(context);
-  return storage.run(valid ? { ...valid, addLink: context?.addLink } : undefined, run);
+  const addLink = ownData(context, "addLink");
+  return storage.run(
+    valid
+      ? {
+          ...valid,
+          addLink:
+            typeof addLink === "function" ? (addLink as ActiveContext["addLink"]) : undefined,
+        }
+      : undefined,
+    run,
+  );
 }
 
 /** Stable identity of an actually emitted admission anchor, not session ancestry. */
 export function admissionTraceContext(eventId: string): TraceContext | undefined {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(eventId))
+  if (
+    typeof eventId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(eventId)
+  )
     return undefined;
   const digest = createHash("sha256")
     .update("opengeni:accepted-event-trace:v1\0")
@@ -41,6 +67,7 @@ export function linkCurrentSpanToAdmission(eventId: string): void {
 
 /** Remote context must be admitted by the caller's trust boundary before use. */
 export function parseTraceparent(value: string | undefined): TraceContext | undefined {
+  if (typeof value !== "string") return undefined;
   const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/.exec(value ?? "");
   return match ? validTraceContext({ traceId: match[1]!, spanId: match[2]! }) : undefined;
 }
