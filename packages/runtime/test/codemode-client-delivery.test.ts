@@ -1,5 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { mkdtempSync } from "node:fs";
 import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -9,12 +10,29 @@ import {
   AttemptToolCatalogIntegrityError,
 } from "@opengeni/codemode";
 import {
-  installManagedCodemodeClient,
-  managedCodemodeClientDirectory,
+  installManagedCodemodeClient as installReleaseClient,
+  managedCodemodeClientDirectory as releaseClientDirectory,
   managedCodemodeClientEnvironment,
   type ManagedCodemodeClient,
 } from "../src/sandbox/codemode-client";
 import { withCodemodeTokenEnvironment } from "../src/sandbox/codemode-token";
+
+// Emulate the managed workspace beneath a private host directory. CI runners
+// are intentionally unprivileged and must never need to create /workspace.
+const sandboxRoot = mkdtempSync(resolve(tmpdir(), "opengeni-codemode-delivery-"));
+afterAll(async () => {
+  await rm(sandboxRoot, { recursive: true, force: true });
+});
+function managedCodemodeClientDirectory(client: ManagedCodemodeClient): string {
+  return releaseClientDirectory(client, sandboxRoot);
+}
+async function installManagedCodemodeClient(
+  session: Parameters<typeof installReleaseClient>[0],
+  client: ManagedCodemodeClient,
+  run: Parameters<typeof installReleaseClient>[2],
+): Promise<void> {
+  await installReleaseClient(session, client, run, undefined, sandboxRoot);
+}
 
 async function shell(cmd: string, environment: Record<string, string> = {}) {
   const child = Bun.spawn(["sh", "-c", cmd], {
@@ -62,6 +80,10 @@ describe("managed release-owned Codemode delivery", () => {
     };
     const one = managedCodemodeClientDirectory(first);
     const two = managedCodemodeClientDirectory(second);
+    expect(releaseClientDirectory(first)).toMatch(
+      /^\/workspace\/\.opengeni\/codemode-clients\/[a-f0-9]{64}$/,
+    );
+    expect(one.startsWith(`${sandboxRoot}/`)).toBe(true);
     try {
       await installManagedCodemodeClient(fileSession() as never, first, shell);
       // A valid warm copy needs no file ingress.

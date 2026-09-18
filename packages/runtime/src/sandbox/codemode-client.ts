@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SandboxSessionLike } from "@openai/agents/sandbox";
 import { sandboxCommandExitCode } from "./command-result";
@@ -15,8 +15,18 @@ export function managedCodemodeClientDigest(client: ManagedCodemodeClient): stri
   return createHash("sha256").update(JSON.stringify(client)).digest("hex");
 }
 
-export function managedCodemodeClientDirectory(client: ManagedCodemodeClient): string {
-  return `/workspace/.opengeni/codemode-clients/${managedCodemodeClientDigest(client)}`;
+export function managedCodemodeClientDirectory(
+  client: ManagedCodemodeClient,
+  workspaceRoot = "/workspace",
+): string {
+  if (!posix.isAbsolute(workspaceRoot) || workspaceRoot.includes("\0")) {
+    throw new Error("Managed Codemode client workspace root must be absolute");
+  }
+  return posix.join(
+    workspaceRoot,
+    ".opengeni/codemode-clients",
+    managedCodemodeClientDigest(client),
+  );
 }
 
 export async function buildManagedCodemodeClient(root: string): Promise<ManagedCodemodeClient> {
@@ -98,8 +108,9 @@ export async function installManagedCodemodeClient(
   client: ManagedCodemodeClient,
   run: (cmd: string) => Promise<unknown>,
   runAs?: string,
+  workspaceRoot = "/workspace",
 ): Promise<void> {
-  const directory = managedCodemodeClientDirectory(client);
+  const directory = managedCodemodeClientDirectory(client, workspaceRoot);
   const digest = managedCodemodeClientDigest(client);
   const verify = `
 const fs = require('node:fs'), crypto = require('node:crypto');
@@ -118,7 +129,7 @@ if (crypto.createHash('sha256').update(JSON.stringify({version: 1, files})).dige
     throw new Error(
       "Managed Codemode client delivery requires sandbox file ingress; update the sandbox provider adapter",
     );
-  const stage = `/workspace/.opengeni/codemode-clients/stage-${randomUUID()}.json`;
+  const stage = `${posix.dirname(directory)}/stage-${randomUUID()}.json`;
   let installationFailure: { error: unknown } | undefined;
   try {
     await editor.createFile({
