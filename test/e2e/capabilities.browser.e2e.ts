@@ -110,10 +110,9 @@ describe("capabilities browser e2e", () => {
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
-      await page.getByRole("tab", { name: "Connections", exact: true }).click();
 
       const browseOpener = await openBrowseSheet(page);
-      await page.getByRole("dialog").getByRole("button", { name: "Add to workspace" }).click();
+      await page.getByRole("dialog").getByRole("button", { name: "Enable" }).click();
 
       const enabledControl = page.locator(
         `[data-capability-focus-target][data-capability-id="${capabilityId}"]`,
@@ -135,7 +134,7 @@ describe("capabilities browser e2e", () => {
     }
   }, 60_000);
 
-  test("dark Enable action preserves WCAG AA text contrast", async () => {
+  test("default-dark Enable action preserves WCAG AA text contrast", async () => {
     const state: CapabilityState = { enabled: false, failNextEnable: false, enableCalls: 0 };
     const context = await browser.newContext({
       viewport: { width: 1440, height: 900 },
@@ -146,13 +145,12 @@ describe("capabilities browser e2e", () => {
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
-      await page.getByRole("tab", { name: "Connections", exact: true }).click();
 
-      await setTheme(page, "dark");
+      expect(
+        await page.evaluate(() => document.documentElement.hasAttribute("data-og-theme")),
+      ).toBe(false);
       await openBrowseSheet(page);
-      await expectVisible(
-        page.getByRole("dialog").getByRole("button", { name: "Add to workspace" }),
-      );
+      await expectVisible(page.getByRole("dialog").getByRole("button", { name: "Enable" }));
 
       const axe = await new AxeBuilder({ page })
         .include('[role="dialog"]')
@@ -177,7 +175,6 @@ describe("capabilities browser e2e", () => {
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
-      await page.getByRole("tab", { name: "Connections", exact: true }).click();
 
       const escapeOpener = await openBrowseSheet(page);
       await page.keyboard.press("Escape");
@@ -186,7 +183,7 @@ describe("capabilities browser e2e", () => {
 
       const errorOpener = await openBrowseSheet(page);
       state.failNextEnable = true;
-      await page.getByRole("dialog").getByRole("button", { name: "Add to workspace" }).click();
+      await page.getByRole("dialog").getByRole("button", { name: "Enable" }).click();
       await expectText(page.getByRole("dialog"), "simulated enable failure");
       expect(await page.getByRole("dialog").isVisible()).toBe(true);
 
@@ -218,7 +215,6 @@ describe("capabilities browser e2e", () => {
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
-      await page.getByRole("tab", { name: "Connections", exact: true }).click();
 
       const enabledControl = page.locator(
         `[data-capability-focus-target][data-capability-id="${capabilityId}"]`,
@@ -262,7 +258,6 @@ describe("capabilities browser e2e", () => {
         await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
           waitUntil: "networkidle",
         });
-        await page.getByRole("tab", { name: "Connections", exact: true }).click();
 
         for (const theme of ["light", "dark"] as const) {
           await setTheme(page, theme);
@@ -289,7 +284,6 @@ describe("capabilities browser e2e", () => {
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
-      await page.getByRole("tab", { name: "Connections", exact: true }).click();
       const search = page.getByLabel("Search all plugins");
       const apps = page.locator("[data-integration-list] [data-integration-row]");
       const appCount = await apps.count();
@@ -330,7 +324,6 @@ describe("capabilities browser e2e", () => {
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
-      await page.getByRole("tab", { name: "Connections", exact: true }).click();
 
       const tile = page.locator(`[data-capability-catalog-tile="${capabilityId}"]`);
       await expectVisible(tile);
@@ -409,7 +402,6 @@ describe("capabilities browser e2e", () => {
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
-      await page.getByRole("tab", { name: "Connections", exact: true }).click();
       expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
       expect(
         await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches),
@@ -478,7 +470,6 @@ describe("capabilities browser e2e", () => {
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
-      await page.getByRole("tab", { name: "Connections", exact: true }).click();
 
       const tiles = page.locator("[data-capability-catalog-tile]");
       expect(await tiles.count()).toBe(48);
@@ -514,7 +505,6 @@ describe("capabilities browser e2e", () => {
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
-      await page.getByRole("tab", { name: "Connections", exact: true }).click();
 
       const tiles = page.locator("[data-capability-catalog-tile]");
       expect(await tiles.count()).toBe(48);
@@ -564,7 +554,6 @@ describe("capabilities browser e2e", () => {
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
-      await page.getByRole("tab", { name: "Connections", exact: true }).click();
 
       const tiles = page.locator("[data-capability-catalog-tile]");
       expect(await tiles.count()).toBe(48);
@@ -614,7 +603,6 @@ describe("capabilities browser e2e", () => {
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
-      await page.getByRole("tab", { name: "Connections", exact: true }).click();
 
       // One Google Drive row folds every account in: the primary knowledge
       // connection plus each named Drive account (its own tool namespace).
@@ -708,7 +696,6 @@ describe("capabilities browser e2e", () => {
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
-      await page.getByRole("tab", { name: "Connections", exact: true }).click();
       await setTheme(page, "light");
       await openMobbinSheet(page, false);
       await expectText(
@@ -756,7 +743,6 @@ describe("capabilities browser e2e", () => {
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
-      await page.getByRole("tab", { name: "Connections", exact: true }).click();
       await setTheme(page, "dark");
       await openMobbinSheet(page, true);
       await expectText(page.getByRole("dialog"), "Personal connection to mobbin.com");
@@ -782,7 +768,6 @@ describe("capabilities browser e2e", () => {
       await mobilePage.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
-      await mobilePage.getByRole("tab", { name: "Connections", exact: true }).click();
       await setTheme(mobilePage, "dark");
       await expectText(mobilePage.getByRole("region", { name: "Plugins" }), "Needs attention");
       await openMobbinSheet(mobilePage, true);
@@ -950,14 +935,6 @@ async function installCapabilityApi(
         body: JSON.stringify(body),
       });
 
-    if (url.pathname.endsWith("/capabilities/discovery/plugins"))
-      return json({ items: [], total: 0, nextOffset: null });
-    if (url.pathname.endsWith("/skills/search")) return json({ items: [], nextCursor: null });
-    if (url.pathname.endsWith("/model-catalog")) return json({ models: [] });
-    if (url.pathname.endsWith("/pr-review/registrations"))
-      return json({ registrations: [], repositories: [] });
-    if (url.pathname.endsWith("/pr-review/github"))
-      return json({ status: "unavailable", installations: [], missing: [] });
     if (url.pathname === "/v1/config/client") {
       return json({
         deploymentRevision: "browser-focus-test",
@@ -1086,7 +1063,6 @@ async function installCapabilityApi(
         binding: state.binding,
       });
     }
-
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) {
       return json([]);
     }
@@ -1168,14 +1144,6 @@ async function installLargeCatalogApi(
         body: JSON.stringify(body),
       });
 
-    if (url.pathname.endsWith("/capabilities/discovery/plugins"))
-      return json({ items: [], total: 0, nextOffset: null });
-    if (url.pathname.endsWith("/skills/search")) return json({ items: [], nextCursor: null });
-    if (url.pathname.endsWith("/model-catalog")) return json({ models: [] });
-    if (url.pathname.endsWith("/pr-review/registrations"))
-      return json({ registrations: [], repositories: [] });
-    if (url.pathname.endsWith("/pr-review/github"))
-      return json({ status: "unavailable", installations: [], missing: [] });
     if (url.pathname === "/v1/config/client") {
       return json({
         deploymentRevision: "large-catalog-browser-test",
@@ -1245,7 +1213,6 @@ async function installLargeCatalogApi(
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
       return json({ plugins: [] });
     }
-
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {
@@ -1289,14 +1256,6 @@ async function installWorkspaceCatalogApi(
         body: JSON.stringify(body),
       });
 
-    if (url.pathname.endsWith("/capabilities/discovery/plugins"))
-      return json({ items: [], total: 0, nextOffset: null });
-    if (url.pathname.endsWith("/skills/search")) return json({ items: [], nextCursor: null });
-    if (url.pathname.endsWith("/model-catalog")) return json({ models: [] });
-    if (url.pathname.endsWith("/pr-review/registrations"))
-      return json({ registrations: [], repositories: [] });
-    if (url.pathname.endsWith("/pr-review/github"))
-      return json({ status: "unavailable", installations: [], missing: [] });
     if (url.pathname === "/v1/config/client") {
       return json({
         deploymentRevision: "workspace-catalog-browser-test",

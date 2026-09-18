@@ -19,7 +19,7 @@ automation routes cannot mutate review-owned sources or triggers. The API contra
 revision changes; deploy matching server and client versions together.
 
 Migration 0482 is a destructive maintenance cutover: drain all API and worker
-database clients, settle capability operations and queued Pack automation work,
+database clients, settle Pack-related operations and queued Pack automation work,
 then apply migrations and provision roles before starting only matching binaries.
 It removes Pack data without a compatibility layer or data-preservation migration.
 Customized, shared, and re-scoped Skills, Connections, and session history are

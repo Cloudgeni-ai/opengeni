@@ -68,7 +68,7 @@ test("Integration Facets are the only production sub-capability authority", () =
   );
 
   expect(contracts).toContain("IntegrationInstanceFacetsResponse");
-  expect(contracts).toContain('kind: z.literal("facet")');
+  expect(contracts).toContain("IntegrationFacetBindingSummary");
   expect(schema).toContain('"integration_facet_definitions"');
   expect(schema).toContain('"integration_facet_bindings"');
   expect(schema).toContain('"integration_facet_binding_owners"');

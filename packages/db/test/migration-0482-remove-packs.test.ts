@@ -12,6 +12,8 @@ import {
   createPrReviewRepositoryBinding,
   createAutomationSource,
   createAutomationTrigger,
+  createAutomationRun,
+  recordAutomationEvent,
 } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
@@ -122,6 +124,65 @@ test("removes Packs under a non-bypass owner while preserving independent Skill 
         status: "active",
       },
     });
+    const seedRun = async (sourceId: string, triggerId: string, adapterId: string) => {
+      const occurrenceKey = crypto.randomUUID();
+      const event = await recordAutomationEvent(client!.db, {
+        ...tenant,
+        sourceId,
+        sourceVersion: 1,
+        sourceConfiguration: {},
+        matchedTriggerRevisions: [{ triggerId, revision: 1 }],
+        deliveryKey: crypto.randomUUID(),
+        requestDigest: "b".repeat(64),
+        normalizedEvent: {
+          adapterId,
+          eventType: "build.failed",
+          occurrenceKey,
+          occurredAt: null,
+          subject: null,
+          resource: null,
+          payload: {},
+        },
+      });
+      const run = await createAutomationRun(client!.db, {
+        ...tenant,
+        sourceId,
+        triggerId,
+        triggerRevision: 1,
+        eventId: event.event.id,
+        occurrenceKey,
+        acceptedExecution: {
+          version: 1,
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sourceId,
+          sourceVersion: 1,
+          triggerId,
+          triggerRevision: 1,
+          eventId: event.event.id,
+          adapterId,
+          occurrenceKey,
+          initialMessage: "Review",
+          sessionTemplate,
+          serviceSubjectId: `automation:${triggerId}`,
+          serviceLabel: "Test automation",
+          provenance: {},
+        },
+      });
+      return { eventId: event.event.id, runId: run.run.id };
+    };
+    const removedRun = await seedRun(ordinary.id, ordinaryTrigger.id, ordinary.adapterId);
+    const retainedRun = await seedRun(
+      registration.sourceId,
+      repository.triggerId,
+      "source-control.pull-request.v1",
+    );
+    await fixture.admin`UPDATE automation_runs SET status='dispatched' WHERE id=${retainedRun.runId}`;
+    const retainedRunBefore =
+      await fixture.admin`SELECT row_to_json(r) AS value FROM automation_runs r WHERE id=${retainedRun.runId}`;
+    const [independentOperation] = await fixture.admin`INSERT INTO capability_operations
+      (account_id,workspace_id,idempotency_key,request_digest,kind,target_kind,target_id,created_by_subject_id)
+      VALUES(${grant.accountId},${grant.workspaceId},${crypto.randomUUID()},${"c".repeat(64)},'install','plugin','independent-plugin',${grant.subjectId}) RETURNING id`;
     // Historical ownership is seeded with SQL, never resurrected as runtime APIs.
     const manifest = { id: "removed-test-pack", name: "Removed test pack" };
     await fixture.admin`INSERT INTO workspace_packs(account_id,workspace_id,pack_id,manifest)
@@ -224,6 +285,13 @@ test("removes Packs under a non-bypass owner while preserving independent Skill 
     ).toHaveLength(1);
     await client.close();
     client = undefined;
+    await expect(
+      migrate(fixture.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] }),
+    ).rejects.toThrow("Settle Pack automation runs");
+    expect(
+      await fixture.admin`SELECT id FROM automation_runs WHERE id=${removedRun.runId}`,
+    ).toHaveLength(1);
+    await fixture.admin`UPDATE automation_runs SET status='failed' WHERE id=${removedRun.runId}`;
     await migrate(fixture.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
     const heads = await fixture.admin`SELECT id,status FROM preference_registry_preferences`;
     expect(heads.find((h) => h.id === installed["source-only"]!.skillReceipt.skillId)?.status).toBe(
@@ -282,6 +350,34 @@ test("removes Packs under a non-bypass owner while preserving independent Skill 
       await fixture.admin`SELECT proname FROM pg_proc WHERE proname IN ('skill_source_has_effective_owner','skill_publish_finalized_owner')
       AND NOT proconfig @> ARRAY['search_path=public, pg_catalog, pg_temp']`,
     ).toHaveLength(0);
+    expect(
+      await fixture.admin`SELECT id FROM automation_runs WHERE id=${removedRun.runId}`,
+    ).toHaveLength(0);
+    expect(
+      await fixture.admin`SELECT id FROM automation_trigger_events WHERE id=${removedRun.eventId}`,
+    ).toHaveLength(0);
+    expect(
+      await fixture.admin`SELECT run_id FROM automation_run_event_links WHERE run_id=${removedRun.runId}`,
+    ).toHaveLength(0);
+    expect([
+      ...(await fixture.admin`SELECT row_to_json(r) AS value FROM automation_runs r WHERE id=${retainedRun.runId}`),
+    ]).toEqual([...retainedRunBefore]);
+    expect(
+      await fixture.admin`SELECT id FROM automation_trigger_events WHERE id=${retainedRun.eventId}`,
+    ).toHaveLength(1);
+    expect(
+      await fixture.admin`SELECT run_id FROM automation_run_event_links WHERE run_id=${retainedRun.runId}`,
+    ).toHaveLength(1);
+    expect(
+      await fixture.admin`SELECT id FROM capability_operations WHERE id=${independentOperation!.id} AND status='pending'`,
+    ).toHaveLength(1);
+    for (const name of ["source-only", "customized", "rescoped"])
+      expect(
+        await fixture.admin`SELECT preference_id FROM skill_source_bindings WHERE preference_id=${installed[name]!.skillReceipt.skillId}`,
+      ).toHaveLength(0);
+    expect(
+      await fixture.admin`SELECT preference_id FROM skill_source_bindings WHERE preference_id=${installed.shared!.skillReceipt.skillId}`,
+    ).toHaveLength(1);
     // A committed retry is a ledger no-op, including Skill event count.
     await migrate(fixture.ownerUrl, undefined, { applicationDatabaseRoles: ["opengeni_app"] });
     const [replayed] =

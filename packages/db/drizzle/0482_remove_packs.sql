@@ -21,7 +21,9 @@ LOCK TABLE workspace_packs, pack_installations, pack_installation_components,
   capability_operations, capability_component_owners, capability_facet_installations,
   capability_plugin_installations, integration_facet_binding_owners, integration_facet_bindings,
   skill_source_bindings, preference_registry_preferences, preference_registry_revisions,
-  preference_registry_events, automation_sources, automation_triggers, automation_runs
+  preference_registry_events, automation_sources, automation_triggers, automation_runs,
+  automation_trigger_revisions, automation_trigger_events, automation_run_event_links,
+  automation_webhook_endpoints
   IN ACCESS EXCLUSIVE MODE;
 ALTER TABLE workspace_packs NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE pack_installations NO FORCE ROW LEVEL SECURITY;
@@ -39,16 +41,9 @@ ALTER TABLE preference_registry_events NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE automation_sources NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE automation_triggers NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE automation_runs NO FORCE ROW LEVEL SECURITY;
-
-DO $preflight$
-BEGIN
-  IF EXISTS (SELECT 1 FROM capability_operations WHERE status IN ('pending','running','outcome_unknown'))
-  THEN RAISE EXCEPTION 'Settle capability operations before Pack removal' USING ERRCODE='55000'; END IF;
-  IF EXISTS (SELECT 1 FROM automation_runs run JOIN automation_sources source ON source.id=run.source_id
-    WHERE source.pack_installation_id IS NOT NULL AND source.adapter_id<>'source-control.pull-request.v1'
-      AND run.status IN ('queued','dispatching'))
-  THEN RAISE EXCEPTION 'Settle Pack automation runs before Pack removal' USING ERRCODE='55000'; END IF;
-END $preflight$;
+ALTER TABLE automation_trigger_revisions NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_trigger_events NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_run_event_links NO FORCE ROW LEVEL SECURITY;
 
 -- Capture only installations whose last owner is the removed feature. Shared
 -- direct, Plugin and migration ownership remains untouched.
@@ -60,6 +55,25 @@ CREATE TEMP TABLE removed_pack_bindings ON COMMIT DROP AS
 SELECT binding.id FROM integration_facet_bindings binding
 WHERE EXISTS (SELECT 1 FROM integration_facet_binding_owners o WHERE o.binding_id=binding.id AND o.owner_kind='pack')
   AND NOT EXISTS (SELECT 1 FROM integration_facet_binding_owners o WHERE o.binding_id=binding.id AND o.owner_kind<>'pack');
+CREATE TEMP TABLE removed_pack_sources ON COMMIT DROP AS
+SELECT id FROM automation_sources
+WHERE pack_installation_id IS NOT NULL AND adapter_id<>'source-control.pull-request.v1';
+CREATE TEMP TABLE removed_pack_triggers ON COMMIT DROP AS
+SELECT trigger.id FROM automation_triggers trigger JOIN automation_sources source ON source.id=trigger.source_id
+WHERE source.adapter_id<>'source-control.pull-request.v1'
+  AND (trigger.pack_installation_id IS NOT NULL OR source.id IN (SELECT id FROM removed_pack_sources));
+
+DO $preflight$
+BEGIN
+  IF EXISTS (SELECT 1 FROM capability_operations
+    WHERE status IN ('pending','running','outcome_unknown')
+      AND (target_kind='pack' OR (target_kind='facet_binding' AND target_id IN (SELECT id::text FROM removed_pack_bindings))))
+  THEN RAISE EXCEPTION 'Settle Pack-related capability operations before Pack removal' USING ERRCODE='55000'; END IF;
+  IF EXISTS (SELECT 1 FROM automation_runs
+    WHERE (source_id IN (SELECT id FROM removed_pack_sources) OR trigger_id IN (SELECT id FROM removed_pack_triggers))
+      AND status IN ('queued','dispatching'))
+  THEN RAISE EXCEPTION 'Settle Pack automation runs before Pack removal' USING ERRCODE='55000'; END IF;
+END $preflight$;
 
 -- This is maintenance deactivation, not an invented human approval. Keep all
 -- immutable Skill revisions/events and preserve customized/re-scoped heads.
@@ -97,6 +111,12 @@ END $release_skills$;
 DELETE FROM integration_facet_binding_owners WHERE owner_kind='pack';
 DELETE FROM capability_component_owners WHERE owner_kind='pack';
 DELETE FROM integration_facet_bindings WHERE id IN (SELECT id FROM removed_pack_bindings);
+DELETE FROM skill_source_bindings binding USING removed_pack_facets removed
+WHERE binding.skill_facet_id=removed.facet_id AND binding.account_id=removed.account_id
+  AND binding.workspace_id=removed.workspace_id
+  AND NOT EXISTS (SELECT 1 FROM capability_facet_installations surviving
+    WHERE surviving.facet_id=removed.facet_id AND surviving.account_id=removed.account_id
+      AND surviving.workspace_id=removed.workspace_id AND surviving.id NOT IN (SELECT id FROM removed_pack_facets));
 DELETE FROM capability_facet_installations WHERE id IN (SELECT id FROM removed_pack_facets);
 DELETE FROM capability_plugin_installations installation
 WHERE installation.id IN (SELECT plugin_installation_id FROM removed_pack_facets)
@@ -107,9 +127,19 @@ WHERE installation.id IN (SELECT plugin_installation_id FROM removed_pack_facets
 -- PR Review already uses the independent source/trigger/registration system.
 -- Keep its IDs, credentials, revisions and history; remove only the obsolete
 -- ownership columns. Other Pack automations are removed, not converted.
-DELETE FROM automation_sources WHERE pack_installation_id IS NOT NULL AND adapter_id<>'source-control.pull-request.v1';
-DELETE FROM automation_triggers trigger USING automation_sources source
-WHERE trigger.source_id=source.id AND trigger.pack_installation_id IS NOT NULL AND source.adapter_id<>'source-control.pull-request.v1';
+-- Remove completed Pack execution records in FK order. Sessions referenced by
+-- those records are independent history and are never deleted here.
+DELETE FROM automation_run_event_links WHERE run_id IN (
+  SELECT id FROM automation_runs WHERE source_id IN (SELECT id FROM removed_pack_sources)
+    OR trigger_id IN (SELECT id FROM removed_pack_triggers)
+) OR event_id IN (SELECT id FROM automation_trigger_events WHERE source_id IN (SELECT id FROM removed_pack_sources));
+DELETE FROM automation_runs WHERE source_id IN (SELECT id FROM removed_pack_sources)
+  OR trigger_id IN (SELECT id FROM removed_pack_triggers);
+DELETE FROM automation_trigger_events WHERE source_id IN (SELECT id FROM removed_pack_sources);
+DELETE FROM automation_trigger_revisions WHERE trigger_id IN (SELECT id FROM removed_pack_triggers);
+DELETE FROM automation_triggers WHERE id IN (SELECT id FROM removed_pack_triggers);
+DELETE FROM automation_webhook_endpoints WHERE source_id IN (SELECT id FROM removed_pack_sources);
+DELETE FROM automation_sources WHERE id IN (SELECT id FROM removed_pack_sources);
 ALTER TABLE automation_sources DROP CONSTRAINT automation_sources_pack_installation_fk;
 ALTER TABLE automation_sources DROP CONSTRAINT automation_sources_shape_chk;
 ALTER TABLE automation_sources DROP COLUMN pack_installation_id, DROP COLUMN pack_connector_id;
@@ -365,3 +395,6 @@ ALTER TABLE preference_registry_events FORCE ROW LEVEL SECURITY;
 ALTER TABLE automation_sources FORCE ROW LEVEL SECURITY;
 ALTER TABLE automation_triggers FORCE ROW LEVEL SECURITY;
 ALTER TABLE automation_runs FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_trigger_revisions FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_trigger_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_run_event_links FORCE ROW LEVEL SECURITY;
