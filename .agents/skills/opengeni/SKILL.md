@@ -300,6 +300,13 @@ For tools and MCP work, distinguish:
 - Built-in SDK sandbox capabilities for shell/files, and OpenGeni's separate Skill catalog and reader.
 - Tools available inside the sandbox image, such as CLIs.
 
+Managed Codemode clients are release-owned, not image-version-owned. Inspect
+`packages/runtime/src/sandbox/codemode-client.ts` and the runtime/process build
+scripts for the bundled CLI/ESM asset. Warm managed boxes receive verified,
+content-addressed clients during setup; per-exec PATH and
+`OPENGENI_CODEMODE_CLIENT_MODULE` select the release without changing the manifest.
+Do not repair stale clients by weakening catalog integrity or choosing npm latest.
+
 Find current MCP behavior in config parsing, tool validation, runtime `prepareTools`, and API MCP server builders. Treat first-party document/file/scheduled-task tools as swappable defaults. If a user wants enterprise search, repo tools, web tools, or custom systems, point OpenGeni at a different MCP server if current config supports it.
 
 ## Scheduling Discovery

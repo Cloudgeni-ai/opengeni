@@ -42,6 +42,10 @@ describe("provider-neutral operational instructions", () => {
       "prefer the connection-bound native client even if an older `ogtool` is installed",
     );
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("OPENGENI_CODEMODE_NATIVE_CLIENT");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("OPENGENI_CODEMODE_CLIENT_MODULE");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "do not import the older image-baked package",
+    );
   });
 
   test("does not carry Codex-only runtime language", () => {

@@ -48,6 +48,21 @@ test("production process bundles retain every runtime skill asset directory", as
     expect(builder.match(/await copyRuntimeSkillAssets\(repositoryRoot, outdir\);/g)).toHaveLength(
       2,
     );
+    expect(builder).toContain(
+      'await writeManagedCodemodeClient(repositoryRoot, join(outdir, "assets/codemode-client.json"))',
+    );
+    const packageBuilder = await readFile(
+      join(repositoryRoot, "scripts/build-typescript-package.ts"),
+      "utf8",
+    );
+    expect(packageBuilder).toContain('"@opengeni/runtime"');
+    expect(packageBuilder).toContain('join(packageDirectory, "dist/assets/codemode-client.json")');
+    const runtimeManifest = JSON.parse(
+      await readFile(join(repositoryRoot, "packages/runtime/package.json"), "utf8"),
+    );
+    expect(runtimeManifest.files).toContain("dist");
+    // Build caching must include the CLI input closure as well as the JS SDK.
+    expect(runtimeManifest.devDependencies["@opengeni/ogtool"]).toBe("workspace:*");
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
