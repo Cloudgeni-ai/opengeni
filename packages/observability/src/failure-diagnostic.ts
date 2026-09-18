@@ -15,6 +15,7 @@ const STAGES = [
   "session_events.append_generic",
   "session_events.append_for_turn_attempt",
   "preclaim",
+  "session_attempts.claim",
   "failure_settlement",
 ] as const;
 const RETRIES = ["not_retryable", "exhausted", "unknown"] as const;
@@ -35,6 +36,47 @@ const ERROR_NAMES = new Set([
   "DrizzleQueryError",
   "SessionEventPersistenceError",
 ]);
+
+// Human-reviewed code locations, not a regex permission to publish any path.
+export const DIAGNOSTIC_SOURCE_FILES = [
+  "apps/api/src/index.ts",
+  "apps/api/src/app.ts",
+  "apps/api/src/fatal-process-boundary.ts",
+  "apps/api/dist/process/index.js",
+  "apps/worker/src/activities/agent-turn/run.ts",
+  "apps/worker/src/activities/agent-turn/claim.ts",
+  "apps/worker/src/activities/agent-turn/failure-settlement.ts",
+  "apps/worker/dist/process/index.js",
+  "packages/db/src/index.ts",
+  "packages/db/src/persistence-errors.ts",
+  "packages/storage/src/index.ts",
+  "packages/observability/src/index.ts",
+] as const;
+
+export const DIAGNOSTIC_POSTGRES_FUNCTIONS = ["admit_session_attempt_personal_resources"] as const;
+
+function reviewedSource(location: string): string | undefined {
+  // Match an exact reviewed suffix; discard the host/deployment path entirely.
+  return DIAGNOSTIC_SOURCE_FILES.find((file) => location === file || location.endsWith(`/${file}`));
+}
+
+function postgresContext(error: unknown): Array<{ functionName: string; line: number }> {
+  if (errorKind(error) !== "PostgresError") return [];
+  const where = own(error, "where");
+  if (typeof where !== "string") return [];
+  return where
+    .slice(0, 8_192)
+    .split("\n")
+    .slice(0, 16)
+    .flatMap((value) => {
+      const match = /^PL\/pgSQL function (?:public\.)?([a-z_]+)\([^\n]*\) line (\d{1,7}) at /.exec(
+        value,
+      );
+      if (!match || !DIAGNOSTIC_POSTGRES_FUNCTIONS.some((name) => name === match[1])) return [];
+      return [{ functionName: match[1]!, line: Number(match[2]) }];
+    })
+    .slice(0, 8);
+}
 
 export type FailureDiagnosticInput = {
   code: (typeof CODES)[number];
@@ -78,12 +120,14 @@ function errorKind(error: unknown): string {
 export function failureDiagnostic(input: FailureDiagnosticInput, revision?: string) {
   const causes: Array<{
     kind: string;
-    frames: Array<{ locationHash: string; line: number; column: number }>;
+    frames: Array<{ locationHash: string; source?: string; line: number; column: number }>;
   }> = [];
+  const pgContext: Array<{ functionName: string; line: number }> = [];
   const seen = new Set<unknown>();
   let error = input.error;
   while (error && typeof error === "object" && !seen.has(error) && causes.length < 4) {
     seen.add(error);
+    pgContext.push(...postgresContext(error).slice(0, 8 - pgContext.length));
     const stack = own(error, "stack");
     const frames =
       typeof stack === "string"
@@ -99,6 +143,7 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
               return [
                 {
                   locationHash: createHash("sha256").update(match[1]!).digest("hex"),
+                  ...(reviewedSource(match[1]!) ? { source: reviewedSource(match[1]!)! } : {}),
                   line: Number(match[2]),
                   column: Number(match[3]),
                 },
@@ -140,6 +185,7 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
       input.constraint && CONSTRAINTS.has(input.constraint) ? input.constraint : undefined,
     deploymentRevision: revision && /^[0-9a-f]{40}$/.test(revision) ? revision : undefined,
     causes,
+    postgresContext: pgContext,
     eventTypes: (input.eventTypes ?? [])
       .slice(0, 32)
       .filter((type) => SessionEventType.safeParse(type).success),

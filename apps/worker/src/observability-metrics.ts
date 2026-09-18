@@ -1544,12 +1544,20 @@ function completedOperationSpan(
 ): void {
   if (!Number.isFinite(durationSeconds) || durationSeconds < 0) return;
   try {
+    const failed = [
+      "failed",
+      "error",
+      "provider_declared_error",
+      "auth_needed",
+      "outcome_uncertain",
+      "timeout",
+      "thrown_transport_error",
+      "thrown_protocol_error",
+    ].includes(attributes.outcome);
     observability
       .startSpan(name, attributes, { startTimeMs: Date.now() - durationSeconds * 1_000 })
       .end({
-        ...(attributes.outcome === "failed" || attributes.outcome === "error"
-          ? { error: true }
-          : {}),
+        ...(failed ? { error: true } : {}),
       });
   } catch {
     // Observers cannot change the completed model/tool/phase outcome.

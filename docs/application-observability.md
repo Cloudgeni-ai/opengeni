@@ -20,10 +20,24 @@ under the physical attempt. Completed duration measurements are siblings, not
 claims that one completed operation caused another. Existing first-startup
 phase deduplication is unchanged; model-call and MCP timing are per invocation.
 
-This foundation does **not** persist an API-admission context through Temporal
-or claim one continuous API-to-worker trace. That requires an explicitly
-versioned durable carrier and workflow replay compatibility work. Session IDs
-must not be hashed into invented trace ancestry as a substitute.
+API Send, Steer and composer-submit emit `api.turn.admitted` only after successful
+non-replayed admission. This real anchor span links to the HTTP request. Its
+identity uses SHA-256 of `opengeni:accepted-event-trace:v1\0` plus the lowercase
+server-generated, persisted event UUID: first 32 hex characters for trace ID,
+next 16 for span ID. The worker loads the same durable trigger after claim and
+links its physical-attempt span to that exact anchor. Retry attempts keep
+independent roots linked to the original admission; they never manufacture a
+parent relationship or republish the API anchor. Raw event IDs are not exported.
+
+This is explicit causal linkage, not a continuous parent chain through Temporal.
+No workflow payload, replay command, schema, or admission transaction changes.
+Public traceparent headers and client idempotency keys cannot select the anchor.
+Rejected/rolled-back admissions and replay responses do not mint anchors.
+Non-API origins (including internal user-message producers), approval resumes,
+and telemetry emitted before a trigger can be loaded do not yet have this full
+link path. Export drops/sampling or process death between commit and observation
+can leave a link without a retained target; links are best-effort observability,
+never durable execution truth or proof an admission did not happen.
 
 ## Bounded export
 
@@ -61,9 +75,15 @@ Original causes are inspected before generic public error projection. At most
 four causes and 32 frames per cause are retained. **Raw stack text and messages
 are not retained**: even filenames/functions may contain secrets. Frames retain
 SHA-256 source-location fingerprints and original line/column numbers, with a
-closed error-kind vocabulary. This permits matching a known source location at
-the recorded revision, but is not a readable original stack. A future readable
-stack lane needs a reviewed source-location manifest, not heuristic redaction.
+closed error-kind vocabulary. Reviewed exact repository/bundle source paths in
+`DIAGNOSTIC_SOURCE_FILES` additionally retain their relative `source` name;
+arbitrary host prefixes, unknown files and function names are never copied.
+Unknown frames remain hash-only, not a readable original stack. Nested
+`PostgresError.where` retains only function names in
+`DIAGNOSTIC_POSTGRES_FUNCTIONS` and numeric line numbers, at most eight contexts.
+All SQL statements, arguments and free-form context remain excluded. The exact
+`session_attempts.claim` stage supports diagnostics before admission settlement.
+Expand these registries only by reviewed source changes, not regex redaction.
 Property getters, `toJSON`, driver detail and arbitrary exception fields are
 never invoked or copied. Original Error objects remain unmodified.
 

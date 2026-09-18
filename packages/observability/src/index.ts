@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { SandboxBackend } from "@opengeni/contracts";
-import { currentTraceContext, validTraceContext, type TraceContext } from "./trace-context";
+import {
+  currentTraceContext,
+  validTraceContext,
+  admissionTraceContext,
+  type TraceContext,
+} from "./trace-context";
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
 export type { FailureDiagnosticInput } from "./failure-diagnostic";
@@ -10,6 +15,8 @@ export {
   withTraceContext,
   parseTraceparent,
   traceparent,
+  admissionTraceContext,
+  linkCurrentSpanToAdmission,
   type TraceContext,
 } from "./trace-context";
 
@@ -41,6 +48,7 @@ export type ObservabilityOptions = {
 export type Span = {
   traceId: string;
   spanId: string;
+  addLink?: (context: TraceContext) => void;
   end: (input?: { attributes?: Attributes; error?: unknown }) => void;
 };
 
@@ -710,6 +718,16 @@ export class Observability {
     return {
       traceId,
       spanId,
+      addLink: (context) => {
+        const valid = validTraceContext(context);
+        if (
+          !ended &&
+          valid &&
+          links.length < 8 &&
+          !links.some((link) => link.traceId === valid.traceId && link.spanId === valid.spanId)
+        )
+          links.push(valid);
+      },
       end: (input = {}) => {
         if (ended) {
           return;
@@ -858,6 +876,22 @@ export class Observability {
       return "";
     }
     return await this.registry.metrics();
+  }
+
+  /** Emit a content-free anchor after successful, non-replayed admission. */
+  recordAdmissionTrace(eventId: string): void {
+    const identity = admissionTraceContext(eventId);
+    if (!identity) return;
+    const current = currentTraceContext();
+    const now = this.now();
+    this.exportSpan({
+      ...identity,
+      name: "api.turn.admitted",
+      startMs: now,
+      endMs: now,
+      attributes: {},
+      links: current ? [current] : [],
+    });
   }
 
   /** Emit a closed protected record independently of application persistence. */

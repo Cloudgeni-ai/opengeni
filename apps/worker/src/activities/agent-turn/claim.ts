@@ -14,6 +14,7 @@ import {
   type SessionTurnForExecution,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
+import { linkCurrentSpanToAdmission } from "@opengeni/observability";
 import { deliverChildRequiresActionToParent } from "../parent-wake";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
@@ -321,6 +322,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   if (!trigger) {
     throw new Error(`Trigger event not found: ${attempt.triggerEventId}`);
   }
+  if (trigger.type === "user.message") linkCurrentSpanToAdmission(trigger.id);
   const humanInputResume = await getHumanInputResumeForEvent(
     db,
     input.workspaceId,

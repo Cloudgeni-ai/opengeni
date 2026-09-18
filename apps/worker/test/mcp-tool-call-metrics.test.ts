@@ -41,6 +41,9 @@ test("every model and MCP call exports measured spans under the physical attempt
     );
   }
   expect(bodies).toHaveLength(1);
+  hooks.onMcpToolCall?.({ outcome: "provider_declared_error", durationSeconds: 0.5 });
+  await observability.flush();
+  expect(bodies[1].resourceSpans[0].scopeSpans[0].spans[0].status.code).toBe(2);
 });
 
 test("MCP tool-call metrics expose only the closed structural outcome", async () => {

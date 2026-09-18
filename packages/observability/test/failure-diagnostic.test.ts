@@ -70,6 +70,30 @@ test("hostile exception descriptors and cyclic chains are bounded and do not esc
   ).not.toContain(sentinel);
 });
 
+test("reviewed source locations and PostgreSQL function lines remain actionable without text leakage", () => {
+  const source = Object.assign(new Error(sentinel), {
+    name: "PostgresError",
+    where: `PL/pgSQL function admit_session_attempt_personal_resources(uuid,uuid) line 113 at SQL statement\nSQL statement ${sentinel}\nPL/pgSQL function ${sentinel}() line 99 at RAISE`,
+  });
+  source.stack = `PostgresError: ${sentinel}\n at ${sentinel} (/app/packages/db/src/index.ts:123:4)\n at secret (/app/${sentinel}.ts:222:8)`;
+  const record = failureDiagnostic({
+    code: "db_failure",
+    stage: "session_attempts.claim",
+    sqlState: "P0002",
+    error: new Error(sentinel, { cause: source }),
+  });
+  expect(record.postgresContext).toEqual([
+    { functionName: "admit_session_attempt_personal_resources", line: 113 },
+  ]);
+  expect(record.causes[1]!.frames[0]).toMatchObject({
+    source: "packages/db/src/index.ts",
+    line: 123,
+    column: 4,
+  });
+  expect(record.causes[1]!.frames[1]).not.toHaveProperty("source");
+  expect(JSON.stringify(record)).not.toContain(sentinel);
+});
+
 test("protected sink is separate, opt-in, DB-independent and drainable", async () => {
   const exported: Array<{ url: string; body: unknown; headers: unknown }> = [];
   const settings = {

@@ -1,8 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 
 /** W3C-compatible identity only: never propagate baggage or user attributes. */
 export type TraceContext = { traceId: string; spanId: string };
-const storage = new AsyncLocalStorage<TraceContext | undefined>();
+type ActiveContext = TraceContext & { addLink?: ((link: TraceContext) => void) | undefined };
+const storage = new AsyncLocalStorage<ActiveContext | undefined>();
 
 export function validTraceContext(value: TraceContext | undefined): TraceContext | undefined {
   if (!value) return undefined;
@@ -12,12 +14,29 @@ export function validTraceContext(value: TraceContext | undefined): TraceContext
 }
 
 export function currentTraceContext(): TraceContext | undefined {
-  return storage.getStore();
+  return validTraceContext(storage.getStore());
 }
 
 /** Scoped run, never enterWith: interleaved requests cannot inherit each other's spans. */
-export function withTraceContext<T>(context: TraceContext | undefined, run: () => T): T {
-  return storage.run(validTraceContext(context), run);
+export function withTraceContext<T>(context: ActiveContext | undefined, run: () => T): T {
+  const valid = validTraceContext(context);
+  return storage.run(valid ? { ...valid, addLink: context?.addLink } : undefined, run);
+}
+
+/** Stable identity of an actually emitted admission anchor, not session ancestry. */
+export function admissionTraceContext(eventId: string): TraceContext | undefined {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(eventId))
+    return undefined;
+  const digest = createHash("sha256")
+    .update("opengeni:accepted-event-trace:v1\0")
+    .update(eventId.toLowerCase())
+    .digest("hex");
+  return validTraceContext({ traceId: digest.slice(0, 32), spanId: digest.slice(32, 48) });
+}
+
+export function linkCurrentSpanToAdmission(eventId: string): void {
+  const link = admissionTraceContext(eventId);
+  if (link) storage.getStore()?.addLink?.(link);
 }
 
 /** Remote context must be admitted by the caller's trust boundary before use. */

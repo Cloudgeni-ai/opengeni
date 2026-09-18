@@ -269,7 +269,9 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
             ? "session_events.append_generic"
             : error.details.stage === "session_events.append_for_turn_attempt"
               ? "session_events.append_for_turn_attempt"
-              : "failure_settlement",
+              : error.details.stage === "session_attempts.claim"
+                ? "session_attempts.claim"
+                : "failure_settlement",
         retryDecision: error.details.retryOutcome,
         error,
         sessionId: input.sessionId,
