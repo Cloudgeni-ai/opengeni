@@ -153,6 +153,10 @@ continuation obligations; Temporal supplies replaceable nudges. Goals never live
 in `Agent.instructions` or solely workflow memory.
 Generic caps cannot replace recovery, pacing, memory or tool-lifecycle fixes.
 
+Non-transient preclaim rejection parks accepted work behind a durable admission
+block. Resume/Send/Steer rechecks without granting authority; operational outages
+retain backoff.
+
 Canonical: [`goals.md`](goals.md) and [`run-lifecycle.md`](run-lifecycle.md).
 
 Reports—including secondary audits—use native documents. Operational instructions

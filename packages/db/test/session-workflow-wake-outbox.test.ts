@@ -4,6 +4,11 @@ import { readTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@opengeni/cont
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   bootstrapWorkspace,
+  blockSessionWorkBeforeAttemptClaim,
+  peekSessionWork,
+  isSessionEventPersistenceError,
+  addSessionSystemUpdate,
+  listOutstandingSessionSystemUpdates,
   claimPendingSessionWorkflowWakes,
   claimSessionWorkForAttempt,
   createDb,
@@ -132,6 +137,261 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 }
 
 describe("transactional session workflow wake outbox", () => {
+  test("rejected preclaim parks accepted work, acknowledges wakes, and explicit Resume retries the same turn", async () => {
+    const ctx = await fixture();
+    const queued = await send(ctx, "preserve this exact accepted input");
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId,
+      sessionId,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: crypto.randomUUID(),
+      summary: "preserved machine input",
+      payload: {
+        type: "agent_message",
+        text: "preserved machine input",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!update.added) throw new Error("Machine input not accepted");
+    const peek = await peekSessionWork(client.db, workspaceId, sessionId, true);
+    if (peek.kind !== "runnable" || !peek.admissionFence)
+      throw new Error("Missing admission fence");
+    const attemptId = crypto.randomUUID();
+    const acceptedTurns = await listSessionTurns(client.db, workspaceId, sessionId);
+    const claimInput = {
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" as const },
+    };
+    // Failure injection is confined to this test database and exact session.
+    await shared.admin
+      .unsafe(`CREATE FUNCTION test_preclaim_denial() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.session_id = '${sessionId}'::uuid THEN
+        RAISE EXCEPTION 'test authorization rejection' USING ERRCODE = '42501';
+      END IF; RETURN NEW; END $$;
+      CREATE TRIGGER zz_test_preclaim_denial BEFORE INSERT ON session_turn_attempts
+      FOR EACH ROW EXECUTE FUNCTION test_preclaim_denial();`);
+    try {
+      let failure: unknown;
+      try {
+        await claimSessionWorkForAttempt(client.db, workspaceId, claimInput);
+      } catch (error) {
+        failure = error;
+      }
+      expect(isSessionEventPersistenceError(failure)).toBe(true);
+      if (!isSessionEventPersistenceError(failure)) throw failure;
+      expect(failure.details).toMatchObject({ sqlState: "42501", stage: "session_attempts.claim" });
+      const blockInput = {
+        accountId: ctx.grant.accountId,
+        sessionId,
+        workflowId: claimInput.workflowId,
+        attemptId,
+        fence: peek.admissionFence,
+        reason: "database_claim_rejected" as const,
+        sqlState: "42501",
+      };
+      expect(
+        (await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, blockInput)).action,
+      ).toBe("blocked");
+      expect(
+        (await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, blockInput)).events,
+      ).toEqual([]);
+      for (let index = 0; index < 3; index++) {
+        expect(await peekSessionWork(client.db, workspaceId, sessionId)).toEqual({
+          kind: "admission-blocked",
+        });
+        expect(await claimSessionWorkForAttempt(client.db, workspaceId, claimInput)).toEqual({
+          action: "unclaimed",
+          reason: "gate-closed",
+        });
+      }
+      const turns = await listSessionTurns(client.db, workspaceId, sessionId);
+      expect(turns).toEqual(acceptedTurns);
+      expect(turns).toHaveLength(1);
+      expect(turns[0]).toMatchObject({ status: "queued", executionGeneration: 0 });
+      expect(
+        await shared.admin`select id from session_turn_attempts where session_id = ${sessionId}`,
+      ).toHaveLength(0);
+      expect(
+        await shared.admin`select id from session_history_items where session_id = ${sessionId}`,
+      ).toHaveLength(0);
+      expect(
+        (await listOutstandingSessionSystemUpdates(client.db, workspaceId, sessionId)).map(
+          (u) => u.id,
+        ),
+      ).toContain(update.update.id);
+      const parkedWake = await wakeRow(workspaceId, sessionId);
+      const laterUpdate = await addSessionSystemUpdate(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId,
+        sessionId,
+        kind: "agent_message",
+        classification: "info",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: crypto.randomUUID(),
+        summary: "later machine input",
+        payload: {
+          type: "agent_message",
+          text: "later machine input",
+          operationId: crypto.randomUUID(),
+        },
+      });
+      expect(laterUpdate).toMatchObject({ added: true, shouldWake: false });
+      expect((await wakeRow(workspaceId, sessionId))!.wakeRevision).toBe(parkedWake!.wakeRevision);
+      expect((await getSession(client.db, workspaceId, sessionId))?.status).toBe("requires_action");
+      expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toMatchObject({
+        reason: "database_claim_rejected",
+        sqlState: "42501",
+        retryPolicy: "explicit_recheck",
+      });
+      expect(
+        await markSessionWorkflowWakeDelivered(client.db, {
+          accountId: ctx.grant.accountId,
+          workspaceId,
+          sessionId,
+          temporalWorkflowId: claimInput.workflowId,
+          wakeRevision: (await wakeRow(workspaceId, sessionId))!.wakeRevision,
+        }),
+      ).toEqual({ action: "acknowledged" });
+      await shared.admin.unsafe(
+        "DROP TRIGGER zz_test_preclaim_denial ON session_turn_attempts; DROP FUNCTION test_preclaim_denial();",
+      );
+      await withWorkspaceRls(client.db, workspaceId, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
+            accountId: ctx.grant.accountId,
+            workspaceId,
+            sessionId,
+            actor: { type: "human", subjectId: ctx.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            action: "resume",
+          }),
+        ),
+      );
+      expect((await wakeRow(workspaceId, sessionId))!.wakeRevision).toBeGreaterThan(
+        queued.wakeRevision,
+      );
+      expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toBeNull();
+      const claimed = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        ...claimInput,
+        attemptId: crypto.randomUUID(),
+      });
+      expect(claimed.action).toBe("claimed");
+      if (claimed.action !== "claimed") throw new Error("Expected same accepted turn");
+      expect(claimed.turn.id).toBe(turns[0]!.id);
+      expect(
+        await listOutstandingSessionSystemUpdates(client.db, workspaceId, sessionId),
+      ).toHaveLength(0);
+    } finally {
+      await shared.admin.unsafe(
+        "DROP TRIGGER IF EXISTS zz_test_preclaim_denial ON session_turn_attempts; DROP FUNCTION IF EXISTS test_preclaim_denial();",
+      );
+    }
+  });
+
+  test("real deadlock and serialization retries recover without blocking or duplicate input", async () => {
+    for (const sqlState of ["40P01", "40001"] as const) {
+      const ctx = await fixture();
+      await send(ctx, `transient ${sqlState}`);
+      const sessionId = ctx.session.id;
+      await shared.admin.unsafe(`CREATE SEQUENCE test_preclaim_counter;
+        CREATE FUNCTION test_preclaim_transient() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+        BEGIN IF NEW.session_id = '${sessionId}'::uuid AND nextval('test_preclaim_counter') = 1 THEN
+          RAISE EXCEPTION 'transient test failure' USING ERRCODE = '${sqlState}';
+        END IF; RETURN NEW; END $$;
+        CREATE TRIGGER zz_test_preclaim_transient BEFORE INSERT ON session_turn_attempts
+        FOR EACH ROW EXECUTE FUNCTION test_preclaim_transient();`);
+      try {
+        const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+          sessionId,
+          workflowId: `session-${sessionId}`,
+          workflowRunId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+          dispatchId: crypto.randomUUID(),
+          trigger: { kind: "next" },
+        });
+        expect(claimed.action).toBe("claimed");
+        expect(
+          await shared.admin`select id from session_turn_attempts where session_id = ${sessionId}`,
+        ).toHaveLength(1);
+        expect(
+          (await getSession(client.db, ctx.grant.workspaceId!, sessionId))?.admissionBlock,
+        ).toBeNull();
+        expect(await shared.admin`select last_value from test_preclaim_counter`).toMatchObject([
+          { last_value: "2" },
+        ]);
+      } finally {
+        await shared.admin.unsafe(
+          "DROP TRIGGER zz_test_preclaim_transient ON session_turn_attempts; DROP FUNCTION test_preclaim_transient(); DROP SEQUENCE test_preclaim_counter;",
+        );
+      }
+    }
+  });
+
+  test("new Send and Steer recheck a block, stale failures cannot reblock, and cancellation wins", async () => {
+    for (const action of ["send", "steer", "cancel"] as const) {
+      const ctx = await fixture();
+      await send(ctx, "original accepted input");
+      const workspaceId = ctx.grant.workspaceId!;
+      const sessionId = ctx.session.id;
+      const peek = await peekSessionWork(client.db, workspaceId, sessionId, true);
+      if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("Missing fence");
+      const input = {
+        accountId: ctx.grant.accountId,
+        sessionId,
+        workflowId: `session-${sessionId}`,
+        attemptId: crypto.randomUUID(),
+        fence: peek.admissionFence,
+        reason: "database_claim_rejected" as const,
+        sqlState: "P0002",
+      };
+      expect((await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, input)).action).toBe(
+        "blocked",
+      );
+      if (action === "cancel") {
+        await withWorkspaceRls(client.db, workspaceId, (db) =>
+          db.transaction((tx) =>
+            mutateSessionControlInTransaction(tx as unknown as typeof db, {
+              accountId: ctx.grant.accountId,
+              workspaceId,
+              sessionId,
+              actor: { type: "human", subjectId: ctx.grant.subjectId },
+              operationKey: crypto.randomUUID(),
+              action,
+            }),
+          ),
+        );
+        expect(
+          (await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, input)).action,
+        ).toBe("terminal");
+        expect(await peekSessionWork(client.db, workspaceId, sessionId)).toEqual({ kind: "idle" });
+      } else {
+        await send(ctx, "new authorized input", action);
+        expect(
+          (await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, input)).action,
+        ).toBe("stale");
+        expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toBeNull();
+        expect(await peekSessionWork(client.db, workspaceId, sessionId)).toEqual({
+          kind: "runnable",
+        });
+        if (action === "send")
+          expect(
+            (await listSessionTurns(client.db, workspaceId, sessionId)).filter(
+              (t) => t.status === "queued",
+            ),
+          ).toHaveLength(2);
+      }
+    }
+  });
+
   test("initial session state, first turn, and wake commit once under concurrent retries", async () => {
     const ctx = await fixture();
     const turnExecutionPolicy = TurnExecutionPolicyV1.parse({

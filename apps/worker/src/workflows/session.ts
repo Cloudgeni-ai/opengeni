@@ -229,7 +229,15 @@ export function preClaimFailureDetail(error: unknown): PreClaimFailureDetail | u
   ) {
     return undefined;
   }
-  const detail = cause.details?.[0] as { disposition?: unknown; code?: unknown } | undefined;
+  const detail = cause.details?.[0] as
+    | {
+        disposition?: unknown;
+        code?: unknown;
+        sqlState?: unknown;
+        reason?: unknown;
+        retryPolicy?: unknown;
+      }
+    | undefined;
   if (
     detail?.code !== "db_deadlock" &&
     detail?.code !== "db_serialization_failure" &&
@@ -239,6 +247,27 @@ export function preClaimFailureDetail(error: unknown): PreClaimFailureDetail | u
     return undefined;
   }
   const disposition = detail.disposition;
+  if (disposition === "blocked") {
+    if (
+      detail.code !== "db_failure" ||
+      detail.retryPolicy !== "explicit_recheck" ||
+      (detail.reason !== "database_claim_rejected" &&
+        detail.reason !== "initiator_membership_required" &&
+        detail.reason !== "personal_resource_grant_required") ||
+      !(
+        detail.sqlState === null ||
+        (typeof detail.sqlState === "string" && /^[0-9A-Z]{5}$/.test(detail.sqlState))
+      )
+    )
+      return undefined;
+    return {
+      disposition,
+      code: detail.code,
+      reason: detail.reason,
+      sqlState: detail.sqlState,
+      retryPolicy: "explicit_recheck",
+    };
+  }
   if (disposition !== "retryable" && disposition !== "permanent") return undefined;
   if (
     (detail.code === "db_deadlock" || detail.code === "db_serialization_failure") &&
@@ -351,6 +380,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   const preserveQuiescenceWake = patched("session-quiescence-reconciliation-wake-v1");
   const staleControlSignalIsOnlyWakeHint = patched("session-control-stale-wake-v1");
   const unclaimedAttemptRecovery = patched("session-unclaimed-attempt-recovery-v1");
+  const durableAdmissionBlocking = patched("session-durable-admission-block-v1");
   // PR #2208 changed a typed-cancelled result from a plain re-peek into a
   // recoverDispatch activity. Version that new command so histories which
   // already recorded the legacy re-peek remain deterministic on replay.
@@ -564,7 +594,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     const peek = await activity.peekSessionWork({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
+      ...(durableAdmissionBlocking ? { includeAdmissionFence: true } : {}),
     });
+    if (peek.kind === "admission-blocked") {
+      if (signalVersion !== closeSignalVersion || pendingQuiescenceProofs.size > 0) continue;
+      return;
+    }
     if (peek.kind === "interruption-pending") {
       const settlement = await activity.settleSessionInterruptions({
         accountId: input.accountId,
@@ -779,7 +814,15 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       peek.kind === "approval-pending"
         ? ({ kind: "approval", triggerEventId: peek.triggerEventId } as const)
         : ({ kind: "next" } as const);
-    if (!(await runTurn(input.accountId, input.workspaceId, input.sessionId, trigger))) {
+    if (
+      !(await runTurn(
+        input.accountId,
+        input.workspaceId,
+        input.sessionId,
+        trigger,
+        "admissionFence" in peek ? peek.admissionFence : undefined,
+      ))
+    ) {
       if (signalVersion !== closeSignalVersion) continue;
       return;
     }
@@ -790,6 +833,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     workspaceId: string,
     sessionId: string,
     trigger: activities.RunAgentTurnInput["trigger"],
+    admissionFence?: activities.FailSessionAttemptInput["admissionFence"],
   ): Promise<boolean> {
     const capacityWaitEntryBaseline = { wakeups, capacityWakeups };
     // Capture every admission-relevant signal before activity dispatch. A
@@ -1072,6 +1116,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
                   ? { preClaimFailureDisposition: admissionFailureDisposition }
                   : {}),
                 ...(admissionFailure ? { preClaimFailure: admissionFailure } : {}),
+                ...(durableAdmissionBlocking && admissionFence ? { admissionFence } : {}),
                 ...(postClaimDatabaseRecovery ? { postClaimDatabaseRecovery } : {}),
                 trigger,
                 error: workflowFailureMessage(outcome.error),

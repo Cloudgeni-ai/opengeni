@@ -1,5 +1,11 @@
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 import {
+  projectSessionAdmissionBlock,
+  type SessionAdmissionFence,
+  StoredSessionAdmissionBlock,
+} from "./session-admission-block";
+export type { SessionAdmissionFence, StoredSessionAdmissionBlock } from "./session-admission-block";
+import {
   SessionMessageSearchRequest,
   type SessionMessageSearchResponse,
 } from "@opengeni/contracts";
@@ -65317,7 +65323,7 @@ export async function claimSessionWorkForAttempt(
         // Work and realtime may coexist, but claim remains the lazy lifecycle
         // cleanup point for an expired voice lease.
         session = await settleExpiredSessionRealtimeInTransaction(tx, session);
-        if (effectiveControl.state !== "active") {
+        if (effectiveControl.state !== "active" || session.admissionBlock != null) {
           return { action: "unclaimed", reason: "gate-closed" };
         }
         // Quiescence is a session-wide admission fence, not a property of one
@@ -67964,12 +67970,13 @@ export async function settleSessionAttemptInterruptions(
 }
 
 export type SessionWorkPeek =
-  | { kind: "runnable" }
+  | { kind: "runnable"; admissionFence?: SessionAdmissionFence }
+  | { kind: "admission-blocked" }
   | {
       kind: "sandbox-lifecycle-wait";
       ref: SandboxLifecycleWait;
     }
-  | { kind: "approval-pending"; triggerEventId: string }
+  | { kind: "approval-pending"; triggerEventId: string; admissionFence?: SessionAdmissionFence }
   | {
       kind: "approval-wait";
       humanInputRequestId?: string;
@@ -68285,6 +68292,7 @@ export async function peekSessionWork(
   db: Database,
   workspaceId: string,
   sessionId: string,
+  includeAdmissionFence = false,
 ): Promise<SessionWorkPeek> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
@@ -68296,6 +68304,15 @@ export async function peekSessionWork(
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
     if (!session) return { kind: "idle" };
+    const fence = includeAdmissionFence
+      ? {
+          admissionFence: {
+            lastSequence: session.lastSequence,
+            controlVersion: effectiveControl.controlVersion,
+          },
+        }
+      : {};
+    const runnable = { kind: "runnable", ...fence } as const;
     const [interruption] = await scopedDb
       .select({ attemptId: schema.sessionAttemptInterruptions.attemptId })
       .from(schema.sessionAttemptInterruptions)
@@ -68363,6 +68380,8 @@ export async function peekSessionWork(
       }
       return { kind: "idle" };
     }
+
+    if (session.admissionBlock) return { kind: "admission-blocked" };
 
     const [capacityWait] = await scopedDb
       .select()
@@ -68449,7 +68468,7 @@ export async function peekSessionWork(
             return { kind: "sandbox-lifecycle-wait", ref: lifecycleWait };
           }
         }
-        return { kind: "runnable" };
+        return runnable;
       }
       if (turn.status === "requires_action") {
         const [currentTrigger] = await scopedDb
@@ -68486,6 +68505,7 @@ export async function peekSessionWork(
           return {
             kind: "approval-pending",
             triggerEventId: actionResponse.id,
+            ...fence,
           };
         }
         const [expiringHumanInput] = await scopedDb
@@ -68569,7 +68589,7 @@ export async function peekSessionWork(
         ),
       )
       .limit(1);
-    if (queued || session.compactRequested) return { kind: "runnable" };
+    if (queued || session.compactRequested) return runnable;
     const waitState = await sessionInputWaitStateTx(scopedDb, workspaceId, sessionId, session);
     const inputWaitPeek =
       session.inputWaitTurnId && session.inputWaitUntil && waitState.disposition !== "none"
@@ -68605,9 +68625,9 @@ export async function peekSessionWork(
       // by newer input, or an immediate input arrives.
       const wakeClasses = await pendingSystemUpdateWakeClassesTx(scopedDb, workspaceId, sessionId);
       if (wakeClasses.immediate || (wakeClasses.command && waitState.disposition === "held")) {
-        return { kind: "runnable" };
+        return runnable;
       }
-      return inputWaitPeek ?? { kind: wakeClasses.deferred ? "runnable" : "idle" };
+      return inputWaitPeek ?? (wakeClasses.deferred ? runnable : { kind: "idle" });
     }
     const [pendingAgentSteer] = await scopedDb
       .select({ id: schema.sessionSystemUpdates.id })
@@ -68621,7 +68641,7 @@ export async function peekSessionWork(
         ),
       )
       .limit(1);
-    return pendingAgentSteer ? { kind: "runnable" } : (inputWaitPeek ?? { kind: "idle" });
+    return pendingAgentSteer ? runnable : (inputWaitPeek ?? { kind: "idle" });
   });
 }
 
@@ -68872,6 +68892,123 @@ export async function settleSessionInputWait(
 ): Promise<SettleSessionInputWaitResult> {
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, (scopedDb) =>
     settleSessionInputWaitInActivity(scopedDb, input),
+  );
+}
+
+/** Park only the exact pre-dispatch snapshot; late failures cannot block new work. */
+export async function blockSessionWorkBeforeAttemptClaim(
+  db: Database,
+  workspaceId: string,
+  input: {
+    accountId: string;
+    sessionId: string;
+    workflowId: string;
+    attemptId: string;
+    fence: SessionAdmissionFence;
+    reason: StoredSessionAdmissionBlock["reason"];
+    sqlState: string | null;
+  },
+): Promise<{ action: "blocked" | "stale" | "terminal"; events: SessionEvent[] }> {
+  return retrySessionActivityRls(
+    db,
+    workspaceId,
+    {
+      stage: "session_admission.block",
+      eventTypes: ["session.status.changed"],
+      maxAttempts: 3,
+    },
+    async (scopedDb) =>
+      scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (
+          !session ||
+          session.accountId !== input.accountId ||
+          (session.temporalWorkflowId !== null && session.temporalWorkflowId !== input.workflowId)
+        ) {
+          return { action: "stale", events: [] };
+        }
+        if (session.status === "cancelled" || session.status === "failed")
+          return { action: "terminal", events: [] };
+        if (session.admissionBlock?.attemptId === input.attemptId)
+          return { action: "blocked", events: [] };
+        if (session.lastSequence !== input.fence.lastSequence) {
+          return { action: "stale", events: [] };
+        }
+        const control = await evaluateSessionControl(
+          tx as unknown as Database,
+          workspaceId,
+          input.sessionId,
+          {
+            workspaceControl: locks.control ?? undefined,
+          },
+        );
+        if (control.state !== "active" || control.controlVersion !== input.fence.controlVersion)
+          return { action: "stale", events: [] };
+        const [live] = await tx
+          .select({ id: schema.sessionTurnAttempts.id })
+          .from(schema.sessionTurnAttempts)
+          .where(
+            and(
+              eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+              eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+              inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+            ),
+          )
+          .limit(1);
+        if (live) return { action: "stale", events: [] };
+        const now = new Date();
+        const block = StoredSessionAdmissionBlock.parse({
+          reason: input.reason,
+          sqlState: input.sqlState,
+          retryPolicy: "explicit_recheck",
+          blockedAt: now.toISOString(),
+          attemptId: input.attemptId,
+          fence: input.fence,
+          previousStatus: session.status as SessionStatus,
+        });
+        const publicBlock = projectSessionAdmissionBlock(block);
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "session.status.changed",
+                payload: {
+                  status: "requires_action",
+                  code: "admission_blocked",
+                  admissionBlock: publicBlock,
+                },
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        await tx
+          .update(schema.sessions)
+          .set({
+            admissionBlock: block,
+            status: "requires_action",
+            lastSequence: session.lastSequence + 1,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        return { action: "blocked", events: [mapEvent(event!)] };
+      }),
   );
 }
 
@@ -74495,7 +74632,7 @@ export async function markSessionWorkflowWakeDelivered(
           input.sessionId,
           { workspaceControl: locks.control ?? undefined },
         );
-        if (effectiveControl.state === "active") {
+        if (effectiveControl.state === "active" && !session.admissionBlock) {
           const [pendingAgentSteer] = await tx
             .select({ id: schema.sessionSystemUpdates.id })
             .from(schema.sessionSystemUpdates)
@@ -75238,6 +75375,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
           (session.status !== "failed" && (goalStatus === "active" || waitingForInput));
         const shouldWake =
           wakeClass === "immediate" &&
+          !session.admissionBlock &&
           commandMayWake &&
           childNoticeMayWake &&
           !realtimeActive &&
@@ -75255,7 +75393,8 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // realtime ownership withholds the workflow wake. Persisting `queued`
         // reserves the accepted work so a later distinct skip occurrence
         // cannot cross the same idle boundary while this update is pending.
-        const shouldQueue = shouldWake || options.requireIdleSession === true;
+        const shouldQueue =
+          !session.admissionBlock && (shouldWake || options.requireIdleSession === true);
         await tx
           .update(schema.sessions)
           .set({
@@ -75661,6 +75800,7 @@ function backgroundCommandTerminalMutation(input: {
       );
       const shouldWake =
         waitingForInput &&
+        !session.admissionBlock &&
         session.status !== "failed" &&
         session.activeTurnId === null &&
         controlActive &&
@@ -77666,6 +77806,7 @@ function mapSession(
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     status: row.status as SessionStatus,
+    admissionBlock: projectSessionAdmissionBlock(row.admissionBlock),
     initialMessage: fromPostgresLosslessText(row.initialMessage, row.initialMessageCodecVersion),
     title: row.title ?? null,
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,

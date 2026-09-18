@@ -82,6 +82,33 @@ describe("turn activity fence-cancellation arbitration", () => {
 });
 
 describe("pre-claim admission failure wire classification", () => {
+  test("accepts only a complete sanitized recoverable block", () => {
+    const detail = {
+      disposition: "blocked",
+      code: "db_failure",
+      sqlState: "42501",
+      reason: "database_claim_rejected",
+      retryPolicy: "explicit_recheck",
+    };
+    const wrap = (value: unknown) =>
+      activityFailure(
+        ApplicationFailure.create({
+          message: PRE_CLAIM_FAILURE_MESSAGE,
+          type: PRE_CLAIM_FAILURE_TYPE,
+          nonRetryable: true,
+          details: [value],
+        }),
+      );
+    expect(preClaimFailureDetail(wrap(detail))).toEqual(detail);
+    for (const value of [
+      { ...detail, sqlState: "SECRET" },
+      { ...detail, retryPolicy: "automatic" },
+      { ...detail, reason: "guessed_membership" },
+      { ...detail, code: "db_deadlock" },
+    ]) {
+      expect(preClaimFailureDetail(wrap(value))).toBeUndefined();
+    }
+  });
   test("accepts only the exact upgraded-worker contract", () => {
     for (const disposition of ["retryable", "permanent"] as const) {
       const failure = ApplicationFailure.create({

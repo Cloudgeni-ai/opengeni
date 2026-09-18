@@ -1,3 +1,4 @@
+import type { StoredSessionAdmissionBlock } from "./session-admission-block";
 import type {
   SandboxProviderCommand,
   AutomationAcceptedExecution,
@@ -4425,6 +4426,7 @@ export const sessions = pgTable(
     // NULL and use the bounded metadata.role compatibility fallback at the
     // attempt-snapshot boundary.
     policyRole: text("policy_role"),
+    admissionBlock: jsonb("admission_block").$type<StoredSessionAdmissionBlock>(),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),

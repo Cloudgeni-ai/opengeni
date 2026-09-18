@@ -279,6 +279,12 @@ not model-visible advice to keep calling tools until a final answer appears.
 Preserve trusted acceptance state, the settled tool batch and canonical history,
 ordinary worker settlement, and the first same-turn deadline across retries.
 
+Preclaim persistence rejections are not all transient. Preserve accepted work
+behind the typed durable admission block for non-operational failures; only
+authorized Resume or new Send/Steer requests recheck. Never repair missing
+membership/grants or invent a principal to make admission succeed. See
+`docs/run-lifecycle.md` for snapshot fencing and mixed-worker rollout limits.
+
 ## Pull-request delivery across moving `main`
 
 Treat a candidate as an immutable semantic source revision, not as a snapshot of
