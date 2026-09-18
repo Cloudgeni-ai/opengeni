@@ -86,9 +86,41 @@ describe("fail-closed change impact", () => {
       expect(plan.e2eTests).toContain(PREVIEW_LOADING_E2E);
       expect(plan.unitTests).not.toContain(PREVIEW_LOADING_E2E);
     }
-    const unrelated = createImpactPlan(["packages/ogtool/src/index.ts"]);
+    const unrelated = createImpactPlan(["packages/browserd/src/index.ts"]);
     expect(unrelated.mode).toBe("focused");
     expect(unrelated.e2eTests).not.toContain(PREVIEW_LOADING_E2E);
+  });
+
+  test("release-owned CLI delivery follows the runtime build dependency closure", () => {
+    // ogtool is no longer an independent leaf: runtime builds its managed
+    // client asset from the CLI source, including its transitive dependencies.
+    for (const path of ["packages/ogtool/src/index.ts", "packages/ogtool/src/cli.ts"]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.affectedPackages, path).toEqual(
+        expect.arrayContaining([
+          "@opengeni/ogtool",
+          "@opengeni/runtime",
+          "@opengeni/worker-bundle",
+        ]),
+      );
+      expect(plan.buildPackages, path).toEqual(
+        expect.arrayContaining([
+          "@opengeni/ogtool",
+          "@opengeni/runtime",
+          "@opengeni/worker-bundle",
+        ]),
+      );
+      expect(plan.typecheckProjects, path).toEqual(
+        expect.arrayContaining(["packages/ogtool", "packages/runtime", "apps/worker"]),
+      );
+      expect(plan.unitTests, path).toContain(
+        "packages/runtime/test/codemode-client-delivery.test.ts",
+      );
+      expect(plan.integrationTests, path).toContain(
+        "test/integration/worker-activity.integration.ts",
+      );
+    }
   });
 
   test("documentation-only changes retain every non-runtime public guard", () => {
@@ -345,7 +377,7 @@ describe("fail-closed change impact", () => {
     }
     expect(usesBrowserRunner(ARTIFACT_LIBRARY_E2E)).toBe(true);
     expect(OPT_IN_TESTS[ARTIFACT_LIBRARY_E2E]).toBeUndefined();
-    for (const path of ["packages/ogtool/src/index.ts", "packages/browserd/src/index.ts"]) {
+    for (const path of ["packages/browserd/src/index.ts"]) {
       expect(createImpactPlan([path]).e2eTests).not.toContain(ARTIFACT_LIBRARY_E2E);
     }
   });
@@ -366,7 +398,7 @@ describe("fail-closed change impact", () => {
       expect(plan.integrationTests).not.toContain(browserTest);
     }
     expect(usesBrowserRunner(browserTest)).toBe(true);
-    for (const path of ["packages/ogtool/src/index.ts", "packages/browserd/src/index.ts"]) {
+    for (const path of ["packages/browserd/src/index.ts"]) {
       expect(createImpactPlan([path]).e2eTests).not.toContain(browserTest);
     }
   });
@@ -404,7 +436,7 @@ describe("fail-closed change impact", () => {
   });
 
   test("artifact browser dependency rules do not widen unrelated leaf package plans", () => {
-    const plan = createImpactPlan(["packages/ogtool/src/index.ts"]);
+    const plan = createImpactPlan(["packages/browserd/src/index.ts"]);
     expect(plan.mode).toBe("focused");
     for (const path of CURATED_ARTIFACT_BROWSER_E2E) expect(plan.e2eTests).not.toContain(path);
     expect(plan.e2eTests).toEqual([]);
@@ -423,7 +455,7 @@ describe("fail-closed change impact", () => {
       expect(plan.mode).toBe("focused");
       expect(plan.e2eTests).toContain(COMPACT_SESSION_VIEW_E2E);
     }
-    expect(createImpactPlan(["packages/ogtool/src/index.ts"]).e2eTests).not.toContain(
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(
       COMPACT_SESSION_VIEW_E2E,
     );
   });
@@ -449,7 +481,7 @@ describe("fail-closed change impact", () => {
       expect(plan.unitTests, path).not.toContain(COMPOSER_MENUS_E2E);
       expect(plan.integrationTests, path).not.toContain(COMPOSER_MENUS_E2E);
     }
-    for (const path of ["packages/ogtool/src/index.ts", "packages/browserd/src/index.ts"]) {
+    for (const path of ["packages/browserd/src/index.ts"]) {
       const plan = createImpactPlan([path]);
       expect(plan.mode, path).toBe("focused");
       expect(plan.e2eTests, path).toEqual([]);
@@ -481,7 +513,7 @@ describe("fail-closed change impact", () => {
       expect(plan.e2eTests).toContain(PERSONAL_WORKSPACE_ACCESSIBILITY_E2E);
     }
 
-    for (const path of ["packages/ogtool/src/index.ts", "packages/browserd/src/index.ts"]) {
+    for (const path of ["packages/browserd/src/index.ts"]) {
       const plan = createImpactPlan([path]);
       expect(plan.mode).toBe("focused");
       expect(plan.e2eTests).not.toContain(PERSONAL_WORKSPACE_ACCESSIBILITY_E2E);
@@ -492,7 +524,7 @@ describe("fail-closed change impact", () => {
     const web = createImpactPlan(["apps/web/src/routes/capabilities.tsx"]);
     expect(web.e2eTests).toContain(PERSONAL_GITHUB_IDENTITY_E2E);
 
-    for (const path of ["packages/ogtool/src/index.ts", "packages/browserd/src/index.ts"]) {
+    for (const path of ["packages/browserd/src/index.ts"]) {
       expect(createImpactPlan([path]).e2eTests).not.toContain(PERSONAL_GITHUB_IDENTITY_E2E);
     }
   });
@@ -519,7 +551,7 @@ describe("fail-closed change impact", () => {
     ]) {
       expect(createImpactPlan([path]).e2eTests).toContain(browserTest);
     }
-    for (const path of ["packages/ogtool/src/index.ts", "packages/browserd/src/index.ts"]) {
+    for (const path of ["packages/browserd/src/index.ts"]) {
       expect(createImpactPlan([path]).e2eTests).not.toContain(browserTest);
     }
   });
