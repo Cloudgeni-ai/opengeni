@@ -8314,6 +8314,8 @@ export async function runOwnedSandboxSetup(
     environment: Record<string, string>;
     preparedInput?: PreparedAgentInput;
     fileDownloadsMaterialized?: boolean;
+    /** Lazy setup runs after SDK preparation has already observed the logical manifest. */
+    recordLazyManifest?: boolean;
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
     gitTokenSeedsOverride?: GitTokenSeeds;
     gitTokenSeedOverride?: string;
@@ -8426,6 +8428,13 @@ export async function runOwnedSandboxSetup(
     });
     if (opts.preparedInput) {
       appendSandboxFileDownloadFailureNote(opts.preparedInput, materialized.failures);
+    }
+  }
+  if (opts.recordLazyManifest) {
+    const manifest = (agent as { defaultManifest?: Manifest }).defaultManifest;
+    if (manifest) {
+      const { recordLazyMaterializedDirectories } = await import("./lazy-manifest");
+      await recordLazyMaterializedDirectories(session, manifest);
     }
   }
 }

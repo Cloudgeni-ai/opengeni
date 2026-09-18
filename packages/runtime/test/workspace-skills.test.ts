@@ -21,6 +21,99 @@ import {
 import { discoverWorkspaceSkills, workspaceSkills } from "../src/workspace-skills";
 
 describe("workspace repository skills", () => {
+  test("bounded discovery preserves deterministic output and reduces remote critical path", async () => {
+    const latency = Number(process.env.OPENGENI_SKILL_BENCHMARK_PROVIDER_MS ?? 10);
+    const files = Object.fromEntries(
+      Array.from({ length: 14 }, (_, index) => [
+        `root${index % 8}/skill${String(index).padStart(2, "0")}/SKILL.md`,
+        `# Skill ${index}`,
+      ]),
+    );
+    const session = fakeSession(files);
+    const listDir = session.listDir!;
+    const readFile = session.readFile!;
+    let active = 0;
+    let peak = 0;
+    let operations = 0;
+    let providerOperations = 0;
+    const delay = async <T>(op: () => Promise<T>, count: number): Promise<T> => {
+      active++;
+      peak = Math.max(peak, active);
+      operations++;
+      providerOperations += count;
+      // Reads use two provider operations in the measured Modal adapter.
+      await Bun.sleep(latency * count);
+      try {
+        return await op();
+      } finally {
+        active--;
+      }
+    };
+    session.listDir = (args) => delay(() => listDir(args), 1);
+    session.readFile = (args) => delay(() => readFile(args), 2);
+    const started = performance.now();
+    const skills = await discoverWorkspaceSkills(
+      session,
+      Array.from({ length: 8 }, (_, index) => ({ path: `root${index}`, source: `root${index}` })),
+    );
+    const elapsed = performance.now() - started;
+    expect(skills.map((skill) => skill.name)).toEqual(
+      Array.from({ length: 14 }, (_, index) => `skill${String(index).padStart(2, "0")}`),
+    );
+    expect(operations).toBe(36);
+    expect(providerOperations).toBe(50);
+    expect(peak).toBe(8);
+    expect(active).toBe(0);
+    // Measure the same fixture with a serialized transport as well. The opt-in
+    // 220ms setting reproduces the reported remote latency without cloud costs.
+    let tail = Promise.resolve();
+    const serial = <T>(op: () => Promise<T>, count: number): Promise<T> => {
+      const result = tail.then(async () => {
+        await Bun.sleep(latency * count);
+        return op();
+      });
+      tail = result.then(() => {});
+      return result;
+    };
+    session.listDir = (args) => serial(() => listDir(args), 1);
+    session.readFile = (args) => serial(() => readFile(args), 2);
+    const serialStarted = performance.now();
+    expect(
+      await discoverWorkspaceSkills(
+        session,
+        Array.from({ length: 8 }, (_, index) => ({ path: `root${index}`, source: `root${index}` })),
+      ),
+    ).toEqual(skills);
+    const serialElapsed = performance.now() - serialStarted;
+    expect(elapsed).toBeLessThan(serialElapsed * 0.7);
+    console.info(
+      `Skill discovery fixture: 50 simulated provider ops at ${latency}ms, serial ${serialElapsed.toFixed(1)}ms, bounded ${elapsed.toFixed(1)}ms, peak ${peak}`,
+    );
+  }, 20_000);
+
+  test("abort drains started reads and schedules no later roots", async () => {
+    const session = fakeSession({});
+    const aborted = Object.assign(new Error("cancelled"), { code: "ABORT_ERR" });
+    let calls = 0;
+    let active = 0;
+    session.listDir = async () => {
+      const index = calls++;
+      active++;
+      await Bun.sleep(index === 0 ? 1 : 10);
+      active--;
+      if (index === 0) throw aborted;
+      return [];
+    };
+    await expect(
+      discoverWorkspaceSkills(
+        session,
+        Array.from({ length: 30 }, (_, index) => ({ path: `root${index}`, source: "test" })),
+      ),
+    ).rejects.toBe(aborted);
+    expect(calls).toBe(8);
+    expect(active).toBe(0);
+  });
+
   for (const [description, expected] of [
     ["|-\n  First line.\n  Second line.", "First line.\nSecond line."],
     [">-\n  First paragraph.\n\n  Second paragraph.", "First paragraph.\nSecond paragraph."],
@@ -243,7 +336,7 @@ describe("workspace repository skills", () => {
     });
   }
   for (const code of ["rotation_in_progress", "EACCES", "ECONNRESET", "ABORT_ERR"]) {
-    test(`propagates directory ${code} without probing another root`, async () => {
+    test(`propagates directory ${code} after draining the bounded in-flight roots`, async () => {
       const failure = Object.assign(new Error(code), { code });
       let calls = 0;
       const session = fakeSession({});
@@ -257,7 +350,7 @@ describe("workspace repository skills", () => {
           { path: ".claude/skills", source: "claude" },
         ]),
       ).rejects.toBe(failure);
-      expect(calls).toBe(1);
+      expect(calls).toBe(2);
     });
 
     test(`propagates skill file ${code}`, async () => {
