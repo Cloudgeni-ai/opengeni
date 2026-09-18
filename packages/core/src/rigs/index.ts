@@ -128,7 +128,7 @@ export async function requireRigForApi(
 ): Promise<Rig> {
   const rig = await getRig(db, grant, rigId);
   if (!rig) {
-    throw new HTTPException(404, { message: "rig not found" });
+    throw new HTTPException(404, { message: "sandbox environment not found" });
   }
   return rig;
 }
@@ -143,7 +143,7 @@ export async function requireRigChangeForApi(
   // RLS + the workspace clause make a cross-workspace id indistinguishable from
   // missing; the rigId clause keeps the change addressable only under its rig.
   if (!change || change.rigId !== rigId) {
-    throw new HTTPException(404, { message: "rig change not found" });
+    throw new HTTPException(404, { message: "sandbox environment change not found" });
   }
   return change;
 }
@@ -151,7 +151,7 @@ export async function requireRigChangeForApi(
 function trimmedRigName(name: string): string {
   const trimmed = name.trim();
   if (!trimmed) {
-    throw new HTTPException(422, { message: "rig name is required" });
+    throw new HTTPException(422, { message: "sandbox environment name is required" });
   }
   return trimmed;
 }
@@ -165,7 +165,7 @@ function assertUniqueCheckNames(checks: ReadonlyArray<{ name: string }> | undefi
   for (const check of checks) {
     if (seen.has(check.name)) {
       throw new HTTPException(422, {
-        message: `duplicate rig check name: ${check.name}`,
+        message: `duplicate sandbox environment check name: ${check.name}`,
       });
     }
     seen.add(check.name);
@@ -198,7 +198,7 @@ async function assertVariableSetsExist(
     }
     if (!variableSetScopeAllowedForRig(rigScope, variableSet.scope)) {
       throw new HTTPException(422, {
-        message: `${rigScope}-scoped rigs cannot use ${variableSet.scope}-scoped variable sets`,
+        message: `${rigScope}-scoped sandbox environments cannot use ${variableSet.scope}-scoped variable sets`,
       });
     }
   }
@@ -233,12 +233,12 @@ export async function createRigForApi(
   );
   if ((await countRigs(deps.db, grant, payload.scope)) >= MAX_RIGS_PER_WORKSPACE) {
     throw new HTTPException(422, {
-      message: `a workspace supports at most ${MAX_RIGS_PER_WORKSPACE} rigs`,
+      message: `a workspace supports at most ${MAX_RIGS_PER_WORKSPACE} sandbox environments`,
     });
   }
   if (await getRigByName(deps.db, grant, name, payload.scope)) {
     throw new HTTPException(409, {
-      message: `rig name is already in use: ${name}`,
+      message: `sandbox environment name is already in use: ${name}`,
     });
   }
   const createdBy = rigActorForGrant(grant);
@@ -281,7 +281,7 @@ export async function updateRigForApi(
     const existing = await getRigByName(deps.db, grant, name, rig.scope);
     if (existing && existing.id !== rig.id) {
       throw new HTTPException(409, {
-        message: `rig name is already in use: ${name}`,
+        message: `sandbox environment name is already in use: ${name}`,
       });
     }
   }
@@ -339,7 +339,7 @@ export async function proposeRigChangeForApi(
   const workspaceId = rig.workspaceId;
   if (!rig.activeVersion) {
     throw new HTTPException(422, {
-      message: "rig has no active version to base a change on",
+      message: "sandbox environment has no active version to base a change on",
     });
   }
   if (request.kind === "definition_edit") {
@@ -412,7 +412,7 @@ async function promoteChangeWithActiveCas(
   } catch (error) {
     if (error instanceof RigActiveVersionChangedError) {
       throw new HTTPException(409, {
-        message: `rig moved since this change was verified (base ${error.expectedVersionId}, now ${error.actualVersionId ?? "none"}); re-verify before promoting`,
+        message: `sandbox environment moved since this change was verified (base ${error.expectedVersionId}, now ${error.actualVersionId ?? "none"}); re-verify before promoting`,
       });
     }
     if (error instanceof RigChangeTransitionError) {
@@ -435,15 +435,15 @@ export async function promoteSetupAppendChange(
   }
   if (change.status !== "proposed" && change.status !== "verifying") {
     throw new HTTPException(409, {
-      message: `rig change is ${change.status}; cannot promote`,
+      message: `sandbox environment change is ${change.status}; cannot promote`,
     });
   }
   if (!change.baseVersionId) {
-    throw new HTTPException(422, { message: "rig change has no base version" });
+    throw new HTTPException(422, { message: "sandbox environment change has no base version" });
   }
   const base = await getRigVersion(deps.db, rig.workspaceId, rig.id, change.baseVersionId);
   if (!base) {
-    throw new HTTPException(404, { message: "base rig version not found" });
+    throw new HTTPException(404, { message: "base sandbox environment version not found" });
   }
   const payload = change.payload as { command?: unknown; note?: unknown };
   if (typeof payload.command !== "string" || !payload.command.trim()) {
@@ -510,7 +510,7 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
   }
   if (change.status !== "proposed") {
     throw new HTTPException(409, {
-      message: `rig change is ${change.status}; cannot promote`,
+      message: `sandbox environment change is ${change.status}; cannot promote`,
     });
   }
   if (change.verification?.passed !== true) {
@@ -519,11 +519,11 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     });
   }
   if (!change.baseVersionId) {
-    throw new HTTPException(422, { message: "rig change has no base version" });
+    throw new HTTPException(422, { message: "sandbox environment change has no base version" });
   }
   const base = await getRigVersion(deps.db, rig.workspaceId, rig.id, change.baseVersionId);
   if (!base) {
-    throw new HTTPException(404, { message: "base rig version not found" });
+    throw new HTTPException(404, { message: "base sandbox environment version not found" });
   }
   const payload = change.payload as {
     setupScript?: unknown;
@@ -590,7 +590,7 @@ export async function createRigVersionForApi(
   payload: RigDefinitionEditPayload,
 ): Promise<RigVersion> {
   if (!rig.activeVersion) {
-    throw new HTTPException(422, { message: "rig has no active version" });
+    throw new HTTPException(422, { message: "sandbox environment has no active version" });
   }
   assertUniqueCheckNames(payload.checks);
   await assertVariableSetsExist(

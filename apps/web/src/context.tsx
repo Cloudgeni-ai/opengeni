@@ -1361,7 +1361,7 @@ export function RootRouteComponent() {
       setWorkspaces((current) => upsertWorkspace(current, update.value));
       return update.value;
     } catch (error) {
-      toast.error("Failed to update the workspace default rig", {
+      toast.error("Failed to update the workspace default sandbox environment", {
         description: error instanceof Error ? error.message : String(error),
       });
       return null;

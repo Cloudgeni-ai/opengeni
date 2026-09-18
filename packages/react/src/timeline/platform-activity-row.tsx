@@ -73,7 +73,7 @@ export default function PlatformActivityRow({
         : startupPhaseTitle(item.phase, item.status, item.outcome),
     preview:
       item.phase === "model_preparation"
-        ? "Includes overlapping sandbox, rig, repository, and runtime setup shown below."
+        ? "Includes overlapping sandbox startup, custom environment setup, repository preparation, and runtime setup shown below."
         : undefined,
     running,
     failed,
@@ -140,7 +140,7 @@ function startupPhaseTitle(
     return `Sandbox ${outcome === "resumed" ? "reattached" : outcome}`;
   }
   if (status === "complete" && phase === "rig" && outcome === "skipped") {
-    return "Rig already ready";
+    return "Sandbox Environment already ready";
   }
   const statusIndex =
     status === "running" ? 0 : status === "failed" ? 1 : status === "cancelled" ? 2 : 3;
@@ -163,7 +163,12 @@ const STARTUP_PHASE_TITLES: Record<
     "Sandbox startup interrupted",
     "Sandbox ready",
   ],
-  rig: ["Setting up rig", "Rig setup failed", "Rig setup interrupted", "Rig ready"],
+  rig: [
+    "Setting up sandbox environment",
+    "Sandbox Environment setup failed",
+    "Sandbox Environment setup interrupted",
+    "Sandbox Environment ready",
+  ],
   repository: [
     "Preparing repository",
     "Repository preparation failed",

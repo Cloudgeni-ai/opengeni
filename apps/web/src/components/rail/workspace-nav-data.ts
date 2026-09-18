@@ -102,8 +102,8 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
       {
         to: "/workspaces/$workspaceId/rigs",
         icon: "server-cog",
-        label: "Rigs",
-        description: "Versioned sandbox machine definitions",
+        label: "Sandbox Environments",
+        description: "Custom sandbox setup and health checks",
       },
       {
         to: "/workspaces/$workspaceId/machines",

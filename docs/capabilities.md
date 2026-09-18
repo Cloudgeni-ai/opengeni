@@ -17,7 +17,7 @@ The catalog merges:
 - reviewed integrations.sh snapshot imports stored as global `source: "registry"` catalog rows
 - public remote MCP servers discovered from the official MCP Registry
 
-Native OpenGeni product surfaces are deliberately absent from the installable catalog. The internal `opengeni`, `files`, and `docs` MCP carriers, Documents, Scheduled Tasks, GitHub repository resources, Rigs, and Sandboxes remain available through their owning runtime and product surfaces; they are never manufactured as enabled catalog rows. Agent discovery may return a separate native connection recommendation, such as GitHub owner consent, without adding that recommendation to the workspace catalog.
+Native OpenGeni product surfaces are deliberately absent from the installable catalog. The internal `opengeni`, `files`, and `docs` MCP carriers, Documents, Scheduled Tasks, GitHub repository resources, Sandbox Environments, and Sandboxes remain available through their owning runtime and product surfaces; they are never manufactured as enabled catalog rows. Agent discovery may return a separate native connection recommendation, such as GitHub owner consent, without adding that recommendation to the workspace catalog.
 
 Every catalog item includes a typed `lifecycle` projection and a bounded list of supported `actions` (`install`, `connect`, `configure`, `update`, `repair`, `disconnect`, `uninstall`, or `inspect`). The legacy `enabled` fields remain a compatibility projection while clients migrate; provenance such as `built_in` never implies lifecycle state. External configured MCPs are reported as deployment-managed and inspect-only.
 
@@ -697,7 +697,7 @@ citizens, to avoid touching unrelated `kind: "api"` catalog-builder behavior.
 Open the **Capabilities** view in the web app to:
 
 - filter and search the local catalog
-- review, install/update/repair, and ownership-safely uninstall role Packs with explicit Rig/Variable Set selection, and register a Pack manifest of your own
+- review, install/update/repair, and ownership-safely uninstall role Packs with explicit Sandbox Environment/Variable Set selection, and register a Pack manifest of your own
 - add and enable public MCP Registry results
 - add and connect manual MCP integrations through the MCP-only catalog form
 - detect, review, authenticate, and install custom OpenAPI or GraphQL APIs
@@ -748,7 +748,7 @@ workspace-administrator authority gets the locked sentence instead of inert
 buttons. A catalog Skill keeps the catalog detail sheet
 (`capability-detail-sheet.tsx`), which already owns its reviewed library
 identity, install/update/remove, and immutable provenance panel. A Pack opens
-`PackDetailDialog` (`pack-dialogs.tsx`), because choosing a Rig and a Variable
+`PackDetailDialog` (`pack-dialogs.tsx`), because choosing a Sandbox Environment and a Variable
 Set, reviewing an exact component plan, and uninstall/unregister do not
 compress into four blocks. Opening a Pack row *is* the review request, so the
 plan resolves immediately rather than behind a second button. That dialog names

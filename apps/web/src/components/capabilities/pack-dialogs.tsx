@@ -441,7 +441,7 @@ function PackInstallationDialog(props: {
                   <span className="font-normal leading-4 text-fg-subtle">
                     {selectedRig?.image ??
                       pack.rig?.description ??
-                      "Used only by work created from this Pack. Backed by a versioned Rig."}
+                      "Used only by work created from this Pack. Backed by a versioned Sandbox Environment."}
                   </span>
                 </label>
               ) : null}
@@ -927,7 +927,9 @@ export function PackContents({ pack }: { pack: CapabilityPack }) {
               {pack.rig?.rigId ? "Preselected compute environment" : "Compatible compute required"}
             </div>
             {pack.rig?.description ? <div>{pack.rig.description}</div> : null}
-            {pack.rig?.rigId ? <div className="font-mono">Rig {pack.rig.rigId}</div> : null}
+            {pack.rig?.rigId ? (
+              <div className="font-mono">Sandbox Environment {pack.rig.rigId}</div>
+            ) : null}
             {pack.sandboxImage ? (
               <div className="truncate font-mono" title={pack.sandboxImage}>
                 Must match {pack.sandboxImage}

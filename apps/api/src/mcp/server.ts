@@ -3898,7 +3898,7 @@ function registerRigTools(
     const rig = await requireRigForApi(deps.db, await resourceGrant(), rigId);
     if (rig.scope === "organization") {
       throw new Error(
-        "Organization rig mutation requires account-admin authority through the authenticated REST surface.",
+        "Organization sandbox environment mutation requires account-admin authority through the authenticated REST surface.",
       );
     }
     return rig;
@@ -3907,7 +3907,7 @@ function registerRigTools(
     server.registerTool(
       "rig_list",
       {
-        description: "List workspace rigs and their active versions.",
+        description: "List workspace sandbox environments and their active versions.",
         inputSchema: {},
       },
       async () => json({ rigs: await listRigs(deps.db, await resourceGrant()) }),
@@ -3917,7 +3917,7 @@ function registerRigTools(
       "rig_get",
       {
         description:
-          "Get one rig's bounded active definition plus compact historical version/change summaries. Historical setup scripts, checks, payloads, and verification logs are represented by counts/byte facts rather than copied into model context; use the access-controlled REST detail endpoints for exact retained definitions.",
+          "Get one sandbox environment's bounded active definition plus compact historical version/change summaries. Historical setup scripts, checks, payloads, and verification logs are represented by counts/byte facts rather than copied into model context; use the access-controlled REST detail endpoints for exact retained definitions.",
         inputSchema: {
           rigId: z4.string().uuid(),
           versionLimit: z4.number().int().positive().optional(),
@@ -3948,7 +3948,7 @@ function registerRigTools(
       "rig_propose_change",
       {
         description:
-          "Propose an additive rig setup command for clean verification. Use the exact command that already worked in this sandbox.",
+          "Propose an additive sandbox environment setup command for clean verification. Use the exact command that already worked in this sandbox.",
         inputSchema: {
           rigId: z4.string().uuid(),
           command: z4.string().min(1).max(8192),
@@ -3997,7 +3997,7 @@ function registerRigTools(
                 retryable: true,
               },
               warnings: [
-                "The rig change and verifying transition committed, but verification workflow start failed.",
+                "The sandbox environment change and verifying transition committed, but verification workflow start failed.",
               ],
               facts: { verificationAttempt: attempt },
               nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
@@ -4030,7 +4030,7 @@ function registerRigTools(
       "rig_verify",
       {
         description:
-          "Trigger rig verification. Pass changeId for a proposed change, or omit it to re-verify the active version's checks.",
+          "Trigger sandbox environment verification. Pass changeId for a proposed change, or omit it to re-verify the active version's checks.",
         inputSchema: {
           rigId: z4.string().uuid(),
           changeId: z4.string().uuid().optional(),
@@ -4100,7 +4100,7 @@ function registerRigTools(
           );
         }
         if (!rig.activeVersion) {
-          throw new Error("rig has no active version");
+          throw new Error("sandbox environment has no active version");
         }
         await deps.workflowClient.startRigVerification({
           workspaceId: rig.workspaceId,
@@ -4133,7 +4133,7 @@ function registerRigTools(
       "rig_promote",
       {
         description:
-          "Promote a verified definition_edit rig change to a new active immutable version. Requires rigs:manage.",
+          "Promote a verified definition_edit sandbox environment change to a new active immutable version. Requires sandbox environments:manage.",
         inputSchema: {
           rigId: z4.string().uuid(),
           changeId: z4.string().uuid(),
@@ -4940,7 +4940,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Do not delegate work you will also perform yourself; track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, OpenGeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Rig, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Do not delegate work you will also perform yourself; track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, OpenGeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Sandbox Environment, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateInput,
       },
       async (args) => {

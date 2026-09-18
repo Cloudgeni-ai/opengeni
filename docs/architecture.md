@@ -1396,15 +1396,15 @@ pointer selects a target without rewriting durable home policy.
 Repository skill discovery skips definite path misses. Other failures reach
 turn settlement; rotation resumes through the durable lifecycle wake.
 
-Immutable rig setup is lease-boundary single-flight. Exact lease epoch, provider
+Immutable sandbox environment setup is lease-boundary single-flight. Exact lease epoch, provider
 instance, and non-secret setup hash own a durable claim/revision/settlement receipt.
 Siblings join/reuse it through backed-off durable reads; after owner loss, a
 deadline successor re-enters the box-local marker guard. Receipts never contain
 or cover per-turn credentials, repository authorization, Codemode tokens, cloud
 login, attachments, or generated media.
 
-Rigs layer versioned setup and checks on the deployment-owned platform sandbox
-base; they cannot replace that base image. A verified provider-native Rig image
+Sandbox Environments layer versioned setup and checks on the deployment-owned platform sandbox
+base; they cannot replace that base image. A verified provider-native Sandbox Environment image
 is only a physical cold-create optimization and never changes the logical lease
 image, workspace archive, session snapshot, or credential authority.
 

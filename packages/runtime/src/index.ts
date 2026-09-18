@@ -2034,10 +2034,10 @@ export type RigInstructionsContext = {
 
 export function rigInstructions(rig: RigInstructionsContext): string[] {
   return [
-    `This session runs on rig "${rig.name}" (active version v${rig.version}) — a shared, versioned sandbox machine definition for your workspace.`,
-    "Your sandbox is an EPHEMERAL FORK of that rig: you have root and may install anything freely, but everything you change here is junk that dies with the box and never reaches the rig or other sessions.",
-    "For a DURABLE, team-wide change (tooling every future session on this rig should have), propose it with rig_propose_change, passing the EXACT command that already worked in this box — never assume an unverified change propagates.",
-    "If tooling you expect is missing, consult rig_get to see the rig's current setup and checks before reinstalling.",
+    `This session uses sandbox environment "${rig.name}" (active version v${rig.version}) — a versioned definition of custom sandbox setup and health checks.`,
+    "Your sandbox is an EPHEMERAL FORK of this environment. You may install tools here, but local changes do not update the environment definition or other sessions.",
+    "To make a verified setup change available to future sessions using this environment, call rig_propose_change with the exact command that already worked here. Never assume an unverified change propagates.",
+    "If tooling you expect is missing, consult rig_get to see the sandbox environment's current setup and checks before reinstalling.",
   ];
 }
 
@@ -10596,7 +10596,7 @@ function rigSetupHeredocDelimiter(script: string): string {
 
 function rigSetupExistingMarkerProbe(versionId: string, contentHash?: string): string {
   if (contentHash !== undefined && !/^sha256:[0-9a-f]{64}$/u.test(contentHash)) {
-    throw new Error("Rig setup content hash must be a canonical SHA-256 value");
+    throw new Error("Sandbox Environment setup content hash must be a canonical SHA-256 value");
   }
   const markers = [`${RIG_SETUP_RUNTIME_MARKER_ROOT}/rig-setup-${versionId}.done`];
   if (contentHash) {
@@ -10639,14 +10639,14 @@ export function rigSetupScriptCommand(
     ["trusted content marker", trustedContentMarkerRoot],
   ] as const) {
     if (!isAbsolute(root) || root === "/") {
-      throw new Error(`Rig setup ${label} root must be a non-root absolute path`);
+      throw new Error(`Sandbox Environment setup ${label} root must be a non-root absolute path`);
     }
   }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new Error("Rig setup timeout must be a positive finite duration");
+    throw new Error("Sandbox Environment setup timeout must be a positive finite duration");
   }
   if (contentHash !== undefined && !/^sha256:[0-9a-f]{64}$/u.test(contentHash)) {
-    throw new Error("Rig setup content hash must be a canonical SHA-256 value");
+    throw new Error("Sandbox Environment setup content hash must be a canonical SHA-256 value");
   }
   const timeoutSecs = Math.max(1, Math.ceil(timeoutMs / 1000));
   const lockWaitSecs = timeoutSecs + 6;
@@ -10665,7 +10665,7 @@ export function rigSetupScriptCommand(
   const heredocDelimiter = rigSetupHeredocDelimiter(script);
   return [
     "set -u",
-    `if ! mkdir -p ${shellQuote(markerRoot)}; then printf '%s\\n' 'unable to create rig setup marker root' >&2; exit 73; fi`,
+    `if ! mkdir -p ${shellQuote(markerRoot)}; then printf '%s\\n' 'unable to create sandbox environment setup marker root' >&2; exit 73; fi`,
     `__OG_RIG_VERSION_MARKER=${shellQuote(versionMarker)}`,
     `__OG_RIG_CONTENT_MARKER=${shellQuote(contentMarker ?? "")}`,
     `__OG_RIG_TRUSTED_CONTENT_MARKER=${shellQuote(trustedContentMarker ?? "")}`,
@@ -10678,7 +10678,7 @@ export function rigSetupScriptCommand(
     '  if mkdir "$__OG_RIG_LOCK" 2>/dev/null; then',
     "    trap 'rm -rf \"$__OG_RIG_LOCK\"' EXIT",
     `    if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
-    "    if ! __OG_RIG_SCRIPT=\"$(mktemp)\"; then printf '%s\\n' 'unable to create rig setup script file' >&2; exit 73; fi",
+    "    if ! __OG_RIG_SCRIPT=\"$(mktemp)\"; then printf '%s\\n' 'unable to create sandbox environment setup script file' >&2; exit 73; fi",
     `cat > "$__OG_RIG_SCRIPT" <<'${heredocDelimiter}'`,
     script,
     heredocDelimiter,
@@ -10686,12 +10686,12 @@ export function rigSetupScriptCommand(
     "__OG_RIG_RC=$?",
     '    rm -f "$__OG_RIG_SCRIPT"',
     '    if [ "$__OG_RIG_RC" -eq 0 ]; then',
-    "      if ! touch \"$__OG_RIG_VERSION_MARKER\"; then printf '%s\\n' 'unable to write rig setup version marker' >&2; exit 73; fi",
-    "      if [ -n \"$__OG_RIG_CONTENT_MARKER\" ] && ! touch \"$__OG_RIG_CONTENT_MARKER\"; then printf '%s\\n' 'unable to write rig setup content marker' >&2; exit 73; fi",
+    "      if ! touch \"$__OG_RIG_VERSION_MARKER\"; then printf '%s\\n' 'unable to write sandbox environment setup version marker' >&2; exit 73; fi",
+    "      if [ -n \"$__OG_RIG_CONTENT_MARKER\" ] && ! touch \"$__OG_RIG_CONTENT_MARKER\"; then printf '%s\\n' 'unable to write sandbox environment setup content marker' >&2; exit 73; fi",
     "    fi",
     '    exit "$__OG_RIG_RC"',
     "  fi",
-    "  if [ ! -d \"$__OG_RIG_LOCK\" ]; then printf '%s\\n' 'unable to create rig setup lock' >&2; exit 73; fi",
+    "  if [ ! -d \"$__OG_RIG_LOCK\" ]; then printf '%s\\n' 'unable to create sandbox environment setup lock' >&2; exit 73; fi",
     "  __OG_RIG_WAITED=0",
     '  while [ "$__OG_RIG_WAITED" -lt "$__OG_RIG_LOCK_WAIT_SECS" ]; do',
     `    if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
@@ -10701,7 +10701,7 @@ export function rigSetupScriptCommand(
     "  done",
     `  if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
     '  if [ ! -d "$__OG_RIG_LOCK" ]; then continue; fi',
-    "  if ! rmdir \"$__OG_RIG_LOCK\" 2>/dev/null && [ -d \"$__OG_RIG_LOCK\" ]; then printf '%s\\n' 'unable to reclaim stale rig setup lock' >&2; exit 73; fi",
+    "  if ! rmdir \"$__OG_RIG_LOCK\" 2>/dev/null && [ -d \"$__OG_RIG_LOCK\" ]; then printf '%s\\n' 'unable to reclaim stale sandbox environment setup lock' >&2; exit 73; fi",
     "done",
   ].join("\n");
 }
@@ -10738,7 +10738,7 @@ async function stageRigSetupScript(
         },
         context.commandRunner,
       );
-      assertSandboxCommandSucceeded(result, "Rig setup payload staging");
+      assertSandboxCommandSucceeded(result, "Sandbox Environment setup payload staging");
     }
     return payloadPath;
   } catch (error) {
@@ -10840,8 +10840,10 @@ export async function runRigSetupHook(
       ) {
         result = markerProbe;
       } else if (markerProbeExitCode !== 42) {
-        assertSandboxCommandSucceeded(markerProbe, "Rig setup marker probe");
-        throw new Error("Rig setup marker probe returned success without its sentinel");
+        assertSandboxCommandSucceeded(markerProbe, "Sandbox Environment setup marker probe");
+        throw new Error(
+          "Sandbox Environment setup marker probe returned success without its sentinel",
+        );
       }
       if (result === undefined) {
         stagedScriptPath = await stageRigSetupScript(session, rigSetup.script, context);
@@ -10866,7 +10868,7 @@ export async function runRigSetupHook(
       },
     });
     throw new Error(
-      `Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): ${message}`,
+      `Sandbox Environment setup failed for sandbox environment "${rigSetup.rigName}" (version ${rigSetup.versionId}): ${message}`,
       { cause: error },
     );
   } finally {
@@ -10901,12 +10903,12 @@ export async function runRigSetupHook(
         : output;
     const timedOut = stillRunning || exitCode === 124 || exitCode === 137;
     const reason = timedOut
-      ? `did not finish within the rig setup timeout (${rigSetup.timeoutMs}ms)`
+      ? `did not finish within the sandbox environment setup timeout (${rigSetup.timeoutMs}ms)`
       : exitCode === null
         ? "did not report an exit code"
         : `exited with code ${exitCode}`;
     const failure = new Error(
-      `Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): the setup script ${reason}${tail ? `:\n${tail}` : ""}`,
+      `Sandbox Environment setup failed for sandbox environment "${rigSetup.rigName}" (version ${rigSetup.versionId}): the setup script ${reason}${tail ? `:\n${tail}` : ""}`,
     );
     await context.onRuntimeEvent?.({
       type: "rig.setup.failed",

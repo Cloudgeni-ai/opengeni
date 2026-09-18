@@ -1975,7 +1975,7 @@ That is `docker/sandbox.Dockerfile` for Docker and `docker/desktop.Dockerfile` f
 Modal Computer/Browser. Do not enable the flag on a desktop digest published
 before the kernel was installed, and do not point Modal at headless
 `opengeni-sandbox` to obtain the kernel.
-Production Docker/Modal references must be digest-pinned; pack, rig, mutable,
+Production Docker/Modal references must be digest-pinned; pack, sandbox environment, mutable,
 self-hosted, and mismatched images fail closed. The worker runs the absolute
 runtime doctor inside the actual box before the model starts. `bun run dev`
 automatically caches an exact clean-HEAD CI runtime when available, source-tags
@@ -2552,7 +2552,7 @@ OpenSandbox v1 uses exact ID-addressed attach and OpenGeni portable
 keeps the SHA-256 descriptor plus an object ref. Object storage is required when
 this backend is active: missing storage fails closed at boot and on capture rather
 than writing tar bytes into `resume_state`. Native OpenSandbox pause/resume,
-snapshots, and immutable rig-image builds are deliberately not used. A desktop-class box
+snapshots, and immutable sandbox environment-image builds are deliberately not used. A desktop-class box
 image (ttyd, browserd, Xvfb/XFCE/noVNC) reports PTY, desktop, and recording;
 interactive keystrokes go through ttyd on 7681, not SDK `write_stdin`. Channel B
 JSON and streams use signed URI-mode ingress when
@@ -2619,7 +2619,7 @@ enabled pool uses label `opengeni.ai/sandbox-pool=opensandbox`, taint
 `opengeni.ai/sandbox=true:NoSchedule`, and explicit autoscaling bounds including
 scale-to-zero. Size 5/50/500 profiles from CPU, memory, pod/IP density, daemon
 overhead, utilization, disruption margin, quota, and cost; a 500 lightweight
-profile is not evidence for 500 desktop rigs. An Azure deployment that selects
+profile is not evidence for 500 desktop sandbox environments. An Azure deployment that selects
 OpenSandbox must enable this pool because its Azure BatchSandbox template pins
 workloads to that scheduling contract. Generic Kubernetes and k3s use the
 unconstrained template instead.
@@ -2873,8 +2873,8 @@ configured while remaining ineffective until ownership is enabled, which is
 reported explicitly.
 
 Roll out ownership first. After every reaper/verifier consumer reports the
-compatible revision, enable rig-verification lease ownership separately as
-described in [Rig operational rollout](rigs.md#operational-rollout). Enable lazy
+compatible revision, enable sandbox environment-verification lease ownership separately as
+described in [Sandbox Environment operational rollout](rigs.md#operational-rollout). Enable lazy
 provisioning only after the credential/resource eager-path canaries for the
 target release are green.
 

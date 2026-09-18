@@ -98,7 +98,7 @@ so discovery returns an empty page. Issue, revoke, and runtime use remain
 activation-gated; the empty discovery answer does not activate the product or
 weaken any mutation fence.
 The managed personal-workspace projection includes `rigs:use`, allowing its
-owner to discover and propose changes to personal Rigs without granting the
+owner to discover and propose changes to personal Sandbox Environments without granting the
 administrative `rigs:manage` capability.
 
 Public issuance supports `session` and `always`. Session grants are authorized
@@ -128,14 +128,14 @@ revocation after baseline route-workspace access is proved.
 Standalone `once` and custom expiry remain outside this management surface.
 Migration 0306 adds the only direct-session `once` path; maintenance migration
 0338 extends it to the selected personal Connected Machine. Create/Send/Steer
-acceptance derives the fixed personal Variable Set/Rig/Connected Machine closure and issues it in
+acceptance derives the fixed personal Variable Set/Sandbox Environment/Connected Machine closure and issues it in
 the same transaction as the logical turn. New-session create binds the new
 session epoch; established-session requests provide the expected epoch. The
 receipt and snapshots are immutable, credential-free, and turn-bound, so
 same-turn recovery reuses once while goal/machine successors do not inherit it.
 The managed web console exposes that exact command for a new session and its
 existing-session Send/Steer composer. It discovers only the current managed
-human's active Variable Set/Rig/Connected Machine authorities through the bounded owner list,
+human's active Variable Set/Sandbox Environment/Connected Machine authorities through the bounded owner list,
 joins names from target-workspace metadata-only catalogs, and preserves the
 explicit selected-resource boundary. Explicit attachment is consent for the
 owner's work in this session: private and shared sessions submit session-scoped
@@ -151,12 +151,12 @@ uses that same human Send path. Cross-workspace grant/fork UX, standalone manage
 Documents/Connections without an exact runtime adapter, and
 MCP/agent administration remain outside this slice.
 
-For direct and scheduled personal Variable Set/Rig use, personal-workspace and
+For direct and scheduled personal Variable Set/Sandbox Environment use, personal-workspace and
 origin-workspace columns are provenance/lifecycle facts only. Authorization is
 the active server-derived owner organization membership, same organization,
 current target-workspace access, and exact live authority/resource/grant,
 session visibility, authority epoch, generation, status, and interruption
-fences. Direct turns re-run the corrected resolver before any Rig or Variable
+fences. Direct turns re-run the corrected resolver before any Sandbox Environment or Variable
 Set read; sessions without personal resources take a no-op path.
 
 Migration `0258_three_scope_document_knowledge_authority.sql` applies the same
@@ -223,7 +223,7 @@ activated common-authority Documents always require the admitted grant
 snapshot.
 
 Migration `0262_scoped_connected_machines_and_rigs.sql` activates the same explicit
-organization/workspace/user ownership for Rigs and Connected Machines. Human
+organization/workspace/user ownership for Sandbox Environments and Connected Machines. Human
 machine approval defaults to user scope. Physical workspace ids remain provenance
 and transport-routing facts, not personal authority boundaries: an owner's user
 resources remain visible in every same-organization workspace they can access.
@@ -1372,7 +1372,7 @@ in the same change.
 ## Legacy behavior
 
 Existing resources retain their current workspace foreign keys and RLS. Slice
-A does not change variable-set, rig, Connected Machine, connection, Codex, or
+A does not change variable-set, sandbox environment, Connected Machine, connection, Codex, or
 Document materialization.
 
 Existing sessions and old writers are safe because the new session columns
@@ -1569,7 +1569,7 @@ The activated database contract is intentionally narrow:
   source, inserts the destination directly at its selected visibility, creates
   a fresh owner/epoch/provenance/root/singleton group, copies the exact durable
   content allowlist (including typed reasoning/latency), and copies no live
-  grant, credential, Connection/delegation, goal/turn, MCP, Variable Set, Rig,
+  grant, credential, Connection/delegation, goal/turn, MCP, Variable Set, Sandbox Environment,
   sandbox identity/process, personal-resource authority, or pin. It never
   creates a private fork and then transitions it. A separate read-only replay
   capability resolves only an exact applied actor/workspace/source/key/request-
@@ -1716,7 +1716,7 @@ than surfacing a duplicate-key error.
 The phase's data source is the read-only inventory seam (migration 0285,
 corrected by 0292): `bun run db:inventory-tenancy --organization-id <uuid>`
 reports content-free counts of every legacy-attribution population - ownerless
-sessions, Variable Sets / Rigs / Connected Machines **per authority lane**,
+sessions, Variable Sets / Sandbox Environments / Connected Machines **per authority lane**,
 connections per authority lane, humans with workspace access but no
 organization-membership anchor, active memberships per lifecycle status,
 unattributed workspace writers, and the two linked-input gates (documents
@@ -1811,7 +1811,7 @@ receipt counts were wrong. 0340 restores that visibility as its own narrow
 read-only policy, `organization_membership_backfill_read`, so the next migration
 to restate the shared list cannot delete it again.
 
-#### Variable Sets, Rigs, and Connected Machines need no data rewrite
+#### Variable Sets, Sandbox Environments, and Connected Machines need no data rewrite
 
 These three families are already terminally classified, and the phase D
 deliverable for them is an assertion plus a receipt rather than an `UPDATE`.
@@ -1948,7 +1948,7 @@ production-posture regression harness
 
 Migration 0291 is the resulting assertion seam:
 `bun run db:verify-resource-classification --organization-id <uuid>
-[--run-key <key>]` proves per row that each Variable Set, Rig, and Connected
+[--run-key <key>]` proves per row that each Variable Set, Sandbox Environment, and Connected
 Machine already carries an explicit terminal authority classification, and
 records what it cannot prove. It covers the only genuinely unenforced parts of
 the classification, which no constraint catches: that a row claiming user
@@ -1973,7 +1973,7 @@ work in the test harness, which migrates as a superuser for whom FORCE RLS never
 engages. Any future classification work on these tables must run behind the same
 kind of capability-claiming seam.
 
-**There is no "unclassified" count for Variable Sets, Rigs, or Connected
+**There is no "unclassified" count for Variable Sets, Sandbox Environments, or Connected
 Machines, and one must not be reintroduced without new schema.** 0285 reported
 one, defined as `authority_id IS NULL`; 0292 removed it. The authority shape
 constraints (`workspace_variable_sets_authority_shape_check`,
@@ -1982,7 +1982,7 @@ NULL `authority_id` for every organization- and workspace-scoped row, so that
 predicate was structurally `total - userScoped`: every correctly classified row
 was reported as unmigrated and the number could never drain to zero. No
 corrected predicate exists either, because `authority_scope` **defaults to
-`'workspace'`** (0230 for Variable Sets and Rigs, 0262 for Connected Machines),
+`'workspace'`** (0230 for Variable Sets and Sandbox Environments, 0262 for Connected Machines),
 making an unmigrated legacy row indistinguishable from a deliberately
 workspace-scoped one, and nothing else separates them:
 
@@ -1992,7 +1992,7 @@ workspace-scoped one, and nothing else separates them:
   "lacks an explicit authority classification": this phase classifies a reviewed
   legacy row explicitly _as_ workspace-owned, which writes nothing, so a fully
   reviewed row still reads NULL.
-- **Rigs** - `origin_workspace_id` is not even a legacy marker. `createRig`
+- **Sandbox Environments** - `origin_workspace_id` is not even a legacy marker. `createRig`
   retains a live non-scoped branch that inserts through Drizzle without it, so
   new rows keep arriving with a NULL origin today.
 - **Connected Machines** - 0262 added `origin_workspace_id` and backfilled it
@@ -2121,7 +2121,7 @@ and an explicit `truncated` flag.
   an identity's `active_login_binding_id` must also be its own binding (the FK
   proves existence, never ownership);
 - the shadow scope comparison: legacy effective scope is workspace for every
-  resource, so every connection, Variable Set, Rig, Connected Machine, or
+  resource, so every connection, Variable Set, Sandbox Environment, Connected Machine, or
   Document whose _proposed_ effective scope is `user` must have an active
   authority owned by an active membership. Without one there is no reachable
   user resolution - it must fall back to workspace or deny.
@@ -2172,7 +2172,7 @@ inspects.
 **Unverifiable** properties are named explicitly rather than emitted as a
 counter that could never reach zero:
 
-- Variable Sets, Rigs, and Connected Machines have no legacy discriminator.
+- Variable Sets, Sandbox Environments, and Connected Machines have no legacy discriminator.
   `authority_scope` defaults to `workspace` and the `*_authority_shape_check`
   constraints _require_ `authority_id IS NULL` for organization/workspace scope,
   so a never-classified legacy row and a deliberately workspace-owned row are
@@ -2190,7 +2190,7 @@ cross-organization evidence suite for this phase. Against a real PostgreSQL
 database, driven as the genuine non-superuser `NOBYPASSRLS` `opengeni_app`
 login, it proves - each denial paired with a positive control under the owning
 organization - that no seeded resource family (session, session event, Variable
-Set, Rig, Connected Machine, enrollment, connection, file, Document base,
+Set, Sandbox Environment, Connected Machine, enrollment, connection, file, Document base,
 Document, knowledge memory, scheduled task, API key) crosses an organization
 boundary by read, forged workspace id, sibling workspace, insert, update, or
 delete; that a missing account or workspace context denies rather than widens;
@@ -2493,7 +2493,7 @@ is run:
    deliberately not blockers: service/API-key sessions can remain ownerless,
    and pre-0277 direct/process writer rows are immutable historical evidence.
    A single non-zero required parity lane or invariant violation is a blocker.
-   Variable Sets, Rigs, and Connected Machines contribute no drain-to-zero
+   Variable Sets, Sandbox Environments, and Connected Machines contribute no drain-to-zero
    counter here, and one must not be invented: nothing in their schema separates
    an unmigrated legacy row from a deliberately organization- or
    workspace-scoped one, so no truthful unmigrated-population count exists for
@@ -2653,7 +2653,7 @@ not create the immediate private session promised by the signup contract.
   action, and activation-gated subject read projection are active (see
   "Session-visibility and fork
   public activation");
-- Connected Machine, rig, variable-set, connection, Codex, or Document
+- Connected Machine, sandbox environment, variable-set, connection, Codex, or Document
   materialization changes;
 - an always-on retention deletion worker (0263 exposes a supported bounded
   operator command instead);

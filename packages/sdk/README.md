@@ -350,7 +350,7 @@ user decision. A quiescence conflict identifies the stable blocker after live
 turns, goals, realtime, schedules, workspace writers, retained processes, and
 sandbox access have been settled. Forks copy exact same-workspace durable
 conversation content but no live turn, goal, credential, Connection/delegation,
-personal grant, Variable Set, Rig, MCP server configuration, process, sandbox
+personal grant, Variable Set, Sandbox Environment, MCP server configuration, process, sandbox
 identity, pin, or workflow. Destination visibility and acknowledgement are
 idempotency-bound.
 

@@ -656,7 +656,7 @@ Approving lands an enrollment plus a `selfhosted` sandbox and unblocks the
 agent's poll; `sandboxId` is immediately usable as a `targetSandboxId` or a swap
 target. The managed consent page always asks for personal, workspace, or
 organization access and defaults to personal. Organization publication is
-available only to account administrators. Machines and Rigs display the
+available only to account administrators. Machines and Sandbox Environments display the
 resulting scope in their list cards so wider publication is never implicit.
 
 ## Large file edits
