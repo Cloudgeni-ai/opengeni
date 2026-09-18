@@ -26,6 +26,38 @@ const MAX_DISCOVERED_SKILLS = 256;
 const MAX_SKILL_ENTRIES = 1_024;
 const MAX_SKILL_BYTES = 32 * 1024 * 1024;
 const SAFE_SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const DISCOVERY_CONCURRENCY = 8;
+
+// Keep ordered results, bound remote work, and drain already-started operations
+// before propagating a failure. Never leave detached filesystem work behind.
+async function mapDiscovery<T, R>(
+  items: readonly T[],
+  read: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  let failed = false;
+  let failure: unknown;
+  let failureIndex = Infinity;
+  await Promise.all(
+    Array.from({ length: Math.min(DISCOVERY_CONCURRENCY, items.length) }, async () => {
+      while (!failed && next < items.length) {
+        const index = next++;
+        try {
+          results[index] = await read(items[index]!);
+        } catch (error) {
+          if (index < failureIndex) {
+            failure = error;
+            failureIndex = index;
+          }
+          failed = true;
+        }
+      }
+    }),
+  );
+  if (failed) throw failure;
+  return results;
+}
 
 function isMissingSkillPath(error: unknown): boolean {
   return (
@@ -229,88 +261,96 @@ async function discoverWorkspaceSkillsUnmeasured(
     throw new Error("Workspace skill discovery requires sandbox listDir() and readFile() support");
   }
   const discovered = new Map<string, DiscoveredWorkspaceSkill>();
-  let candidates = 0;
-  for (const searchPath of searchPaths) {
-    let entries;
+  const roots = await mapDiscovery(searchPaths, async (searchPath) => {
     try {
-      entries = await session.listDir({ path: searchPath.path, ...(runAs ? { runAs } : {}) });
+      return await session.listDir!({ path: searchPath.path, ...(runAs ? { runAs } : {}) });
     } catch (error) {
       if (!isMissingSkillPath(error)) throw error;
+      return [];
+    }
+  });
+  const candidates = roots.flatMap((entries, index) =>
+    [...entries]
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .filter((entry) => entry.type === "dir")
+      .map((entry) => ({ entry, searchPath: searchPaths[index]! })),
+  );
+  if (candidates.length > MAX_DISCOVERED_SKILLS) {
+    throw new Error(`Repository skill discovery exceeds ${MAX_DISCOVERED_SKILLS} directories`);
+  }
+  const loaded = await mapDiscovery(candidates, async ({ entry, searchPath }) => {
+    const skillMarkdownPath = joinWorkspacePath(entry.path, SKILL_FILE);
+    let markdown: string;
+    try {
+      // Match reader/inventory eligibility: symlink entrypoints are not
+      // advertised because the portable filesystem API cannot prove containment.
+      const skillEntries = await session.listDir!({
+        path: entry.path,
+        ...(runAs ? { runAs } : {}),
+      });
+      if (
+        !skillEntries.some(
+          (candidate) => candidate.name === SKILL_FILE && candidate.type === "file",
+        )
+      )
+        return null;
+      const content = await session.readFile!({
+        path: skillMarkdownPath,
+        ...(runAs ? { runAs } : {}),
+      });
+      markdown = typeof content === "string" ? content : new TextDecoder().decode(content);
+    } catch (error) {
+      if (!isMissingSkillPath(error)) throw error;
+      return null;
+    }
+    const frontmatter = parseSkillFrontmatter(markdown);
+    const name = frontmatter.name?.trim() || entry.name;
+    if (name.length > 64 || !SAFE_SKILL_NAME.test(name)) {
+      throw new Error(`Repository skill has an invalid name: ${name.slice(0, 64)}`);
+    }
+    const key = name.toLowerCase();
+    if (shadowedNames.has(key)) return null;
+    const description = frontmatter.description?.trim() || "No description provided.";
+    if (description.length > 2_048) {
+      throw new Error(`Repository skill "${name}" has an invalid description`);
+    }
+    if (reservedNames.has(key)) {
+      throw new Error(`Workspace skill "${name}" conflicts with a configured OpenGeni skill`);
+    }
+    const candidate: DiscoveredWorkspaceSkill = {
+      name,
+      description,
+      path: skillMarkdownPath,
+      source: searchPath.source,
+      directory: entry.path,
+    };
+    return candidate;
+  });
+  for (const candidate of loaded) {
+    if (!candidate) continue;
+    const { name } = candidate;
+    const key = name.toLowerCase();
+    const existing = discovered.get(key);
+    if (!existing) {
+      discovered.set(key, candidate);
       continue;
     }
-    for (const entry of [...entries].sort((left, right) => left.name.localeCompare(right.name))) {
-      if (entry.type !== "dir") continue;
-      candidates += 1;
-      if (candidates > MAX_DISCOVERED_SKILLS) {
-        throw new Error(`Repository skill discovery exceeds ${MAX_DISCOVERED_SKILLS} directories`);
-      }
-      const skillMarkdownPath = joinWorkspacePath(entry.path, SKILL_FILE);
-      let markdown: string;
-      try {
-        // Match reader/inventory eligibility: symlink entrypoints are not
-        // advertised because the portable filesystem API cannot prove containment.
-        const skillEntries = await session.listDir({
-          path: entry.path,
-          ...(runAs ? { runAs } : {}),
-        });
-        if (
-          !skillEntries.some(
-            (candidate) => candidate.name === SKILL_FILE && candidate.type === "file",
-          )
-        )
-          continue;
-        const content = await session.readFile({
-          path: skillMarkdownPath,
-          ...(runAs ? { runAs } : {}),
-        });
-        markdown = typeof content === "string" ? content : new TextDecoder().decode(content);
-      } catch (error) {
-        if (!isMissingSkillPath(error)) throw error;
-        continue;
-      }
-      const frontmatter = parseSkillFrontmatter(markdown);
-      const name = frontmatter.name?.trim() || entry.name;
-      if (name.length > 64 || !SAFE_SKILL_NAME.test(name)) {
-        throw new Error(`Repository skill has an invalid name: ${name.slice(0, 64)}`);
-      }
-      const key = name.toLowerCase();
-      if (shadowedNames.has(key)) continue;
-      const description = frontmatter.description?.trim() || "No description provided.";
-      if (description.length > 2_048) {
-        throw new Error(`Repository skill "${name}" has an invalid description`);
-      }
-      if (reservedNames.has(key)) {
-        throw new Error(`Workspace skill "${name}" conflicts with a configured OpenGeni skill`);
-      }
-      const candidate: DiscoveredWorkspaceSkill = {
-        name,
-        description,
-        path: skillMarkdownPath,
-        source: searchPath.source,
-        directory: entry.path,
-      };
-      const existing = discovered.get(key);
-      if (!existing) {
-        discovered.set(key, candidate);
-        continue;
-      }
-      // Unique names only need SKILL.md frontmatter for the prompt-cache prefix.
-      // Hash both trees only when the same name appears in two search paths.
-      const existingFingerprint =
-        existing.fingerprint ??
-        (await fingerprintWorkspaceDirectory(session, existing.directory, runAs));
-      const candidateFingerprint = await fingerprintWorkspaceDirectory(
-        session,
-        candidate.directory,
-        runAs,
+    // Unique names only need SKILL.md frontmatter for the prompt-cache prefix.
+    // Hash both trees only when the same name appears in two search paths.
+    const existingFingerprint =
+      existing.fingerprint ??
+      (await fingerprintWorkspaceDirectory(session, existing.directory, runAs));
+    const candidateFingerprint = await fingerprintWorkspaceDirectory(
+      session,
+      candidate.directory,
+      runAs,
+    );
+    if (existingFingerprint !== candidateFingerprint) {
+      throw new Error(
+        `Workspace skill "${name}" has conflicting definitions in ${existing.source} and ${candidate.source}`,
       );
-      if (existingFingerprint !== candidateFingerprint) {
-        throw new Error(
-          `Workspace skill "${name}" has conflicting definitions in ${existing.source} and ${candidate.source}`,
-        );
-      }
-      existing.fingerprint = existingFingerprint;
     }
+    existing.fingerprint = existingFingerprint;
   }
   return [...discovered.values()]
     .map(({ name, description, path, source }) => ({ name, description, path, source }))

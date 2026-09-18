@@ -1004,6 +1004,7 @@ export async function bindLazySandboxProvisioner(
                 {
                   settings: runSettings,
                   environment: sandboxEnvironment,
+                  recordLazyManifest: true,
                   onRuntimeEvent: async (event) => {
                     await eventing.publish?.([{ type: event.type, payload: event.payload }], true);
                   },
