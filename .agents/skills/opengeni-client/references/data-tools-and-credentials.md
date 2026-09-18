@@ -70,6 +70,13 @@ This is credential brokerage, not zero-knowledge storage. OpenGeni operators wit
 
 Do not put tokens in an OpenAPI document URL, MCP URL, prompt, modelContext, Skill, browser response, or log. Use Connections, write-only MCP headers, a supported OAuth flow, or the customer's secret manager.
 
+During setup, inspect credential presence and selected account metadata without
+printing secret values. Some CLI account/configuration commands return cached
+tokens; check their output contract and select safe fields before emitting tool
+output. A diagnostic or handoff should contain configuration names and checks,
+not credentials. If exposure occurs, stop further disclosure and arrange revocation
+or rotation through the authorized owner.
+
 ## Authorization belongs at every layer
 
 Tool selection is not data authorization. The customer API must validate the presented credential on every operation and derive or verify the allowed tenant, user, report, and row scope. Do not trust model-supplied tenant IDs. Prefer endpoints whose server derives scope from token claims; when an ID is accepted, verify it belongs to those claims.

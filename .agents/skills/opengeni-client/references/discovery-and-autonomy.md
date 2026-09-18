@@ -37,11 +37,12 @@ platform work separate from an ordinary customer's integration responsibilities.
 
 ## Ask the exact amount
 
-Ask a question when all of the following are true:
-
-1. The answer is not already available from the product, repository, live service, or prior user direction.
-2. Different answers would materially change privacy, authority, user experience, cost, irreversible data, or the delivery boundary.
-3. A reversible implementation choice would not let useful work continue safely.
+Ask when an unresolved choice would materially change privacy, authority, user
+experience, cost, irreversible data, or the delivery boundary. First use facts
+already available from the product, repository, live service, or prior direction.
+For reversible preferences, offer a fitting recommendation and continue independent
+work while the user responds. Require an answer before dependent work only when
+the missing decision is necessary for correctness or authorization.
 
 Good questions ask for a product decision, such as who may read another person's chats, whether the agent may write data, which actions need confirmation, whether users should see tool activity, or whether a named environment may be deployed.
 

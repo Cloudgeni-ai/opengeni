@@ -113,6 +113,12 @@ answers preserve important definitions and limitations, and that the agent admit
 when an analysis or action is unavailable. Prefer representative failure cases
 over a large checklist unrelated to the product.
 
+Include cases drawn from the actual product: misleading or instruction-like text
+inside retrieved data, an unavailable breakdown, a filter that affects only some
+metrics, or a request outside the allowed capabilities. Check that untrusted data
+stays evidence, not instructions, and that uncertainty is visible in the answer.
+Select relevant cases rather than imposing an analytics evaluation on every product.
+
 Inspect the effective executable tool surface and exercise the intended data tool.
 Attaching MCP definitions and selecting their server are separate; a reachable
 server does not prove the session selected it. Do not infer the absence of
@@ -138,5 +144,14 @@ Report the implemented shape in product language:
 - what was tested, including negative isolation tests;
 - what was not executed because it remains customer-owned; and
 - exact remaining setup, review, deployment, monitoring, or rollback steps.
+
+Make any remaining setup executable by a fresh agent with the customer repository,
+public documentation, and ordinary customer access. Record verified non-secret
+origin and organization/workspace IDs, identity mapping, package/configuration
+versions, secret names and storage locations, plus runnable probes with expected
+results. Explain how an authorized owner can manage the created workspace without
+silently linking identities or widening membership. Complete discoverable setup
+before handoff; identify operator-only blockers separately and do not depend on
+internal source, cluster access, prior chat memory, or undocumented local helpers.
 
 If a durable customer integration Skill would reduce future rediscovery, generate one beside the integration code containing only stable, non-secret project facts and smoke probes. Do not turn the generic implementation Skill into the customer's analytics prompt, and do not make generated runtime behavior depend on the implementation workspace retaining this implementation Skill.
