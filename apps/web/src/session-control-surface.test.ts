@@ -296,7 +296,7 @@ describe("session control surface architecture", () => {
     expect(establishedPicker).toContain("props.canControl && props.canAttach");
     expect(
       establishedRoute.match(
-        /canControl=\{workspacePermissions\.includes\("sessions:control"\)\}/g,
+        /<SessionVariableSetPicker\s+session=\{props\.session\}\s+canControl=\{workspacePermissions\.includes\("sessions:control"\)\}/g,
       ),
     ).toHaveLength(1);
     expect(establishedRoute.match(/goalActive=\{props\.goal\.isActive\}/g)).toHaveLength(1);

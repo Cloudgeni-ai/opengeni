@@ -13,6 +13,7 @@ import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
+import { SessionAdmissionNotice } from "@/components/session/session-admission-notice";
 import {
   connectorSelectionUpdate,
   followWorkspaceConnectorPolicy,
@@ -2620,6 +2621,24 @@ function SessionChatPane(props: {
           and agents as one dock. Hides entirely when there are no signals. */}
       <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
+          <SessionAdmissionNotice
+            key={`${props.session.workspaceId}:${props.session.id}`}
+            session={props.session}
+            canControl={workspacePermissions.includes("sessions:control")}
+            paused={
+              (composer.effectiveControl ?? props.session.effectiveControl).state === "paused"
+            }
+            busy={composer.resuming || composer.pausing || composer.sending || props.queue.mutating}
+            onRecheck={async () => {
+              const control = composer.effectiveControl ?? props.session.effectiveControl;
+              if (control.state === "paused") return;
+              await context.client.resumeSession(props.session.workspaceId, props.session.id, {
+                clientEventId: crypto.randomUUID(),
+                expectedControlEtag: control.controlEtag,
+              });
+              await Promise.all([props.onReloadSession(), props.queue.refresh()]);
+            }}
+          />
           <SessionChrome
             sessionStatus={props.session.status}
             onOpenSession={props.onOpenSession}
