@@ -390,10 +390,20 @@ operation.
 
 ## Skills are external product data
 
-Ordinary OpenGeni sessions include the `builtin:opengeni-help` descriptor by
-default. Its guide can be read without a sandbox and points
-to the official documentation at https://docs.opengeni.ai/llms.txt. It covers
-product questions. Use the repository opengeni-client Skill for implementation work.
+Ordinary OpenGeni sessions include `builtin:opengeni-client` for product
+integration and `builtin:opengeni-help` for general product questions. Both are
+readable with `skill_read` without a sandbox, installation, Pack, or repository
+attachment. The client guide helps discover/connect required resources and adapt
+implementation, verification and handoff to the product. Only descriptors enter
+the initial prompt; the agent reads relevant guidance on demand.
+
+`.agents/skills/opengeni-client` is the single authored source, also usable by
+coding agents in a cloned repository. `bun run sync:client-skill` copies it exactly
+to the runtime's bundled assets; `bun run check:client-skill` and the unit suite
+check for drift. These assets ship with runtime packages and production process
+bundles, so managed, self-hosted and local deployments use the same guide without
+fetching GitHub at runtime. Edit the canonical source, not the generated copy.
+The old `opengeni-product-integration` Pack is not needed or restored.
 
 Control OpenGeni's bundled guidance separately from your product Skills with
 `CreateSessionRequest.bundledSkillIds`. Omit it for the default bundles; pass

@@ -4309,6 +4309,7 @@ describe("runtime event normalization", () => {
     "Management tools are lazy and available through tool search.",
     "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
     '- {"id":"native-tool:document-parsing","name":"document-parsing","description":"Extract readable Markdown from local Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files using the preinstalled AnyDoc runtime."}',
+    `- ${JSON.stringify(composeRuntimeSkills([]).index.find((entry) => entry.name === "opengeni-client"))}`,
     '- {"id":"native-tool:opengeni-help","name":"opengeni-help","description":"Answer questions about OpenGeni setup, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application\'s AI provider. No installation is needed for this bundled guide."}',
     '- {"id":"native-tool:opengeni-visualize","name":"opengeni-visualize","description":"Create visualizations and interactive tools directly in conversation. Proactively use to show how something works; explore \'what happens when\', \'what changes\', or \'help me understand\'; compare or inspect; create simulations, maps, charts, graphs, and mockups. Use standard tools for static scientific figures."}',
   ].join("\n");
@@ -11556,6 +11557,7 @@ describe("runtime Skill activation", () => {
     const index = composition.index;
     expect(index.map((entry) => ({ id: entry.id, name: entry.name }))).toEqual([
       { id: "native-tool:document-parsing", name: "document-parsing" },
+      { id: "native-tool:opengeni-client", name: "opengeni-client" },
       { id: "native-tool:opengeni-help", name: "opengeni-help" },
       { id: "native-tool:opengeni-visualize", name: "opengeni-visualize" },
     ]);

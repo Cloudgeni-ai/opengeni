@@ -7,6 +7,7 @@ export type {
 
 export type BundledSkillId =
   | "builtin:opengeni-help"
+  | "builtin:opengeni-client"
   | "builtin:opengeni-visualize"
   | "builtin:document-parsing"
   | "builtin:opengeni-skills"
