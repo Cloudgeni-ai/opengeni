@@ -193,9 +193,7 @@ describe("connector selection policy", () => {
         excludedMcpServerIds: [],
       }),
     ).toEqual({ customizing: true, explicit: false });
-    expect(
-      followWorkspaceConnectorPolicy({ toolPolicyVersion: 4 }),
-    ).toEqual({
+    expect(followWorkspaceConnectorPolicy({ toolPolicyVersion: 4 })).toEqual({
       mode: "workspace_default",
       expectedVersion: 4,
     });

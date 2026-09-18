@@ -164,7 +164,11 @@ import {
   usePersonalResourceAttachment,
 } from "@/lib/use-personal-resource-attachment";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
-import type { LineageNode, SessionRealtimeModel, UpdateSessionToolPolicyRequest } from "@opengeni/sdk";
+import type {
+  LineageNode,
+  SessionRealtimeModel,
+  UpdateSessionToolPolicyRequest,
+} from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 const InlineChatImage = lazy(() =>
@@ -1823,10 +1827,7 @@ function SessionChatPane(props: {
   const connectorCustomizing =
     connectorCustomizingOverride ?? sessionConnectorPolicyIsCustomized(durableToolsSnapshot);
   const applyDurableToolPolicy = useCallback(
-    async (
-      request: UpdateSessionToolPolicyRequest,
-      optimistic?: SessionToolSelection,
-    ) => {
+    async (request: UpdateSessionToolPolicyRequest, optimistic?: SessionToolSelection) => {
       if (durableToolsSaveInFlight.current) return;
       durableToolsSaveInFlight.current = true;
       const targetSessionId = props.session.id;
