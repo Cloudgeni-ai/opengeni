@@ -7,6 +7,7 @@ import {
   getWorkspaceInsights,
   normalizeWorkspaceInsightsFilter,
   WorkspaceInsightsFilterValidationError,
+  type InsightsPhaseObservation,
 } from "../src/domain/insights";
 
 const WORKSPACE = "33333333-3333-4333-8333-333333333333";
@@ -112,6 +113,60 @@ describe("getWorkspaceInsights", () => {
       floor,
     };
   }
+
+  test("timing preserves results, parallel helpers, and failure identity", async () => {
+    const { modelBundle, usageBundle, machines } = stubEmptyWorkspace();
+    const settings = testSettings({ sandboxSelfhostedEnabled: false });
+    const input = {
+      workspaceId: WORKSPACE,
+      range: "week" as const,
+      now: new Date("2026-07-15T12:00:00.000Z"),
+    };
+    const expected = await getWorkspaceInsights(db, settings, input);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let modelStarted = false;
+    modelBundle.mockImplementation(async () => {
+      modelStarted = true;
+      await gate;
+      return emptyModelBundle();
+    });
+    usageBundle.mockImplementation(async () => {
+      expect(modelStarted).toBe(true);
+      release();
+      return emptyUsageBundle();
+    });
+    const events: InsightsPhaseObservation[] = [];
+    expect(
+      await getWorkspaceInsights(db, settings, input, (event) => {
+        events.push(event);
+        throw new Error("observer");
+      }),
+    ).toEqual(expected);
+    expect(events.map((event) => event.phase).sort()).toEqual(
+      [
+        "require_workspace",
+        "model_bundle",
+        "usage_bundle",
+        "live_warm",
+        "scheduled_tasks",
+        "session_depth",
+        "floor_sessions",
+        "attached_sessions",
+        "scheduled_fires",
+      ].sort(),
+    );
+    expect(machines).not.toHaveBeenCalled();
+    const original = new Error("helper failure");
+    modelBundle.mockRejectedValue(original);
+    await expect(
+      getWorkspaceInsights(db, settings, input, () => {
+        throw new Error("observer");
+      }),
+    ).rejects.toBe(original);
+  });
 
   test("normalizes empty and valid boundary filters before analytical reads", async () => {
     const { modelBundle } = stubEmptyWorkspace();

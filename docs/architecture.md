@@ -926,6 +926,11 @@ Each new fact also freezes provider cost and equivalent OpenGeni credit price as
 separate nullable comparisons, while `priced_cost_micros` remains the actual
 credits-path price and is zero for externally billed calls.
 
+Insights usage uses a four-column projection (0484), preserving full-row readers
+and identical tenant/actor/visibility checks. Transaction-capability writes still
+require a writable database.
+Canonical: `packages/db/src/insights-usage-bundle.ts`.
+
 Codex and SuperGrok pools own credentials and capacity without changing logical
 turns. Shared and Personal workspaces inherit same-organization pools; each
 forms one allocator boundary and grants no workspace access. SuperGrok freezes
