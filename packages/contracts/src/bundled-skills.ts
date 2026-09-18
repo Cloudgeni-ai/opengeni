@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const BundledSkillId = z.enum([
   "builtin:opengeni-help",
+  "builtin:opengeni-client",
   "builtin:opengeni-visualize",
   "builtin:document-parsing",
   "builtin:opengeni-skills",
