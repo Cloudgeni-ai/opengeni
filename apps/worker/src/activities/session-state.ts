@@ -3,6 +3,7 @@ import {
   applySessionTurnSettlement,
   enqueueSessionWorkflowWake,
   failSessionWorkBeforeAttemptClaim,
+  blockSessionWorkBeforeAttemptClaim,
   requestSessionTurnRecovery,
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
@@ -52,6 +53,7 @@ export type SessionStateActivityOverrides = Partial<{
   applySessionTurnSettlement: typeof applySessionTurnSettlement;
   enqueueSessionWorkflowWake: typeof enqueueSessionWorkflowWake;
   failSessionWorkBeforeAttemptClaim: typeof failSessionWorkBeforeAttemptClaim;
+  blockSessionWorkBeforeAttemptClaim: typeof blockSessionWorkBeforeAttemptClaim;
   requestSessionTurnRecovery: typeof requestSessionTurnRecovery;
   recoverSessionDispatch: typeof recoverSessionDispatch;
   reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
@@ -91,6 +93,8 @@ export function createSessionStateActivities(
     overrides.enqueueSessionWorkflowWake ?? enqueueSessionWorkflowWake;
   const failSessionWorkBeforeAttemptClaimFn =
     overrides.failSessionWorkBeforeAttemptClaim ?? failSessionWorkBeforeAttemptClaim;
+  const blockSessionWorkBeforeAttemptClaimFn =
+    overrides.blockSessionWorkBeforeAttemptClaim ?? blockSessionWorkBeforeAttemptClaim;
   const requestSessionTurnRecoveryFn =
     overrides.requestSessionTurnRecovery ?? requestSessionTurnRecovery;
   const recoverSessionDispatchFn = overrides.recoverSessionDispatch ?? recoverSessionDispatch;
@@ -153,6 +157,28 @@ export function createSessionStateActivities(
 
       const preClaimFailureDisposition =
         input.preClaimFailure?.disposition ?? input.preClaimFailureDisposition;
+      if (
+        preClaimFailureDisposition === "blocked" &&
+        input.admissionFence &&
+        input.preClaimFailure?.reason
+      ) {
+        const blocked = await blockSessionWorkBeforeAttemptClaimFn(db, input.workspaceId, {
+          accountId: input.accountId,
+          sessionId: input.sessionId,
+          workflowId,
+          attemptId: input.attemptId,
+          fence: input.admissionFence,
+          reason: input.preClaimFailure.reason,
+          sqlState: input.preClaimFailure.sqlState ?? null,
+        });
+        await publishDurableSessionEventsFn(
+          bus,
+          input.workspaceId,
+          input.sessionId,
+          blocked.events,
+        );
+        return { action: blocked.action };
+      }
       if (preClaimFailureDisposition === "permanent" && input.trigger) {
         const failed = await failSessionWorkBeforeAttemptClaimFn(db, input.workspaceId, {
           accountId: input.accountId,
@@ -160,7 +186,14 @@ export function createSessionStateActivities(
           workflowId,
           trigger: input.trigger,
           error: input.error ?? "Agent turn admission failed before attempt claim.",
-          ...(input.preClaimFailure ? { admissionFailure: input.preClaimFailure } : {}),
+          ...(input.preClaimFailure?.disposition === "permanent"
+            ? {
+                admissionFailure: {
+                  disposition: "permanent" as const,
+                  code: input.preClaimFailure.code,
+                },
+              }
+            : {}),
         });
         if (failed.action === "terminal") return { action: "terminal" };
         if (failed.action === "stale") return { action: "stale" };
@@ -489,7 +522,12 @@ export function createSessionStateActivities(
 
   async function peekSessionWork(input: PeekSessionWorkInput) {
     const { db, observability } = await services();
-    const peek = await peekSessionWorkFn(db, input.workspaceId, input.sessionId);
+    const peek = await peekSessionWorkFn(
+      db,
+      input.workspaceId,
+      input.sessionId,
+      input.includeAdmissionFence,
+    );
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
     return peek;
   }

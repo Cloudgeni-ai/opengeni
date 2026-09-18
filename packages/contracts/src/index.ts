@@ -11966,6 +11966,23 @@ export type CancelSessionBackgroundCommandResult = z.infer<
   typeof CancelSessionBackgroundCommandResult
 >;
 
+export const SessionAdmissionBlock = z
+  .object({
+    reason: z.enum([
+      "database_claim_rejected",
+      "initiator_membership_required",
+      "personal_resource_grant_required",
+    ]),
+    sqlState: z
+      .string()
+      .regex(/^[0-9A-Z]{5}$/)
+      .nullable(),
+    retryPolicy: z.literal("explicit_recheck"),
+    blockedAt: z.string().datetime(),
+  })
+  .strict();
+export type SessionAdmissionBlock = z.infer<typeof SessionAdmissionBlock>;
+
 export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
   z.object({
     bundledSkillIds: BundledSkillSelection.optional(),
@@ -11973,6 +11990,8 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     workspaceId: z.string().uuid(),
     accountId: z.string().uuid(),
     status: SessionStatus,
+    /** Accepted work is retained; Resume or a new Send/Steer rechecks admission. */
+    admissionBlock: SessionAdmissionBlock.nullable().optional(),
     /** Detail-only dispatch evidence. A wake delivery attempt is not turn execution. */
     dispatchWait: z
       .object({

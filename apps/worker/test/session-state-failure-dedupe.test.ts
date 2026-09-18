@@ -2,6 +2,47 @@ import { describe, expect, mock, test } from "bun:test";
 import { createSessionStateActivities } from "../src/activities/session-state";
 
 describe("failSessionAttempt child-terminal identity", () => {
+  test("parks exact rejected admission without retry wakes or terminal input settlement", async () => {
+    const block = mock(async () => ({ action: "blocked" as const, events: [] }));
+    const wake = mock(async () => undefined);
+    const terminal = mock(async () => ({ action: "failed" as const, events: [], turnId: null }));
+    const activities = createSessionStateActivities(
+      async () => ({ db: {}, bus: {}, settings: {}, observability: {} }) as any,
+      {
+        requireSession: mock(async () => ({ status: "queued" }) as any),
+        getSessionTurnForAttempt: mock(async () => null),
+        getSessionAttemptActivityRef: mock(async () => null),
+        blockSessionWorkBeforeAttemptClaim: block,
+        enqueueSessionWorkflowWake: wake as any,
+        failSessionWorkBeforeAttemptClaim: terminal,
+        publishDurableSessionEvents: mock(async () => undefined),
+      },
+    );
+    const fence = { lastSequence: 10, controlVersion: 2 };
+    expect(
+      await activities.failSessionAttempt({
+        accountId: "a",
+        workspaceId: "w",
+        sessionId: "s",
+        attemptId: "attempt",
+        admissionFence: fence,
+        preClaimFailure: {
+          disposition: "blocked",
+          code: "db_failure",
+          sqlState: "42501",
+          reason: "database_claim_rejected",
+          retryPolicy: "explicit_recheck",
+        },
+      }),
+    ).toEqual({ action: "blocked" });
+    expect(block.mock.calls[0]?.[2]).toMatchObject({
+      fence,
+      attemptId: "attempt",
+      sqlState: "42501",
+    });
+    expect(wake).not.toHaveBeenCalled();
+    expect(terminal).not.toHaveBeenCalled();
+  });
   test("reports existing failed and cancelled session truth as terminal", async () => {
     for (const status of ["failed", "cancelled"] as const) {
       const getTurn = mock(async () => null);

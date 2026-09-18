@@ -3518,7 +3518,8 @@ export async function mutateSessionControlInTransaction(
             sessionId: input.sessionId,
             directPauseRevision,
           }))
-        : before.state === "paused" ||
+        : targetSession.admissionBlock != null ||
+          before.state === "paused" ||
           (await continuableWakeRepairNeeded(db, {
             workspaceId: input.workspaceId,
             rootSessionId: input.sessionId,
@@ -3603,6 +3604,7 @@ export async function mutateSessionControlInTransaction(
       input.action === "pause" || input.action === "cancel"
         ? {
             directControlState: "paused",
+            ...(input.action === "cancel" ? { admissionBlock: null } : {}),
             directPauseRevision: revision,
             controlVersion: revision,
             directControlReason: input.reason ?? null,
@@ -3615,6 +3617,12 @@ export async function mutateSessionControlInTransaction(
           }
         : {
             directControlState: "active",
+            ...(targetSession.admissionBlock
+              ? {
+                  admissionBlock: null,
+                  status: targetSession.admissionBlock.previousStatus,
+                }
+              : {}),
             directPauseRevision: null,
             subtreeRunOverrideRevision: revision,
             controlVersion: revision,

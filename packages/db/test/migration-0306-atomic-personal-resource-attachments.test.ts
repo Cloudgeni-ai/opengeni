@@ -793,7 +793,7 @@ describe("migration 0306 atomic personal-resource attachments", () => {
             reasoningEffortFallback: "medium",
             createdEventPayload: {},
           });
-          await expectSqlState(() => claim(otherSessionId), "42501");
+          await expectSqlState(() => claim(otherSessionId), "OG002");
         } else if (invalidation !== "legacy selection regression") {
           if (invalidation === "revocation") {
             await revokeSelfUserResourceGrant(client.db, {
@@ -828,7 +828,10 @@ describe("migration 0306 atomic personal-resource attachments", () => {
             invalidation === "grant epoch"
           ) {
             await recover(continuation);
-            await expectSqlState(claim, "42501");
+            await expectSqlState(
+              claim,
+              invalidation === "authority revocation" ? "42501" : "OG002",
+            );
           }
         }
       } finally {

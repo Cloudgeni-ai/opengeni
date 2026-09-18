@@ -12,6 +12,8 @@ import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 import {
   POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
   POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
+  PRE_CLAIM_FAILURE_MESSAGE,
+  PRE_CLAIM_FAILURE_TYPE,
 } from "../../apps/worker/src/activities/types";
 
 // An ungraceful worker death cannot be faked by throwing a TimeoutFailure
@@ -309,6 +311,74 @@ describe("Temporal workflow integration", () => {
           retryDelayMs: 1_000,
         });
         expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "durable preclaim block closes without retry timers, idle settlement, or another turn dispatch",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const fence = { lastSequence: 8, controlVersion: 2 };
+      let blocked = false;
+      let attempts = 0;
+      let idleSettlements = 0;
+      const detail = {
+        disposition: "blocked",
+        code: "db_failure",
+        reason: "database_claim_rejected",
+        sqlState: "42501",
+        retryPolicy: "explicit_recheck",
+      };
+      const admission = createTurnAdmission([queuedTurn("event-1")], async () => {
+        attempts += 1;
+        throw ApplicationFailure.create({
+          message: PRE_CLAIM_FAILURE_MESSAGE,
+          type: PRE_CLAIM_FAILURE_TYPE,
+          nonRetryable: true,
+          details: [detail],
+        });
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        peekSessionWork: async () =>
+          blocked
+            ? { kind: "admission-blocked" as const }
+            : { kind: "runnable" as const, admissionFence: fence },
+        markSessionIdle: async () => {
+          idleSettlements += 1;
+        },
+        failSessionAttempt: async (input: {
+          preClaimFailure?: unknown;
+          admissionFence?: unknown;
+        }) => {
+          expect(input.preClaimFailure).toEqual(detail);
+          expect(input.admissionFence).toEqual(fence);
+          blocked = true;
+          return { action: "blocked" as const };
+        },
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `wf-${crypto.randomUUID()}`,
+          args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+        });
+        await handle.result();
+        expect(attempts).toBe(1);
+        expect(idleSettlements).toBe(0);
+        const history = await handle.fetchHistory();
+        expect(history.events?.filter((event) => event.timerStartedEventAttributes)).toHaveLength(
+          0,
+        );
       } finally {
         worker.shutdown();
         await run;
