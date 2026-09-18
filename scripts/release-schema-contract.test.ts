@@ -242,6 +242,9 @@ describe("release schema contract", () => {
     const packsRemoved = completeSourceContract.migrations.some(
       (migration) => migration.path === "0482_remove_packs.sql",
     );
+    const preclaimAdmissionBlock = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0483_preclaim_admission_block.sql",
+    );
     const insightsUsageProjection = completeSourceContract.migrations.some(
       (migration) => migration.path === "0484_insights_usage_projection.sql",
     );
@@ -305,6 +308,7 @@ describe("release schema contract", () => {
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (insightsUsageProjection ? 1 : 0) +
+        (preclaimAdmissionBlock ? 1 : 0) +
         (packsRemoved ? 1 : 0) +
         (senderOwnedConnections ? 1 : 0) +
         (personalConnectionVisibilityCleanup ? 1 : 0) +
@@ -490,34 +494,38 @@ describe("release schema contract", () => {
         ? { latestMigration: "0481_personal_connection_visibility_cleanup.sql" }
         : {}),
       ...(packsRemoved ? { latestMigration: "0482_remove_packs.sql" } : {}),
+      ...(preclaimAdmissionBlock ? { latestMigration: "0483_preclaim_admission_block.sql" } : {}),
       ...(insightsUsageProjection ? { latestMigration: "0484_insights_usage_projection.sql" } : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
       path: insightsUsageProjection
         ? "0484_insights_usage_projection.sql"
-        : packsRemoved
-          ? "0482_remove_packs.sql"
-          : personalConnectionVisibilityCleanup
-            ? "0481_personal_connection_visibility_cleanup.sql"
-            : privateSessionKeyAdministration
-              ? "0480_private_session_organization_key_administration.sql"
-              : connectionCreateIdempotency
-                ? "0479_connection_create_idempotency.sql"
-                : senderOwnedConnections
-                  ? "0478_sender_owned_connections.sql"
-                  : managedSignInMethods
-                    ? "0477_managed_sign_in_methods.sql"
-                    : sessionEventHistoryPolicyPlanning
-                      ? "0476_session_event_history_policy_planning.sql"
-                      : sessionEventHistoryStatistics
-                        ? "0475_session_event_history_statistics.sql"
-                        : goalReportRequirements
-                          ? "0474_goal_report_requirements.sql"
-                          : organizationUsageAnalyticalCapability
-                            ? "0473_organization_usage_analytical_capability.sql"
-                            : "0472_usage_events_workspace_recent_index.sql",
+        : preclaimAdmissionBlock
+          ? "0483_preclaim_admission_block.sql"
+          : packsRemoved
+            ? "0482_remove_packs.sql"
+            : personalConnectionVisibilityCleanup
+              ? "0481_personal_connection_visibility_cleanup.sql"
+              : privateSessionKeyAdministration
+                ? "0480_private_session_organization_key_administration.sql"
+                : connectionCreateIdempotency
+                  ? "0479_connection_create_idempotency.sql"
+                  : senderOwnedConnections
+                    ? "0478_sender_owned_connections.sql"
+                    : managedSignInMethods
+                      ? "0477_managed_sign_in_methods.sql"
+                      : sessionEventHistoryPolicyPlanning
+                        ? "0476_session_event_history_policy_planning.sql"
+                        : sessionEventHistoryStatistics
+                          ? "0475_session_event_history_statistics.sql"
+                          : goalReportRequirements
+                            ? "0474_goal_report_requirements.sql"
+                            : organizationUsageAnalyticalCapability
+                              ? "0473_organization_usage_analytical_capability.sql"
+                              : "0472_usage_events_workspace_recent_index.sql",
       deploymentMode:
         !insightsUsageProjection &&
+        !preclaimAdmissionBlock &&
         (packsRemoved ||
           (!connectionCreateIdempotency && (senderOwnedConnections || managedSignInMethods)))
           ? "maintenance"
@@ -1643,6 +1651,9 @@ describe("release schema contract", () => {
     const packsRemoved = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0482_remove_packs.sql",
     );
+    const preclaimAdmissionBlock = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0483_preclaim_admission_block.sql",
+    );
     const insightsUsageProjection = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0484_insights_usage_projection.sql",
     );
@@ -2143,6 +2154,7 @@ describe("release schema contract", () => {
       "0480_private_session_organization_key_administration.sql",
       "0481_personal_connection_visibility_cleanup.sql",
       "0482_remove_packs.sql",
+      "0483_preclaim_admission_block.sql",
       "0484_insights_usage_projection.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
@@ -2577,6 +2589,11 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0482_remove_packs.sql",
       };
+    if (preclaimAdmissionBlock)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0483_preclaim_admission_block.sql",
+      };
     if (insightsUsageProjection)
       completeSourceContract = {
         ...completeSourceContract,
@@ -2585,6 +2602,7 @@ describe("release schema contract", () => {
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (insightsUsageProjection ? 1 : 0) +
+        (preclaimAdmissionBlock ? 1 : 0) +
         (packsRemoved ? 1 : 0) +
         (senderOwnedConnections ? 1 : 0) +
         (personalConnectionVisibilityCleanup ? 1 : 0) +
@@ -2972,6 +2990,7 @@ describe("release schema contract", () => {
         ? { latestMigration: "0481_personal_connection_visibility_cleanup.sql" }
         : {}),
       ...(packsRemoved ? { latestMigration: "0482_remove_packs.sql" } : {}),
+      ...(preclaimAdmissionBlock ? { latestMigration: "0483_preclaim_admission_block.sql" } : {}),
       ...(insightsUsageProjection ? { latestMigration: "0484_insights_usage_projection.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
