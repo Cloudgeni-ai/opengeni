@@ -3848,7 +3848,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-organization-recovery-custody-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-09-plugins-and-skills-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -6366,329 +6366,26 @@ export type WorkspaceMemorySearchResponse = {
   results: WorkspaceMemorySearchResult[];
 };
 
-// --- Capability packs ---------------------------------------------------------
-
-export type CapabilityPackConnectorAuthModel =
-  | "oauth2_authorization_code_pkce"
-  | "oauth2_authorization_code"
-  | "api_key"
-  | "credential_ref";
-
-export type CapabilityPackConnector = {
-  id: string;
-  name: string;
-  category: string;
-  authModel: CapabilityPackConnectorAuthModel;
-  providers: string[];
-  scopes: string[];
-  required: boolean;
-  metadata: Record<string, unknown>;
-};
-
-export type CapabilityPackKnowledge = {
-  type: "document_base";
-  id: string;
-  name: string;
-  description: string | null;
-  required: boolean;
-};
-
-export type CapabilityPackScheduledTaskTemplate = {
-  id: string;
-  name: string;
-  description: string;
-  defaultSchedule: ScheduledTaskScheduleSpec;
-  defaultRunMode: ScheduledTaskRunMode;
-  defaultOverlapPolicy: ScheduledTaskOverlapPolicy;
-  prompt?: string | undefined;
-};
-
-export type CapabilityPackAutomationTemplate = {
-  id: string;
-  name: string;
-  description: string;
-  adapterId: string;
-  eventTypes: string[];
-  sessionTemplate: {
-    bundledSkillIds?: BundledSkillId[] | undefined;
-    prompt: string;
-    instructions: string | null;
-    resources: ResourceRef[];
-    skills: CapabilityPackSkill[];
-    tools: ToolRef[];
-    firstPartyMcpTools: string[];
-    firstPartyMcpPermissions: Permission[];
-    model: string | null;
-    reasoningEffort: ReasoningEffort | null;
-    sandboxBackend: SandboxBackend | null;
-    policyRole: string | null;
-    metadata: Record<string, unknown>;
-  };
-  configuration: Record<string, unknown>;
-  connectionRequirement: string | null;
-};
-
-export type CapabilityPackSkillFile = {
+export type SkillArtifactFile = {
   path: string;
   content: string;
 };
 
-export type CapabilityPackSkill = {
+export type SkillArtifactDefinition = {
   name: string;
   description?: string | undefined;
   /** Omitted means workspace-wide; session_selected requires explicit session attachment. */
   activationMode?: "workspace_managed" | "session_selected" | undefined;
-  files: CapabilityPackSkillFile[];
+  files: SkillArtifactFile[];
 };
 
-export type SessionSkill = Omit<CapabilityPackSkill, "activationMode">;
+export type SessionSkill = Omit<SkillArtifactDefinition, "activationMode">;
 /** SKILL.md owns metadata; supplied legacy fields must exactly match it. */
-export type CapabilityPackSkillInput = Omit<CapabilityPackSkill, "name" | "description"> & {
+export type SkillArtifactDefinitionInput = Omit<SkillArtifactDefinition, "name" | "description"> & {
   name?: string | undefined;
   description?: string | undefined;
 };
-export type SessionSkillInput = Omit<CapabilityPackSkillInput, "activationMode">;
-
-export type CapabilityPackVariableSetSpec = {
-  description: string;
-  requiredVariables: string[];
-  required: boolean;
-};
-
-export type CapabilityPackComponentReference =
-  | {
-      key: string;
-      kind: "plugin";
-      pluginKey: string;
-      version: string;
-      manifestDigest: string;
-      required: boolean;
-    }
-  | {
-      key: string;
-      kind: "skill";
-      capabilityId: string;
-      contentSha256: string;
-      required: boolean;
-    }
-  | {
-      key: string;
-      kind: "integration";
-      capabilityId: string;
-      instanceKey: string;
-      revisionId: string;
-      contentSha256: string;
-      required: boolean;
-    }
-  | {
-      key: string;
-      kind: "facet";
-      capabilityId: string;
-      instanceKey: string;
-      facetKey: string;
-      bindingKey: string;
-      configDigest: string;
-      required: boolean;
-    };
-
-export type CapabilityPackRigRequirement = {
-  description?: string | undefined;
-  required: boolean;
-  rigId?: string | undefined;
-  requireVerified: boolean;
-};
-
-export type CapabilityPack = {
-  id: string;
-  name: string;
-  description: string;
-  role: string;
-  category: string;
-  version: string;
-  sandboxImage?: string | undefined;
-  sandboxProviderImages?:
-    | {
-        modal?: { imageId: string } | undefined;
-      }
-    | undefined;
-  skills: CapabilityPackSkill[];
-  components: CapabilityPackComponentReference[];
-  rig?: CapabilityPackRigRequirement | undefined;
-  tools: ToolRef[];
-  connectors: CapabilityPackConnector[];
-  knowledge: CapabilityPackKnowledge[];
-  scheduledTaskTemplates: CapabilityPackScheduledTaskTemplate[];
-  automationTemplates?: CapabilityPackAutomationTemplate[] | undefined;
-  variableSet?: CapabilityPackVariableSetSpec | undefined;
-  metadata: Record<string, unknown>;
-};
-
-/** Input shape for registering a pack manifest (server applies defaults). */
-export type RegisterCapabilityPackRequest = {
-  id: string;
-  name: string;
-  description: string;
-  role: string;
-  category: string;
-  version: string;
-  sandboxImage?: string | undefined;
-  sandboxProviderImages?:
-    | {
-        modal?: { imageId: string } | undefined;
-      }
-    | undefined;
-  skills?:
-    | {
-        name?: string | undefined;
-        description?: string | undefined;
-        activationMode?: "workspace_managed" | "session_selected" | undefined;
-        files: CapabilityPackSkillFile[];
-      }[]
-    | undefined;
-  components?:
-    | (
-        | {
-            key: string;
-            kind: "plugin";
-            pluginKey: string;
-            version: string;
-            manifestDigest: string;
-            required?: boolean | undefined;
-          }
-        | {
-            key: string;
-            kind: "skill";
-            capabilityId: string;
-            contentSha256: string;
-            required?: boolean | undefined;
-          }
-        | {
-            key: string;
-            kind: "integration";
-            capabilityId: string;
-            instanceKey: string;
-            revisionId: string;
-            contentSha256: string;
-            required?: boolean | undefined;
-          }
-        | {
-            key: string;
-            kind: "facet";
-            capabilityId: string;
-            instanceKey: string;
-            facetKey: string;
-            bindingKey: string;
-            configDigest: string;
-            required?: boolean | undefined;
-          }
-      )[]
-    | undefined;
-  rig?:
-    | {
-        description?: string | undefined;
-        required?: boolean | undefined;
-        rigId?: string | undefined;
-        requireVerified?: boolean | undefined;
-      }
-    | undefined;
-  tools?: ToolRef[] | undefined;
-  connectors?:
-    | {
-        id: string;
-        name: string;
-        category: string;
-        authModel: CapabilityPackConnectorAuthModel;
-        providers?: string[] | undefined;
-        scopes?: string[] | undefined;
-        required?: boolean | undefined;
-        metadata?: Record<string, unknown> | undefined;
-      }[]
-    | undefined;
-  knowledge?:
-    | {
-        type: "document_base";
-        id: string;
-        name: string;
-        description?: string | null | undefined;
-        required?: boolean | undefined;
-      }[]
-    | undefined;
-  scheduledTaskTemplates?:
-    | {
-        id: string;
-        name: string;
-        description: string;
-        defaultSchedule: ScheduledTaskScheduleSpec;
-        defaultRunMode?: ScheduledTaskRunMode | undefined;
-        defaultOverlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
-        prompt?: string | undefined;
-      }[]
-    | undefined;
-  automationTemplates?:
-    | {
-        id: string;
-        name: string;
-        description: string;
-        adapterId: string;
-        eventTypes: string[];
-        sessionTemplate: {
-          bundledSkillIds?: BundledSkillId[] | undefined;
-          prompt: string;
-          instructions?: string | null | undefined;
-          resources?: ResourceRef[] | undefined;
-          skills?: CapabilityPackSkill[] | undefined;
-          tools?: ToolRef[] | undefined;
-          firstPartyMcpTools?: string[] | undefined;
-          firstPartyMcpPermissions?: Permission[] | undefined;
-          model?: string | null | undefined;
-          reasoningEffort?: ReasoningEffort | null | undefined;
-          sandboxBackend?: SandboxBackend | null | undefined;
-          policyRole?: string | null | undefined;
-          metadata?: Record<string, unknown> | undefined;
-        };
-        configuration?: Record<string, unknown> | undefined;
-        connectionRequirement?: string | null | undefined;
-      }[]
-    | undefined;
-  variableSet?:
-    | {
-        description: string;
-        requiredVariables?: string[] | undefined;
-        required?: boolean | undefined;
-      }
-    | undefined;
-  metadata?: Record<string, unknown> | undefined;
-};
-
-export type WorkspaceRegisteredPack = {
-  accountId: string;
-  workspaceId: string;
-  pack: CapabilityPack;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type PackInstallationStatus = "installing" | "active" | "needs_attention" | "disabled";
-
-export type PackInstallation = {
-  skillPublications?: import("./skills").SkillPublicationReceipt[] | undefined;
-  skillWrites?: import("./skills").SkillWriteReceipt[] | undefined;
-  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
-  id: string;
-  accountId: string;
-  workspaceId: string;
-  packId: string;
-  status: PackInstallationStatus;
-  version: number;
-  /** Exact accepted manifest, not a normalized executable Pack. */
-  manifestSnapshot: Record<string, unknown> | null;
-  manifestDigest: string | null;
-  selectedRigId: string | null;
-  installedBySubjectId: string | null;
-  metadata: Record<string, unknown>;
-  enabledAt: string;
-  updatedAt: string;
-};
+export type SessionSkillInput = Omit<SkillArtifactDefinitionInput, "activationMode">;
 
 // --- OpenGeni Review Bot ------------------------------------------------------------
 
@@ -6804,103 +6501,9 @@ export type PrReviewManagedGitHubSetup = {
   missing: string[];
 };
 
-export type EnablePackRequest = {
-  variableSetId?: string | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | undefined;
-  metadata?: Record<string, unknown> | undefined;
-};
-
-export type PackComponentResolutionStatus = "ready" | "missing" | "mismatch";
-
-export type PackComponentResolution = {
-  key: string;
-  kind: "plugin" | "skill" | "integration" | "facet" | "inline_skill";
-  capabilityId: string;
-  required: boolean;
-  status: PackComponentResolutionStatus;
-  expectedDigest: string;
-  actualDigest: string | null;
-  resolvedId: string | null;
-  label: string;
-};
-
-export type PackRigResolution = {
-  required: boolean;
-  status: "not_required" | "ready" | "missing" | "mismatch" | "unverified";
-  requestedRigId: string | null;
-  rigId: string | null;
-  rigVersionId: string | null;
-  name: string | null;
-  image: string | null;
-};
-
-export type PreviewPackInstallationRequest = {
-  rigId?: string | undefined;
-  variableSetId?: string | undefined;
-};
-
-export type PackInstallationPreview = {
-  packId: string;
-  packVersion: string;
-  manifestDigest: string;
-  installationVersion: number | null;
-  action: "install" | "update" | "repair";
-  ready: boolean;
-  blockers: string[];
-  components: PackComponentResolution[];
-  rig: PackRigResolution;
-  variableSetId: string | null;
-  legacyInlineSkillCount: number;
-  legacySandboxImage: string | null;
-};
-
-export type InstallPackRequest = {
-  expectedManifestDigest: string;
-  expectedInstallationVersion?: number | undefined;
-  rigId?: string | undefined;
-  variableSetId?: string | undefined;
-  idempotencyKey: string;
-  metadata?: Record<string, unknown> | undefined;
-};
-
-export type PackUninstallPreview = {
-  packId: string;
-  installed: boolean;
-  installationVersion: number | null;
-  components: Array<{
-    key: string;
-    kind: "plugin" | "skill" | "integration" | "facet" | "inline_skill";
-    capabilityId: string;
-    retainedByOtherOwners: boolean;
-  }>;
-};
-
-export type UninstallPackRequest = {
-  expectedInstallationVersion: number;
-  idempotencyKey: string;
-};
-
-export type UninstallPackResult = {
-  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
-  packId: string;
-  status: "not_installed" | "uninstalled";
-  retainedComponents: string[];
-};
-
-export type ListPacksResponse = {
-  packs: CapabilityPack[];
-  installations: PackInstallation[];
-};
-
-export type GetPackResponse = {
-  pack: CapabilityPack;
-  installation: PackInstallation | null;
-};
-
 // --- Capabilities ---------------------------------------------------------------
 
-export type CapabilityKind = "pack" | "mcp" | "api" | "skill" | "plugin";
+export type CapabilityKind = "mcp" | "api" | "skill" | "plugin";
 
 export type CapabilitySource =
   | "built_in"
@@ -7062,7 +6665,7 @@ export type DiscoverMcpCapabilitiesResponse = {
 
 export type SkillImportSource = "github" | "skills_sh";
 
-export type SkillInstallationSource = "library" | "github" | "skills_sh" | "pack";
+export type SkillInstallationSource = "library" | "github" | "skills_sh";
 
 export type PreviewSkillImportRequest = {
   url: string;
@@ -7125,7 +6728,7 @@ export type InstalledSkill = {
 };
 
 export type CapabilityComponentOwner = {
-  kind: "direct" | "plugin" | "pack" | "migration";
+  kind: "direct" | "plugin" | "migration";
   id: string;
   removable: boolean;
 };
@@ -7553,7 +7156,7 @@ export type PluginUninstallComponentImpact = {
   name: string;
   disposition: "removed" | "retained" | "inactive";
   retentionReasons: Array<"other_owners" | "customized" | "re_scoped" | "registry_unavailable">;
-  remainingOwners: Array<{ kind: "direct" | "plugin" | "pack" | "migration"; name: string }>;
+  remainingOwners: Array<{ kind: "direct" | "plugin" | "migration"; name: string }>;
   skillId?: string | undefined;
 };
 

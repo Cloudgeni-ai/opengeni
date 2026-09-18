@@ -154,7 +154,6 @@ import {
   SandboxSiblingWarmingTimeoutError,
   sandboxLeaseHolderIdForAttempt,
 } from "../src/sandbox-resume";
-import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 import { attachPendingUpdatesBeforePreparingModelInput } from "../src/activities/agent-turn/stream-attempt";
 
@@ -2944,27 +2943,6 @@ describe("turn-start pointer reconcile classification (issue #341 invariant B)",
 });
 
 describe("turn-time Modal private-registry warm", () => {
-  test("warms the pack-resolved Modal image ref before sandbox creation", async () => {
-    const packImage = "acr.example.com/cloudgeni/f4c-gecko@sha256:abc";
-    const runSettings = settingsWithPackSandboxImage(
-      testSettings({
-        sandboxBackend: "modal",
-        modalImageRef: undefined,
-        modalImageRegistrySecret: "acr-credentials-gecko",
-      }),
-      packImage,
-    );
-    const ensureRegistryImage = mock(async (_settings: Settings) => undefined);
-
-    await ensureTurnModalRegistryImage(runSettings, "modal", ensureRegistryImage);
-
-    expect(ensureRegistryImage).toHaveBeenCalledTimes(1);
-    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRef).toBe(packImage);
-    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRegistrySecret).toBe(
-      "acr-credentials-gecko",
-    );
-  });
-
   test("keeps non-modal or public-image turns on the no-op path", async () => {
     const ensureRegistryImage = mock(async (_settings: Settings) => undefined);
     await ensureTurnModalRegistryImage(
@@ -3320,10 +3298,6 @@ describe("lazy sandbox provisioner single-flight", () => {
       "Independent workspace reads after the personal-resource fence",
       authorize,
     );
-    const packRead = governanceSource.indexOf(
-      "resolveWorkspacePackRuntime(db, input.workspaceId)",
-      overlappedReads,
-    );
     const rigRead = governanceSource.indexOf(
       "await materializeRigVersionForAttempt(db",
       overlappedReads,
@@ -3343,8 +3317,7 @@ describe("lazy sandbox provisioner single-flight", () => {
     const gitAssert = credentialsSource.indexOf("assertGitHubResourcesRemainAuthorized(");
     expect(authorize).toBeGreaterThan(0);
     expect(overlappedReads).toBeGreaterThan(authorize);
-    expect(packRead).toBeGreaterThan(overlappedReads);
-    expect(rigRead).toBeGreaterThan(packRead);
+    expect(rigRead).toBeGreaterThan(overlappedReads);
     expect(policyRead).toBeGreaterThan(rigRead);
     expect(governanceCall).toBeGreaterThan(-1);
     expect(credentialsCall).toBeGreaterThan(governanceCall);

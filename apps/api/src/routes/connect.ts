@@ -15,7 +15,6 @@ import {
   stableJson,
   assertOrganizationIntegrationAllowed,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
-  OPENGENI_PR_REVIEW_PACK_ID,
 } from "@opengeni/contracts";
 import {
   CORE_INTEGRATION_DEFINITIONS,
@@ -34,7 +33,6 @@ import {
   encryptEnvironmentValue,
   normalizedCredentialHeaders,
   listGitHubInstallationAccessForWorkspace,
-  getPackInstallation,
   listPrReviewAppRegistrations,
   listSocialConnections,
   getSocialConnection,
@@ -112,11 +110,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     const canWrite = hasPermission(authorization.grant.permissions, "connections:write");
     const personal = isPersonalConnectionOwnerPrincipal(authorization);
-    const lensPack = await getPackInstallation(
-      deps.db,
-      authorization.grant.workspaceId,
-      OPENGENI_PR_REVIEW_PACK_ID,
-    );
     let mcpConfigured = false;
     let credentialConfigured = false;
     try {
@@ -305,7 +298,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           !hasPermission(authorization.grant.permissions, "secrets:write")
             ? "unsupported"
             : credentialConfigured &&
-                lensPack?.status === "active" &&
                 deps.settings.sandboxBackend !== "selfhosted" &&
                 prReviewGitHubAppMissingSettings(deps.settings).length === 0
               ? "available"
@@ -735,7 +727,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             await requireConnectOwnerAuthority(tx, scope, installationPermission, origin);
             if (before.providerId === "github-lens") {
               await requireConnectOwnerAuthority(tx, scope, "secrets:write", origin);
-              await requireGitHubLensConnect({ ...deps, db: tx }, workspaceId);
+              await requireGitHubLensConnect({ ...deps, db: tx });
             }
           },
           execute: async (attempt) =>
@@ -1542,7 +1534,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             if (!hasPermission(authorization.grant.permissions, "secrets:write"))
               throw new HTTPException(403, { message: "secrets:write required" });
             await requireConnectOwnerAuthority(tx, scope, "secrets:write");
-            await requireGitHubLensConnect({ ...deps, db: tx }, workspaceId);
+            await requireGitHubLensConnect({ ...deps, db: tx });
           }
           const navigation = githubAppConnectNavigation(
             deps,

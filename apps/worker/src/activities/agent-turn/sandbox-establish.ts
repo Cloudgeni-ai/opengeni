@@ -29,7 +29,7 @@ import {
   type MintedRunGitCredentials,
   type SandboxCodemodeAuthority,
 } from "../environment";
-import { rigProviderImageSourceImage } from "../packs";
+import { rigProviderImageSourceImage } from "../sandbox-images";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import type { currentActivityContext } from "../streaming";
 import { resumeBoxForTurn, type ResumedTurnSandbox } from "../../sandbox-resume";

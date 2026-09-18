@@ -1,35 +1,20 @@
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
-import {
-  OPENGENI_PR_REVIEW_PACK_ID,
-  type GitHubInstallationBindingProof,
-} from "@opengeni/contracts";
-import {
-  getCapabilityPack,
-  PR_REVIEW_AUTOMATION_TEMPLATE_ID,
-  prReviewPackConnectorId,
-  type ApiRouteDeps,
-} from "@opengeni/core";
+import { type GitHubInstallationBindingProof } from "@opengeni/contracts";
+import { PR_REVIEW_AUTOMATION_SETUP, type ApiRouteDeps } from "@opengeni/core";
 import {
   encryptVariableSetValue,
-  getPackInstallation,
   recordAuditEvent,
   syncManagedGitHubPrReviewInstallation,
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
-export async function requireGitHubLensConnect(deps: ApiRouteDeps, workspaceId: string) {
+export async function requireGitHubLensConnect(deps: ApiRouteDeps) {
   if (deps.settings.sandboxBackend === "selfhosted")
     throw new HTTPException(409, { message: "OpenGeni Lens requires managed compute" });
-  const installation = await getPackInstallation(deps.db, workspaceId, OPENGENI_PR_REVIEW_PACK_ID);
-  if (installation?.status !== "active")
-    throw new HTTPException(409, { message: "Install and enable the Review Bot Pack first" });
-  const template = getCapabilityPack(OPENGENI_PR_REVIEW_PACK_ID)?.automationTemplates?.find(
-    (value) => value.id === PR_REVIEW_AUTOMATION_TEMPLATE_ID,
-  );
-  if (!template || !environmentsEncryptionKeyBytes(deps.settings))
-    throw new HTTPException(503, { message: "Lens template or secret encryption is unavailable" });
-  return { installation, template };
+  if (!environmentsEncryptionKeyBytes(deps.settings))
+    throw new HTTPException(503, { message: "Lens secret encryption is unavailable" });
+  return { template: PR_REVIEW_AUTOMATION_SETUP };
 }
 
 /** Separate Lens registration/source/automation domain, not a repository-access
@@ -48,10 +33,7 @@ export async function commitGitHubLensConnect(
     nonce: string;
   },
 ) {
-  const { installation, template } = await requireGitHubLensConnect(
-    { ...deps, db: tx },
-    input.workspaceId,
-  );
+  const { template } = await requireGitHubLensConnect({ ...deps, db: tx });
   const synchronized = await syncManagedGitHubPrReviewInstallation(tx, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -70,9 +52,6 @@ export async function commitGitHubLensConnect(
     ),
     repositories: input.proof.repositories,
     createdBySubjectId: input.subjectId,
-    packInstallationId: installation.id,
-    packConnectorId: prReviewPackConnectorId("github"),
-    packTemplateId: template.id,
     adapterId: template.adapterId,
     eventTypes: template.eventTypes,
     configuration: template.configuration,

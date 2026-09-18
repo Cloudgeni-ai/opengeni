@@ -380,8 +380,8 @@ that repository access, a review webhook, or source synchronization is enabled.
 `github-app` discovers installations, asks the host user to choose one, then
 requires fresh owner proof before binding repository access. `github-lens` uses
 the same chooser behavior but creates separate Review Bot registrations, webhook
-routing and repository review bindings; it requires an active Review Bot Pack,
-managed compute, and workspace administration plus secret-write permission.
+routing and repository review bindings; it requires managed compute and
+workspace administration plus secret-write permission.
 Neither GitHub App flow is a generic stored user token. Pending organization-owner
 approval is incomplete setup, not a connected account. Discovery currently supports
 at most 99 existing installations plus the new-install option; a larger result

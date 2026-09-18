@@ -5861,7 +5861,7 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
     }
     // Strict wins: if the same server appears both optional and strict, the
     // strict occurrence upgrades the merged ref so an unavailable server fails
-    // the turn. This preserves the fail-loud default when defaults, packs, and
+
     // per-turn tool selections are combined.
     const optional = prior.optional === true && tool.optional === true ? true : undefined;
     const eager = prior.eager === true || tool.eager === true ? true : undefined;
@@ -9931,8 +9931,7 @@ export const AutomationSource = z.object({
   configuration: z.record(z.string(), z.unknown()),
   status: AutomationSourceStatus,
   version: z.number().int().positive(),
-  packInstallationId: z.string().uuid().nullable(),
-  packConnectorId: z.string().min(1).max(128).nullable(),
+
   hasWebhookSecret: z.boolean(),
   webhookPath: z.string().min(1),
   createdBySubjectId: z.string(),
@@ -9951,19 +9950,8 @@ export const CreateAutomationTriggerRequest = /* @__PURE__ */ defineSkillContrac
       parameters: AutomationBoundedJson.default({}),
       sessionTemplate: AutomationSessionTemplate,
       status: AutomationTriggerStatus.default("active"),
-      packInstallationId: z.string().uuid().nullable().default(null),
-      packTemplateId: z.string().trim().min(1).max(128).nullable().default(null),
     })
-    .strict()
-    .superRefine((value, context) => {
-      if ((value.packInstallationId === null) !== (value.packTemplateId === null)) {
-        context.addIssue({
-          code: "custom",
-          path: ["packTemplateId"],
-          message: "packInstallationId and packTemplateId must be supplied together",
-        });
-      }
-    }),
+    .strict(),
 );
 export type CreateAutomationTriggerRequest = z.infer<typeof CreateAutomationTriggerRequest>;
 
@@ -9999,8 +9987,7 @@ export const AutomationTrigger = /* @__PURE__ */ defineSkillContractSchema(() =>
     sessionTemplate: AutomationSessionTemplate,
     status: AutomationTriggerStatus,
     revision: z.number().int().positive(),
-    packInstallationId: z.string().uuid().nullable(),
-    packTemplateId: z.string().nullable(),
+
     createdBySubjectId: z.string(),
     createdAt: z.string(),
     updatedAt: z.string(),
@@ -10047,66 +10034,6 @@ export const TriggerAutomationManuallyRequest = z
   .strict();
 export type TriggerAutomationManuallyRequest = z.infer<typeof TriggerAutomationManuallyRequest>;
 
-export const CapabilityPackAutomationTemplate = /* @__PURE__ */ defineSkillContractSchema(() =>
-  z
-    .object({
-      id: z.string().min(1).max(128),
-      name: z.string().min(1).max(200),
-      description: z.string().min(1).max(4096),
-      adapterId: AutomationAdapterId,
-      eventTypes: z.array(z.string().min(1).max(256)).min(1).max(64),
-      sessionTemplate: AutomationSessionTemplate,
-      configuration: AutomationBoundedJson.default({}),
-      connectionRequirement: z.string().min(1).max(128).nullable().default(null),
-    })
-    .strict(),
-);
-export type CapabilityPackAutomationTemplate = z.infer<typeof CapabilityPackAutomationTemplate>;
-
-export const CapabilityPackConnectorAuthModel = z.enum([
-  "oauth2_authorization_code_pkce",
-  "oauth2_authorization_code",
-  "api_key",
-  "credential_ref",
-]);
-export type CapabilityPackConnectorAuthModel = z.infer<typeof CapabilityPackConnectorAuthModel>;
-
-export const CapabilityPackConnector = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  category: z.string().min(1),
-  authModel: CapabilityPackConnectorAuthModel,
-  providers: z.array(z.string().min(1)).default([]),
-  scopes: z.array(z.string().min(1)).default([]),
-  required: z.boolean().default(false),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-});
-export type CapabilityPackConnector = z.infer<typeof CapabilityPackConnector>;
-
-export const CapabilityPackKnowledge = z.object({
-  type: z.literal("document_base"),
-  id: z.string().min(1),
-  name: z.string().min(1),
-  description: z.string().nullable().default(null),
-  required: z.boolean().default(false),
-});
-export type CapabilityPackKnowledge = z.infer<typeof CapabilityPackKnowledge>;
-
-export const CapabilityPackScheduledTaskTemplate = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  description: z.string().min(1),
-  defaultSchedule: ScheduledTaskScheduleSpec,
-  defaultRunMode: ScheduledTaskRunMode.default("new_session_per_run"),
-  defaultOverlapPolicy: ScheduledTaskOverlapPolicy.default("skip"),
-  // Optional default agent prompt so registered pack manifests can ship fully
-  // instantiable templates; built-in packs may instead build prompts in code.
-  prompt: z.string().min(1).optional(),
-});
-export type CapabilityPackScheduledTaskTemplate = z.infer<
-  typeof CapabilityPackScheduledTaskTemplate
->;
-
 // Construct canonical Skill validators synchronously, but let browser bundlers
 // discard their entire dependency graph (including YAML) for unrelated imports.
 // Each transitive schema initializer needs a pure factory boundary: annotating
@@ -10115,33 +10042,26 @@ function defineSkillContractSchema<Schema>(factory: () => Schema): Schema {
   return factory();
 }
 
-// One file inside a pack skill directory. Paths are workspace-relative POSIX
-// paths inside the skill directory (for example "SKILL.md" or
-// "references/runbook.md"); content is UTF-8 text carried inline in the pack
-// manifest, which is also how registered packs persist it (the manifest JSONB
-// row in workspace_packs is the storage of record for pack skills).
-export const CapabilityPackSkillFile = z.object({
+// One UTF-8 file inside a portable Skill folder. Paths are relative POSIX paths
+// such as "SKILL.md" or "references/runbook.md".
+export const SkillArtifactFile = z.object({
   path: z.string().min(1).max(512).refine(isSafeSkillRelativePath, {
     message: "skill file path must be a safe relative POSIX path without '..' segments",
   }),
   content: z.string().max(256 * 1024),
 });
-export type CapabilityPackSkillFile = z.infer<typeof CapabilityPackSkillFile>;
+export type SkillArtifactFile = z.infer<typeof SkillArtifactFile>;
 
-// A skill delivered by a capability pack. Files own metadata. Optional legacy
-// name/description inputs are consistency assertions, never competing values.
-export const CapabilityPackSkill = /* @__PURE__ */ defineSkillContractSchema(() =>
+// A portable Skill definition. Files own metadata; optional name/description
+// inputs are consistency assertions, never competing values.
+export const SkillArtifactDefinition = /* @__PURE__ */ defineSkillContractSchema(() =>
   z
     .object({
       name: z.string().min(1).max(64).optional(),
       description: z.string().min(1).max(1024).optional(),
-      // Workspace-managed Skills are available to every session in the
-      // workspace. Session-selected Skills remain installed and inspectable, but
-      // enter model context only when their immutable definition is attached to
-      // a session explicitly. This is the hard contamination boundary for Packs
-      // that guide implementation agents rather than customer-facing agents.
+      // Installation policy stays separate from session-owned Skill content.
       activationMode: z.enum(["workspace_managed", "session_selected"]).optional(),
-      files: z.array(CapabilityPackSkillFile).min(1).max(128),
+      files: z.array(SkillArtifactFile).min(1).max(128),
     })
     .transform((skill, ctx) => {
       const main = skill.files.find((file) => file.path === "SKILL.md");
@@ -10176,16 +10096,14 @@ export const CapabilityPackSkill = /* @__PURE__ */ defineSkillContractSchema(() 
       return { ...skill, ...metadata };
     }),
 );
-export type CapabilityPackSkill = z.infer<typeof CapabilityPackSkill>;
-export type CapabilityPackSkillInput = z.input<typeof CapabilityPackSkill>;
+export type SkillArtifactDefinition = z.infer<typeof SkillArtifactDefinition>;
+export type SkillArtifactDefinitionInput = z.input<typeof SkillArtifactDefinition>;
 
-// Inline skill content fixed onto one session at creation. It intentionally
-// uses the exact same validated directory shape as a pack skill, but has a
-// different semantic owner and lifecycle. Session readers can inspect it; it
-// is configuration, never a secret store. Pack activation policy is consumed
-// at admission and cannot become part of the session-owned artifact.
+// Inline Skill content fixed onto one session at creation. Session readers can
+// inspect it; it is configuration, never a secret store. Installation policy
+// cannot become part of the session-owned artifact.
 export const SessionSkill = /* @__PURE__ */ defineSkillContractSchema(() =>
-  CapabilityPackSkill.transform(({ activationMode: _activationMode, ...skill }) => skill),
+  SkillArtifactDefinition.transform(({ activationMode: _activationMode, ...skill }) => skill),
 );
 export type SessionSkill = z.infer<typeof SessionSkill>;
 export type SessionSkillInput = z.input<typeof SessionSkill>;
@@ -10249,316 +10167,10 @@ function projectStoredTemplateSkillMetadata(value: unknown): unknown {
   };
 }
 
-const CapabilityPackVariableSet = z
-  .object({
-    description: z.string().min(1).max(2048),
-    requiredVariables: z.array(VariableSetVariableName).max(256).default([]),
-    required: z.boolean().default(false),
-  })
-  .strict();
-
-const CapabilityPackComponentKey = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
-
-const CapabilityPackInstanceKey = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
-
-/**
- * Immutable requirements adopted by a Pack installation. The manifest names
- * portable identities; installation resolves them to exact workspace-local
- * component rows and records Pack ownership in the shared component ledger.
- */
-export const CapabilityPackComponentReference = z.discriminatedUnion("kind", [
-  z
-    .object({
-      key: CapabilityPackComponentKey,
-      kind: z.literal("plugin"),
-      pluginKey: z.string().min(1).max(200),
-      version: z.string().min(1).max(128),
-      manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
-      required: z.boolean().default(true),
-    })
-    .strict(),
-  z
-    .object({
-      key: CapabilityPackComponentKey,
-      kind: z.literal("skill"),
-      capabilityId: z.string().min(1).max(512),
-      contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-      required: z.boolean().default(true),
-    })
-    .strict(),
-  z
-    .object({
-      key: CapabilityPackComponentKey,
-      kind: z.literal("integration"),
-      capabilityId: z.string().min(1).max(512),
-      instanceKey: CapabilityPackInstanceKey,
-      revisionId: z.string().min(1).max(512),
-      contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-      required: z.boolean().default(true),
-    })
-    .strict(),
-  z
-    .object({
-      key: CapabilityPackComponentKey,
-      kind: z.literal("facet"),
-      capabilityId: z.string().min(1).max(512),
-      instanceKey: CapabilityPackInstanceKey,
-      facetKey: z.string().min(1).max(200),
-      bindingKey: CapabilityPackInstanceKey,
-      configDigest: z.string().regex(/^[0-9a-f]{64}$/),
-      required: z.boolean().default(true),
-    })
-    .strict(),
-]);
-export type CapabilityPackComponentReference = z.infer<typeof CapabilityPackComponentReference>;
-
-export const CapabilityPackRigRequirement = z
-  .object({
-    description: z.string().min(1).max(2048).optional(),
-    required: z.boolean().default(true),
-    rigId: z.string().uuid().optional(),
-    requireVerified: z.boolean().default(false),
-  })
-  .strict();
-export type CapabilityPackRigRequirement = z.infer<typeof CapabilityPackRigRequirement>;
-
-export const CapabilityPack = /* @__PURE__ */ defineSkillContractSchema(() =>
-  z.preprocess(
-    (input) => {
-      if (!input || typeof input !== "object" || Array.isArray(input)) {
-        return input;
-      }
-      const record = input as Record<string, unknown>;
-      if (record.variableSet !== undefined) {
-        return record;
-      }
-      if (record.environment !== undefined) {
-        const { environment: _environment, ...rest } = record;
-        return { ...rest, variableSet: record.environment };
-      }
-      if (record.requiredVariables !== undefined) {
-        const { requiredVariables: _requiredVariables, ...rest } = record;
-        return {
-          ...rest,
-          variableSet: {
-            description: "Required variables",
-            requiredVariables: record.requiredVariables,
-            required:
-              Array.isArray(record.requiredVariables) && record.requiredVariables.length > 0,
-          },
-        };
-      }
-      return record;
-    },
-    z
-      .object({
-        id: z
-          .string()
-          .min(1)
-          .max(100)
-          .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/),
-        name: z.string().min(1).max(200),
-        description: z.string().min(1).max(4096),
-        role: z.string().min(1).max(128),
-        category: z.string().min(1).max(128),
-        version: z.string().min(1).max(128),
-        // Legacy manifest compatibility. V2 installation resolves this image to
-        // an explicit Rig requirement; the Pack no longer changes workspace
-        // runtime settings directly.
-        sandboxImage: z.string().trim().min(1).max(512).optional(),
-        // Optional provider-native immutable identities for the exact logical
-        // sandboxImage above. These avoid re-importing a private registry image on
-        // every provider while preserving sandboxImage as the cross-provider image
-        // provenance and lease-conflict identity.
-        sandboxProviderImages: z
-          .object({
-            modal: z
-              .object({
-                imageId: z
-                  .string()
-                  .trim()
-                  .regex(/^im-[A-Za-z0-9]{22}$/),
-              })
-              .strict()
-              .optional(),
-          })
-          .strict()
-          .optional(),
-        // Legacy inline Skills are migrated into immutable Skill components by
-        // the V2 Pack installer. They are not loaded directly by V2 runtime.
-        skills: z
-          .array(CapabilityPackSkill)
-          .max(32)
-          .superRefine((skills, ctx) => {
-            const seen = new Set<string>();
-            skills.forEach((skill, index) => {
-              const key = skill.name.toLowerCase();
-              if (seen.has(key)) {
-                ctx.addIssue({
-                  code: "custom",
-                  message: `duplicate pack skill name: ${skill.name}`,
-                  path: [index, "name"],
-                });
-              }
-              seen.add(key);
-            });
-          })
-          .default([]),
-        components: z.array(CapabilityPackComponentReference).max(128).default([]),
-        rig: CapabilityPackRigRequirement.optional(),
-        tools: z.array(ToolRef).default([]),
-        connectors: z.array(CapabilityPackConnector).default([]),
-        knowledge: z.array(CapabilityPackKnowledge).default([]),
-        scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
-        automationTemplates: z.array(CapabilityPackAutomationTemplate).max(64).optional(),
-        variableSet: CapabilityPackVariableSet.optional(),
-        metadata: z.record(z.string(), z.unknown()).default({}),
-      })
-      .superRefine((pack, ctx) => {
-        const componentKeys = new Set<string>();
-        pack.components.forEach((component, index) => {
-          if (componentKeys.has(component.key)) {
-            ctx.addIssue({
-              code: "custom",
-              message: `duplicate Pack component key: ${component.key}`,
-              path: ["components", index, "key"],
-            });
-          }
-          componentKeys.add(component.key);
-        });
-        pack.skills.forEach((skill, index) => {
-          const key = `inline-skill/${skill.name.toLowerCase()}`;
-          if (componentKeys.has(key)) {
-            ctx.addIssue({
-              code: "custom",
-              message: `Pack component key conflicts with inline Skill ${skill.name}: ${key}`,
-              path: ["skills", index, "name"],
-            });
-          }
-          componentKeys.add(key);
-        });
-        const automationTemplateIds = new Set<string>();
-        pack.automationTemplates?.forEach((template, index) => {
-          if (automationTemplateIds.has(template.id)) {
-            ctx.addIssue({
-              code: "custom",
-              message: `duplicate Pack automation template id: ${template.id}`,
-              path: ["automationTemplates", index, "id"],
-            });
-          }
-          automationTemplateIds.add(template.id);
-        });
-        if (!pack.sandboxProviderImages?.modal) {
-          return;
-        }
-        if (!pack.sandboxImage) {
-          ctx.addIssue({
-            code: "custom",
-            message: "sandboxProviderImages.modal requires sandboxImage",
-            path: ["sandboxProviderImages", "modal"],
-          });
-          return;
-        }
-        if (!/@sha256:[0-9a-f]{64}$/i.test(pack.sandboxImage)) {
-          ctx.addIssue({
-            code: "custom",
-            message:
-              "sandboxProviderImages.modal requires sandboxImage to be pinned by an OCI sha256 digest",
-            path: ["sandboxImage"],
-          });
-        }
-      }),
-  ),
-);
-export type CapabilityPack = z.infer<typeof CapabilityPack>;
-
 /** Execution view only; never replace the stored manifest or its digest with it. */
-export const StoredCapabilityPack = /* @__PURE__ */ defineSkillContractSchema(() =>
-  z.preprocess((value) => {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-    const pack = value as Record<string, unknown>;
-    return {
-      ...pack,
-      ...(pack.skills !== undefined ? { skills: projectStoredSkillMetadata(pack.skills) } : {}),
-      ...(Array.isArray(pack.automationTemplates)
-        ? {
-            automationTemplates: pack.automationTemplates.map((entry: unknown) => {
-              if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
-              const template = entry as Record<string, unknown>;
-              return {
-                ...template,
-                sessionTemplate: projectStoredTemplateSkillMetadata(template.sessionTemplate),
-              };
-            }),
-          }
-        : {}),
-    };
-  }, CapabilityPack),
-);
-
-// Registering a pack stores the manifest itself; the request body is a full
-// CapabilityPack manifest.
-export const RegisterCapabilityPackRequest = /* @__PURE__ */ defineSkillContractSchema(
-  () => CapabilityPack,
-);
-export type RegisterCapabilityPackRequest = z.infer<typeof RegisterCapabilityPackRequest>;
-
-export const WorkspaceRegisteredPack = /* @__PURE__ */ defineSkillContractSchema(() =>
-  z.object({
-    accountId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    pack: CapabilityPack,
-    createdAt: z.string(),
-    updatedAt: z.string(),
-  }),
-);
-export type WorkspaceRegisteredPack = z.infer<typeof WorkspaceRegisteredPack>;
-
-export const PackInstallationStatus = z.enum([
-  "installing",
-  "active",
-  "needs_attention",
-  "disabled",
-]);
-export type PackInstallationStatus = z.infer<typeof PackInstallationStatus>;
-
-export const PackInstallation = z.object({
-  skillWrites: z.array(SkillWriteReceipt).optional(),
-  skillPublications: z.array(SkillPublicationReceipt).optional(),
-  skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
-  id: z.string().uuid(),
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  packId: z.string().min(1),
-  status: PackInstallationStatus,
-  version: z.number().int().positive(),
-  // Exact accepted audit data, including historical fields and legacy Skills.
-  // Execution must explicitly parse StoredCapabilityPack; response validation
-  // must not project metadata, apply defaults, or change manifestDigest input.
-  manifestSnapshot: z.record(z.string(), z.unknown()).nullable(),
-  manifestDigest: z
-    .string()
-    .regex(/^[0-9a-f]{64}$/)
-    .nullable(),
-  selectedRigId: z.string().uuid().nullable(),
-  installedBySubjectId: z.string().min(1).max(1024).nullable(),
-  metadata: z.record(z.string(), z.unknown()),
-  enabledAt: z.string(),
-  updatedAt: z.string(),
-});
-export type PackInstallation = z.infer<typeof PackInstallation>;
 
 // ============ OpenGeni Review Bot — provider-neutral pull-request review automation ============
 
-export const OPENGENI_PR_REVIEW_PACK_ID = "pr-review" as const;
 export const OPENGENI_PR_REVIEW_SESSION_ROLE = "pull_request_review" as const;
 
 export const PrReviewProvider = GitCredentialProvider;
@@ -10781,124 +10393,6 @@ export const PrReviewRepositoryBinding = /* @__PURE__ */ (() =>
     updatedAt: z.string(),
   }))();
 export type PrReviewRepositoryBinding = z.infer<typeof PrReviewRepositoryBinding>;
-
-export const EnablePackRequest = withVariableSetIdAlias({
-  variableSetId: z.string().uuid().optional(),
-  environmentId: z.string().uuid().optional(),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-});
-export type EnablePackRequest = z.infer<typeof EnablePackRequest>;
-
-export const PackComponentResolutionStatus = z.enum(["ready", "missing", "mismatch"]);
-export type PackComponentResolutionStatus = z.infer<typeof PackComponentResolutionStatus>;
-
-export const PackComponentResolution = z
-  .object({
-    key: CapabilityPackComponentKey,
-    kind: z.enum(["plugin", "skill", "integration", "facet", "inline_skill"]),
-    capabilityId: z.string().min(1).max(512),
-    required: z.boolean(),
-    status: PackComponentResolutionStatus,
-    expectedDigest: z.string().regex(/^[0-9a-f]{64}$/),
-    actualDigest: z
-      .string()
-      .regex(/^[0-9a-f]{64}$/)
-      .nullable(),
-    resolvedId: z.string().min(1).max(512).nullable(),
-    label: z.string().min(1).max(200),
-  })
-  .strict();
-export type PackComponentResolution = z.infer<typeof PackComponentResolution>;
-
-export const PackRigResolution = z
-  .object({
-    required: z.boolean(),
-    status: z.enum(["not_required", "ready", "missing", "mismatch", "unverified"]),
-    requestedRigId: z.string().uuid().nullable(),
-    rigId: z.string().uuid().nullable(),
-    rigVersionId: z.string().uuid().nullable(),
-    name: z.string().min(1).max(200).nullable(),
-    image: z.string().min(1).max(512).nullable(),
-  })
-  .strict();
-export type PackRigResolution = z.infer<typeof PackRigResolution>;
-
-export const PreviewPackInstallationRequest = z
-  .object({
-    rigId: z.string().uuid().optional(),
-    variableSetId: z.string().uuid().optional(),
-  })
-  .strict();
-export type PreviewPackInstallationRequest = z.infer<typeof PreviewPackInstallationRequest>;
-
-export const PackInstallationPreview = z
-  .object({
-    packId: z.string().min(1),
-    packVersion: z.string().min(1),
-    manifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
-    installationVersion: z.number().int().positive().nullable(),
-    action: z.enum(["install", "update", "repair"]),
-    ready: z.boolean(),
-    blockers: z.array(z.string().min(1).max(500)).max(256),
-    components: z.array(PackComponentResolution).max(160),
-    rig: PackRigResolution,
-    variableSetId: z.string().uuid().nullable(),
-    legacyInlineSkillCount: z.number().int().nonnegative().max(32),
-    legacySandboxImage: z.string().min(1).max(512).nullable(),
-  })
-  .strict();
-export type PackInstallationPreview = z.infer<typeof PackInstallationPreview>;
-
-export const InstallPackRequest = z
-  .object({
-    expectedManifestDigest: z.string().regex(/^[0-9a-f]{64}$/),
-    expectedInstallationVersion: z.number().int().positive().optional(),
-    rigId: z.string().uuid().optional(),
-    variableSetId: z.string().uuid().optional(),
-    idempotencyKey: z.string().uuid(),
-    metadata: z.record(z.string(), z.unknown()).default({}),
-  })
-  .strict();
-export type InstallPackRequest = z.infer<typeof InstallPackRequest>;
-
-export const PackUninstallPreview = z
-  .object({
-    packId: z.string().min(1),
-    installed: z.boolean(),
-    installationVersion: z.number().int().positive().nullable(),
-    components: z
-      .array(
-        z
-          .object({
-            key: CapabilityPackComponentKey,
-            kind: z.enum(["plugin", "skill", "integration", "facet", "inline_skill"]),
-            capabilityId: z.string().min(1).max(512),
-            retainedByOtherOwners: z.boolean(),
-          })
-          .strict(),
-      )
-      .max(160),
-  })
-  .strict();
-export type PackUninstallPreview = z.infer<typeof PackUninstallPreview>;
-
-export const UninstallPackRequest = z
-  .object({
-    expectedInstallationVersion: z.number().int().positive(),
-    idempotencyKey: z.string().uuid(),
-  })
-  .strict();
-export type UninstallPackRequest = z.infer<typeof UninstallPackRequest>;
-
-export const UninstallPackResult = z
-  .object({
-    skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
-    packId: z.string().min(1),
-    status: z.enum(["not_installed", "uninstalled"]),
-    retainedComponents: z.array(z.string().min(1).max(512)).max(160),
-  })
-  .strict();
-export type UninstallPackResult = z.infer<typeof UninstallPackResult>;
 
 export const SocialProvider = z.enum([
   "x",
@@ -11294,21 +10788,7 @@ export const IntegrationClientMetadata = z.object({
 });
 export type IntegrationClientMetadata = z.infer<typeof IntegrationClientMetadata>;
 
-export const MarketingDailyAnalysisTaskRequest = z.object({
-  name: z.string().min(1).optional(),
-  connectionIds: z.array(z.string().uuid()).default([]),
-  documentBaseIds: z.array(z.string().uuid()).default([]),
-  timeZone: z.string().min(1).default("UTC"),
-  hour: z.number().int().min(0).max(23).default(9),
-  minute: z.number().int().min(0).max(59).default(0),
-  promptInstructions: z.string().min(1).optional(),
-  status: ScheduledTaskStatus.default("active"),
-  runMode: ScheduledTaskRunMode.default("new_session_per_run"),
-  overlapPolicy: ScheduledTaskOverlapPolicy.default("skip"),
-});
-export type MarketingDailyAnalysisTaskRequest = z.infer<typeof MarketingDailyAnalysisTaskRequest>;
-
-export const CapabilityKind = z.enum(["pack", "mcp", "api", "skill", "plugin"]);
+export const CapabilityKind = z.enum(["mcp", "api", "skill", "plugin"]);
 export type CapabilityKind = z.infer<typeof CapabilityKind>;
 
 export const CapabilitySource = z.enum([
@@ -11330,11 +10810,6 @@ export type CapabilityCatalogAuthKind = z.infer<typeof CapabilityCatalogAuthKind
 export const CapabilityCatalogTier = z.enum(["verified", "community"]);
 export type CapabilityCatalogTier = z.infer<typeof CapabilityCatalogTier>;
 
-/**
- * User-facing lifecycle truth for the Capabilities control center. This is a
- * read-model projection only: each action is still executed by the owning
- * Plugin, Integration, Connection, Skill, or Pack domain.
- */
 export const CapabilityLifecycleStatus = z.enum([
   "available",
   "installed",
@@ -11542,7 +11017,7 @@ export type DiscoverMcpCapabilitiesResponse = z.infer<typeof DiscoverMcpCapabili
 export const SkillImportSource = z.enum(["github", "skills_sh"]);
 export type SkillImportSource = z.infer<typeof SkillImportSource>;
 
-export const SkillInstallationSource = z.enum(["library", "github", "skills_sh", "pack"]);
+export const SkillInstallationSource = z.enum(["library", "github", "skills_sh"]);
 export type SkillInstallationSource = z.infer<typeof SkillInstallationSource>;
 
 export const PreviewSkillImportRequest = z.object({
@@ -11614,7 +11089,7 @@ export const InstalledSkill = z.object({
 export type InstalledSkill = z.infer<typeof InstalledSkill>;
 
 export const CapabilityComponentOwner = z.object({
-  kind: z.enum(["direct", "plugin", "pack", "migration"]),
+  kind: z.enum(["direct", "plugin", "migration"]),
   id: z.string().min(1).max(512),
   removable: z.boolean(),
 });
@@ -12320,7 +11795,7 @@ export const PluginUninstallComponentImpact = z.object({
   ),
   remainingOwners: z.array(
     z.object({
-      kind: z.enum(["direct", "plugin", "pack", "migration"]),
+      kind: z.enum(["direct", "plugin", "migration"]),
       name: z.string().min(1),
     }),
   ),
@@ -15158,7 +14633,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // trusted parent's selection; an explicit array, including [], wins.
       skills: SessionSkills.default([]),
       // Immutable workspace Skill identities to copy onto this session at
-      // creation. This is the explicit opt-in path for session-selected Pack
+
       // Skills: installation alone never exposes them to model context. Child
       // omission still inherits the parent's already-materialized session Skills.
       installedSkillIds: z
@@ -17114,7 +16589,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-organization-recovery-custody-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-09-plugins-and-skills-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;

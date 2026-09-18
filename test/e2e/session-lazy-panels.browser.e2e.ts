@@ -531,7 +531,7 @@ async function installApi(page: Page, baseUrl: string, state: State) {
     if (path.endsWith("/connection-authorities")) return json({ authorities: [] });
     if (path.endsWith("/skills")) return json({ skills: [] });
     if (path.endsWith("/plugins")) return json({ plugins: [] });
-    if (path.endsWith("/packs")) return json({ packs: [], installations: [] });
+
     if (path.endsWith("/github/app"))
       return json({ configured: false, missing: [], installUrl: null });
     if (path.endsWith("/connections/github")) return json({ enabled: false, connection: null });

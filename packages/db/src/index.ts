@@ -139,7 +139,6 @@ import type {
   CapabilityInstallation,
   CapabilityInstallationStatus,
   CapabilityKind,
-  CapabilityPack,
   CapabilitySource,
   ConnectionKind,
   ConnectionMetadata,
@@ -171,8 +170,6 @@ import type {
   ModelContextContributionSummary,
   Permission,
   PersonalResourceAttachmentIntent,
-  PackInstallation,
-  PackInstallationStatus,
   ResourceRef,
   SandboxBackend,
   SandboxOs,
@@ -240,7 +237,6 @@ import type {
   VariableSetSecret,
   VariableSetVariableMetadata,
   WorkspaceMemoryPromptMode,
-  WorkspaceRegisteredPack,
   Channel,
   Rig,
   RigProviderImage,
@@ -5508,24 +5504,6 @@ export type UpdateScheduledTaskInput = Partial<{
   captureLinkAuthority: (tx: Database, task: ScheduledTask) => Promise<void>;
 }>;
 
-export type CreatePackInstallationInput = {
-  accountId: string;
-  workspaceId: string;
-  packId: string;
-  status?: PackInstallationStatus;
-  manifestSnapshot?: CapabilityPack | null;
-  manifestDigest?: string | null;
-  selectedRigId?: string | null;
-  installedBySubjectId?: string | null;
-  metadata?: Record<string, unknown>;
-};
-
-export type RegisterWorkspacePackInput = {
-  accountId: string;
-  workspaceId: string;
-  pack: CapabilityPack;
-};
-
 export type CreateKnowledgeMemoryInput = {
   accountId: string;
   workspaceId: string;
@@ -6073,7 +6051,7 @@ export type InstallPortableSkillInput = {
   skillRequestIdentity?: Record<string, unknown>;
   capabilityId: string;
   pluginKey: string;
-  source: "library" | "github" | "skills_sh" | "pack";
+  source: "library" | "github" | "skills_sh";
   sourceUrl: string;
   repositoryUrl: string;
   version?: string;
@@ -6109,7 +6087,7 @@ export type InstalledPortableSkill = {
   pluginInstallationId: string;
   facetInstallationId: string;
   installationVersion: number;
-  source: "library" | "github" | "skills_sh" | "pack";
+  source: "library" | "github" | "skills_sh";
   version: string;
   sourceUrl: string;
   sourceCommit: string;
@@ -6119,7 +6097,7 @@ export type InstalledPortableSkill = {
 
 export type PortableSkillRuntime = {
   capabilityId: string;
-  source: "library" | "github" | "skills_sh" | "pack";
+  source: "library" | "github" | "skills_sh";
   version: string;
   name: string;
   description: string;
@@ -6140,7 +6118,7 @@ export type InstalledSkillSummary = {
   category: string;
   tags: string[];
   provenance: string;
-  source: "library" | "github" | "skills_sh" | "pack";
+  source: "library" | "github" | "skills_sh";
   version: string;
   sourceUrl: string;
   repositoryUrl: string;
@@ -6156,7 +6134,7 @@ export type InstalledSkillSummary = {
 };
 
 export type PortableSkillOwner = {
-  kind: "direct" | "plugin" | "pack" | "migration";
+  kind: "direct" | "plugin" | "migration";
   id: string;
   removable: boolean;
 };
@@ -7998,228 +7976,6 @@ export async function completeExpiredFileUploadCleanup(
   });
 }
 
-export async function enablePackInstallation(
-  db: Database,
-  input: CreatePackInstallationInput,
-): Promise<PackInstallation> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const now = new Date();
-      const existing = await getPackInstallation(scopedDb, input.workspaceId, input.packId);
-      if (existing) {
-        const [row] = await scopedDb
-          .update(schema.packInstallations)
-          .set({
-            status: input.status ?? "active",
-            version: existing.version + 1,
-            manifestSnapshot:
-              input.manifestSnapshot === undefined
-                ? existing.manifestSnapshot
-                : input.manifestSnapshot === null
-                  ? null
-                  : (input.manifestSnapshot as unknown as Record<string, unknown>),
-            manifestDigest:
-              input.manifestDigest === undefined ? existing.manifestDigest : input.manifestDigest,
-            selectedRigId:
-              input.selectedRigId === undefined ? existing.selectedRigId : input.selectedRigId,
-            installedBySubjectId:
-              input.installedBySubjectId === undefined
-                ? existing.installedBySubjectId
-                : input.installedBySubjectId,
-            metadata: input.metadata ?? existing.metadata,
-            enabledAt: now,
-            updatedAt: now,
-          })
-          .where(
-            and(
-              eq(schema.packInstallations.workspaceId, input.workspaceId),
-              eq(schema.packInstallations.packId, input.packId),
-            ),
-          )
-          .returning();
-        if (!row) {
-          throw new Error(`Pack installation not found: ${input.packId}`);
-        }
-        return mapPackInstallation(row);
-      }
-      const [row] = await scopedDb
-        .insert(schema.packInstallations)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          packId: input.packId,
-          status: input.status ?? "active",
-          manifestSnapshot:
-            input.manifestSnapshot === undefined || input.manifestSnapshot === null
-              ? null
-              : (input.manifestSnapshot as unknown as Record<string, unknown>),
-          manifestDigest: input.manifestDigest ?? null,
-          selectedRigId: input.selectedRigId ?? null,
-          installedBySubjectId: input.installedBySubjectId ?? null,
-          metadata: input.metadata ?? {},
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to enable pack installation");
-      }
-      return mapPackInstallation(row);
-    },
-  );
-}
-
-export async function listPackInstallations(
-  db: Database,
-  workspaceId: string,
-): Promise<PackInstallation[]> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.packInstallations)
-      .where(eq(schema.packInstallations.workspaceId, workspaceId))
-      .orderBy(desc(schema.packInstallations.updatedAt));
-    return rows.map(mapPackInstallation);
-  });
-}
-
-export async function getPackInstallation(
-  db: Database,
-  workspaceId: string,
-  packId: string,
-): Promise<PackInstallation | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.packInstallations)
-      .where(
-        and(
-          eq(schema.packInstallations.workspaceId, workspaceId),
-          eq(schema.packInstallations.packId, packId),
-        ),
-      )
-      .limit(1);
-    return row ? mapPackInstallation(row) : null;
-  });
-}
-
-export async function updatePackInstallationStatus(
-  db: Database,
-  workspaceId: string,
-  packId: string,
-  status: PackInstallationStatus,
-): Promise<PackInstallation> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.packInstallations)
-      .set({
-        status,
-        version: sql`${schema.packInstallations.version} + 1`,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.packInstallations.workspaceId, workspaceId),
-          eq(schema.packInstallations.packId, packId),
-        ),
-      )
-      .returning();
-    if (!row) {
-      throw new Error(`Pack installation not found: ${packId}`);
-    }
-    return mapPackInstallation(row);
-  });
-}
-
-export async function registerWorkspacePack(
-  db: Database,
-  input: RegisterWorkspacePackInput,
-): Promise<{ pack: WorkspaceRegisteredPack; created: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const now = new Date();
-      const [row] = await scopedDb
-        .insert(schema.workspacePacks)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          packId: input.pack.id,
-          manifest: input.pack as unknown as Record<string, unknown>,
-        })
-        .onConflictDoUpdate({
-          target: [schema.workspacePacks.workspaceId, schema.workspacePacks.packId],
-          set: {
-            manifest: input.pack as unknown as Record<string, unknown>,
-            updatedAt: now,
-          },
-        })
-        .returning();
-      if (!row) {
-        throw new Error("Failed to register workspace pack");
-      }
-      return {
-        pack: mapWorkspacePack(row),
-        created: row.createdAt.getTime() === row.updatedAt.getTime(),
-      };
-    },
-  );
-}
-
-export async function listWorkspacePacks(
-  db: Database,
-  workspaceId: string,
-): Promise<WorkspaceRegisteredPack[]> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.workspacePacks)
-      .where(eq(schema.workspacePacks.workspaceId, workspaceId))
-      .orderBy(asc(schema.workspacePacks.packId));
-    return rows.map(mapWorkspacePack);
-  });
-}
-
-export async function getWorkspacePack(
-  db: Database,
-  workspaceId: string,
-  packId: string,
-): Promise<WorkspaceRegisteredPack | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.workspacePacks)
-      .where(
-        and(
-          eq(schema.workspacePacks.workspaceId, workspaceId),
-          eq(schema.workspacePacks.packId, packId),
-        ),
-      )
-      .limit(1);
-    return row ? mapWorkspacePack(row) : null;
-  });
-}
-
-export async function deleteWorkspacePack(
-  db: Database,
-  workspaceId: string,
-  packId: string,
-): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .delete(schema.workspacePacks)
-      .where(
-        and(
-          eq(schema.workspacePacks.workspaceId, workspaceId),
-          eq(schema.workspacePacks.packId, packId),
-        ),
-      )
-      .returning({ id: schema.workspacePacks.id });
-    return rows.length > 0;
-  });
-}
-
 const registryCapabilitySource = "registry" as CapabilitySource;
 
 export async function createImportBatch(
@@ -8305,7 +8061,7 @@ export async function upsertRegistryCapabilityCatalogItem(
     id: input.id,
     accountId: null,
     workspaceId: null,
-    kind: "mcp" as Exclude<CapabilityKind, "pack">,
+    kind: "mcp" as CapabilityKind,
     source: registryCapabilitySource,
     name: input.name,
     description: input.description ?? null,
@@ -9567,12 +9323,7 @@ async function portableSkillOwners(
       asc(schema.capabilityComponentOwners.ownerId),
     );
   return rows.map((row) => {
-    if (
-      row.kind !== "direct" &&
-      row.kind !== "plugin" &&
-      row.kind !== "pack" &&
-      row.kind !== "migration"
-    ) {
+    if (row.kind !== "direct" && row.kind !== "plugin" && row.kind !== "migration") {
       throw new Error(`Unknown portable Skill owner kind: ${row.kind}`);
     }
     return { kind: row.kind, id: row.id, removable: row.removable };
@@ -9580,7 +9331,7 @@ async function portableSkillOwners(
 }
 
 function portableSkillOwner(kind: string, id: string, removable: boolean): PortableSkillOwner {
-  if (kind !== "direct" && kind !== "plugin" && kind !== "pack" && kind !== "migration") {
+  if (kind !== "direct" && kind !== "plugin" && kind !== "migration") {
     throw new Error(`Unknown Skill owner kind: ${kind}`);
   }
   return { kind, id, removable };
@@ -9591,7 +9342,7 @@ function skillSourceFromManifest(
   capabilityId: string,
 ): InstalledSkillSummary["source"] {
   const source = manifestValue.source;
-  if (source === "library" || source === "github" || source === "skills_sh" || source === "pack") {
+  if (source === "library" || source === "github" || source === "skills_sh") {
     return source;
   }
   throw new Error(`Installed Skill ${capabilityId} has invalid immutable source metadata`);
@@ -43557,7 +43308,7 @@ export class SandboxLeaseRecoveryBlockedError extends Error {
 // the one the live shared box was created with AND other holders are still on the box.
 // A shared box is ONE filesystem; recreating it on a new image would yank the running
 // filesystem out from under the OTHER sessions, so we refuse. The turn activity surfaces
-// this as an actionable error: spawn with sandbox:'new' or align the pack image. A SOLO
+
 // holder never hits this — acquireLease requests a reaper-owned durable rotation instead.
 export class SandboxImageConflictError extends Error {
   constructor(
@@ -43567,7 +43318,7 @@ export class SandboxImageConflictError extends Error {
   ) {
     super(
       `Sandbox group ${sandboxGroupId} runs image ${currentImage}; this run resolves image ${requestedImage}. ` +
-        `A shared box requires one image — spawn with sandbox:'new' for an isolated box or align the pack image.`,
+        `A shared box requires one image — spawn with sandbox:'new' for an isolated box or use the same sandbox environment.`,
     );
     this.name = "SandboxImageConflictError";
   }
@@ -78220,36 +77971,6 @@ function mapAccount(row: typeof schema.managedAccounts.$inferSelect): ManagedAcc
   };
 }
 
-function mapPackInstallation(row: typeof schema.packInstallations.$inferSelect): PackInstallation {
-  return {
-    id: row.id,
-    accountId: row.accountId,
-    workspaceId: row.workspaceId,
-    packId: row.packId,
-    status: row.status as PackInstallationStatus,
-    version: row.version,
-    manifestSnapshot: row.manifestSnapshot,
-    manifestDigest: row.manifestDigest,
-    selectedRigId: row.selectedRigId,
-    installedBySubjectId: row.installedBySubjectId,
-    metadata: row.metadata,
-    enabledAt: row.enabledAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-  };
-}
-
-function mapWorkspacePack(row: typeof schema.workspacePacks.$inferSelect): WorkspaceRegisteredPack {
-  return {
-    accountId: row.accountId,
-    workspaceId: row.workspaceId,
-    // Manifests are validated with the CapabilityPack contract at the API
-    // boundary before they are stored.
-    pack: row.manifest as unknown as CapabilityPack,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-  };
-}
-
 function mapImportBatch(row: typeof schema.importBatches.$inferSelect): ImportBatch {
   return {
     id: row.id,
@@ -79072,34 +78793,7 @@ export {
   effectiveCapabilityOwnerSql,
   type CapabilityComponentOwnerIdentity,
 } from "./capability-components";
-export {
-  adoptPackComponentReferences,
-  finalizePackComponentOwnership,
-  listPackInstallationComponents,
-  PackComponentResolutionError,
-  previewPackComponentRelease,
-  recordPackInlineSkillComponent,
-  releasePackComponents,
-  resolvePackComponentReferences,
-  resolvePackInlineSkillReferences,
-  type PackInlineSkillRequirement,
-  type StoredPackInstallationComponent,
-} from "./pack-components";
-export {
-  deferPackInstallationOperation,
-  finalizePackInstallationOperation,
-  finalizePackUninstallOperation,
-  PackManifestChangedError,
-  PackOperationClaimLostError,
-  PackOperationInProgressError,
-  PackInstallationVersionConflictError,
-  PackInstallationVersionRequiredError,
-  PackOperationIdempotencyError,
-  preparePackInstallationOperation,
-  preparePackUninstallOperation,
-  touchPackInstallationOperation,
-  type PreparedPackInstallation,
-} from "./pack-installations";
+
 export {
   checkpointPluginPackageOperation,
   deferPluginPackageOperation,

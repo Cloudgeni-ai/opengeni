@@ -677,7 +677,6 @@ function facetOwnerSummary(owners: IntegrationFacetBindingSummary["owners"]): st
   const kinds = new Set(owners.map((owner) => owner.kind));
   const labels = [
     kinds.has("plugin") ? "another Plugin" : null,
-    kinds.has("pack") ? "another Pack" : null,
     kinds.has("migration") ? "migration authority" : null,
     kinds.has("direct") ? "another direct installation" : null,
   ].filter((label): label is string => label !== null);

@@ -18,8 +18,6 @@ export type CapabilityFilter = "all" | CapabilityKind;
 /** Singular human label for a capability kind ("MCP server", "API"…). */
 export function capabilityKindLabel(kind: CapabilityKind): string {
   switch (kind) {
-    case "pack":
-      return "Pack";
     case "mcp":
       return "MCP server";
     case "api":
@@ -123,15 +121,6 @@ export function emptyCapabilityForm(): CapabilityFormState {
   };
 }
 
-/**
- * The Connectors surface owns exactly MCP servers and API connectors. Skills,
- * Plugins, and Packs are Bundles - a named collection of tools and
- * instructions, not a live connection - and have their own section with their
- * own search, so they never enter the Enabled, Browse, or Featured
- * projections. (No `kind: "plugin"` catalog item is produced at all today;
- * scoping by kind here keeps that an implementation detail rather than a fact
- * the UI silently depends on.)
- */
 export function isConnectorCatalogItem(item: CapabilityCatalogItem): boolean {
   return item.kind === "mcp" || item.kind === "api";
 }
@@ -882,82 +871,6 @@ export function capabilityMonogram(name: string): string {
   return (words[0]![0]! + words[1]![0]!).toUpperCase();
 }
 
-export type PackConnectorSummary = {
-  id: string;
-  name: string;
-  authModel: string | null;
-  providers: string[];
-  scopes: string[];
-  required: boolean;
-};
-
-export type PackKnowledgeSummary = {
-  id: string;
-  name: string;
-  description: string | null;
-};
-
-export type PackScheduledTaskTemplateSummary = {
-  id: string;
-  name: string;
-  scheduleSummary: string;
-};
-
-export type PackContentsSummary = {
-  hasContents: boolean;
-  mcpServerIds: string[];
-  firstPartyMcpTools: string[];
-  skills: string[];
-  connectors: PackConnectorSummary[];
-  knowledge: PackKnowledgeSummary[];
-  scheduledTaskTemplates: PackScheduledTaskTemplateSummary[];
-};
-
-export function summarizePackContents(item: CapabilityCatalogItem): PackContentsSummary | null {
-  if (item.kind !== "pack") {
-    return null;
-  }
-  const metadata = item.metadata;
-  const mcpServerIds = uniqueStrings(
-    item.tools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id),
-  );
-  const firstPartyMcpTools = uniqueStrings(stringArray(metadata.firstPartyMcpTools));
-  const skills = uniqueStrings([stringValue(metadata.skill), ...stringArray(metadata.skills)]);
-  const connectors = recordArray(metadata.connectors).map((connector) => ({
-    id: stringValue(connector.id) ?? stringValue(connector.name) ?? "connector",
-    name: stringValue(connector.name) ?? stringValue(connector.id) ?? "Connector",
-    authModel: stringValue(connector.authModel),
-    providers: stringArray(connector.providers),
-    scopes: stringArray(connector.scopes),
-    required: connector.required === true,
-  }));
-  const knowledge = recordArray(metadata.knowledge).map((entry) => ({
-    id: stringValue(entry.id) ?? stringValue(entry.name) ?? "knowledge",
-    name: stringValue(entry.name) ?? stringValue(entry.id) ?? "Knowledge",
-    description: stringValue(entry.description),
-  }));
-  const scheduledTaskTemplates = recordArray(metadata.scheduledTaskTemplates).map((template) => ({
-    id: stringValue(template.id) ?? stringValue(template.name) ?? "schedule",
-    name: stringValue(template.name) ?? stringValue(template.id) ?? "Scheduled task",
-    scheduleSummary: scheduleSummaryForMetadata(template.defaultSchedule),
-  }));
-  return {
-    hasContents:
-      mcpServerIds.length > 0 ||
-      firstPartyMcpTools.length > 0 ||
-      skills.length > 0 ||
-      connectors.length > 0 ||
-      knowledge.length > 0 ||
-      scheduledTaskTemplates.length > 0,
-    mcpServerIds,
-    firstPartyMcpTools,
-    skills,
-    connectors,
-    knowledge,
-    scheduledTaskTemplates,
-  };
-}
-
 export function scheduleSummaryForMetadata(value: unknown): string {
   const schedule = recordValue(value);
   if (!schedule) {
@@ -985,12 +898,6 @@ export function scheduleSummaryForMetadata(value: unknown): string {
   return type ? `${type} schedule` : "Custom schedule";
 }
 
-function recordArray(value: unknown): Record<string, unknown>[] {
-  return Array.isArray(value)
-    ? value.map(recordValue).filter((entry): entry is Record<string, unknown> => Boolean(entry))
-    : [];
-}
-
 function recordValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -1011,14 +918,9 @@ function numberValue(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function uniqueStrings(values: Array<string | null | undefined>): string[] {
-  return [...new Set(values.filter((value): value is string => Boolean(value)))];
-}
-
 export function capabilityCounts(items: CapabilityCatalogItem[]): Record<CapabilityFilter, number> {
   return {
     all: items.length,
-    pack: items.filter((item) => item.kind === "pack").length,
     mcp: items.filter((item) => item.kind === "mcp").length,
     api: items.filter((item) => item.kind === "api").length,
     skill: items.filter((item) => item.kind === "skill").length,
@@ -1030,8 +932,6 @@ export function capabilityFilterLabel(kind: CapabilityFilter): string {
   switch (kind) {
     case "all":
       return "All";
-    case "pack":
-      return "Packs";
     case "mcp":
       return "MCP servers";
     case "api":

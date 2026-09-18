@@ -801,8 +801,7 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "social_connections_list",
       {
-        description:
-          "List connected social media accounts available to social media analysis packs.",
+        description: "List connected social media accounts available for analysis.",
         inputSchema: { limit: z4.number().int().positive().optional() },
       },
       async ({ limit }) =>
@@ -1005,7 +1004,7 @@ export function buildOpenGeniMcpServer(
 
     // Provider-scoped aliases are the canonical tools advertised by the X and
     // Reddit Integration cards. The legacy social_* names remain available to
-    // existing Packs/sessions, but these names bind the provider in the tool
+
     // identity and reject a near-identical Connection from the other adapter.
     for (const provider of ["x", "reddit"] as const) {
       const providerName = provider === "x" ? "X" : "Reddit";

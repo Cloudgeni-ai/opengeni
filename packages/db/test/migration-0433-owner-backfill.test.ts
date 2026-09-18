@@ -6,7 +6,8 @@ import {
 import { readdir, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import postgres from "postgres";
-import { migrate } from "../src/migrate";
+import { migrateBefore } from "./helpers/historical-schema";
+const migrate = (url: string) => migrateBefore(url, "0482_remove_packs.sql");
 import { readSkillMetadata } from "@opengeni/contracts";
 import { createDb } from "../src/database";
 import { listSkillDescriptors, listSkillRecords } from "../src/skills";

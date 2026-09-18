@@ -204,7 +204,7 @@ export async function completeGitHubAppConnect(
           )
             throw new Error("Stale GitHub setup stage");
           if (acquiring && state.providerId === "github-lens")
-            await requireGitHubLensConnect({ ...deps, db: tx }, state.workspaceId);
+            await requireGitHubLensConnect({ ...deps, db: tx });
         },
       },
       state.providerId,

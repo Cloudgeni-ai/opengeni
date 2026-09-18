@@ -8,7 +8,7 @@ export type WorkspaceSkillSearchEntry = Readonly<{
   revisionId?: string;
   scopeVersion?: number;
   installationVersion?: number;
-  source?: "workspace" | "builtin" | "session" | "pack";
+  source?: "workspace" | "builtin" | "session";
 }>;
 
 export function createSkillSearchAttemptToolDefinition(input: {

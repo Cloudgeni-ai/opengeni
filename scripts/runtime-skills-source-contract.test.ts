@@ -26,7 +26,7 @@ test("runtime Skills have one explicit composition owner and no legacy default b
   expect(runtimeFacade).not.toContain("bundled_skill_library");
   expect(runtimeSkills).not.toContain('source: "bundled"');
   expect(runtimeSkills).toContain('source: "installation"');
-  expect(runtimeSkills).toContain('source: "pack"');
+  expect(runtimeSkills).not.toContain('source: "pack"');
   expect(runtimeSkills).toContain('source: "session"');
   expect(runtimeSkills).toContain('source: "native_tool"');
 });

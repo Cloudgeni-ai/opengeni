@@ -663,9 +663,7 @@ async function installApi(page: Page, state: UiState): Promise<void> {
         return json({ message: "Connection data unavailable" }, 503);
       return json({ connections: connections(state.dense) });
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({ packs: [], installations: [] });
-    }
+
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`)
       return json({ items: [], nextCursor: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) return json({ skills: [] });

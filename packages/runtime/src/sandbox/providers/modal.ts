@@ -796,7 +796,7 @@ type ModalClientLike = InstanceType<ModalModule["ModalClient"]>;
 // a `ModalImageSelector.fromImage(...)`. `build` is synchronous and modal is imported
 // lazily (never loaded for non-modal backends), so resolution can't happen inside
 // `build`; the worker awaits `ensureModalRegistryImage` at boot for global refs and
-// at turn time for pack-scoped refs, then `build` reads the settled result. Modal
+
 // images are lazy, workspace-scoped definitions, so an image built by this module's
 // client is usable by the ModalSandboxClient's own client.
 
@@ -819,14 +819,6 @@ function registryImageCacheKey(settings: Settings): string {
   ].join("|");
 }
 
-/**
- * Resolve + cache the private-registry Modal image. No-op unless BOTH
- * `modalImageRef` and `modalImageRegistrySecret` are set. Memoized per
- * (imageRef, secret, environment) so it runs once per worker process. Awaited at
- * worker boot for the deployment-global image and at turn time for pack-scoped
- * images BEFORE the first sandbox using that ref is created; `build` then reads the
- * resolved image and otherwise falls back to the public `fromTag` path.
- */
 export async function ensureModalRegistryImage(
   settings: Settings,
   loadModal: ModalModuleLoader = defaultModalLoader,

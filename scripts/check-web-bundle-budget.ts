@@ -133,7 +133,7 @@ const budgets = {
   // Advance only those two aggregate envelopes to their next whole KiB; every
   // initial, per-file, file-count, lazy-chunk, and CSS cap stays fixed.
   // Generic event automations add the shared SDK contracts that let ordinary
-  // session surfaces carry Pack-owned trigger metadata. The pre-migration Bun 1.3.14
+  // session surfaces carry automation trigger metadata. The pre-migration Bun 1.3.14
   // production graph measures 2,121,826 raw / 588,620 gzip bytes. Advance only
   // the raw aggregate to its next whole-KiB envelope; gzip, file-count, initial,
   // per-file, lazy-chunk, and CSS caps remain unchanged.

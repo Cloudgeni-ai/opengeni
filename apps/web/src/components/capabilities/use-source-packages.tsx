@@ -321,7 +321,7 @@ export function useSourcePackages({
           description:
             skillReleaseMessage(result.skillReleases) ??
             (result.status === "retained_by_other_owners"
-              ? "The runtime Skill remains available because another Plugin or Pack still owns it."
+              ? "The runtime Skill remains available because another Plugin still owns it."
               : "The reviewed Skill files are no longer active in this workspace."),
         });
       } else {

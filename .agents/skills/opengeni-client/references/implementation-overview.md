@@ -1,11 +1,11 @@
 ---
 name: opengeni-product-integration
-description: Design, implement, verify, and hand off a tenant-safe OpenGeni product integration while adapting to the customer's architecture, UI, data APIs, and desired delivery autonomy. Select only for an implementation session; installation alone does not expose it to other agents.
+description: Design, implement, verify, and hand off a tenant-safe OpenGeni product integration while adapting to the customer's architecture, UI, data APIs, and desired delivery autonomy. Use only for implementation sessions, not end-user runtime chats.
 ---
 
 # OpenGeni product integration
 
-Use this Skill to add OpenGeni capabilities to an external product. It guides the coding or implementation agent. Pack installation keeps it inactive; explicitly select it only for the implementation session. Do not attach it to customer-facing runtime sessions.
+Use this Skill to add OpenGeni capabilities to an external product. It guides the coding or implementation agent. Use it only for the implementation session. Do not attach it to customer-facing runtime sessions.
 
 The desired outcome is a native-feeling product experience backed by a standalone OpenGeni deployment, with the product retaining authority over its users, tenants, business data, and UI. Adapt to the customer's system instead of imposing a sample architecture, framework, cloud, release process, or chat design.
 

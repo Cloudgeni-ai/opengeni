@@ -2566,7 +2566,7 @@ function capabilityAuthorizationRequest(
   if (
     typeof record.id !== "string" ||
     typeof record.name !== "string" ||
-    !["pack", "mcp", "api", "skill", "plugin"].includes(String(kind)) ||
+    !["mcp", "api", "skill", "plugin"].includes(String(kind)) ||
     !["built_in", "library", "configured", "public_registry", "registry", "manual"].includes(
       String(source),
     ) ||

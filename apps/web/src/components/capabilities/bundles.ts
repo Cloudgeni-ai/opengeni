@@ -1,76 +1,29 @@
-/**
- * Bundles: the third kind of thing on the Capabilities page.
- *
- * A Bundle is a named collection of tools and instructions - a Skill, a Plugin,
- * or a Pack - not a live connection to another product. Integrations and
- * Connectors both hold an identity somewhere else; a Bundle holds none, so it
- * gets its own section rather than being mixed into the Connectors
- * Enabled/Browse grid.
- *
- * Three provenances coexist and are all named honestly on the row:
- *
- * - `built_in`: the reviewed curated Skill library OpenGeni ships, plus the
- *   Packs OpenGeni ships (`source: "built_in"` catalog rows).
- * - `admin_registered`: a Pack manifest a workspace admin registered here
- *   (`registerPackManifest`, `source: "manual"` catalog rows).
- * - `installed_from_source`: a Skill imported from GitHub/skills.sh, or a
- *   Plugin installed from a manifest URL.
- *
- * This module is pure: it maps each source's own summary onto one uniform row
- * and one discriminated detail action. Rendering, data loading, and mutations
- * live in `bundles-section.tsx` and the hooks it composes, exactly as provider
- * logic lives in the `use-*-integration.tsx` adapters rather than in
- * `integration-row.tsx`.
- */
-
 import type {
   IntegrationChip,
   IntegrationMark,
   IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
 import type { InstalledSourceSkill } from "@/components/capabilities/source-import-flow";
-import type {
-  CapabilityCatalogItem,
-  CapabilityPack,
-  PackInstallation,
-  PluginInstallationSummary,
-} from "@/types";
+import type { CapabilityCatalogItem, PluginInstallationSummary } from "@/types";
 
-export type BundleKind = "skill" | "plugin" | "pack";
+export type BundleKind = "skill" | "plugin";
 
-export type BundleProvenance = "built_in" | "admin_registered" | "installed_from_source";
+export type BundleProvenance = "built_in" | "installed_from_source";
 
-/**
- * What opening a row does. Skills and Plugins imported from source share the
- * four-block `IntegrationSheet`; a curated library Skill keeps the catalog
- * detail sheet that already owns its install/update/remove and immutable
- * provenance panel; a Pack opens its own dialog, because picking a Rig and a
- * Variable Set genuinely does not compress into four blocks.
- */
 export type BundleDetail =
   | { kind: "sheet"; model: IntegrationViewModel }
-  | { kind: "catalog-sheet"; item: CapabilityCatalogItem }
-  | { kind: "pack-dialog"; pack: CapabilityPack };
+  | { kind: "catalog-sheet"; item: CapabilityCatalogItem };
 
 export type BundleRow = {
   /** Stable across reloads; unique across all three sources. */
   id: string;
   kind: BundleKind;
-  /**
-   * `null` while the fact is genuinely not known yet - a Pack whose catalog row
-   * has not arrived. Provenance is read, never guessed, so an unknown one is
-   * omitted from the row rather than defaulted to a flattering value.
-   */
+
   provenance: BundleProvenance | null;
   name: string;
   /** The kind, the provenance, then the bundle's own one-line description. */
   description: string;
-  /**
-   * The taxonomy segment of the accessible name, spoken mid-sentence between
-   * the bundle's name and its state ("Pack, curated by OpenGeni"). The row
-   * button's `aria-label` overrides its own contents, so without this a screen
-   * reader hears neither the kind nor the provenance the visible line carries.
-   */
+
   accessibleDetail?: string;
   mark: IntegrationMark;
   chip: IntegrationChip;
@@ -87,8 +40,6 @@ export function bundleKindLabel(kind: BundleKind): string {
       return "Skill";
     case "plugin":
       return "Plugin";
-    case "pack":
-      return "Pack";
   }
 }
 
@@ -96,24 +47,15 @@ export function bundleProvenanceLabel(provenance: BundleProvenance): string {
   switch (provenance) {
     case "built_in":
       return "Curated by OpenGeni";
-    case "admin_registered":
-      return "Registered in this workspace";
     case "installed_from_source":
       return "Imported from source";
   }
 }
 
-/**
- * The same provenance read mid-sentence, for the row's accessible name. The
- * visible label is a standalone segment and capitalises accordingly; spoken
- * after "Pack," it must not.
- */
 function bundleProvenanceSpokenLabel(provenance: BundleProvenance): string {
   switch (provenance) {
     case "built_in":
       return "curated by OpenGeni";
-    case "admin_registered":
-      return "registered in this workspace";
     case "installed_from_source":
       return "imported from source";
   }
@@ -283,7 +225,7 @@ export function pluginBundleRow(
   const chip: IntegrationChip = active
     ? { label: "Installed", tone: "ok" }
     : { label: "Needs attention", tone: "warn" };
-  // Not "Portable Plugin package": a bundle search for `pack` would then match
+
   // every Plugin that never supplied its own description.
   const rawDescription = plugin.description || "A portable set of tools and instructions.";
   const sourceAvailable = plugin.sourceUrl !== null;
@@ -361,81 +303,6 @@ export function pluginBundleRow(
   };
 }
 
-/** The Pack's chip. A Pack is installed or not; it is never "connected". */
-export function packBundleChip(installation: PackInstallation | null): IntegrationChip {
-  if (!installation || installation.status === "disabled") {
-    return { label: "Not installed", tone: "idle" };
-  }
-  if (installation.status === "active") return { label: "Installed", tone: "ok" };
-  if (installation.status === "installing") return { label: "Installing", tone: "plain" };
-  return { label: "Needs attention", tone: "warn" };
-}
-
-/**
- * A Pack. Its row is identical to every other bundle row; only its detail
- * differs, because installing one means choosing a Rig and a Variable Set and
- * reviewing an exact component plan.
- */
-export function packBundleRow(
-  pack: CapabilityPack,
-  options: {
-    installation: PackInstallation | null;
-    /** `null` while the catalog row that carries this fact has not arrived. */
-    provenance: BundleProvenance | null;
-    busy: boolean;
-  },
-): BundleRow {
-  const chip = packBundleChip(options.installation);
-  return {
-    id: `pack:${pack.id}`,
-    kind: "pack",
-    provenance: options.provenance,
-    name: pack.name,
-    description: bundleRowDescription("pack", options.provenance, pack.description),
-    accessibleDetail: bundleAccessibleDetail("pack", options.provenance),
-    mark: mark(pack.name, null),
-    chip,
-    busy: options.busy || chip.label === "Installing",
-    detail: { kind: "pack-dialog", pack },
-    searchText: searchText([
-      pack.name,
-      pack.description,
-      pack.role,
-      pack.category,
-      pack.id,
-      `v${pack.version}`,
-    ]),
-  };
-}
-
-/**
- * Where a Pack manifest came from. The catalog already carries this fact
- * (`built_in` for the manifests OpenGeni ships, `manual` for one a workspace
- * admin registered), so it is read rather than guessed.
- *
- * Packs and the catalog load independently, so "no matching catalog row" is
- * genuinely "not known yet", not "shipped by OpenGeni": returning `null` keeps
- * the row honest until the catalog resolves instead of flashing a provenance
- * the caller never read.
- */
-export function packBundleProvenance(
-  packId: string,
-  items: readonly CapabilityCatalogItem[] | null,
-): BundleProvenance | null {
-  const item = items?.find((candidate) => candidate.id === `pack:${packId}`);
-  if (!item) return null;
-  return item.source === "manual" ? "admin_registered" : "built_in";
-}
-
-/**
- * The bundle-scoped search: name and description, case-insensitive, plus the
- * kind word itself.
- *
- * The kind is matched as a discrete token rather than folded into the row's
- * searchable text: as a substring, `pack` matched every Plugin carrying the
- * word "package" as well as every Pack, so a reader narrowing to Packs got a
- * list that was not Packs.
- */
 export function filterBundleRows(rows: readonly BundleRow[], query: string): BundleRow[] {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return [...rows];
@@ -449,13 +316,8 @@ function matchesBundleKindWord(kind: BundleKind, normalizedQuery: string): boole
   return normalizedQuery === word || normalizedQuery === `${word}s`;
 }
 
-/**
- * One stable order for the whole list: Packs, then Plugins, then Skills (the
- * largest unit first), each alphabetical. A status change never reorders the
- * list under the reader's cursor.
- */
 export function sortBundleRows(rows: readonly BundleRow[]): BundleRow[] {
-  const rank: Record<BundleKind, number> = { pack: 0, plugin: 1, skill: 2 };
+  const rank: Record<BundleKind, number> = { plugin: 0, skill: 1 };
   return [...rows].sort(
     (left, right) =>
       rank[left.kind] - rank[right.kind] ||

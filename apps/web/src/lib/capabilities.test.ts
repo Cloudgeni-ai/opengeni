@@ -193,7 +193,7 @@ describe("human labels", () => {
   test("kind labels never leak enum slugs", () => {
     expect(capabilityKindLabel("mcp")).toBe("MCP server");
     expect(capabilityKindLabel("api")).toBe("API");
-    expect(capabilityKindLabel("pack")).toBe("Pack");
+    expect(capabilityKindLabel("plugin")).toBe("Plugin");
     expect(
       capabilityItemKindLabel(item({ kind: "api", surfaceType: "provider_integration" })),
     ).toBe("Integration");

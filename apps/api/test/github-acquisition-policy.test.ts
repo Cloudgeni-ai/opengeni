@@ -2,17 +2,12 @@ import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import postgres from "postgres";
 import { Hono } from "hono";
-import {
-  stableJson,
-  OrganizationIntegrationDeniedError,
-  type ConnectAttempt,
-} from "@opengeni/contracts";
-import { getCapabilityPack, type ApiRouteDeps } from "@opengeni/core";
+import { OrganizationIntegrationDeniedError, type ConnectAttempt } from "@opengeni/contracts";
+import { type ApiRouteDeps } from "@opengeni/core";
 import {
   beginConnectAttempt,
   createDb,
   createWorkspace,
-  enablePackInstallation,
   getConnectAttempt,
   type DbClient,
   listGitHubInstallationAccessForWorkspace,
@@ -59,15 +54,6 @@ beforeAll(async () => {
   ).id;
   await shared.admin`insert into api_keys (id, account_id, name, credential_kind, prefix, key_hash, permissions)
     values (${keyId}, ${scope.accountId}, 'Fixture', 'organization', 'test', ${createHash("sha256").update(token).digest("hex")}, '["workspace:admin","secrets:write","github:manage"]'::jsonb)`;
-  const pack = getCapabilityPack("pr-review")!;
-  await enablePackInstallation(client.db, {
-    ...scope,
-    packId: pack.id,
-    manifestSnapshot: pack,
-    manifestDigest: createHash("sha256").update(stableJson(pack)).digest("hex"),
-    installedBySubjectId: scope.subjectId,
-    metadata: {},
-  });
 }, 180_000);
 afterAll(async () => {
   if (shared) await shared.admin`delete from managed_accounts where id = ${scope.accountId}`;

@@ -141,7 +141,7 @@ not accept a caller-provided hash. Without an explicit identity, install binds
 the full resolved input; callers cannot safely replay a moving URL before
 resolution. Receipts predating the envelope fail closed, not reconstruct a
 possibly changed installation. A missing operation ID means a new operation.
-Last-owner direct, Pack, and plugin removal resolves the canonical head atomically
+Last-owner direct and plugin removal resolves the canonical head atomically
 with distribution cleanup through `skill-source-release.ts`. Source-managed
 workspace heads deactivate through the existing human registry lifecycle;
 customized or re-scoped heads remain active and return an explicit preservation
@@ -152,27 +152,27 @@ personal, and other-workspace Skills are unaffected. Direct history deletion
 remains forbidden; corrupt cross-scope references cause atomic failure rather
 than removal of surviving history. Existing workspace-deletion eligibility and
 authorization checks still apply. Physical owners,
-including pending Pack owners, prevent cleanup even when not runtime-effective.
+including pending Plugin owners, prevent cleanup even when not runtime-effective.
 The removal and upgrade-finalization APIs accept `skillActor`; removing a bound
 Skill requires a trusted `human_session` actor. Missing, service/API-key, and agent
 authority fails closed and rolls back. A subject ID is never treated as proof of
 human authority. No new agent deactivation authority is introduced here.
 Removal results expose `skillReleases` with the Skill/revision IDs, disposition,
-event ID, and warning. Pack and plugin finalizers return these receipts too;
-plugin operation replay retains them. Pack adapters must retain returned receipts
+event ID, and warning. Plugin finalizers return these receipts too;
+plugin operation replay retains them. Plugin adapters must retain returned receipts
 when finalizing their operation result.
 
 ## Release
 
 ### Composite source publication
 
-An unfinished Pack/Plugin owner cannot publish newly installed guidance. An
+An unfinished Plugin owner cannot publish newly installed guidance. An
 otherwise-Automatic child install saves an inactive revision and returns
 `outcome: pending, pendingReason: source_finalization`. Its immutable write receipt
 retains the deferred intent and the expected head, scope version, and source facet.
 Suggest proposals are not marked for automatic publication.
 
-Successful Pack/Plugin finalization changes the owner status and publishes
+Successful Plugin finalization changes the owner status and publishes
 eligible deferred revisions in the same database transaction. A private status
 trigger, `skill_publish_finalized_owner`, has no runtime EXECUTE grant. Install,
 replay, parent preparation and finalization serialize on the workspace publication
@@ -190,7 +190,7 @@ a deterministic operation ID, `sourceOperationId` and `activationEventId`.
 Original install receipts are never rewritten: replay can truthfully return the
 original pending result after publication. Parent finalizers return supplemental
 `skillPublications` and persist them in the parent operation's replay result.
-Pack and Plugin API adapters must forward these completion receipts; they must
+Plugin API adapters must forward these completion receipts; they must
 not relabel the earlier `skillWrites` as if those installs were already applied.
 The publication event is attributed to `service:skill-publication`; any retained
 human-confirmed authority is derived from the original immutable human receipt,
@@ -288,11 +288,9 @@ ordinary runtime session-configuration writer.
 The migration ledger makes committed retries no-ops. A failure rolls back all
 configuration changes, receipts, registry conversion and schema changes.
 
-Pack installation `manifestSnapshot` is returned as exact saved JSON alongside
-its unchanged digest, not parsed through current admission rules. This keeps
-disabled historical snapshots readable and does not turn them into executable
-configuration. Execution explicitly uses `StoredCapabilityPack`, deriving labels
-from valid frontmatter and rejecting headerless or malformed Skills.
+The following notes document historical migration 0433, which runs before the
+destructive Pack-removal migration. Archived Pack JSON is migration evidence,
+not a current API contract or runtime compatibility layer.
 
 The owner-only RLS window also covers current configurations and the exact
 Session/automation/Pack tables read by preflight; FORCE is restored before commit.

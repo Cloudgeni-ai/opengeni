@@ -2,7 +2,7 @@
 
 ## Generate customer-specific runtime behavior
 
-This Pack teaches the implementation agent. Installation keeps its Skill inactive until one session explicitly selects it. The implementation agent should derive the customer-facing agent's runtime profile from the customer's product intent and system, then store that profile with the customer's integration code or configuration. Do not attach this generic implementation Skill to end-user runtime chats.
+This Skill guides the implementation agent, not end-user runtime chats. The implementation agent should derive the customer-facing agent's runtime profile from the customer's product intent and system, then store that profile with the customer's integration code or configuration. Do not attach this generic implementation Skill to end-user runtime chats.
 
 A runtime profile may contain:
 
@@ -105,4 +105,4 @@ Report the implemented shape in product language:
 - what was not executed because it remains customer-owned; and
 - exact remaining setup, review, deployment, monitoring, or rollback steps.
 
-If a durable customer integration Skill would reduce future rediscovery, generate one beside the integration code containing only stable, non-secret project facts and smoke probes. Do not turn the generic OpenGeni Pack into the customer's analytics prompt, and do not make generated runtime behavior depend on the implementation workspace retaining this Pack forever.
+If a durable customer integration Skill would reduce future rediscovery, generate one beside the integration code containing only stable, non-secret project facts and smoke probes. Do not turn the generic implementation Skill into the customer's analytics prompt, and do not make generated runtime behavior depend on the implementation workspace retaining this implementation Skill.
