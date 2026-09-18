@@ -5,7 +5,7 @@ import { recordLazyMaterializedDirectories } from "../src/lazy-manifest";
 import { workspaceSkills } from "../src/workspace-skills";
 import { RoutingSandboxSession, type RoutableBackendSession } from "../src/sandbox";
 import { UnixLocalSandboxClient } from "@openai/agents/sandbox/local";
-import { mkdir } from "node:fs/promises";
+import { mkdir, symlink } from "node:fs/promises";
 import { join } from "node:path";
 
 // Exercise the pinned SDK's real cache key and capability cloning. Do not
@@ -17,12 +17,44 @@ const { SandboxRuntimeManager } = await import(
 function backend(manifest = new Manifest()): SandboxSessionLike {
   return {
     state: { manifest },
-    listDir: async () => [],
+    listDir: async ({ path }) =>
+      path === "/workspace"
+        ? [
+            { name: "repos", type: "dir", path: "/workspace/repos" },
+            { name: "repo", type: "dir", path: "/workspace/repo" },
+          ]
+        : [{ name: "repo", type: "dir", path: "/workspace/repos/repo" }],
     readFile: async () => "# Guidance",
   };
 }
 
 describe("lazy logical manifest handoff", () => {
+  for (const ancestor of [false, true]) {
+    test.skipIf(process.platform === "win32")(
+      `real local adapter rejects a symlink ${ancestor ? "ancestor" : "placeholder"}`,
+      async () => {
+        const session = await new UnixLocalSandboxClient().create(new Manifest());
+        try {
+          const root = session.state.workspaceRootPath;
+          await mkdir(join(root, "actual/repo"), { recursive: true });
+          await symlink("actual", join(root, "linked"));
+          const path = ancestor ? "linked/repo" : "linked";
+          const original = session.state.manifest;
+          const target = new Manifest({ ...original, entries: { [path]: dir() } });
+          // A direct list succeeds; neither the SDK nor the logical handoff may
+          // therefore interpret list success as ordinary-directory proof.
+          await session.listDir({ path });
+          await expect(session.materializeEntry({ path, entry: dir() })).rejects.toThrow(
+            "symbolic link",
+          );
+          await recordLazyMaterializedDirectories(session, target);
+          expect(session.state.manifest).toBe(original);
+        } finally {
+          await session.delete();
+        }
+      },
+    );
+  }
   test.skipIf(process.platform === "win32")(
     "verifies placeholders through the real local adapter",
     async () => {
@@ -45,18 +77,19 @@ describe("lazy logical manifest handoff", () => {
     const target = new Manifest({ entries: { "repos/repo": dir() } });
     const session = backend();
     const paths: string[] = [];
+    const listDir = session.listDir!;
     session.listDir = async ({ path }) => {
       paths.push(path);
-      return [];
+      return listDir({ path });
     };
     session.applyManifest = async () => {
       throw new Error("must not materialize");
     };
     await recordLazyMaterializedDirectories(session, target);
     expect(session.state.manifest).toEqual(target);
-    expect(paths).toEqual(["/workspace/repos/repo"]);
+    expect(paths).toEqual(["/workspace", "/workspace/repos"]);
     await recordLazyMaterializedDirectories(session, target);
-    expect(paths).toHaveLength(1);
+    expect(paths).toHaveLength(2);
   });
 
   for (const [name, target] of [
@@ -112,7 +145,7 @@ describe("lazy logical manifest handoff", () => {
     const replacement = new Manifest({ root: "/new-root" });
     session.listDir = async () => {
       session.state.manifest = replacement;
-      return [];
+      return [{ name: "repo", type: "dir", path: "/workspace/repo" }];
     };
     await recordLazyMaterializedDirectories(session, target);
     expect(session.state.manifest).toBe(replacement);
@@ -126,6 +159,8 @@ describe("lazy logical manifest handoff", () => {
       let scans = 0;
       real.listDir = async ({ path }) => {
         path = path.replace(/^\/workspace\//, "");
+        if (path === "/workspace") return [{ name: "repos", type: "dir", path: "repos" }];
+        if (path === "repos") return [{ name: "repo", type: "dir", path: "repos/repo" }];
         if (path === searchRoot) {
           scans++;
           return [{ name: "example", type: "dir", path: `${searchRoot}/example` }];

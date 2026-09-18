@@ -26,10 +26,26 @@ export async function recordLazyMaterializedDirectories(
     .placeholder;
   if (additions.some(([, entry]) => !isDeepStrictEqual(entry, emptyDirectory))) return;
   // iterEntries validates every logical path before any live filesystem access.
-  const paths = new Map(
-    [...target.iterEntries()].map((entry) => [entry.logicalPath, entry.absolutePath]),
-  );
-  for (const [path] of additions) await session.listDir({ path: paths.get(path)! });
+  const paths = new Map([...target.iterEntries()].map((entry) => [entry.logicalPath, entry]));
+  const directories = new Map<
+    string,
+    Awaited<ReturnType<NonNullable<SandboxSessionLike["listDir"]>>>
+  >();
+  for (const [path] of additions) {
+    let directory = target.root;
+    // Listing the target itself follows symlinks on some adapters. Walk every
+    // ancestor through its parent's typed listing instead, exactly like the
+    // repository reader. Cache only these invocation-local parent listings.
+    for (const name of paths.get(path)!.logicalPath.split("/")) {
+      let entries = directories.get(directory);
+      if (!entries) {
+        entries = await session.listDir({ path: directory });
+        directories.set(directory, entries);
+      }
+      if (!entries.some((entry) => entry.name === name && entry.type === "dir")) return;
+      directory = `${directory.replace(/\/$/, "")}/${name}`;
+    }
+  }
   // Do not overwrite a concurrent manifest update.
   if (session.state.manifest !== current || additions.length === 0) return;
   session.state.manifest = new Manifest({

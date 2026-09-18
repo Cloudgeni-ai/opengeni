@@ -35,7 +35,10 @@ describe("lazy provisioning synthetic manifest", () => {
     (agent as { defaultManifest: Manifest }).defaultManifest = target;
     const backend = {
       state: { manifest: new Manifest({ environment }) },
-      listDir: async () => [],
+      listDir: async ({ path }: { path: string }) =>
+        path === "/workspace"
+          ? [{ name: "repos", type: "dir", path: "/workspace/repos" }]
+          : [{ name: "repo", type: "dir", path: "/workspace/repos/repo" }],
     };
     await runOwnedSandboxSetup(agent, backend as never, backend as never, {
       settings,
