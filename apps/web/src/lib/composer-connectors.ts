@@ -113,9 +113,7 @@ export function connectorSelectionUpdate(
   };
 }
 
-export function sessionConnectorPolicyIsCustomized(
-  session: Pick<Session, "toolPolicy">,
-): boolean {
+export function sessionConnectorPolicyIsCustomized(session: Pick<Session, "toolPolicy">): boolean {
   return (
     session.toolPolicy.mode === "explicit" ||
     (session.toolPolicy.excludedMcpServerIds?.length ?? 0) > 0
@@ -142,7 +140,6 @@ export function newSessionConnectorCustomizeState(input: {
   return {
     customizing: input.toolsProvided || exclusions.length > 0,
     explicit:
-      input.toolsProvided &&
-      (input.tools.length > 0 || input.excludedMcpServerIds === undefined),
+      input.toolsProvided && (input.tools.length > 0 || input.excludedMcpServerIds === undefined),
   };
 }
