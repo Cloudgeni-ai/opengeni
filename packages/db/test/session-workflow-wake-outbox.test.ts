@@ -10,6 +10,7 @@ import {
   lockSessionEventWriteRows,
   nestedPostgresSqlState,
   addSessionSystemUpdate,
+  evaluateSessionControl,
   listOutstandingSessionSystemUpdates,
   claimPendingSessionWorkflowWakes,
   claimSessionWorkForAttempt,
@@ -139,6 +140,164 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 }
 
 describe("transactional session workflow wake outbox", () => {
+  test("admission fencing uses the event cursor and rejects events appended after the peek", async () => {
+    const ctx = await fixture();
+    await send(ctx, "preserved accepted input");
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    // Simulate a pure append: allocate from the canonical cursor without
+    // advancing the compatibility projection on the wide session row.
+    const append = () =>
+      withWorkspaceRls(client.db, workspaceId, (db) =>
+        db.transaction(async (tx) => {
+          const locks = await lockSessionEventWriteRows(tx as unknown as typeof db, {
+            workspaceId,
+            controlLock: "none",
+            sessionIds: [sessionId],
+          });
+          await tx.insert(schema.sessionEvents).values({
+            accountId: ctx.grant.accountId,
+            workspaceId,
+            sessionId,
+            sequence: locks.sessions[0]!.lastSequence + 1,
+            type: "goal.updated",
+            payload: { admissionCursorRegression: true },
+            occurredAt: new Date(),
+          });
+        }),
+      );
+    await append();
+    const [sequences] = await shared.admin<{ projection: number; cursor: number }[]>`
+      select s.last_sequence as projection, c.last_sequence as cursor
+      from sessions s join session_event_cursors c on c.session_id = s.id
+        and c.workspace_id = s.workspace_id where s.id = ${sessionId}
+    `;
+    expect(sequences!.cursor).toBeGreaterThan(sequences!.projection);
+    const peek = await peekSessionWork(client.db, workspaceId, sessionId, true);
+    if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("Missing fence");
+    expect(peek.admissionFence.lastSequence).toBe(sequences!.cursor);
+    await append();
+    const input = {
+      accountId: ctx.grant.accountId,
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      attemptId: crypto.randomUUID(),
+      fence: peek.admissionFence,
+      reason: "database_claim_rejected" as const,
+      sqlState: "42501",
+    };
+    expect((await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, input)).action).toBe(
+      "stale",
+    );
+    const fresh = await peekSessionWork(client.db, workspaceId, sessionId, true);
+    if (fresh.kind !== "runnable" || !fresh.admissionFence) throw new Error("Missing fresh fence");
+    expect(
+      (
+        await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+          ...input,
+          fence: fresh.admissionFence,
+        })
+      ).action,
+    ).toBe("blocked");
+  });
+
+  test("active blocked Resume honors its control fence and replay cannot clear a later denial", async () => {
+    const ctx = await fixture();
+    await send(ctx, "accepted before denial");
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    const park = async () => {
+      const peek = await peekSessionWork(client.db, workspaceId, sessionId, true);
+      if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("Missing fence");
+      expect(
+        (
+          await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+            accountId: ctx.grant.accountId,
+            sessionId,
+            workflowId: `session-${sessionId}`,
+            attemptId: crypto.randomUUID(),
+            fence: peek.admissionFence,
+            reason: "initiator_membership_required",
+            sqlState: "OG001",
+          })
+        ).action,
+      ).toBe("blocked");
+    };
+    await park();
+    const before = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      evaluateSessionControl(db, workspaceId, sessionId),
+    );
+    expect(before.state).toBe("active");
+    const operationKey = crypto.randomUUID();
+    const resume = () =>
+      withWorkspaceRls(client.db, workspaceId, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
+            accountId: ctx.grant.accountId,
+            workspaceId,
+            sessionId,
+            actor: { type: "human", subjectId: ctx.grant.subjectId },
+            operationKey,
+            action: "resume",
+            expectedControlEtag: before.controlEtag,
+          }),
+        ),
+      );
+    expect((await resume()).replay).toBe(false);
+    expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toBeNull();
+    await park();
+    const blocked = await getSession(client.db, workspaceId, sessionId);
+    const wakeBefore = await wakeRow(workspaceId, sessionId);
+    expect((await resume()).replay).toBe(true);
+    expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toEqual(
+      blocked?.admissionBlock,
+    );
+    expect(await wakeRow(workspaceId, sessionId)).toEqual(wakeBefore);
+  });
+
+  test("Send clears admission blocking without overriding explicit Pause", async () => {
+    const ctx = await fixture();
+    await send(ctx, "accepted before pause");
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    const peek = await peekSessionWork(client.db, workspaceId, sessionId, true);
+    if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("Missing fence");
+    await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+      accountId: ctx.grant.accountId,
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      attemptId: crypto.randomUUID(),
+      fence: peek.admissionFence,
+      reason: "database_claim_rejected",
+      sqlState: "42501",
+    });
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId,
+          sessionId,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    await send(ctx, "accepted while explicitly paused");
+    expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toBeNull();
+    expect(
+      await withWorkspaceRls(client.db, workspaceId, (db) =>
+        evaluateSessionControl(db, workspaceId, sessionId),
+      ),
+    ).toMatchObject({ state: "paused" });
+    expect(await peekSessionWork(client.db, workspaceId, sessionId)).toEqual({ kind: "idle" });
+    expect(
+      (await listSessionTurns(client.db, workspaceId, sessionId)).filter(
+        (turn) => turn.status === "queued",
+      ),
+    ).toHaveLength(2);
+  });
+
   test("rejected preclaim parks accepted work, acknowledges wakes, and explicit Resume retries the same turn", async () => {
     const ctx = await fixture();
     const queued = await send(ctx, "preserve this exact accepted input");

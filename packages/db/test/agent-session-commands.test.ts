@@ -7,6 +7,10 @@ import {
   applySessionTurnSettlement,
   addSessionSystemUpdate,
   bootstrapWorkspace,
+  blockSessionWorkBeforeAttemptClaim,
+  peekSessionWork,
+  evaluateSessionControl,
+  getSessionGoal,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
@@ -155,6 +159,155 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 }
 
 describe("attempt-fenced Agent session commands", () => {
+  test("parent admission recheck preserves independent child control and goal pauses", async () => {
+    const grant = await fixture();
+    const parent = await makeSession(grant);
+    const child = await makeSession(grant, parent.id);
+    const workspaceId = grant.workspaceId!;
+    await submit(grant, parent.id, "accepted parent work");
+    await submit(grant, child.id, "accepted child work");
+    const control = (sessionId: string, action: "pause" | "resume") =>
+      withWorkspaceRls(client.db, workspaceId, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            actor: { type: "human", subjectId: grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            action,
+          }),
+        ),
+      );
+    const beforeHierarchyChange = await peekSessionWork(client.db, workspaceId, parent.id, true);
+    if (beforeHierarchyChange.kind !== "runnable" || !beforeHierarchyChange.admissionFence)
+      throw new Error("Missing pre-control fence");
+    await control(child.id, "pause");
+    expect(
+      (
+        await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+          accountId: grant.accountId,
+          sessionId: parent.id,
+          workflowId: `session-${parent.id}`,
+          attemptId: crypto.randomUUID(),
+          fence: beforeHierarchyChange.admissionFence,
+          reason: "database_claim_rejected",
+          sqlState: "42501",
+        })
+      ).action,
+    ).toBe("stale");
+    await createSessionGoal(client.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: parent.id,
+      text: "explicitly paused objective",
+      createdBy: "api",
+    });
+    await setSessionGoalStatus(client.db, workspaceId, parent.id, {
+      status: "paused",
+      rationale: "human decision pending",
+    });
+    const peek = await peekSessionWork(client.db, workspaceId, parent.id, true);
+    if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("Missing fence");
+    expect(
+      (
+        await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+          accountId: grant.accountId,
+          sessionId: parent.id,
+          workflowId: `session-${parent.id}`,
+          attemptId: crypto.randomUUID(),
+          fence: peek.admissionFence,
+          reason: "database_claim_rejected",
+          sqlState: "42501",
+        })
+      ).action,
+    ).toBe("blocked");
+    await control(parent.id, "resume");
+    expect((await getSession(client.db, workspaceId, parent.id))?.admissionBlock).toBeNull();
+    expect(
+      await withWorkspaceRls(client.db, workspaceId, (db) =>
+        evaluateSessionControl(db, workspaceId, child.id),
+      ),
+    ).toMatchObject({ state: "paused" });
+    expect(await getSessionGoal(client.db, workspaceId, parent.id)).toMatchObject({
+      status: "paused",
+    });
+  });
+
+  test("agent messages preserve admission blocking; fresh Steer rechecks but receipt replay does not", async () => {
+    const grant = await fixture();
+    const caller = await activeAgent(grant);
+    const target = await makeSession(grant, caller.session.id);
+    await submit(grant, target.id, "accepted before admission denial");
+    const workspaceId = grant.workspaceId!;
+    const park = async () => {
+      const peek = await peekSessionWork(client.db, workspaceId, target.id, true);
+      if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("Missing fence");
+      expect(
+        (
+          await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+            accountId: grant.accountId,
+            sessionId: target.id,
+            workflowId: `session-${target.id}`,
+            attemptId: crypto.randomUUID(),
+            fence: peek.admissionFence,
+            reason: "personal_resource_grant_required",
+            sqlState: "OG002",
+          })
+        ).action,
+      ).toBe("blocked");
+    };
+    await park();
+    const wakeBefore = await wakeRow(workspaceId, target.id);
+    const message = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db.transaction((tx) =>
+        sendAgentMessageInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId,
+          targetSessionId: target.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          text: "durable while blocked",
+        }),
+      ),
+    );
+    expect(message.replay).toBe(false);
+    expect(await wakeRow(workspaceId, target.id)).toEqual(wakeBefore);
+    expect(await getSession(client.db, workspaceId, target.id)).toMatchObject({
+      status: "requires_action",
+      admissionBlock: { reason: "personal_resource_grant_required" },
+    });
+    expect(
+      (await listOutstandingSessionSystemUpdates(client.db, workspaceId, target.id)).some(
+        (update) => update.id === message.updateId,
+      ),
+    ).toBe(true);
+    const operationKey = crypto.randomUUID();
+    const steer = () =>
+      withWorkspaceRls(client.db, workspaceId, (db) =>
+        db.transaction((tx) =>
+          steerAgentSessionInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId,
+            targetSessionId: target.id,
+            actor: caller.actor,
+            operationKey,
+            instruction: "explicit authorized recheck",
+          }),
+        ),
+      );
+    expect((await steer()).replay).toBe(false);
+    expect((await getSession(client.db, workspaceId, target.id))?.admissionBlock).toBeNull();
+    await park();
+    const blocked = await getSession(client.db, workspaceId, target.id);
+    const reblockedWake = await wakeRow(workspaceId, target.id);
+    expect((await steer()).replay).toBe(true);
+    expect((await getSession(client.db, workspaceId, target.id))?.admissionBlock).toEqual(
+      blocked?.admissionBlock,
+    );
+    expect(await wakeRow(workspaceId, target.id)).toEqual(reblockedWake);
+  });
+
   test("Agent Message and Steer freeze caller authority while queue disclosure stays public-safe", async () => {
     const grant = await fixture();
     const connectionId = crypto.randomUUID();

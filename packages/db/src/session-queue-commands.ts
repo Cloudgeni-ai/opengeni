@@ -2742,7 +2742,11 @@ export async function sendAgentMessageInTransaction(
   }
   const eventIds = insertedEvents.map((event) => event.id);
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
-  const runnable = !realtimeActive && session.activeTurnId === null && effective.state === "active";
+  const runnable =
+    !session.admissionBlock &&
+    !realtimeActive &&
+    session.activeTurnId === null &&
+    effective.state === "active";
   const wake = runnable
     ? await registerInternalUpdateWakeInTransaction(db, {
         accountId: input.accountId,
@@ -3076,7 +3080,10 @@ export async function steerAgentSessionInTransaction(
     .update(schema.sessions)
     .set({
       activeTurnId: supersession.liveCurrentTurnId,
-      status: supersession.liveCurrentTurnId ? session.status : "queued",
+      status: supersession.liveCurrentTurnId
+        ? (session.admissionBlock?.previousStatus ?? session.status)
+        : "queued",
+      admissionBlock: null,
       lastSequence: sequence,
       updatedAt: now,
     })

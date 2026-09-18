@@ -68304,10 +68304,33 @@ export async function peekSessionWork(
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
     if (!session) return { kind: "idle" };
+    // Pure event appends can leave the wide session projection behind. Admission
+    // settlement fences against the allocation cursor, so observe that same
+    // authority here without taking a writer lock during this advisory peek.
+    let admissionSequence = session.lastSequence;
+    if (includeAdmissionFence) {
+      const [cursor] = await scopedDb
+        .select()
+        .from(schema.sessionEventCursors)
+        .where(
+          and(
+            eq(schema.sessionEventCursors.accountId, session.accountId),
+            eq(schema.sessionEventCursors.workspaceId, workspaceId),
+            eq(schema.sessionEventCursors.sessionId, sessionId),
+          ),
+        )
+        .limit(1);
+      if (!cursor || cursor.lastSequence < session.lastSequence) {
+        throw new SessionControlInvariantError(
+          `Session admission cursor is missing or behind projection for session ${sessionId}`,
+        );
+      }
+      admissionSequence = cursor.lastSequence;
+    }
     const fence = includeAdmissionFence
       ? {
           admissionFence: {
-            lastSequence: session.lastSequence,
+            lastSequence: admissionSequence,
             controlVersion: effectiveControl.controlVersion,
           },
         }
