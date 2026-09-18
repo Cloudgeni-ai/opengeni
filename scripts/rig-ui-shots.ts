@@ -241,7 +241,9 @@ async function main() {
         });
       },
       prepare: async (page) => {
-        await page.getByText(/don't have access to sandbox environments/).waitFor({ timeout: 15_000 });
+        await page
+          .getByText(/don't have access to sandbox environments/)
+          .waitFor({ timeout: 15_000 });
       },
     },
   ];

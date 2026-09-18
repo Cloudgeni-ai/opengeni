@@ -19179,7 +19179,9 @@ export class RigChangeAlreadyVerifyingError extends Error {
 
 export class RigImageOverrideUnsupportedError extends Error {
   constructor() {
-    super("Sandbox environment image overrides are unsupported; sandbox environments use the deployment platform sandbox image");
+    super(
+      "Sandbox environment image overrides are unsupported; sandbox environments use the deployment platform sandbox image",
+    );
     this.name = "RigImageOverrideUnsupportedError";
   }
 }
