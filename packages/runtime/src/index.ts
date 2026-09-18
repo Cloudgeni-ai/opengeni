@@ -233,6 +233,7 @@ import {
   CODEX_APPS_MCP_SERVER_ID,
   CODEX_APPS_MCP_URL,
   CODEX_ORIGINATOR,
+  classifyCodexEncryptedArtifactRejection,
   codexAppsSanitizingFetch,
 } from "@opengeni/codex";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -598,6 +599,10 @@ export {
   CompactionNeededError,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
+  compactionProviderRejection,
+  compactionProviderRejectionFromDiagnostics,
+  describeCompactionProviderRejection,
+  type CompactionProviderRejection,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
   compactionReplacementFingerprint,
@@ -1366,8 +1371,13 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
   let code: string | null = null;
   let type: string | null = null;
   let requestId: string | null = null;
+  let param: string | null = null;
   let eventType: string | null = null;
-  let rejectionReason: "missing_required_reasoning_item" | null = null;
+  let rejectionReason: CompactionRejectionReason | null = classifyCodexEncryptedArtifactRejection(
+    error,
+  )
+    ? "encrypted_content_rejected"
+    : null;
   const seen = new Set<object>();
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
     if (seen.has(current)) break;
@@ -1376,6 +1386,11 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
     rejectionReason ??= compactionRejectionReason(record);
     if (!errorName && current instanceof Error) {
       errorName = boundCompactionDiagnosticField(current.name);
+    }
+    // `error.param` names the rejected request field (an identifier path such
+    // as `input[3].encrypted_content`), never conversation content.
+    if (param === null && typeof record.param === "string" && record.param.length > 0) {
+      param = boundCompactionDiagnosticField(record.param);
     }
     if (
       httpStatus === null &&
@@ -1406,7 +1421,10 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
       eventType = boundCompactionDiagnosticField(directEventType);
     }
     if (requestId === null) {
-      const directRequestId = record.request_id ?? record.requestId ?? record._request_id;
+      // `requestID` is the OpenAI SDK's APIError property; the others are
+      // provider-body and legacy spellings.
+      const directRequestId =
+        record.request_id ?? record.requestId ?? record.requestID ?? record._request_id;
       if (typeof directRequestId === "string") {
         requestId = boundCompactionDiagnosticField(directRequestId);
       }
@@ -1431,6 +1449,9 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
       if (type === null && typeof nested.type === "string") {
         type = boundCompactionDiagnosticField(nested.type);
       }
+      if (param === null && typeof nested.param === "string" && nested.param.length > 0) {
+        param = boundCompactionDiagnosticField(nested.param);
+      }
       const nestedResponseStatus = nested.response_status ?? nested.responseStatus;
       if (responseStatus === null && typeof nestedResponseStatus === "string") {
         responseStatus = boundCompactionDiagnosticField(nestedResponseStatus);
@@ -1453,11 +1474,20 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
     responseId,
     code,
     type,
+    param,
     requestId,
     ...(eventType ? { eventType } : {}),
     ...(rejectionReason ? { rejectionReason } : {}),
   };
 }
+
+/**
+ * Closed provider rejection families the worker reacts to. Anything else is a
+ * bounded status/code/param record with no classification.
+ */
+export type CompactionRejectionReason =
+  | "missing_required_reasoning_item"
+  | "encrypted_content_rejected";
 
 function compactionRejectionReason(
   record: Record<string, unknown>,

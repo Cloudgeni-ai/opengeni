@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { CREDIT_EXHAUSTION_MESSAGE } from "../src/lib/format";
+import { compactionSkipSubtitle } from "../src/timeline/compaction-copy";
 import {
   buildTimeline,
   creditExhaustedFromEvents,
@@ -1712,8 +1713,57 @@ describe("buildTimeline", () => {
         kind: "context-compaction",
         phase: "skipped",
         skipReason: "summarization_failed",
+        providerRejection: null,
       }),
     ]);
+  });
+
+  test("carries a definitive provider rejection on the compaction failure landmark", () => {
+    reset();
+    const items = buildTimeline([
+      event("session.context.compaction.skipped", {
+        reason: "summarization_failed",
+        providerRejection: {
+          httpStatus: 400,
+          type: "invalid_request_error",
+          code: null,
+          param: "input[12].encrypted_content",
+          requestId: "e63ad2c3-fab4-44e4-b458-3f5008f3c18f",
+          message: "must never be projected",
+        },
+      }),
+    ]);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "context-compaction",
+        phase: "skipped",
+        skipReason: "summarization_failed",
+        providerRejection: {
+          httpStatus: 400,
+          type: "invalid_request_error",
+          code: null,
+          param: "input[12].encrypted_content",
+          requestId: "e63ad2c3-fab4-44e4-b458-3f5008f3c18f",
+        },
+      }),
+    ]);
+    expect(JSON.stringify(items)).not.toContain("must never be projected");
+    const projected = items[0];
+    if (projected?.kind !== "context-compaction") throw new Error("expected a compaction item");
+    expect(compactionSkipSubtitle("summarization_failed", projected.providerRejection)).toBe(
+      "The model provider rejected the compaction request (HTTP 400 invalid_request_error, param input[12].encrypted_content). Chat history is unchanged. Repeating it fails the same way until the conversation changes; if a new message fails again, start a new session.",
+    );
+    expect(compactionSkipSubtitle("summarization_failed", null)).toBe(
+      "Request it again to retry. Chat history is unchanged.",
+    );
+    // A malformed record without a numeric status is not a rejection.
+    const malformed = buildTimeline([
+      event("session.context.compaction.skipped", {
+        reason: "summarization_failed",
+        providerRejection: { httpStatus: "400", param: "input[0]" },
+      }),
+    ]);
+    expect(malformed[0]).toMatchObject({ providerRejection: null });
   });
 
   test("hides same-turn recovery control evidence from the user timeline", () => {

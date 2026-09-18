@@ -383,9 +383,22 @@ export type ContextCompactionItem = {
   estimatedTokensBefore: number | null;
   estimatedTokensAfter: number | null;
   skipReason: string | null;
+  /**
+   * Present only for a `summarization_failed` skip where the provider
+   * definitively rejected the compaction request. Content-free identifiers.
+   */
+  providerRejection: ContextCompactionProviderRejection | null;
   /** Provider implementation id for debug disclosure only. */
   implementation: string | null;
   occurredAt: string;
+};
+
+export type ContextCompactionProviderRejection = {
+  httpStatus: number;
+  type: string | null;
+  code: string | null;
+  param: string | null;
+  requestId: string | null;
 };
 
 export type MachineInputMember = {

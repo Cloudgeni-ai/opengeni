@@ -2283,6 +2283,26 @@ plaintext exists. Credential identity is irrelevant. A generic 400, a different
 provider error, or a rejection that invalidates none of that exact candidate set is terminal
 rather than an equivalent retry loop.
 
+The family is recognized either by the exact provider code
+`invalid_encrypted_content` or by the decrypt/parse sentence family, and the
+remote-compaction request is in scope: `shouldRecoverCompactionProviderFailure`
+lets a `CompactionProviderResponseError` carrying that rejection reach the same
+invalidation settlement instead of settling `context_compaction_failed`, because
+the compaction request sends the same opaque artifacts as the ordinary request
+that preceded it.
+
+Every other definitive provider rejection of the compaction request (HTTP 400,
+413, or 422) remains terminal, but it is no longer opaque. The worker persists a
+closed `providerRejection` record on both the `turn.failed` payload and the
+`session.context.compaction.skipped` landmark: `httpStatus`, the provider
+`type` and `code`, the rejected `param` path (for example
+`input[12].encrypted_content`), and the provider request id. The provider
+message is never persisted because it can quote conversation input. The failure
+text names those identifiers and states that repeating the request fails the
+same way until the conversation changes; the timeline's compaction pill shows
+the same identifiers instead of the generic "request it again to retry" copy,
+which only applies to a transient failure.
+
 Subscription, model, and provider-route changes never alter canonical history
 or a saved approval RunState. Responses consumes canonical history directly;
 Chat Completions receives one request-local transcript projection only for item
