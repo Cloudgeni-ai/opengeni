@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,7 +14,7 @@ afterEach(async () => {
   );
 });
 
-async function resolveBackend(requested: string, dockerExitCode: number) {
+async function resolveBackend(requested: string, dockerExitCode: number, delay = false) {
   const root = await mkdtemp(join(tmpdir(), "opengeni-backend-"));
   temporaryRoots.push(root);
   const docker = join(root, "docker");
@@ -22,6 +22,8 @@ async function resolveBackend(requested: string, dockerExitCode: number) {
     docker,
     `#!/bin/sh
 [ "\${1:-}" = info ] || exit 99
+echo 'fixture Docker diagnostic' >&2
+${delay ? "sleep 5" : ""}
 exit ${dockerExitCode}
 `,
   );
@@ -48,6 +50,50 @@ exit ${dockerExitCode}
 }
 
 describe("development infrastructure backend", () => {
+  test.each(["docker", "native", "auto", undefined])(
+    "the startup shell preserves caller backend %s over a copied env default",
+    async (requested) => {
+      const root = await mkdtemp(join(tmpdir(), "opengeni-backend-env-"));
+      temporaryRoots.push(root);
+      await mkdir(join(root, "scripts"));
+      await copyFile(devStackPath, join(root, "scripts/dev-stack.sh"));
+      await copyFile(new URL("../.env.example", import.meta.url), join(root, ".env.example"));
+      // Stop at the selection boundary, before credentials or infrastructure.
+      await writeFile(
+        join(root, "scripts/dev-stack-backend.sh"),
+        'opengeni_resolve_dev_backend() { echo "selected=$OPENGENI_DEV_BACKEND" >&2; return 42; }\n',
+      );
+      const env = { ...Bun.env };
+      delete env.OPENGENI_DEV_BACKEND;
+      if (requested !== undefined) env.OPENGENI_DEV_BACKEND = requested;
+      const child = Bun.spawn(
+        ["bash", join(root, "scripts/dev-stack.sh"), "--opengeni-dev-stack-token=fixture"],
+        { env, stdout: "pipe", stderr: "pipe" },
+      );
+      const [exitCode, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stderr).text(),
+        new Response(child.stdout).text(),
+      ]);
+      expect(exitCode).toBe(42);
+      expect(stderr.trim()).toBe(`selected=${requested ?? "auto"}`);
+    },
+  );
+
+  test("failed probes retain their exit status and Docker diagnostic", async () => {
+    const result = await resolveBackend("auto", 7);
+    expect(result.stdout.trim()).toBe("native");
+    expect(result.stderr).toContain("fixture Docker diagnostic");
+    expect(result.stderr).toContain("exit 7");
+  });
+
+  test("a timed-out probe is distinguishable from a Docker error", async () => {
+    const result = await resolveBackend("docker", 0, true);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("exit 124");
+    expect(result.stderr).toContain("1s");
+  });
+
   test("auto chooses native when a Docker client cannot reach its daemon", async () => {
     const result = await resolveBackend("auto", 1);
     expect(result.exitCode).toBe(0);

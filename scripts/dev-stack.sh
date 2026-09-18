@@ -21,10 +21,18 @@ if [ ! -f .env ]; then
   echo "Created .env from .env.example. Configure model and sandbox credentials before running agent sessions."
 fi
 
+# An explicit caller choice (including CI's Docker-only acceptance lane) must
+# survive the copied .env.example default. Leave every other env setting's
+# existing precedence unchanged.
+opengeni_requested_dev_backend="${OPENGENI_DEV_BACKEND:-}"
 set -a
 # shellcheck disable=SC1091
 . ./.env
 set +a
+if [ -n "$opengeni_requested_dev_backend" ]; then
+  OPENGENI_DEV_BACKEND="$opengeni_requested_dev_backend"
+fi
+unset opengeni_requested_dev_backend
 
 # Docker remains the preferred local infrastructure backend when its daemon is
 # reachable. Restricted sandboxes commonly have no daemon (or only a dead CLI),
