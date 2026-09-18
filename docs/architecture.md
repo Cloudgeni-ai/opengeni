@@ -181,6 +181,10 @@ remain conversation resources; agents select lasting findings/reference sources.
 Default discovery excludes supporting evidence. Read-only save preparation fetches
 collections and published/pending matches on demand. See [`knowledge.md`](knowledge.md).
 
+Unconditional CORE routes persistent behavior to instructions or Skills, not
+Knowledge, preserving destination scope and review; see
+[`company-brain-write-routing.md`](company-brain-write-routing.md).
+
 Agent learning centralizes Knowledge, instructions and Skills in Automatic,
 Review first and Off settings, with sparse chat/task overrides and immutable
 accepted-turn policy snapshots. Review first queues inactive changes without
