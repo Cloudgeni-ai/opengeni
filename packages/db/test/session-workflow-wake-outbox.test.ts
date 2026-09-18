@@ -140,6 +140,74 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 }
 
 describe("transactional session workflow wake outbox", () => {
+  test("blocked recovery retains its active logical turn on Send but explicit Steer supersedes it", async () => {
+    for (const delivery of ["send", "steer"] as const) {
+      const ctx = await fixture();
+      await send(ctx, "original logical turn");
+      const workspaceId = ctx.grant.workspaceId!;
+      const sessionId = ctx.session.id;
+      const workflowId = `session-${sessionId}`;
+      const workflowRunId = crypto.randomUUID();
+      const dispatchId = crypto.randomUUID();
+      const attemptId = crypto.randomUUID();
+      const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId,
+        workflowId,
+        workflowRunId,
+        dispatchId,
+        attemptId,
+        trigger: { kind: "next" },
+      });
+      if (claim.action !== "claimed") throw new Error("Missing active turn");
+      await requestSessionTurnRecovery(client.db, workspaceId, {
+        sessionId,
+        turnId: claim.turn.id,
+        triggerEventId: claim.turn.triggerEventId,
+        attemptId,
+        reason: "worker_shutdown",
+      });
+      await markSessionAttemptQuiesced(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId,
+        sessionId,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+      });
+      const peek = await peekSessionWork(client.db, workspaceId, sessionId, true);
+      if (peek.kind !== "runnable" || !peek.admissionFence)
+        throw new Error("Missing recovery fence");
+      expect((await getSession(client.db, workspaceId, sessionId))?.activeTurnId).toBe(
+        claim.turn.id,
+      );
+      expect(
+        (
+          await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+            accountId: ctx.grant.accountId,
+            sessionId,
+            workflowId,
+            attemptId: crypto.randomUUID(),
+            fence: peek.admissionFence,
+            reason: "database_claim_rejected",
+            sqlState: "42501",
+          })
+        ).action,
+      ).toBe("blocked");
+      await send(ctx, "new explicit direction", delivery);
+      expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toBeNull();
+      const prior = await getSessionTurn(client.db, workspaceId, claim.turn.id);
+      if (delivery === "send") {
+        expect(prior?.status).toBe("recovering");
+        expect((await getSession(client.db, workspaceId, sessionId))?.activeTurnId).toBe(
+          claim.turn.id,
+        );
+      } else {
+        expect(prior?.status).toBe("cancelled");
+      }
+    }
+  });
+
   test("admission fencing uses the event cursor and rejects events appended after the peek", async () => {
     const ctx = await fixture();
     await send(ctx, "preserved accepted input");
