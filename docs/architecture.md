@@ -1162,6 +1162,8 @@ before a catalog can be published. In-process local model tools
 bind only to the final combined local-plus-MCP attempt environment used by
 Codemode, never to a provisional local-only gateway.
 
+Managed-client delivery: `packages/runtime/src/sandbox/codemode-client.ts`.
+
 Codemode adds only attempt scope, active-attempt fencing, its durable operation
 journal, sandbox delivery, and recovery semantics. Input and authorization
 preflight finish before its execution-start marker. The API exposes a stable
