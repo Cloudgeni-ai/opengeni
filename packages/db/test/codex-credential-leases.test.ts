@@ -351,8 +351,12 @@ describe("credential allocator atomic Codex credential allocation", () => {
         const credentialId = await connectCredential(ws!, externalId);
         const turnId = await seedTurn(ws!);
         const fence = await attemptFenceForTurn(turnId);
-        if (policy === "rotation_off")
+        if (policy === "rotation_off") {
+          // Connecting only creates the row/settings in this low-level
+          // fixture. Rotation-off must have an explicitly selected pointer.
+          expect(await setActiveCodexCredential(dbA, ws!.workspaceId, credentialId)).toBe(true);
           await updateCodexRotationSettings(dbA, ws!.workspaceId, { rotationEnabled: false });
+        }
         if (policy === "manual")
           await admin`update sessions set codex_pinned_credential_id = ${credentialId}, codex_pin_source = 'manual' where id = ${fence.sessionId}`;
         let now = new Date();
@@ -374,6 +378,9 @@ describe("credential allocator atomic Codex credential allocation", () => {
           { ...ws!, ...fence, turnId, holderId: `typed:${turnId}`, advanceActivePointer: false },
           select,
         );
+        expect(lease.credentialId).toBe(credentialId);
+        expect(lease.holderId).toBe(`typed:${turnId}`);
+        expect(lease.generation).not.toBeNull();
         const credential = await loadCodexCredentialForRun(
           dbA,
           settings,
