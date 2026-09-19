@@ -439,11 +439,18 @@ describe("Temporal workflow integration", () => {
             const history = await handle.fetchHistory();
             return history.events?.some((event) => !!event.timerStartedEventAttributes) ?? false;
           });
+          const waitingHistory = await handle.fetchHistory();
+          const timer = waitingHistory.events?.find(
+            (event) => event.timerStartedEventAttributes,
+          )?.timerStartedEventAttributes;
+          expect(Number(timer?.startToFireTimeout?.seconds)).toBe(30);
           expect(peeks).toBe(1);
           expect(dispatched).toBe(0);
           expect(idle).toBe(0);
           restored = true;
-          await handle.signal("queueChanged");
+          // No restoration wake is guaranteed. Prove the unavailable observer
+          // refreshes on its timer; the owned path separately proves signal wake.
+          if (kind === "attempt-owned") await handle.signal("queueChanged");
           await handle.result();
           expect(peeks).toBe(2);
           expect(dispatched).toBe(0);
@@ -460,6 +467,57 @@ describe("Temporal workflow integration", () => {
       }
     },
     quiescenceReceiptTestTimeoutMs,
+  );
+
+  test(
+    "replays a pre-safe-observation peek without adding the new activity input",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const calls: unknown[] = [];
+      const worker = await Worker.create({
+        connection: nativeConnection,
+        namespace: "default",
+        taskQueue,
+        workflowsPath: new URL(
+          "../../apps/worker/test/fixtures/legacy-session-observer-workflow.ts",
+          import.meta.url,
+        ).pathname,
+        activities: {
+          peekSessionWork: async (input: unknown) => {
+            calls.push(input);
+            return { kind: "admission-blocked" };
+          },
+        },
+      });
+      const run = worker.run();
+      try {
+        const scope = { ...workflowScope(), sessionId: crypto.randomUUID() };
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [scope],
+        });
+        await handle.result();
+        expect(calls).toEqual([
+          {
+            workspaceId: scope.workspaceId,
+            sessionId: scope.sessionId,
+            includeAdmissionFence: true,
+          },
+        ]);
+        await Worker.runReplayHistory(
+          { workflowsPath: workflowDefinitionsPath },
+          await handle.fetchHistory(),
+          workflowId,
+        );
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
   );
 
   test(

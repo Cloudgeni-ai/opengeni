@@ -20,6 +20,8 @@ import {
   settleSessionIdleWithParentOutbox,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { CancelledFailure } from "@temporalio/activity";
+import { currentActivityContext } from "./streaming";
 import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
 import { recordTurnsQueuedGauge, recordWorkerDeathRecoveryMetrics } from "../observability-metrics";
 import {
@@ -533,9 +535,22 @@ export function createSessionStateActivities(
     if (peek.kind === "attempt-owned") {
       // Observation never revokes a writer or recovers a live owner. In
       // particular, a settled Temporal activity is not physical-writer proof.
-      const ownerActivityState = inspectSessionAttemptActivity
-        ? await inspectSessionAttemptActivity(peek.activityRef)
-        : ("unknown" as const);
+      let ownerActivityState: "pending" | "settled" | "unknown" = "unknown";
+      if (inspectSessionAttemptActivity) {
+        try {
+          ownerActivityState = await inspectSessionAttemptActivity(peek.activityRef);
+        } catch (error) {
+          if (error instanceof CancelledFailure) throw error;
+          if (currentActivityContext()?.cancellationSignal.aborted)
+            throw new CancelledFailure("Control observation cancelled");
+          // This optional metadata observation grants no recovery authority.
+          // An unavailable inspector must not pin the control activity in
+          // retries and prevent a fresh Pause/owner/visibility observation.
+          // Database reads below remain outside this catch and retry normally.
+        }
+      }
+      if (currentActivityContext()?.cancellationSignal.aborted)
+        throw new CancelledFailure("Control observation cancelled");
       const current = await peekSessionWorkFn(
         db,
         input.workspaceId,

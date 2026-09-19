@@ -195,6 +195,56 @@ describe("transactional session workflow wake outbox", () => {
       }),
     ).toEqual({ action: "pending_admission", blocker: "session_unavailable" });
     expect(await wakeRow(workspaceId, sessionId)).toEqual(wake);
+    // These commits occur between independent observer transactions, the same
+    // boundary occupied by the optional Temporal metadata request.
+    await requestSessionTurnRecovery(client.db, workspaceId, {
+      sessionId,
+      turnId: claim.turn.id,
+      triggerEventId: claim.turn.triggerEventId,
+      attemptId,
+      reason: "worker_shutdown",
+    });
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId,
+      sessionId,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+    });
+    const nextAttemptId = crypto.randomUUID();
+    const successor = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId,
+      workflowId,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: nextAttemptId,
+      trigger: { kind: "next" },
+    });
+    if (successor.action !== "claimed") throw new Error("Missing successor");
+    expect(await observe()).toMatchObject({
+      kind: "attempt-owned",
+      attemptId: nextAttemptId,
+      turnId: claim.turn.id,
+      executionGeneration: claim.turn.executionGeneration + 1,
+    });
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId,
+          sessionId,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    expect(await observe()).toEqual({ kind: "interruption-pending", attemptId: nextAttemptId });
+    expect((await getSessionTurn(client.db, workspaceId, claim.turn.id))?.activeAttemptId).toBe(
+      nextAttemptId,
+    );
   });
 
   test("blocked recovery retains its active logical turn on Send but explicit Steer supersedes it", async () => {

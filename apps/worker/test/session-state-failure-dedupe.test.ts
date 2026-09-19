@@ -1,7 +1,75 @@
 import { describe, expect, mock, test } from "bun:test";
+import { CancelledFailure } from "@temporalio/activity";
 import { createSessionStateActivities } from "../src/activities/session-state";
 
 describe("failSessionAttempt child-terminal identity", () => {
+  test("optional inspection never suppresses activity cancellation", async () => {
+    const cancelled = new CancelledFailure("cancelled by control");
+    const peek = mock(async () => ({
+      kind: "attempt-owned" as const,
+      turnId: "t",
+      attemptId: "a",
+      executionGeneration: 1,
+      activityRef: { workflowId: "w", workflowRunId: "r", activityId: "activity", quiesced: false },
+    }));
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: {},
+          inspectSessionAttemptActivity: async () => {
+            throw cancelled;
+          },
+        }) as any,
+      { peekSessionWork: peek },
+    );
+    await expect(
+      activities.peekSessionWork({ workspaceId: "w", sessionId: "s", observerAccountId: "a" }),
+    ).rejects.toBe(cancelled);
+    expect(peek).toHaveBeenCalledTimes(1);
+  });
+
+  test("an unavailable inspector returns unknown or fresh Pause, while DB failures still escape", async () => {
+    const owned = {
+      kind: "attempt-owned" as const,
+      turnId: "t",
+      attemptId: "a",
+      executionGeneration: 2,
+      activityRef: { workflowId: "w", workflowRunId: "r", activityId: "activity", quiesced: false },
+    };
+    for (const outcome of ["owned", "paused", "db_failure"] as const) {
+      let reads = 0;
+      const dbFailure = new Error("database unavailable");
+      const peek = mock(async () => {
+        reads += 1;
+        if (reads === 1 || outcome === "owned") return owned;
+        if (outcome === "db_failure") throw dbFailure;
+        return { kind: "idle" as const };
+      });
+      const activities = createSessionStateActivities(
+        async () =>
+          ({
+            db: {},
+            observability: {},
+            inspectSessionAttemptActivity: async () => {
+              throw new Error("metadata transport unavailable");
+            },
+          }) as any,
+        { peekSessionWork: peek },
+      );
+      const result = activities.peekSessionWork({
+        workspaceId: "ws",
+        sessionId: "s",
+        observerAccountId: "account",
+      });
+      if (outcome === "db_failure") await expect(result).rejects.toBe(dbFailure);
+      else
+        expect(await result).toEqual(
+          outcome === "owned" ? { ...owned, ownerActivityState: "unknown" } : { kind: "idle" },
+        );
+      expect(reads).toBe(2);
+    }
+  });
+
   test("safe observation inspects only the exact owner and discards an obsolete inspection", async () => {
     const owned = {
       kind: "attempt-owned" as const,

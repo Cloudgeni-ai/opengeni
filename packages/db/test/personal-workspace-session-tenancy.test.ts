@@ -19,6 +19,8 @@ import {
   openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
   peekSessionWork,
+  enqueueSessionWorkflowWake,
+  markSessionWorkflowWakeDelivered,
   removeWorkspaceMember,
   resolveCompanyBrainContextSelection,
   setSubjectRlsContext,
@@ -199,6 +201,35 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       (db) => peekSessionWork(db, workspaceId, session.id, false, human.accountId),
     );
     expect(hidden).toEqual({ kind: "unavailable" });
+    await withWorkspaceSubjectSessionActivityRls(client.db, workspaceId, human.subjectId, (db) =>
+      enqueueSessionWorkflowWake(db, {
+        accountId: human.accountId,
+        workspaceId,
+        sessionId: session.id,
+        temporalWorkflowId: `session-${session.id}`,
+        reason: "test_restore_observer",
+      }),
+    );
+    const [wakeBefore] =
+      await shared.admin`select * from session_workflow_wake_outbox where session_id = ${session.id}`;
+    expect(wakeBefore).toBeDefined();
+    const receipt = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      workspaceId,
+      `user:${crypto.randomUUID()}`,
+      (db) =>
+        markSessionWorkflowWakeDelivered(db, {
+          accountId: human.accountId,
+          workspaceId,
+          sessionId: session.id,
+          temporalWorkflowId: `session-${session.id}`,
+          wakeRevision: Number(wakeBefore!.wake_revision),
+        }),
+    );
+    expect(receipt).toEqual({ action: "pending_admission", blocker: "session_unavailable" });
+    const [wakeHidden] =
+      await shared.admin`select * from session_workflow_wake_outbox where session_id = ${session.id}`;
+    expect(wakeHidden).toEqual(wakeBefore);
     const visible = await withWorkspaceSubjectSessionActivityRls(
       client.db,
       workspaceId,
@@ -206,6 +237,23 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       (db) => peekSessionWork(db, workspaceId, session.id, false, human.accountId),
     );
     expect(visible.kind).not.toBe("unavailable");
+    const restoredReceipt = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      workspaceId,
+      human.subjectId,
+      (db) =>
+        markSessionWorkflowWakeDelivered(db, {
+          accountId: human.accountId,
+          workspaceId,
+          sessionId: session.id,
+          temporalWorkflowId: `session-${session.id}`,
+          wakeRevision: Number(wakeBefore!.wake_revision),
+        }),
+    );
+    expect(restoredReceipt).toEqual({ action: "acknowledged" });
+    const [wakeRestored] =
+      await shared.admin`select delivered_revision from session_workflow_wake_outbox where session_id = ${session.id}`;
+    expect(Number(wakeRestored!.delivered_revision)).toBe(Number(wakeBefore!.wake_revision));
     const after =
       await shared.admin`select status, active_turn_id, last_sequence, direct_control_state
       from sessions where id = ${session.id}`;
