@@ -331,6 +331,7 @@ describe("durable Codex capacity waits", () => {
         await armCodexCapacityWait(dbA, {
           ...scenario,
           attemptId: originalAttemptId,
+          goalVersion: scenario.goalId ? 1 : null,
           earliestResetAt: null,
           resetKind: "bounded_refresh",
           failurePayload: {},

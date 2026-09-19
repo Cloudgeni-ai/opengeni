@@ -178,10 +178,14 @@ accepted holder.
 ### Same-turn capacity recovery
 
 Capacity reconciliation and credential acquisition apply the same accepted model,
-failure exclusions and failover limit. A refusal's recorded cooldown revision is
-recoverable only after a newer verified clear; elapsed time or an account wake
-alone does not clear the refusal. Legacy ID-only refusals remain excluded when
-their ordering cannot be proven. Typed quota cooldowns remain eligible for the
+failure exclusions and failover limit, including manual pins and rotation-off.
+Quota refusals require a newer verified cooldown clear; elapsed time or an account
+wake alone does not clear them. Typed rate-limit refusals can recover after the
+same or a newer rate-limit revision's deadline expires. Auth/status refusals
+require active health at a newer credential version, produced by reconnect or
+explicit status repair. Status repair advances that version and wakes waiters.
+Legacy ID-only refusals remain excluded when their ordering cannot be proven.
+Typed quota cooldowns remain eligible for the
 existing bounded control-plane refresh even after their reset time passes.
 
 Genuine `waiting_capacity` has no elapsed-time expiry. Provider resets and durable

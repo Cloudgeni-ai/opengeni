@@ -91,8 +91,8 @@ export async function signalPendingCodexCapacityWakeTargets(
 
 export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnostic = never>(
   context: CodexCapacitySelectionContext<TPolicyScope, TUnavailableDiagnostic>,
+  now = new Date(),
 ): ReturnType<Parameters<typeof reconcileCodexCapacityWaitDb>[2]> {
-  const now = new Date();
   context = {
     ...context,
     accounts: context.accounts.filter(
@@ -173,7 +173,7 @@ export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnost
     kind: "unavailable",
     earliestResetAt: authoritativeReset,
     resetKind:
-      (selected.decision.kind === "none" && !hasReconcilableQuotaCooldown) ||
+      (selected.decision.kind === "none" && !hasReconcilableQuotaCooldown && !authoritativeReset) ||
       selected.decision.kind === "allocatorDisabled" ||
       mutationOnlyStatusBlock
         ? "mutation_only"

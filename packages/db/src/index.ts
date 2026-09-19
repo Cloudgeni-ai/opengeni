@@ -23908,30 +23908,46 @@ export async function setCodexCredentialStatusById(
   status: "active" | "needs_relogin" | "error",
   lastError: string | null,
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
-    if (!pool.condition) return false;
-    const [row] = await scopedDb
-      .select({ version: schema.codexSubscriptionCredentials.version })
-      .from(schema.codexSubscriptionCredentials)
-      .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), pool.condition))
-      .limit(1);
-    if (!row) {
-      return false;
-    }
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
-      .set({ status, lastError, updatedAt: new Date() })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          pool.condition,
-          eq(schema.codexSubscriptionCredentials.version, row.version),
-        ),
-      )
-      .returning({ id: schema.codexSubscriptionCredentials.id });
-    return updated.length > 0;
-  });
+  const mutation = await withCodexCapacityMutation(
+    db,
+    { workspaceId, reason: "credential_status_changed" },
+    async (scopedDb) => {
+      const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
+      if (!pool.condition) return { result: false, changed: false };
+      const [row] = await scopedDb
+        .select({
+          version: schema.codexSubscriptionCredentials.version,
+          status: schema.codexSubscriptionCredentials.status,
+        })
+        .from(schema.codexSubscriptionCredentials)
+        .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), pool.condition))
+        .limit(1);
+      if (!row) {
+        return { result: false, changed: false };
+      }
+      const updated = await scopedDb
+        .update(schema.codexSubscriptionCredentials)
+        .set({
+          status,
+          lastError,
+          updatedAt: new Date(),
+          // Explicit reactivation is a new credential-health generation. A
+          // same-turn status refusal can recover only after this or reconnect.
+          ...(status === "active" && row.status !== "active" ? { version: row.version + 1 } : {}),
+        })
+        .where(
+          and(
+            eq(schema.codexSubscriptionCredentials.id, credentialId),
+            pool.condition,
+            eq(schema.codexSubscriptionCredentials.version, row.version),
+            eq(schema.codexSubscriptionCredentials.status, row.status),
+          ),
+        )
+        .returning({ id: schema.codexSubscriptionCredentials.id });
+      return { result: updated.length > 0, changed: updated.length > 0 };
+    },
+  );
+  return mutation.result;
 }
 
 /**
@@ -24225,6 +24241,7 @@ export type CodexLeaseAccountStatus = Omit<
   activeLeaseCount: number;
   /** Absent only in pre-0383 compatibility schemas. */
   exhaustedRevision?: number;
+  credentialVersion?: number;
   selectionCount: number;
   lastSelectedAt: Date | null;
 };
@@ -24416,6 +24433,7 @@ type CodexLeaseCandidateRow = {
   exhausted_until: Date | string | null;
   exhausted_kind: string | null;
   exhausted_revision?: number | string | null;
+  credential_version?: number | string | null;
   selection_count: number;
   last_selected_at: Date | string | null;
   active_lease_count: number;
@@ -24450,6 +24468,7 @@ function mapCodexLeaseCandidate(
     usageCheckedAt: codexMetadataDate(row.usage_checked_at),
     exhaustedUntil: codexMetadataDate(row.exhausted_until),
     exhaustedRevision: Number(row.exhausted_revision ?? 0),
+    credentialVersion: Number(row.credential_version ?? 0),
     exhaustedKind:
       row.exhausted_kind === "quota" || row.exhausted_kind === "rate_limit"
         ? row.exhausted_kind
@@ -24503,6 +24522,7 @@ async function listCodexLeaseCandidatesInTransaction(
     select
       c.id,
       c.chatgpt_account_id,
+      c.version as credential_version,
       c.allowed_model_ids,
       c.label,
       c.account_email,
@@ -25298,9 +25318,14 @@ export async function armCodexCapacityWait(
   ) {
     throw new Error("Codex capacity goal fence must be absent or contain a positive version");
   }
-  return await withSessionActivityRlsContext(
+  return await retrySessionActivityRls(
     db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+    input.workspaceId,
+    {
+      stage: "session_lifecycle_outbox.arm_codex_capacity_wait",
+      eventTypes: ["codex.capacity.waiting", "turn.failed", "session.status.changed"],
+      maxAttempts: 3,
+    },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {
         const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
@@ -26265,6 +26290,7 @@ export async function reconcileCodexCapacityWait<
           failedCredentialIds: unresolvedCodexCredentialFailures(
             blockedTurn.metadata,
             filtered.accounts,
+            now,
           ),
           failoverExhausted: codexFailoverMetadata(blockedTurn.metadata).exhausted,
           modelId: blockedTurn.model,
@@ -27951,6 +27977,18 @@ export async function quarantineCodexCredentialForLease(
                   | undefined),
                 [input.credentialId]:
                   input.quarantine.kind === "cooldown" ? credential.exhaustedRevision + 1 : null,
+              },
+              codexCredentialFailureEvidenceV1: {
+                ...(turn.metadata?.codexCredentialFailureEvidenceV1 as
+                  | Record<string, unknown>
+                  | undefined),
+                [input.credentialId]:
+                  input.quarantine.kind === "status"
+                    ? { kind: "status", credentialVersion: credential.version }
+                    : {
+                        kind: input.quarantine.cooldownKind,
+                        cooldownRevision: credential.exhaustedRevision + 1,
+                      },
               },
               codexCredentialFailovers: failoverCount,
               codexCredentialFailoverLimit: maxFailovers,

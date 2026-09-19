@@ -571,6 +571,9 @@ export function selectCodexCredentialLeaseForTurn<
     if (!pinned) {
       return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
     }
+    if (failedCredentialIds.has(pinned.id)) {
+      return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
+    }
     if (!pinned.allocatorEnabled) {
       return {
         credentialId: null,
@@ -638,6 +641,9 @@ export function selectCodexCredentialLeaseForTurn<
       ? accounts.find((account) => account.id === activeCredentialId)
       : undefined;
     if (!active) {
+      return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
+    }
+    if (failedCredentialIds.has(active.id)) {
       return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
     }
     if (!active.allocatorEnabled) {

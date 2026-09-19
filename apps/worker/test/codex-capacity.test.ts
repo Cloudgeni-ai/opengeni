@@ -41,6 +41,78 @@ function account(
 }
 
 describe("Codex capacity availability diagnostics", () => {
+  for (const policy of ["sharded", "manual", "rotation_off"] as const) {
+    for (const kind of ["quota", "rate_limit", "status"] as const) {
+      test(`${policy} ${kind} refusal waits then recovers using the same fenced evidence as acquisition`, () => {
+        const now = new Date();
+        const future = new Date(now.getTime() + 60_000);
+        const metadata = {
+          codexCredentialFailedIds: ["a"],
+          codexCredentialFailureCooldownRevisions: { a: kind === "status" ? null : 3 },
+          codexCredentialFailureEvidenceV1: {
+            a: kind === "status" ? { kind, credentialVersion: 7 } : { kind, cooldownRevision: 3 },
+          },
+        };
+        const context: CodexCapacitySelectionContext = {
+          accounts: [
+            account("a", {
+              credentialVersion: 7,
+              exhaustedRevision: 3,
+              status: kind === "status" ? "needs_relogin" : "active",
+              exhaustedKind: kind === "status" ? null : kind,
+              exhaustedUntil: kind === "status" ? null : kind === "quota" ? new Date(0) : future,
+            }),
+          ],
+          activeCredentialId: "a",
+          rotationEnabled: policy !== "rotation_off",
+          rotationStrategy: "sharded",
+          existingCredentialId: null,
+          policyScope: null,
+          unavailableDiagnostics: [],
+          sessionId: "typed-recovery",
+          sessionPinnedCredentialId: policy === "manual" ? "a" : null,
+          sessionPinSource: policy === "manual" ? "manual" : null,
+          sessionLastCredentialId: "a",
+          policyHash: null,
+        };
+        context.failedCredentialIds = unresolvedCodexCredentialFailures(
+          metadata,
+          context.accounts,
+          now,
+        );
+        expect(codexCapacityDecision(context, now)).toMatchObject({
+          kind: "unavailable",
+          resetKind:
+            kind === "quota"
+              ? "bounded_refresh"
+              : kind === "rate_limit"
+                ? "authoritative"
+                : "mutation_only",
+        });
+        expect(
+          selectCodexCredentialLeaseForTurn({ ...context, context, now }).credentialId,
+        ).toBeNull();
+        const recoveredAt = kind === "rate_limit" ? new Date(future.getTime() + 1) : now;
+        if (kind === "quota")
+          context.accounts = [account("a", { exhaustedRevision: 4, credentialVersion: 7 })];
+        if (kind === "status")
+          context.accounts = [account("a", { exhaustedRevision: 3, credentialVersion: 8 })];
+        context.failedCredentialIds = unresolvedCodexCredentialFailures(
+          metadata,
+          context.accounts,
+          recoveredAt,
+        );
+        expect(codexCapacityDecision(context, recoveredAt)).toMatchObject({
+          kind: "available",
+          credentialId: "a",
+        });
+        expect(
+          selectCodexCredentialLeaseForTurn({ ...context, context, now: recoveredAt }).credentialId,
+        ).toBe("a");
+      });
+    }
+  }
+
   test("checker and execution agree on selected model, failures, pins and rotation-off", () => {
     const base: CodexCapacitySelectionContext = {
       accounts: [account("a"), account("b")],

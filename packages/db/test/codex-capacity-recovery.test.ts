@@ -8,6 +8,57 @@ import {
 import { unresolvedCodexCredentialFailures } from "../src/codex-failure-eligibility";
 
 describe("durable false-capacity recovery", () => {
+  test("typed rate limits recover only after a fenced deadline; status refusals require a newer repaired version", () => {
+    const now = new Date("2026-09-19T12:00:00Z");
+    const account = {
+      id: "a",
+      status: "active",
+      exhaustedUntil: null as Date | null,
+      exhaustedKind: null as string | null,
+      exhaustedRevision: 3,
+      credentialVersion: 7,
+    };
+    const failure = (receipt: Record<string, unknown>) => ({
+      codexCredentialFailedIds: ["a"],
+      codexCredentialFailureEvidenceV1: { a: receipt },
+    });
+    const status = failure({ kind: "status", credentialVersion: 7 });
+    expect(unresolvedCodexCredentialFailures(status, [account], now)).toEqual(["a"]);
+    expect(
+      unresolvedCodexCredentialFailures(status, [{ ...account, credentialVersion: 8 }], now),
+    ).toEqual([]);
+    expect(
+      unresolvedCodexCredentialFailures(
+        status,
+        [{ ...account, status: "needs_relogin", credentialVersion: 8 }],
+        now,
+      ),
+    ).toEqual(["a"]);
+    const rateLimit = failure({ kind: "rate_limit", cooldownRevision: 3 });
+    const limited = {
+      ...account,
+      exhaustedKind: "rate_limit",
+      exhaustedUntil: new Date(now.getTime() + 1),
+    };
+    expect(unresolvedCodexCredentialFailures(rateLimit, [limited], now)).toEqual(["a"]);
+    expect(
+      unresolvedCodexCredentialFailures(rateLimit, [limited], new Date(now.getTime() + 2)),
+    ).toEqual([]);
+    expect(
+      unresolvedCodexCredentialFailures(
+        rateLimit,
+        [{ ...limited, exhaustedRevision: 2 }],
+        new Date(now.getTime() + 2),
+      ),
+    ).toEqual(["a"]);
+    expect(
+      unresolvedCodexCredentialFailures(
+        rateLimit,
+        [{ ...limited, exhaustedKind: "quota" }],
+        new Date(now.getTime() + 2),
+      ),
+    ).toEqual(["a"]);
+  });
   test("jitter is bounded, exponential and capped independently of wait duration", () => {
     for (let count = 1; count <= 10; count++) {
       const min = codexFalseResumptionBackoffMs(count, 0);
@@ -42,7 +93,7 @@ describe("durable false-capacity recovery", () => {
     }
   });
 
-  test("only a newer verified clear recovers a failed credential; legacy and backpressure remain excluded", () => {
+  test("legacy numeric quota requires a newer clear; ID-only stays excluded; explicit status evidence recovers", () => {
     const metadata = {
       codexCredentialFailedIds: ["a"],
       codexCredentialFailureCooldownRevisions: { a: 3 },
@@ -69,6 +120,22 @@ describe("durable false-capacity recovery", () => {
         { ...metadata, codexCredentialFailureCooldownRevisions: { a: null } },
         [account],
       ),
+    ).toEqual([]);
+    expect(
+      unresolvedCodexCredentialFailures(
+        { ...metadata, codexCredentialFailureCooldownRevisions: { a: null } },
+        [{ ...account, status: "needs_relogin" }],
+      ),
     ).toEqual(["a"]);
+    expect(
+      unresolvedCodexCredentialFailures(metadata, [
+        {
+          ...account,
+          exhaustedKind: "rate_limit",
+          exhaustedRevision: 3,
+          exhaustedUntil: new Date(0),
+        },
+      ]),
+    ).toEqual([]);
   });
 });
