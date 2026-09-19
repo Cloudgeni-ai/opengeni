@@ -1163,6 +1163,14 @@ bind only to the final combined local-plus-MCP attempt environment used by
 Codemode, never to a provisional local-only gateway.
 
 Managed-client delivery: `packages/runtime/src/sandbox/codemode-client.ts`.
+Supported mid-turn home repair awaits client-only preparation on the verified
+replacement under its exact workspace-mutation lease/provider fence before
+publishing the raw handle or route cache. Concurrent home resolutions share
+preparation per route epoch; failure publishes neither. Unchanged provider
+identities skip preparation. This does not replay turn-start hooks, create a
+provider, change logical manifests, or install a managed client on Connected
+Machines. Worker wiring: `apps/worker/src/sandbox-routing.ts` and
+`apps/worker/src/activities/agent-turn/sandbox-runtime.ts`.
 
 Codemode adds only attempt scope, active-attempt fencing, its durable operation
 journal, sandbox delivery, and recovery semantics. Input and authorization

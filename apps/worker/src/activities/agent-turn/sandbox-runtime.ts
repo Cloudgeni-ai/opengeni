@@ -8,6 +8,7 @@ import {
 } from "@opengeni/db";
 import {
   RoutingMutationOutcomeUnknownError,
+  runManagedCodemodeClientHook,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime";
 import {
@@ -124,16 +125,37 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
   // alive. Keep setup/snapshot persistence on the rebound raw session while
   // preserving the SDK-owned routing proxy for eager turns. Lazy turns hold the
   // proxy separately, so their worker-side handle may replace its raw session.
-  const onHomeSandboxRebound = (rebound: {
+  const onHomeSandboxRebound = async (rebound: {
     established: EstablishedSandboxSession;
     leaseEpoch: number;
-  }): void => {
+  }): Promise<void> => {
     const current = sandboxState.resolvedSandbox;
+    if (!current) throw new Error("Home sandbox rebound before turn sandbox admission");
+    if (
+      rebound.established.backendId !== "selfhosted" &&
+      rebound.established.instanceId !== current.established.instanceId
+    ) {
+      // An older archive may lack this worker release's selected client. Only
+      // prepare that client, never replay turn-start hooks/credentials/resources.
+      // Fence the replacement itself, not the stale turn-start handle. Both
+      // mutation admission and settlement precede raw-state/route publication.
+      const commandFence = eventing.toolCancellationFenceRef.current;
+      await runWorkspaceMutationForSandbox(
+        { ...current, established: rebound.established, leaseEpoch: rebound.leaseEpoch },
+        "homeSandboxClientPreparation",
+        () =>
+          runManagedCodemodeClientHook(rebound.established.session as never, {
+            environment: {},
+            ...(commandFence
+              ? { commandRunner: commandFence.runSandboxCommand.bind(commandFence) }
+              : {}),
+          }),
+      );
+    }
     const previousSession = current?.established.session;
     const preserveRoutingProxy =
       current !== null && previousSession !== sandboxState.setupBoxSession;
     sandboxState.setupBoxSession = rebound.established.session;
-    if (!current) return;
     current.leaseEpoch = rebound.leaseEpoch;
     current.established = preserveRoutingProxy
       ? {
