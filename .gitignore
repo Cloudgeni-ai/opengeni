@@ -4,6 +4,7 @@
 !.env.example
 var/
 dist/
+apps/web/dist-settings-preview/
 packages/react/demo-dist/
 !packages/artifact-kernel-wasm-*/dist/
 !packages/artifact-kernel-wasm-*/dist/**
