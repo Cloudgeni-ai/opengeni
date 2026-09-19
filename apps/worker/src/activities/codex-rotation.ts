@@ -12,6 +12,7 @@ import type {
   CodexLeaseAccountStatus,
   CodexPinSource,
 } from "@opengeni/db";
+import { connectionModelAllowed } from "@opengeni/db";
 
 export type CodexRotationAccount = CodexAccountStatus | CodexLeaseAccountStatus;
 
@@ -21,14 +22,12 @@ export function codexAccountNeedsLiveCapacityRefresh(
     CodexAccountStatus,
     "primaryUsedPercent" | "secondaryUsedPercent" | "exhaustedUntil" | "exhaustedKind"
   >,
-  now: Date,
+  _now: Date,
 ): boolean {
   return (
     (account.primaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT ||
     (account.secondaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT ||
-    (account.exhaustedKind === "quota" &&
-      account.exhaustedUntil !== null &&
-      account.exhaustedUntil > now)
+    (account.exhaustedKind === "quota" && account.exhaustedUntil !== null)
   );
 }
 
@@ -524,8 +523,16 @@ export function selectCodexCredentialLeaseForTurn<
   sessionLastCredentialId: string | null;
   now: Date;
 }): CodexTurnLeaseSelection {
-  const { accounts, activeCredentialId, rotationEnabled, rotationStrategy, existingCredentialId } =
+  const { activeCredentialId, rotationEnabled, rotationStrategy, existingCredentialId } =
     args.context;
+  if (args.context.failoverExhausted) {
+    return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
+  }
+  const accounts = args.context.modelId
+    ? args.context.accounts.filter((account) =>
+        connectionModelAllowed(account.allowedModelIds, args.context.modelId!),
+      )
+    : args.context.accounts;
   const failedCredentialIds = new Set(args.context.failedCredentialIds ?? []);
   // Normalized: rotation-enabled always behaves as sharded (see
   // effectiveRotationStrategy); the stored value is only ever legacy residue.

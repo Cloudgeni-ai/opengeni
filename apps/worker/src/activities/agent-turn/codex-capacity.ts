@@ -466,6 +466,11 @@ export async function selectCodexTurnCapacity(
             },
           },
         );
+        if (evaluated.action === "stopped") {
+          control.turnMetricOutcome = "failed";
+          control.activityStatus = "idle";
+          return { exit: claimedResult({ status: "idle" }) };
+        }
         if (evaluated.action === "resumed") {
           control.turnMetricOutcome = "recovering";
           control.activityStatus = "recovering";
@@ -583,6 +588,11 @@ export async function selectCodexTurnCapacity(
             },
           },
         );
+        if (evaluated.action === "stopped") {
+          control.turnMetricOutcome = "failed";
+          control.activityStatus = "idle";
+          return { exit: claimedResult({ status: "idle" }) };
+        }
         if (evaluated.action === "resumed") {
           control.turnMetricOutcome = "recovering";
           control.activityStatus = "recovering";
@@ -682,6 +692,11 @@ export async function selectCodexTurnCapacity(
             failurePayload,
           },
         );
+        if (evaluated.action === "stopped") {
+          control.turnMetricOutcome = "failed";
+          control.activityStatus = "idle";
+          return { exit: claimedResult({ status: "idle" }) };
+        }
         if (evaluated.action === "resumed") {
           control.turnMetricOutcome = "recovering";
           control.activityStatus = "recovering";

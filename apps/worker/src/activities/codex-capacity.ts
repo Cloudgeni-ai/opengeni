@@ -1,4 +1,5 @@
 import {
+  connectionModelAllowed,
   armCodexCapacityWait,
   fetchCodexUsageForAccount,
   getCodexCapacityWaitForSession,
@@ -92,6 +93,13 @@ export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnost
   context: CodexCapacitySelectionContext<TPolicyScope, TUnavailableDiagnostic>,
 ): ReturnType<Parameters<typeof reconcileCodexCapacityWaitDb>[2]> {
   const now = new Date();
+  context = {
+    ...context,
+    accounts: context.accounts.filter(
+      (account) =>
+        !context.modelId || connectionModelAllowed(account.allowedModelIds, context.modelId),
+    ),
+  };
   const selected = selectCodexCredentialLeaseForTurn({
     context,
     sessionId: context.sessionId,
@@ -114,8 +122,12 @@ export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnost
       credentialId: selected.credentialId,
       diagnostic: {
         connectedCount: context.accounts.length,
-        eligibleCount: context.accounts.filter((account) => isCodexCredentialEligible(account, now))
-          .length,
+        eligibleCount: context.accounts.filter(
+          (account) =>
+            (account.id === selected.credentialId ||
+              !context.failedCredentialIds?.includes(account.id)) &&
+            isCodexCredentialEligible(account, now),
+        ).length,
       },
     };
   }
@@ -134,8 +146,7 @@ export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnost
       account.status === "active" &&
       account.allocatorEnabled &&
       account.exhaustedKind === "quota" &&
-      account.exhaustedUntil !== null &&
-      account.exhaustedUntil > now,
+      account.exhaustedUntil !== null,
   );
   const policyAccount = capacityAccounts[0] ?? null;
   const mutationOnlyStatusBlock =
@@ -162,7 +173,7 @@ export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnost
     kind: "unavailable",
     earliestResetAt: authoritativeReset,
     resetKind:
-      selected.decision.kind === "none" ||
+      (selected.decision.kind === "none" && !hasReconcilableQuotaCooldown) ||
       selected.decision.kind === "allocatorDisabled" ||
       mutationOnlyStatusBlock
         ? "mutation_only"
@@ -191,6 +202,16 @@ export async function armAndReconcileCodexCapacityWait(
   options: { onArmed?: () => void } = {},
 ) {
   const armed = await armCodexCapacityWait(services.db, input);
+  if (armed.action === "stopped") {
+    options.onArmed?.();
+    await publishDurableSessionEvents(
+      services.bus,
+      input.workspaceId,
+      input.sessionId,
+      armed.events,
+    );
+    return armed;
+  }
   if (armed.action !== "waiting") return armed;
 
   options.onArmed?.();

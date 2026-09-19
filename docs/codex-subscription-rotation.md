@@ -175,6 +175,38 @@ accepted holder.
 
 ## Public status semantics
 
+### Same-turn capacity recovery
+
+Capacity reconciliation and credential acquisition apply the same accepted model,
+failure exclusions and failover limit. A refusal's recorded cooldown revision is
+recoverable only after a newer verified clear; elapsed time or an account wake
+alone does not clear the refusal. Legacy ID-only refusals remain excluded when
+their ordering cannot be proven. Typed quota cooldowns remain eligible for the
+existing bounded control-plane refresh even after their reset time passes.
+
+Genuine `waiting_capacity` has no elapsed-time expiry. Provider resets and durable
+account revisions re-evaluate the same turn, without a model call or retry-budget
+charge. Manual pins, rotation-off, selected model and accepted source policy stay
+binding, and Pause prevents resumption.
+
+The turn's `codexCapacityRecoveryV1` metadata separately tracks false resumptions:
+an available decision followed by its resumed execution returning to capacity
+waiting without a completed model request. Each such failure spends
+one of ten attempts. A persisted equal-jitter exponential delay starts at 30–60
+seconds and caps at 15 minutes; account wakes acknowledge their revisions but do
+not bypass that delay. Wait timers and metadata checks do not spend or reset the
+budget. A current, exact-attempt completed model-request event clears it; stale
+completion events cannot. A worker redispatch or credential failover preserves
+the outstanding resumption receipt, but only its exact current attempt may close
+it; stale predecessor attempts cannot charge the budget.
+
+The tenth false resumption atomically closes the attempt and turn as failed,
+supersedes the waiter, emits `codex_capacity_recovery_exhausted`, and suppresses
+automatic goal continuation. The session is idle (or queued for already accepted
+human input), not falsely presented as still recovering. Existing explicit Retry
+or a new Continue message starts fresh work; no credits are redeemed, model is
+switched, or pause is overridden automatically.
+
 `GET /v1/workspaces/:id/codex/status` keeps the backward-compatible
 `activeAccount` and `valid` fields. `valid` is a live model-catalog probe of the
 active account only; it is not a readiness claim about every connected account.
