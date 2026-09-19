@@ -2,6 +2,57 @@ import { describe, expect, mock, test } from "bun:test";
 import { createSessionStateActivities } from "../src/activities/session-state";
 
 describe("failSessionAttempt child-terminal identity", () => {
+  test("safe observation inspects only the exact owner and discards an obsolete inspection", async () => {
+    const owned = {
+      kind: "attempt-owned" as const,
+      turnId: "t",
+      attemptId: "a",
+      executionGeneration: 2,
+      activityRef: { workflowId: "w", workflowRunId: "r", activityId: "activity", quiesced: false },
+    };
+    for (const state of ["pending", "settled"] as const) {
+      const inspect = mock(async () => state);
+      let fresh = owned;
+      const peek = mock(async () => fresh);
+      const activities = createSessionStateActivities(
+        async () => ({ db: {}, observability: {}, inspectSessionAttemptActivity: inspect }) as any,
+        { peekSessionWork: peek as any },
+      );
+      const input = { workspaceId: "ws", sessionId: "s", observerAccountId: "account" };
+      expect(await activities.peekSessionWork(input)).toEqual({
+        ...owned,
+        ownerActivityState: state,
+      });
+      expect(inspect).toHaveBeenCalledWith(owned.activityRef);
+      inspect.mockImplementation(async () => {
+        fresh = { ...owned, attemptId: "successor", executionGeneration: 3 };
+        return state;
+      });
+      expect(await activities.peekSessionWork(input)).toEqual(fresh);
+    }
+  });
+
+  test("unavailable observer does not inspect an owner or refresh unscoped queue telemetry", async () => {
+    const inspect = mock(async () => "settled" as const);
+    const count = mock(async () => 0);
+    const activities = createSessionStateActivities(
+      async () => ({ db: {}, observability: {}, inspectSessionAttemptActivity: inspect }) as any,
+      {
+        peekSessionWork: mock(async () => ({ kind: "unavailable" as const })),
+        countQueuedTurns: count,
+      },
+    );
+    expect(
+      await activities.peekSessionWork({
+        workspaceId: "w",
+        sessionId: "s",
+        observerAccountId: "a",
+      }),
+    ).toEqual({ kind: "unavailable" });
+    expect(inspect).not.toHaveBeenCalled();
+    expect(count).not.toHaveBeenCalled();
+  });
+
   test("parks exact rejected admission without retry wakes or terminal input settlement", async () => {
     const block = mock(async () => ({ action: "blocked" as const, events: [] }));
     const wake = mock(async () => undefined);

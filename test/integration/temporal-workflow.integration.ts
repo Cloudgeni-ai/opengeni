@@ -388,6 +388,81 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "safe control observations wait without settlement and re-read after a wake with replay-safe history",
+    async () => {
+      for (const kind of ["unavailable", "attempt-owned"] as const) {
+        const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+        const scope = workflowScope();
+        const workflowId = `wf-${crypto.randomUUID()}`;
+        let restored = false;
+        let peeks = 0;
+        let dispatched = 0;
+        let idle = 0;
+        const worker = await testWorker(nativeConnection, taskQueue, {
+          peekSessionWork: async (input: { observerAccountId?: string }) => {
+            expect(input.observerAccountId).toBe(scope.accountId);
+            peeks += 1;
+            if (restored) return { kind: "admission-blocked" as const };
+            return kind === "unavailable"
+              ? { kind }
+              : {
+                  kind,
+                  turnId: "owned-turn",
+                  attemptId: "owned-attempt",
+                  executionGeneration: 1,
+                  activityRef: {
+                    workflowId,
+                    workflowRunId: "owner-run",
+                    activityId: "owner-activity",
+                    quiesced: false,
+                  },
+                  ownerActivityState: "pending" as const,
+                };
+          },
+          runAgentTurn: async () => {
+            dispatched += 1;
+            throw new Error("Observer dispatched a successor");
+          },
+          markSessionIdle: async () => {
+            idle += 1;
+          },
+        });
+        const run = worker.run();
+        try {
+          const client = new Client({ connection });
+          const handle = await client.workflow.start("sessionWorkflow", {
+            taskQueue,
+            workflowId,
+            args: [{ ...scope, sessionId: crypto.randomUUID() }],
+          });
+          await waitFor(async () => {
+            const history = await handle.fetchHistory();
+            return history.events?.some((event) => !!event.timerStartedEventAttributes) ?? false;
+          });
+          expect(peeks).toBe(1);
+          expect(dispatched).toBe(0);
+          expect(idle).toBe(0);
+          restored = true;
+          await handle.signal("queueChanged");
+          await handle.result();
+          expect(peeks).toBe(2);
+          expect(dispatched).toBe(0);
+          expect(idle).toBe(0);
+          await Worker.runReplayHistory(
+            { workflowsPath: workflowDefinitionsPath },
+            await handle.fetchHistory(),
+            workflowId,
+          );
+        } finally {
+          worker.shutdown();
+          await run;
+        }
+      }
+    },
+    quiescenceReceiptTestTimeoutMs,
+  );
+
+  test(
     "backs off and reclaims the same turn after post-claim database failure",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;

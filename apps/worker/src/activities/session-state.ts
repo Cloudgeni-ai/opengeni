@@ -521,13 +521,40 @@ export function createSessionStateActivities(
   }
 
   async function peekSessionWork(input: PeekSessionWorkInput) {
-    const { db, observability } = await services();
+    const { db, observability, inspectSessionAttemptActivity } = await services();
     const peek = await peekSessionWorkFn(
       db,
       input.workspaceId,
       input.sessionId,
       input.includeAdmissionFence,
+      input.observerAccountId,
     );
+    if (peek.kind === "unavailable") return peek;
+    if (peek.kind === "attempt-owned") {
+      // Observation never revokes a writer or recovers a live owner. In
+      // particular, a settled Temporal activity is not physical-writer proof.
+      const ownerActivityState = inspectSessionAttemptActivity
+        ? await inspectSessionAttemptActivity(peek.activityRef)
+        : ("unknown" as const);
+      const current = await peekSessionWorkFn(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        input.includeAdmissionFence,
+        input.observerAccountId,
+      );
+      if (
+        current.kind !== "attempt-owned" ||
+        current.turnId !== peek.turnId ||
+        current.attemptId !== peek.attemptId ||
+        current.executionGeneration !== peek.executionGeneration ||
+        current.activityRef.workflowId !== peek.activityRef.workflowId ||
+        current.activityRef.workflowRunId !== peek.activityRef.workflowRunId ||
+        current.activityRef.activityId !== peek.activityRef.activityId
+      )
+        return current;
+      return { ...current, ownerActivityState };
+    }
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
     return peek;
   }

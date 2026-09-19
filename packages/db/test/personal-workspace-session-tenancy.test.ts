@@ -18,6 +18,7 @@ import {
   nestedPostgresSqlState,
   openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
+  peekSessionWork,
   removeWorkspaceMember,
   resolveCompanyBrainContextSelection,
   setSubjectRlsContext,
@@ -169,6 +170,48 @@ async function waitUntilBlockedBy(backendPid: number): Promise<void> {
  * inference is accepted.
  */
 describe("session tenancy SQL seams inside a managed human's own personal workspace", () => {
+  test("an unavailable private-session observer preserves state and sees restored owner scope", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const workspaceId = human.legacyWorkspaceId;
+    const { session } = await createSessionWithIdempotencyKey(client.db, {
+      accountId: human.accountId,
+      workspaceId,
+      visibility: "user_private",
+      initialMessage: "private accepted work",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: human.subjectId },
+      subjectId: human.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createIdempotencyKey: crypto.randomUUID(),
+    });
+    const before =
+      await shared.admin`select status, active_turn_id, last_sequence, direct_control_state
+      from sessions where id = ${session.id}`;
+    const hidden = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      workspaceId,
+      `user:${crypto.randomUUID()}`,
+      (db) => peekSessionWork(db, workspaceId, session.id, false, human.accountId),
+    );
+    expect(hidden).toEqual({ kind: "unavailable" });
+    const visible = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      workspaceId,
+      human.subjectId,
+      (db) => peekSessionWork(db, workspaceId, session.id, false, human.accountId),
+    );
+    expect(visible.kind).not.toBe("unavailable");
+    const after =
+      await shared.admin`select status, active_turn_id, last_sequence, direct_control_state
+      from sessions where id = ${session.id}`;
+    expect(Array.from(after)).toEqual(Array.from(before));
+  });
+
   test("creates an owner-bound private session atomically in shared and Personal workspaces", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();

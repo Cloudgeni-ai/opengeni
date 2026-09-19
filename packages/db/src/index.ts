@@ -67969,6 +67969,14 @@ export async function settleSessionAttemptInterruptions(
 }
 
 export type SessionWorkPeek =
+  | { kind: "unavailable" }
+  | {
+      kind: "attempt-owned";
+      turnId: string;
+      attemptId: string;
+      executionGeneration: number;
+      activityRef: SessionAttemptActivityRef;
+    }
   | { kind: "runnable"; admissionFence?: SessionAdmissionFence }
   | { kind: "admission-blocked" }
   | {
@@ -67985,6 +67993,7 @@ export type SessionWorkPeek =
   | {
       kind: "capacity-wait";
       ref: {
+        provider?: "codex" | "xai";
         waiterId: string;
         generation: number;
         nextCheckAt: string;
@@ -68292,8 +68301,19 @@ export async function peekSessionWork(
   workspaceId: string,
   sessionId: string,
   includeAdmissionFence = false,
+  observerAccountId?: string,
 ): Promise<SessionWorkPeek> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  const observe = async (scopedDb: Database): Promise<SessionWorkPeek> => {
+    // An observer cannot distinguish absent rows from rows hidden by RLS.
+    // Do not infer deletion or settle business state from either condition.
+    if (observerAccountId) {
+      const [visible] = await scopedDb
+        .select({ id: schema.sessions.id })
+        .from(schema.sessions)
+        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+        .limit(1);
+      if (!visible) return { kind: "unavailable" };
+    }
     const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
       lock: "share",
     });
@@ -68302,7 +68322,7 @@ export async function peekSessionWork(
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
-    if (!session) return { kind: "idle" };
+    if (!session) return { kind: observerAccountId ? "unavailable" : "idle" };
     // Pure event appends can leave the wide session projection behind. Admission
     // settlement fences against the allocation cursor, so observe that same
     // authority here without taking a writer lock during this advisory peek.
@@ -68592,6 +68612,36 @@ export async function peekSessionWork(
           : { kind: "approval-wait" };
       }
       if (turn.status === "running") {
+        if (observerAccountId && turn.activeAttemptId) {
+          const [attempt] = await scopedDb
+            .select()
+            .from(schema.sessionTurnAttempts)
+            .where(
+              and(
+                eq(schema.sessionTurnAttempts.accountId, observerAccountId),
+                eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+                eq(schema.sessionTurnAttempts.sessionId, sessionId),
+                eq(schema.sessionTurnAttempts.turnId, turn.id),
+                eq(schema.sessionTurnAttempts.id, turn.activeAttemptId),
+                eq(schema.sessionTurnAttempts.executionGeneration, turn.executionGeneration),
+                inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+              ),
+            )
+            .limit(1);
+          if (attempt)
+            return {
+              kind: "attempt-owned",
+              turnId: turn.id,
+              attemptId: attempt.id,
+              executionGeneration: turn.executionGeneration,
+              activityRef: {
+                workflowId: attempt.temporalWorkflowId,
+                workflowRunId: attempt.temporalWorkflowRunId,
+                activityId: attempt.temporalActivityId,
+                quiesced: attempt.quiescedAt !== null,
+              },
+            };
+        }
         throw new Error(
           `Session workflow reached admission with turn ${turn.id} still owned by attempt ${turn.activeAttemptId ?? "none"}`,
         );
@@ -68664,7 +68714,10 @@ export async function peekSessionWork(
       )
       .limit(1);
     return pendingAgentSteer ? runnable : (inputWaitPeek ?? { kind: "idle" });
-  });
+  };
+  return observerAccountId
+    ? await withRlsContext(db, { accountId: observerAccountId, workspaceId }, observe)
+    : await withWorkspaceRls(db, workspaceId, observe);
 }
 
 class SessionInputWaitSettlementStaleError extends Error {
@@ -74629,7 +74682,8 @@ export type SessionWorkflowWakeDeliveryResult =
         | "pending_prompt_turn"
         | "pending_quiescence"
         | "pending_machine_input"
-        | "pending_input_wait";
+        | "pending_input_wait"
+        | "session_unavailable";
     };
 
 export async function markSessionWorkflowWakeDelivered(
@@ -74647,7 +74701,8 @@ export async function markSessionWorkflowWakeDelivered(
           sessionIds: [input.sessionId],
         });
         const session = locks.sessions[0];
-        if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+        if (!session)
+          return { action: "pending_admission", blocker: "session_unavailable" } as const;
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           input.workspaceId,

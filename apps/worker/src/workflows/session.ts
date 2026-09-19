@@ -595,11 +595,21 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     // without the marker keeps its old shape; the next live admission cycle
     // can activate this fix without waiting for continueAsNew.
     durableAdmissionBlocking = patched("session-durable-admission-block-v1");
+    const safeObservation = patched("session-safe-control-observation-v1");
     const peek = await activity.peekSessionWork({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       ...(durableAdmissionBlocking ? { includeAdmissionFence: true } : {}),
+      ...(safeObservation ? { observerAccountId: input.accountId } : {}),
     });
+    if (peek.kind === "unavailable" || peek.kind === "attempt-owned") {
+      // No terminal/idle projection and no successor dispatch. Restoration
+      // need not produce a wake, so retain the observer with a bounded timer
+      // instead of closing and stranding durable work. Signals interrupt the
+      // wait; continue-as-new above bounds history, never business execution.
+      await condition(() => signalVersion !== closeSignalVersion, "30s");
+      continue;
+    }
     if (peek.kind === "admission-blocked") {
       if (signalVersion !== closeSignalVersion || pendingQuiescenceProofs.size > 0) continue;
       return;
@@ -669,6 +679,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const finalPeek = await activity.peekSessionWork({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
+        ...(safeObservation ? { observerAccountId: input.accountId } : {}),
       });
       if (
         finalPeek.kind !== "sandbox-lifecycle-wait" ||
@@ -750,6 +761,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const finalPeek = await activity.peekSessionWork({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
+        ...(safeObservation ? { observerAccountId: input.accountId } : {}),
       });
       if (
         finalPeek.kind !== "input-wait" ||
@@ -802,6 +814,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const finalPeek = await activity.peekSessionWork({
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
+        ...(safeObservation ? { observerAccountId: input.accountId } : {}),
       });
       if (finalPeek.kind !== "idle") continue;
       await activity.markSessionIdle({
