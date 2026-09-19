@@ -1879,7 +1879,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       await this.writeStdinForProcessControl({
         sessionId: record.process.providerSessionId,
         chars: "",
-        yieldTimeMs: 1,
+        // A near-zero provider long-poll can expire before even an already
+        // completed command's terminal batch is delivered. Use the ordinary
+        // bounded command-read window; never infer completion from silence.
+        yieldTimeMs: 250,
       });
       return true;
     }

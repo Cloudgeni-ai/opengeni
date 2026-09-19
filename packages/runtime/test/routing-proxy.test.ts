@@ -1272,7 +1272,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(acknowledgment).toBeGreaterThan(events.lastIndexOf("capture:modal:179:5:8"));
   });
 
-  test("owner refresh captures exact adopted command without pointer lookup or observation", async () => {
+  test("owner refresh allows terminal delivery without pointer lookup or observation", async () => {
     let pointerReads = 0;
     let observed = 0;
     let providerReads = 0;
@@ -1288,7 +1288,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
         session: {
           execCommand: async () => "Process running with session ID 197\n\nOutput:\nstart",
           writeStdin: async (args) => {
-            expect(args).toEqual({ sessionId: 197, chars: "", yieldTimeMs: 1 });
+            expect(args).toEqual({ sessionId: 197, chars: "", yieldTimeMs: 250 });
             providerReads++;
             return "Process exited with code 0\n\nOutput:\ntail";
           },
