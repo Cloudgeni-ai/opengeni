@@ -395,3 +395,12 @@ for the final acknowledgement. It never reads or modifies a customer session.
 Omit `--durable` for provider-only verification;
 the receipt distinguishes the two modes. Locally authored assertion messages
 are visible; arbitrary provider errors and SDK causes remain content-free.
+
+### Cache-preserving compaction requests
+
+Remote v2 compaction carries the ordinary agent’s effective reasoning effort and
+summary setting, alongside its exact instructions and tool schemas. Omitting the
+reasoning configuration can change provider-side instructions before the long
+history is summarized. Durable turn-scoped operational notices remain at their
+original positions in the compaction input. The resulting summarized history is
+still a deliberate new prefix.

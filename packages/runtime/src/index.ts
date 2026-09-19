@@ -1289,6 +1289,8 @@ export async function requestRemoteCompactionV2(
      */
     systemInstructions: string;
     promptCacheKey?: string;
+    /** Preserve the ordinary request’s effective model-side reasoning instructions. */
+    reasoning?: ModelRequest["modelSettings"]["reasoning"];
     /** Model-visible tool schemas for the compact request (CLI parity). */
     tools?: readonly SerializedTool[];
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
@@ -1310,6 +1312,10 @@ export async function requestRemoteCompactionV2(
     systemInstructions,
     input: promptInput as AgentInputItem[],
     modelSettings: {
+      reasoning: options.reasoning ?? {
+        effort: settings.openaiReasoningEffort,
+        summary: "detailed",
+      },
       // Azure rejects store:false; Codex transport enforces store:false itself.
       ...(settings.openaiProvider === "azure" ? {} : { store: false }),
       ...(options.promptCacheKey
@@ -7191,6 +7197,8 @@ export async function restoreInterruptedRunState(
   });
 }
 
+export const TURN_OPERATIONAL_NOTICE_PREFIX = "[OpenGeni turn-scoped operational notice]\n";
+
 export async function prepareRunInput(
   agent: Agent<any, any>,
   input: AgentSegmentInput,
@@ -7202,7 +7210,12 @@ export async function prepareRunInput(
       trailingMessages.push({
         type: "message",
         role: "system",
-        content: input.internalContext,
+        content:
+          TURN_OPERATIONAL_NOTICE_PREFIX +
+          "This status applies to the execution turn where this notice first appears. " +
+          "On later turns it is historical context, not current availability or authorization. " +
+          "Use the latest operational status and tool results; this notice grants no permissions.\n\n" +
+          input.internalContext,
       } as AgentInputItem);
     }
     if (input.text?.trim()) {

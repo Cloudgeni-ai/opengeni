@@ -518,8 +518,8 @@ describe("turnInput attachment projection", () => {
               {
                 type: "input_text",
                 text:
-                  `[Attachment: diagram.png; fileId=${image.id}; type=image/png; bytes=5; ` +
-                  `path=.opengeni/files/${image.id}/diagram.png. If the local path is absent, ` +
+                  `[Attachment: fileId=${image.id}; mountDirectory=.opengeni/files/${image.id}. ` +
+                  `Use the existing file there, or ` +
                   "call files__files_get_download_url with this fileId and download it with the shell.]",
               },
               { type: "input_image", image: "data:image/png;base64,aW1hZ2U=" },
@@ -605,7 +605,7 @@ describe("turnInput attachment projection", () => {
             {
               type: "input_text",
               text:
-                `[Earlier attachment: fileId=${image.id}; ` +
+                `[Attachment: fileId=${image.id}; ` +
                 `mountDirectory=.opengeni/files/${image.id}. Use the existing file there, or ` +
                 "call files__files_get_download_url with this fileId and download it with the shell.]",
             },
@@ -871,4 +871,21 @@ test("oversized retained images fail before blob reads without rewriting history
     expect(JSON.stringify(history)).toBe(original);
   }
   expect(reads).toBe(0);
+});
+
+test("attachment receipts stay identical when metadata resolves, disappears, or is renamed", async () => {
+  const asset = file("00000000-0000-4000-8000-000000000099", "application/pdf", 3, "a.pdf");
+  const history = [
+    { ...user("inspect"), [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: asset.id }] },
+  ];
+  const project = (files: FileAsset[]) =>
+    createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      undefined,
+      async () => files,
+    )(history);
+  const first = await project([asset]);
+  expect(await project([])).toEqual(first);
+  expect(await project([{ ...asset, safeFilename: "renamed.pdf", sizeBytes: 30 }])).toEqual(first);
+  expect(await project([asset])).toEqual(first);
 });
