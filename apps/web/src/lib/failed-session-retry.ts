@@ -10,6 +10,7 @@ export type FailedSessionRetryInput = RetryPolicy & {
 /** Keep an ambiguous transport retry bound to the exact original operation. */
 export function createFailedSessionRetry(
   submit: (input: FailedSessionRetryInput) => Promise<unknown>,
+  onOperationChange?: (input: FailedSessionRetryInput | null) => void,
 ) {
   let operation: FailedSessionRetryInput | null = null;
   let inFlight: Promise<boolean> | null = null;
@@ -24,10 +25,16 @@ export function createFailedSessionRetry(
     if (inFlight) return inFlight;
     operation ??= { ...policy, failureEventId, clientEventId: crypto.randomUUID() };
     const input = operation;
+    // The UI must describe and lock the same policy while its outcome is
+    // unknown, rather than displaying a newer model this request cannot use.
+    onOperationChange?.(input);
     const request = (async () => {
       try {
         await submit(input);
-        if (operation === input) accepted = true;
+        if (operation === input) {
+          accepted = true;
+          onOperationChange?.(null);
+        }
         return true;
       } catch (error) {
         // A definitive rejection permits a corrected model selection. Unknown
@@ -40,6 +47,7 @@ export function createFailedSessionRetry(
           error.status < 500
         ) {
           operation = null;
+          onOperationChange?.(null);
         }
         throw error;
       }

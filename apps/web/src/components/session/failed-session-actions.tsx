@@ -1,6 +1,7 @@
 import type { ComposerSendBlocker } from "@/lib/composer-send-blocking";
+import type { FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 
 type RetryBlocker =
@@ -28,6 +29,7 @@ export function FailedSessionActions(props: {
   repositoryError?: string | null;
   onRetry: () => Promise<boolean>;
   retryBlocker: RetryBlocker | null;
+  retryInput?: FailedSessionRetryInput | null;
   onChooseModel: () => void;
   modelDisabled: boolean;
 }) {
@@ -47,6 +49,7 @@ function FailureActionsAttempt({
   composerBlocker,
   repositoryError,
   retryBlocker,
+  retryInput,
   onChooseModel,
   modelDisabled,
 }: {
@@ -54,9 +57,11 @@ function FailureActionsAttempt({
   composerBlocker?: ComposerSendBlocker | null;
   repositoryError?: string | null;
   retryBlocker: RetryBlocker | null;
+  retryInput?: FailedSessionRetryInput | null;
   onChooseModel: () => void;
   modelDisabled: boolean;
 }) {
+  const retryDescriptionId = useId();
   const retryBlockedReason = composerBlocker
     ? {
         upload: "Wait for the upload below to finish, or remove it.",
@@ -96,7 +101,7 @@ function FailureActionsAttempt({
                 : failure.status === 409
                   ? "The session changed. Check its current status before trying again."
                   : "Could not retry this session. Check your access and selected model, then try again."
-          : "Could not confirm the retry. Try again to check the same request.",
+          : "Could not confirm the retry. Check the same request again.",
       );
     } finally {
       pending.current = false;
@@ -111,20 +116,35 @@ function FailureActionsAttempt({
           size="sm"
           variant="secondary"
           disabled={submitting || submitted || Boolean(retryBlockedReason)}
+          aria-describedby={retryInput ? retryDescriptionId : undefined}
           onClick={() => void submit()}
         >
-          {submitting ? "Trying again…" : submitted ? "Retry requested" : "Try again"}
+          {submitting
+            ? "Trying again…"
+            : submitted
+              ? "Retry requested"
+              : retryInput
+                ? "Check prior retry"
+                : "Try again"}
         </Button>
         <Button
           type="button"
           size="sm"
           variant="secondary"
-          disabled={modelDisabled}
+          disabled={modelDisabled || Boolean(retryInput)}
+          aria-describedby={retryInput ? retryDescriptionId : undefined}
           onClick={onChooseModel}
         >
           Choose another model
         </Button>
       </div>
+      {retryInput ? (
+        <p id={retryDescriptionId} className="mt-2 text-xs text-fg-muted" role="status">
+          This retry uses {retryInput.model} ({retryInput.reasoningEffort} reasoning,{" "}
+          {retryInput.latencyMode} speed). Model choices are locked until its outcome is confirmed.
+          Checking it again uses the same request, not a new model.
+        </p>
+      ) : null}
       {submitted ? (
         <p className="mt-2 text-xs text-fg-muted" role="status">
           Retry requested. Your original request and completed work are preserved.

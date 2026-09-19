@@ -2012,105 +2012,187 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 120_000);
 
-  test("retries a failed session without a new user message and opens the constrained model picker", async () => {
-    const context = await configuredContext(browser, {
-      viewport: { width: 1280, height: 800 },
-      extraHTTPHeaders: ownerHeaders,
-    });
-    const page = await context.newPage();
-    try {
-      await page.goto(webBaseUrl);
-      const workspaceId = await workspaceFromPage(page);
-      const failed = await createSessionThroughApi(
-        page,
-        apiBaseUrl,
-        workspaceId,
-        "Failed session actions",
-      );
-      const [identity] = await shared.admin<Array<{ workflowId: string }>>`
+  for (const responseLoss of ["before dispatch", "after commit"] as const) {
+    test(`retries with the selected model and no new user message when the response is lost ${responseLoss}`, async () => {
+      const context = await configuredContext(browser, {
+        viewport: { width: 1280, height: 800 },
+        extraHTTPHeaders: ownerHeaders,
+      });
+      const page = await context.newPage();
+      try {
+        await page.goto(webBaseUrl);
+        const workspaceId = await workspaceFromPage(page);
+        const failed = await createSessionThroughApi(
+          page,
+          apiBaseUrl,
+          workspaceId,
+          "Failed session actions",
+        );
+        const [identity] = await shared.admin<Array<{ workflowId: string }>>`
         select temporal_workflow_id as "workflowId" from sessions
         where workspace_id = ${workspaceId} and id = ${failed.id}`;
-      if (!identity?.workflowId) throw new Error("Fixture workflow identity missing");
-      const failure = await failSessionWorkBeforeAttemptClaim(dbClient.db, workspaceId, {
-        accountId: failed.accountId,
-        sessionId: failed.id,
-        workflowId: identity.workflowId,
-        trigger: { kind: "next" },
-        error: "Fixture model unavailable before execution",
-      });
-      expect(failure.action).toBe("failed");
-      expect(failure.turnId).toBeTruthy();
-      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${failed.id}`);
-      const banner = page.getByTestId("failed-session-banner");
-      const chooseModel = banner.getByRole("button", { name: "Choose another model", exact: true });
-      await chooseModel.waitFor();
-      await waitFor(async () => !(await chooseModel.isDisabled()));
-      await chooseModel.click();
-      await page.getByRole("dialog", { name: "Model and effort", exact: true }).waitFor();
-      await page.getByRole("textbox", { name: "Search models or providers" }).waitFor();
-      await page.keyboard.press("Escape");
-      const retryButton = banner.getByRole("button", { name: "Try again", exact: true });
-      await waitFor(async () => !(await retryButton.isDisabled()));
-      let submissions = 0;
-      const submittedBodies: Record<string, unknown>[] = [];
-      await page.route(
-        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${failed.id}/retry`,
-        async (route) => {
-          submissions++;
-          submittedBodies.push(route.request().postDataJSON());
-          if (submissions === 1)
-            await route.fulfill({
-              status: 503,
-              contentType: "application/json",
-              body: JSON.stringify({ error: "Fixture temporarily unavailable" }),
-            });
-          else await route.continue();
-        },
-      );
-      const submission = page.waitForResponse(
-        (response) =>
-          response.request().method() === "POST" &&
-          response.url().endsWith(`/sessions/${failed.id}/retry`),
-      );
-      await retryButton.click();
-      const receipt = await submission;
-      expect(receipt.status()).toBe(503);
-      await banner.getByRole("alert").waitFor();
-      expect(await banner.getByRole("alert").textContent()).toContain("same request");
-      await waitFor(async () => !(await retryButton.isDisabled()));
-      const retryReceipt = page.waitForResponse(
-        (response) =>
-          response.request().method() === "POST" &&
-          response.url().endsWith(`/sessions/${failed.id}/retry`),
-      );
-      await retryButton.click();
-      expect((await retryReceipt).ok()).toBe(true);
-      expect(submissions).toBe(2);
-      expect(submittedBodies[1]).toEqual(submittedBodies[0]);
-      expect(submittedBodies[0]).not.toHaveProperty("text");
-      expect(submittedBodies[0]?.model).toBe("scripted-model");
-      const evidence = await page.evaluate(
-        async ({ apiBaseUrl: fixtureApiUrl, workspaceId: fixtureWorkspaceId, id }) => {
-          const response = await fetch(
-            `${fixtureApiUrl}/v1/workspaces/${fixtureWorkspaceId}/sessions/${id}/events`,
+        if (!identity?.workflowId) throw new Error("Fixture workflow identity missing");
+        const failure = await failSessionWorkBeforeAttemptClaim(dbClient.db, workspaceId, {
+          accountId: failed.accountId,
+          sessionId: failed.id,
+          workflowId: identity.workflowId,
+          trigger: { kind: "next" },
+          error: "Fixture model unavailable before execution",
+        });
+        expect(failure.action).toBe("failed");
+        expect(failure.turnId).toBeTruthy();
+        await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${failed.id}`);
+        const banner = page.getByTestId("failed-session-banner");
+        const chooseModel = banner.getByRole("button", {
+          name: "Choose another model",
+          exact: true,
+        });
+        await chooseModel.waitFor();
+        await waitFor(async () => !(await chooseModel.isDisabled()));
+        await chooseModel.click();
+        await page.getByRole("dialog", { name: "Model and effort", exact: true }).waitFor();
+        await page.getByRole("textbox", { name: "Search models or providers" }).waitFor();
+        const selectedModel = "gpt-5.6-terra";
+        await page.getByTestId(`model-picker-choice-${selectedModel}`).click();
+        await page
+          .getByRole("dialog", { name: "Model and effort", exact: true })
+          .waitFor({ state: "detached" });
+        const retryButton = banner.getByRole("button", { name: "Try again", exact: true });
+        await waitFor(async () => !(await retryButton.isDisabled()));
+        let submissions = 0;
+        const submittedBodies: Record<string, unknown>[] = [];
+        type RetryReceipt = {
+          outcome: "accepted" | "replayed";
+          turnId: string;
+          failureEventId: string;
+        };
+        let committedReceipt: RetryReceipt | null = null;
+        let committedTurnIds: string[] | null = null;
+        await page.route(
+          `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${failed.id}/retry`,
+          async (route) => {
+            submissions++;
+            submittedBodies.push(route.request().postDataJSON());
+            if (submissions === 1) {
+              if (responseLoss === "after commit") {
+                // The real API commits first. Only its response is lost; current
+                // reads and SSE remain real so the UI must reconcile the result.
+                const committed = await route.fetch();
+                expect(committed.ok()).toBe(true);
+                committedReceipt = (await committed.json()) as RetryReceipt;
+                committedTurnIds = (
+                  await shared.admin<Array<{ id: string }>>`
+                select id from session_turns
+                where workspace_id = ${workspaceId} and session_id = ${failed.id}
+                order by id`
+                ).map((row) => row.id);
+              }
+              await route.fulfill({
+                status: 503,
+                contentType: "application/json",
+                body: JSON.stringify({ error: "Fixture temporarily unavailable" }),
+              });
+            } else await route.continue();
+          },
+        );
+        const submission = page.waitForResponse(
+          (response) =>
+            response.request().method() === "POST" &&
+            response.url().endsWith(`/sessions/${failed.id}/retry`),
+        );
+        await retryButton.click();
+        const receipt = await submission;
+        expect(receipt.status()).toBe(503);
+        let acceptedReceipt: RetryReceipt;
+        if (responseLoss === "before dispatch") {
+          await banner.getByRole("alert").waitFor();
+          expect(await banner.getByRole("alert").textContent()).toContain("same request");
+          const checkRetry = banner.getByRole("button", { name: "Check prior retry", exact: true });
+          await waitFor(async () => !(await checkRetry.isDisabled()));
+          expect(await banner.getByRole("status").textContent()).toContain(selectedModel);
+          expect(await banner.getByRole("status").textContent()).toContain(
+            "Model choices are locked",
           );
-          if (!response.ok) throw new Error(`events failed: ${response.status}`);
-          return await response.json();
-        },
-        { apiBaseUrl, workspaceId, id: failed.id },
-      );
-      const userMessages = evidence.filter(
-        (event: { type: string }) => event.type === "user.message",
-      );
-      expect(userMessages).toHaveLength(1);
-      expect(userMessages[0]?.payload.text).toBe("Failed session actions");
-      expect(await page.getByText("Continue from the last failure", { exact: false }).count()).toBe(
-        0,
-      );
-    } finally {
-      await context.close();
-    }
-  }, 60_000);
+          expect(await chooseModel.isDisabled()).toBe(true);
+          expect(
+            await page.getByRole("button", { name: "Model and effort", exact: true }).isDisabled(),
+          ).toBe(true);
+          const retryReceipt = page.waitForResponse(
+            (response) =>
+              response.request().method() === "POST" &&
+              response.url().endsWith(`/sessions/${failed.id}/retry`),
+          );
+          await checkRetry.click();
+          const confirmed = await retryReceipt;
+          expect(confirmed.ok()).toBe(true);
+          acceptedReceipt = (await confirmed.json()) as RetryReceipt;
+          expect(acceptedReceipt.outcome).toBe("accepted");
+        } else {
+          // Successful read reconciliation removes the failed-session controls;
+          // it must not manufacture another retry just because the POST was lost.
+          await banner.waitFor({ state: "detached" });
+          expect(submissions).toBe(1);
+          expect(committedReceipt!.outcome).toBe("accepted");
+          // Replay the browser's exact operation through the real public API to
+          // prove the lost receipt is recoverable, not another accepted turn.
+          acceptedReceipt = (await page.evaluate(
+            async ({ url, input }) => {
+              const response = await fetch(url, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify(input),
+              });
+              if (!response.ok) throw new Error(`retry replay failed: ${response.status}`);
+              return await response.json();
+            },
+            {
+              url: `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${failed.id}/retry`,
+              input: submittedBodies[0]!,
+            },
+          )) as RetryReceipt;
+          expect(acceptedReceipt.outcome).toBe("replayed");
+          expect(acceptedReceipt.turnId).toBe(committedReceipt!.turnId);
+          expect(acceptedReceipt.failureEventId).toBe(committedReceipt!.failureEventId);
+          const currentTurnIds = (
+            await shared.admin<Array<{ id: string }>>`
+          select id from session_turns
+          where workspace_id = ${workspaceId} and session_id = ${failed.id}
+          order by id`
+          ).map((row) => row.id);
+          expect(currentTurnIds).toEqual(committedTurnIds!);
+        }
+        expect(submissions).toBe(2);
+        expect(submittedBodies[1]).toEqual(submittedBodies[0]);
+        expect(submittedBodies[0]).not.toHaveProperty("text");
+        expect(submittedBodies[0]?.model).toBe(selectedModel);
+        const [acceptedTurn] = await shared.admin<Array<{ model: string }>>`
+        select model from session_turns
+        where workspace_id = ${workspaceId} and session_id = ${failed.id}
+          and id = ${acceptedReceipt.turnId}`;
+        expect(acceptedTurn?.model).toBe(selectedModel);
+        const evidence = await page.evaluate(
+          async ({ apiBaseUrl: fixtureApiUrl, workspaceId: fixtureWorkspaceId, id }) => {
+            const response = await fetch(
+              `${fixtureApiUrl}/v1/workspaces/${fixtureWorkspaceId}/sessions/${id}/events`,
+            );
+            if (!response.ok) throw new Error(`events failed: ${response.status}`);
+            return await response.json();
+          },
+          { apiBaseUrl, workspaceId, id: failed.id },
+        );
+        const userMessages = evidence.filter(
+          (event: { type: string }) => event.type === "user.message",
+        );
+        expect(userMessages).toHaveLength(1);
+        expect(userMessages[0]?.payload.text).toBe("Failed session actions");
+        expect(
+          await page.getByText("Continue from the last failure", { exact: false }).count(),
+        ).toBe(0);
+      } finally {
+        await context.close();
+      }
+    }, 60_000);
+  }
 
   test("opens the exact child from pending and delivered results without claiming the failed parent completed", async () => {
     const context = await configuredContext(browser, {

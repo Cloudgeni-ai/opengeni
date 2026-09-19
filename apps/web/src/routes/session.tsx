@@ -13,7 +13,7 @@ import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
-import { createFailedSessionRetry } from "@/lib/failed-session-retry";
+import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import {
   admissionRecheckControl,
   admissionControlNeedsRefresh,
@@ -2059,10 +2059,14 @@ function SessionChatPane(props: {
       : null;
   });
   const composerPolicy = composer.policy;
+  const [retryOperation, setRetryOperation] = useState<FailedSessionRetryInput | null>(null);
+  const pendingRetryInput =
+    retryOperation?.failureEventId === props.failure?.failureEventId ? retryOperation : null;
   const retryFailedSession = useMemo(
     () =>
-      createFailedSessionRetry((input) =>
-        context.client.retrySession(props.session.workspaceId, props.session.id, input),
+      createFailedSessionRetry(
+        (input) => context.client.retrySession(props.session.workspaceId, props.session.id, input),
+        setRetryOperation,
       ),
     [context.client, props.session.workspaceId, props.session.id],
   );
@@ -2434,6 +2438,7 @@ function SessionChatPane(props: {
                   )}
                   actions={{
                     failureId: props.failure.failureEventId,
+                    retryInput: pendingRetryInput,
                     composerBlocker: composerSendBlocker(),
                     repositoryError: repositories.error,
                     onRetry: async () => {
@@ -2476,7 +2481,11 @@ function SessionChatPane(props: {
                                   ? "loading"
                                   : null,
                     onChooseModel: () => setModelPickerSession(props.session.id),
-                    modelDisabled: composer.sending || composer.draftLoading || !hasComposerPolicy,
+                    modelDisabled:
+                      composer.sending ||
+                      composer.draftLoading ||
+                      !hasComposerPolicy ||
+                      Boolean(pendingRetryInput),
                   }}
                 />
               </Suspense>
@@ -2870,13 +2879,18 @@ function SessionChatPane(props: {
                   hasImageAttachments={attachments.attachments.some(
                     (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
                   )}
-                  open={modelPickerSession === props.session.id}
+                  open={modelPickerSession === props.session.id && !pendingRetryInput}
                   onOpenChange={(open) => setModelPickerSession(open ? props.session.id : null)}
                   rows={modelCatalog.rows}
                   model={model}
                   effort={reasoningEffort}
                   latencyMode={latencyMode}
-                  disabled={composer.sending || composer.draftLoading || !hasComposerPolicy}
+                  disabled={
+                    composer.sending ||
+                    composer.draftLoading ||
+                    !hasComposerPolicy ||
+                    Boolean(pendingRetryInput)
+                  }
                   loading={modelCatalog.loading || composer.draftLoading}
                   error={modelCatalog.error ?? composerPolicyError}
                   sessionKey={props.session.id}

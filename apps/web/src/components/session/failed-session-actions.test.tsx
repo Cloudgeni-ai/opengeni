@@ -2,10 +2,11 @@ import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { FailureRecoveryBoundary } from "./failure-recovery-boundary";
 import { afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, type ReactNode } from "react";
+import { act, useMemo, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { FailedSessionActions } from "./failed-session-actions";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
+import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 
 mock.module("@tanstack/react-router", () => ({
   Link: ({ children }: { children: ReactNode }) => <a href="#models">{children}</a>,
@@ -309,6 +310,63 @@ test("transport failure leaves one retry action and never creates a message bubb
   expect(calls).toBe(2);
   expect(container.querySelector("button")!.textContent).toBe("Retry requested");
   expect(container.querySelector('[role="alert"]')).toBeNull();
+});
+
+test("an uncertain retry names its frozen model and locks model selection until confirmed", async () => {
+  const inputs: FailedSessionRetryInput[] = [];
+  let modelOpens = 0;
+  function Recovery() {
+    const [retryInput, setRetryInput] = useState<FailedSessionRetryInput | null>(null);
+    const retry = useMemo(
+      () =>
+        createFailedSessionRetry(async (input) => {
+          inputs.push(input);
+          if (inputs.length === 1) throw new Error("Response lost");
+        }, setRetryInput),
+      [],
+    );
+    return (
+      <FailedSessionActions
+        failureId="failure-a"
+        retryInput={retryInput}
+        onRetry={() =>
+          retry("failure-a", {
+            model: "selected-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+          })
+        }
+        retryBlocker={null}
+        modelDisabled={false}
+        onChooseModel={() => {
+          modelOpens++;
+        }}
+      />
+    );
+  }
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => root!.render(<Recovery />));
+  const [retryButton, modelButton] = [...container.querySelectorAll("button")];
+  await act(async () => retryButton!.click());
+  expect(retryButton!.textContent).toBe("Check prior retry");
+  expect(modelButton!.disabled).toBe(true);
+  await act(async () => modelButton!.click());
+  expect(modelOpens).toBe(0);
+  const description = document.getElementById(retryButton!.getAttribute("aria-describedby")!);
+  expect(description?.getAttribute("role")).toBe("status");
+  expect(description?.textContent).toContain("selected-model");
+  expect(description?.textContent).toContain(
+    "Model choices are locked until its outcome is confirmed",
+  );
+  expect(modelButton!.getAttribute("aria-describedby")).toBe(description!.id);
+  await act(async () => retryButton!.click());
+  expect(inputs).toHaveLength(2);
+  expect(inputs[1]).toBe(inputs[0]);
+  expect(retryButton!.textContent).toBe("Retry requested");
+  expect(modelButton!.disabled).toBe(false);
+  expect(retryButton!.hasAttribute("aria-describedby")).toBe(false);
 });
 
 test("unsupported recovery explains the safe next step without automatic investigation", async () => {
