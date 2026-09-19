@@ -312,6 +312,7 @@ import {
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 import { ApiHttpError } from "../http/api-error";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
+import { recordAcceptedApiAdmission } from "../admission-trace";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -3201,6 +3202,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     } catch (error) {
       return commandConflictResponse(c, error);
     }
+    recordAcceptedApiAdmission(deps.observability, result);
     return c.json(result, 202);
   });
 
@@ -3224,6 +3226,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     } catch (error) {
       return commandConflictResponse(c, error);
     }
+    recordAcceptedApiAdmission(deps.observability, result);
     return c.json(result, 202);
   });
 
@@ -3283,6 +3286,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       } catch (error) {
         return commandConflictResponse(c, error);
       }
+      recordAcceptedApiAdmission(deps.observability, result);
       return c.json(result.accepted, 202);
     }
 

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createObservability } from "@opengeni/observability";
+import { createObservability, withTraceContext } from "@opengeni/observability";
 import {
   MCP_LIFECYCLE_OUTCOMES,
   MCP_LIFECYCLE_PHASES,
@@ -8,6 +8,43 @@ import {
 } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import { runtimeMetricsHooksForObservability } from "../src/observability-metrics";
+
+test("every model and MCP call exports measured spans under the physical attempt", async () => {
+  const bodies: any[] = [];
+  const observability = createObservability(
+    { ...testSettings(), observabilityOtlpEndpoint: "http://collector" },
+    {
+      component: "worker",
+      exporter: async (_url, body) => {
+        bodies.push(body);
+      },
+    },
+  );
+  const hooks = runtimeMetricsHooksForObservability(observability);
+  const parent = observability.startSpan("attempt");
+  withTraceContext(parent, () => {
+    for (let i = 0; i < 3; i++) {
+      hooks.onModelCall?.({ provider: "openai", outcome: "completed", durationSeconds: 1 });
+      hooks.onMcpToolCall?.({ outcome: "success", durationSeconds: 0.5 });
+    }
+  });
+  await observability.flush();
+  const spans = bodies.flatMap((body) =>
+    body.resourceSpans.flatMap((resource: any) => resource.scopeSpans[0].spans),
+  );
+  expect(spans).toHaveLength(6);
+  for (const span of spans) {
+    expect(span.traceId).toBe(parent.traceId);
+    expect(span.parentSpanId).toBe(parent.spanId);
+    expect(BigInt(span.endTimeUnixNano) - BigInt(span.startTimeUnixNano)).toBeGreaterThanOrEqual(
+      500_000_000n,
+    );
+  }
+  expect(bodies).toHaveLength(1);
+  hooks.onMcpToolCall?.({ outcome: "provider_declared_error", durationSeconds: 0.5 });
+  await observability.flush();
+  expect(bodies[1].resourceSpans[0].scopeSpans[0].spans[0].status.code).toBe(2);
+});
 
 test("MCP tool-call metrics expose only the closed structural outcome", async () => {
   const observability = createObservability(testSettings(), { component: "worker" });

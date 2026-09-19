@@ -1657,7 +1657,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | --- | --- | --- |
 | Deployment profile, Helm, Terraform, or conformance | `packages/deployment/`, `deploy/` | [`deployment.md`](deployment.md) |
 | Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md) |
-| Logs, traces, metrics, or dashboards | `packages/observability/`, `deploy/observability/` | [`deployment.md`](deployment.md) Observability |
+| Logs, traces, metrics, or dashboards | `packages/observability/`, `deploy/observability/` | [`application-observability.md`](application-observability.md), [`deployment.md`](deployment.md) Observability |
 
 ---
 

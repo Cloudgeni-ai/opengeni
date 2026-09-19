@@ -119,6 +119,10 @@ export function runtimeMetricsHooksForObservability(
 ): RuntimeMetricsHooks {
   return {
     onModelCall: ({ provider, outcome, durationSeconds }) => {
+      completedOperationSpan(observability, "worker.model.call", durationSeconds, {
+        provider,
+        outcome,
+      });
       observability.incrementCounter({
         name: "opengeni_model_calls_total",
         help: "Total model calls by provider and outcome.",
@@ -180,6 +184,7 @@ export function runtimeMetricsHooksForObservability(
       });
     },
     onMcpToolCall: ({ outcome, durationSeconds }) => {
+      completedOperationSpan(observability, "worker.mcp.tool_call", durationSeconds, { outcome });
       observability.incrementCounter({
         name: "opengeni_mcp_tool_calls_total",
         help: "Total physical MCP tool calls by bounded structural outcome.",
@@ -1508,6 +1513,11 @@ export function recordTurnStartupPhase(
     cache?: TurnStartupCache;
   },
 ): void {
+  completedOperationSpan(observability, `worker.prepare.${input.phase}`, input.durationSeconds, {
+    provider: input.provider,
+    backend: input.backend,
+    outcome: input.outcome,
+  });
   observability.observeHistogram({
     name: "opengeni_turn_startup_phase_duration_seconds",
     help: "Turn startup phase duration before the model response stream begins.",
@@ -1522,6 +1532,36 @@ export function recordTurnStartupPhase(
     },
     value: Math.max(0, input.durationSeconds),
   });
+}
+
+/** Completed measurements become siblings under the scoped physical attempt.
+ * They never establish ambient ancestry for work which has already finished. */
+function completedOperationSpan(
+  observability: Observability,
+  name: string,
+  durationSeconds: number,
+  attributes: { outcome: string; provider?: string; backend?: string },
+): void {
+  if (!Number.isFinite(durationSeconds) || durationSeconds < 0) return;
+  try {
+    const failed = [
+      "failed",
+      "error",
+      "provider_declared_error",
+      "auth_needed",
+      "outcome_uncertain",
+      "timeout",
+      "thrown_transport_error",
+      "thrown_protocol_error",
+    ].includes(attributes.outcome);
+    observability
+      .startSpan(name, attributes, { startTimeMs: Date.now() - durationSeconds * 1_000 })
+      .end({
+        ...(failed ? { error: true } : {}),
+      });
+  } catch {
+    // Observers cannot change the completed model/tool/phase outcome.
+  }
 }
 
 /**
