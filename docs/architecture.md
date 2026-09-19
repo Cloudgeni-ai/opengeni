@@ -1443,25 +1443,15 @@ completion promise rejects. Iterator EOF is therefore not terminal success
 authority: the worker must await SDK completion and route its rejection through
 `sandbox_deadline_rotation` recovery before settling `turn.completed`.
 
-BrowserSession and ComputerSession interaction holders are durable placement
-authority, not UI-presence leases, so an active controller never expires merely
-because its heartbeat timestamp is old. A requested finite-lifetime Modal
-rotation is the narrow exception: at the lead-time rotation boundary, the global
-lifecycle reaper marks each exact controller resource `lost`, settles a prepared
-operation as a deterministic rotation failure or a dispatched operation as
-`outcome_unknown`, preserves the controller binding for cleanup evidence, and
-then lets the ordinary holder/orphan and lease-drain transaction rotate the box
-while capture headroom remains. The deadline batch admits only leases that still
-carry interaction holders, so unrelated overdue turn/direct/process-held leases
-cannot starve it, and includes an exact lease that entered `draining` before the
-deadline. The same global
-reaper inventories due lease-free Connected Machine and attached-device
-transitions under its owner-only FORCE-RLS capability, acquires every affected
-workspace advisory fence in canonical UUID order, and only then opens mutation
-visibility. This rotation override remains batch-bounded and imposes no
-independent age limit on healthy interaction sessions; it interrupts only when
-the underlying finite provider identity has entered its mandatory handoff
-window.
+BrowserSession/ComputerSession holders remain durable despite old heartbeats.
+Only finite-provider handoff deadlines override them: the reaper marks exact
+controllers `lost`, deterministically fails prepared operations, marks dispatched
+operations `outcome_unknown`, and preserves bindings for cleanup. The bounded
+deadline batch selects interaction-held leases, including already-draining ones;
+unrelated overdue leases cannot starve it. Lease-free Connected Machine/device
+transitions use owner-only FORCE-RLS inventory and canonically ordered workspace
+fences before mutation visibility. Healthy interactions have no independent age
+limit. See `docs/run-lifecycle.md` for rotation and capture ordering.
 
 Modal command output uses authenticated task-router byte offsets. The exact
 retained process owns the locator; output events and cursor advancement commit

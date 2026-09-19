@@ -10,7 +10,7 @@ import {
 import { readSessionBackgroundCommandOutput } from "../src/session-background-commands";
 
 let shared: SharedTestDatabase, client: DbClient;
-let accountId: string, workspaceId: string, sessionId: string, sandboxGroupId: string;
+let accountId: string, workspaceId: string;
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("retained-router-output");
   if (!acquired) throw new Error("Atomic router output tests require PostgreSQL");
@@ -27,6 +27,13 @@ beforeAll(async () => {
     subjectId: `test-${suffix}`,
   });
   ({ accountId, workspaceId } = access.workspaceGrants[0]!);
+}, 180_000);
+afterAll(async () => {
+  await client?.close();
+  await shared?.release();
+}, 60_000);
+
+async function fixture() {
   const session = await createSession(client.db, {
     accountId,
     workspaceId,
@@ -38,15 +45,8 @@ beforeAll(async () => {
     latencyMode: "standard",
     sandboxBackend: "none",
   });
-  sessionId = session.id;
-  sandboxGroupId = session.sandboxGroupId;
-}, 180_000);
-afterAll(async () => {
-  await client?.close();
-  await shared?.release();
-}, 60_000);
-
-async function fixture() {
+  const sessionId = session.id,
+    sandboxGroupId = session.sandboxGroupId;
   const processId = crypto.randomUUID(),
     leaseId = crypto.randomUUID(),
     admissionId = crypto.randomUUID(),
