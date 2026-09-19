@@ -124,11 +124,12 @@ export type RoutingWiringServices = {
     instanceId: string;
     leaseEpoch: number;
   }) => Promise<void>;
-  /** Called when a route repair replaces the worker's original home handle. */
+  /** Prepare and publish the worker's home handle. Rejection leaves the route
+   * unpublished; replacement preparation must settle before the first tool op. */
   onHomeSandboxRebound?: (input: {
     established: EstablishedSandboxSession;
     leaseEpoch: number;
-  }) => void;
+  }) => void | Promise<void>;
   /** Cancel bounded capture waits with the owning turn activity. */
   waitSignal?: AbortSignal;
 };
@@ -342,7 +343,7 @@ async function resolveCurrentHomeBackend(
   // A route epoch can advance without a provider replacement. Reuse the exact
   // established handle only when its identity still equals the durable one.
   if (lease.instanceId === established.instanceId) {
-    services.onHomeSandboxRebound?.({
+    await services.onHomeSandboxRebound?.({
       established,
       leaseEpoch: lease.leaseEpoch,
     });
@@ -416,7 +417,7 @@ async function resolveCurrentHomeBackend(
   if (rebound.instanceId !== lease.instanceId || reboundBackend !== resumeBackend) {
     throw homeRouteRecoveryError(lease, lease.leaseEpoch);
   }
-  services.onHomeSandboxRebound?.({
+  await services.onHomeSandboxRebound?.({
     established: rebound,
     leaseEpoch: lease.leaseEpoch,
   });

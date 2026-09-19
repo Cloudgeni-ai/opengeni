@@ -2268,6 +2268,66 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(reboundCalls).toBe(2);
   });
 
+  for (const preparationFails of [false, true]) {
+    test(`home repair joins client preparation before publication (${preparationFails ? "failure" : "success"})`, async () => {
+      const original = new FakeBackend("original");
+      const replacement = new FakeBackend("prepared-replacement");
+      const entered = Promise.withResolvers<void>();
+      const preparation = Promise.withResolvers<void>();
+      const ptr = mutablePointer();
+      let preparations = 0;
+      let fail = preparationFails;
+      const failure = new Error("client preparation failed");
+      const proxy = new RoutingSandboxSession({
+        defaultResolved: { session: original, sandboxId: null, kind: "modal" },
+        readPointer: ptr.read,
+        resolveActiveBackend: async (pointer) => {
+          if (pointer.activeEpoch === 0) {
+            return { session: original, sandboxId: null, kind: "modal" };
+          }
+          preparations += 1;
+          entered.resolve();
+          await preparation.promise;
+          if (fail) throw failure;
+          return { session: replacement, sandboxId: null, kind: "modal" };
+        },
+      });
+      await proxy.exec({ cmd: "before" });
+      ptr.swap(null);
+      const first = proxy.exec({ cmd: "first" });
+      const second = proxy.exec({ cmd: "second" });
+      const settled = Promise.allSettled([first, second]);
+      await entered.promise;
+      expect(preparations).toBe(1);
+      expect(replacement.calls).toEqual([]);
+      expect(proxy.state).toEqual(original.state);
+      preparation.resolve();
+      const results = await settled;
+      expect(preparations).toBe(1);
+      expect(original.calls).toEqual(["before"]);
+      if (preparationFails) {
+        expect(results).toEqual([
+          { status: "rejected", reason: failure },
+          { status: "rejected", reason: failure },
+        ]);
+        expect(replacement.calls).toEqual([]);
+        expect(proxy.state).toEqual(original.state);
+        // A failed resolution must not poison the epoch cache or leave a
+        // rejected single-flight entry behind. A new independent op can retry.
+        fail = false;
+        await proxy.exec({ cmd: "retry" });
+        expect(preparations).toBe(2);
+        expect(replacement.calls).toEqual(["retry"]);
+      } else {
+        expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+        expect(replacement.calls).toEqual(["first", "second"]);
+      }
+      await proxy.exec({ cmd: "cached" });
+      expect(preparations).toBe(preparationFails ? 2 : 1);
+      expect(proxy.state).toEqual(replacement.state);
+    });
+  }
+
   test("selfhosted target -> a SelfhostedSession bound to the enrollment agentId, fenced under active_epoch", async () => {
     const mock = new MockAgentResponder({ hostname: "the-laptop" });
     const route = mockSelfhostedRoute(mock);

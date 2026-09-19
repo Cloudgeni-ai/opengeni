@@ -716,6 +716,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   private cachedEpoch: number | undefined;
   private cachedSandboxId: string | null | undefined;
   private cached: ResolvedActiveBackend | undefined;
+  private readonly homeResolutions = new Map<number, Promise<ResolvedActiveBackend>>();
   // The last-resolved backend, exposed via the `state` getter (a method-free read
   // of the active backend's `state`). Updated on every resolve.
   private lastResolved: ResolvedActiveBackend | undefined;
@@ -813,6 +814,23 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     ) {
       return this.cached;
     }
+    // Home repair may prepare the release client before publishing a handle.
+    // Concurrent first operations must join that preparation, including its
+    // failure, instead of each resuming/preparing the replacement independently.
+    // Explicit machine routes retain their existing resolution behavior.
+    if (pointer.activeSandboxId !== null) return await this.resolvePointer(pointer);
+    const pending = this.homeResolutions.get(pointer.activeEpoch);
+    if (pending) return await pending;
+    const resolution = this.resolvePointer(pointer);
+    this.homeResolutions.set(pointer.activeEpoch, resolution);
+    try {
+      return await resolution;
+    } finally {
+      this.homeResolutions.delete(pointer.activeEpoch);
+    }
+  }
+
+  private async resolvePointer(pointer: ActivePointer): Promise<ResolvedActiveBackend> {
     const fromEpoch = this.cachedEpoch ?? pointer.activeEpoch;
     const resolved = await this.deps.resolveActiveBackend(pointer);
     // Re-entrancy guard: a resolver that returns THIS proxy as the active backend

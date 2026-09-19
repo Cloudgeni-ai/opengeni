@@ -1162,6 +1162,14 @@ before a catalog can be published. In-process local model tools
 bind only to the final combined local-plus-MCP attempt environment used by
 Codemode, never to a provisional local-only gateway.
 
+Managed-client delivery: `packages/runtime/src/sandbox/codemode-client.ts`.
+Mid-turn home repair fences client-only preparation to the exact replacement
+lease/provider before publishing handles/cache; failures publish neither.
+Preparation is singleflight per epoch; unchanged identities and Connected Machines
+skip it. No hooks replay, provider creation, or manifest changes.
+Wiring: `apps/worker/src/sandbox-routing.ts` and
+`apps/worker/src/activities/agent-turn/sandbox-runtime.ts`.
+
 Codemode adds only attempt scope, active-attempt fencing, its durable operation
 journal, sandbox delivery, and recovery semantics. Input and authorization
 preflight finish before its execution-start marker. The API exposes a stable

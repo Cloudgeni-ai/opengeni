@@ -2340,20 +2340,22 @@ describe("worker activities integration", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(sandboxExecCalls).toHaveLength(2);
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain(
+    expect(sandboxExecCalls).toHaveLength(3);
+    expect(String(sandboxExecCalls[0]?.cmd)).toContain("/workspace/.opengeni/codemode-clients/");
+    expect(String(sandboxExecCalls[0]?.cmd)).not.toContain("OPENGENI_CODEMODE_TOKEN_SEED");
+    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
       "OPENGENI_CODEMODE_TOKEN_FILE='/workspace/.opengeni/codemode-tokens/",
     );
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain(
+    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
       'printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"',
     );
-    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
+    expect(String(sandboxExecCalls[2]?.cmd)).toContain(
       "start_repository_clone '/workspace/repos/github.com/Futhark-AS/aifilesearch.git'",
     );
-    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
+    expect(String(sandboxExecCalls[2]?.cmd)).toContain(
       'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
     );
-    expect(String(sandboxExecCalls[1]?.cmd)).toContain("x-access-token");
+    expect(String(sandboxExecCalls[2]?.cmd)).toContain("x-access-token");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "sandbox.operation.started")).toBe(true);
     expect(events.some((event) => event.type === "sandbox.operation.completed")).toBe(true);

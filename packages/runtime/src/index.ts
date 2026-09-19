@@ -276,6 +276,11 @@ import {
   sandboxCommandStdout,
 } from "./sandbox/command-result";
 import { shellCodemodePath } from "./sandbox/codemode-token";
+import {
+  installManagedCodemodeClient,
+  loadManagedCodemodeClient,
+  managedCodemodeClientDirectory,
+} from "./sandbox/codemode-client";
 import { InputWaitYield, type InputWaitYieldStream } from "./input-wait-yield";
 export { InputWaitYield } from "./input-wait-yield";
 import {
@@ -7416,6 +7421,7 @@ function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilt
 // environments can use the exact pinned package hint.
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
   "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff. " +
+  "Managed sandboxes select the worker-release client on PATH for every command, including warm boxes. When OPENGENI_CODEMODE_CLIENT_MODULE is set, persistent Bun programs must use `const { tools, openGeni } = await import(process.env.OPENGENI_CODEMODE_CLIENT_MODULE!)`; do not import the older image-baked package or invoke /usr/local/bin/ogtool directly. The stock-package import below is only for environments without that deployment-selected module. " +
   'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, discover tools with `ogtool list`, inspect an unfamiliar tool with `ogtool show <tool-path>`, then use `ogtool call <tool-path> \'<json-args>\'`. Listing is compact by default; `list --json` gives compact structured discovery and `list --full` explicitly includes all schemas. When $OPENGENI_CODEMODE_NATIVE_CLIENT is available, prefer the connection-bound native client even if an older `ogtool` is installed: use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` with the same list, show, and call commands; this uses the same public Codemode operation journal, not another tool path. If no compatible installed client is available and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
 
 function modelModalityProjectionFilterForAgent(
@@ -7546,6 +7552,10 @@ async function runAgentStreamInternal(
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
   const codemodeTokenFile = codemodeTokenFileForAgent(agent, environment);
   const codemodeUrl = environment.OPENGENI_CODEMODE_URL;
+  const codemodeClientDirectory =
+    codemodeTokenFile && agentActiveSandboxBackend.get(agent) !== "selfhosted"
+      ? managedCodemodeClientDirectory(await loadManagedCodemodeClient())
+      : undefined;
   const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
   const modelRequestCapture = bindModelVisibleContextCapture(
     agent,
@@ -7577,13 +7587,23 @@ async function runAgentStreamInternal(
       ? withRunCredentialsSession(session as SandboxSessionLike, overrides.runCredentialSessionId)
       : (session as SandboxSessionLike);
     const agentSession = codemodeTokenFile
-      ? withCodemodeTokenSession(credentialAgentSession, codemodeTokenFile, codemodeUrl)
+      ? withCodemodeTokenSession(
+          credentialAgentSession,
+          codemodeTokenFile,
+          codemodeUrl,
+          codemodeClientDirectory,
+        )
       : credentialAgentSession;
     const credentialSetupSession = overrides.runCredentialSessionId
       ? withRunCredentialsSession(setupSession, overrides.runCredentialSessionId)
       : setupSession;
     const decoratedSetupSession = codemodeTokenFile
-      ? withCodemodeTokenSession(credentialSetupSession, codemodeTokenFile, codemodeUrl)
+      ? withCodemodeTokenSession(
+          credentialSetupSession,
+          codemodeTokenFile,
+          codemodeUrl,
+          codemodeClientDirectory,
+        )
       : credentialSetupSession;
     // Platform setup (manifest-env pin + beforeAgentStart hooks + file downloads)
     // against the UN-proxied established box — the ONE-TRUTH helper shared with the
@@ -7671,7 +7691,12 @@ async function runAgentStreamInternal(
         )
       : resourceClient;
     const codemodeResourceClient = codemodeTokenFile
-      ? withCodemodeTokenClient(credentialResourceClient, codemodeTokenFile, codemodeUrl)
+      ? withCodemodeTokenClient(
+          credentialResourceClient,
+          codemodeTokenFile,
+          codemodeUrl,
+          codemodeClientDirectory,
+        )
       : credentialResourceClient;
     const decoratedClient = withSandboxLifecycleHooks(
       codemodeResourceClient,
@@ -7784,7 +7809,12 @@ async function runAgentStreamInternal(
       : resourceClient;
   const codemodeClient =
     credentialClient && codemodeTokenFile
-      ? withCodemodeTokenClient(credentialClient, codemodeTokenFile, codemodeUrl)
+      ? withCodemodeTokenClient(
+          credentialClient,
+          codemodeTokenFile,
+          codemodeUrl,
+          codemodeClientDirectory,
+        )
       : credentialClient;
   // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
   // repository-clone hook seeds it to the box's token file before the clone.
@@ -9317,6 +9347,15 @@ function codemodeTokenFileForAgent(
 function sandboxCodemodeTokenHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
   return codemodeTokenSeedForAgent(agent)
     ? [
+        ...(agentActiveSandboxBackend.get(agent) !== "selfhosted"
+          ? [
+              {
+                id: "codemode-client",
+                phase: "beforeAgentStart" as const,
+                run: runManagedCodemodeClientHook,
+              },
+            ]
+          : []),
         {
           id: "codemode-token",
           phase: "beforeAgentStart",
@@ -10556,6 +10595,29 @@ export async function runCodemodeTokenSeedHook(
     context.commandRunner,
   );
   assertSandboxCommandSucceeded(result, "Codemode token seed hook");
+}
+
+export async function runManagedCodemodeClientHook(
+  session: SandboxSessionLike,
+  context: SandboxLifecycleHookContext,
+): Promise<void> {
+  await installManagedCodemodeClient(
+    session,
+    await loadManagedCodemodeClient(),
+    async (cmd) =>
+      await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd,
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 1_000,
+        },
+        context.commandRunner,
+      ),
+    context.runAs,
+  );
 }
 
 export async function refreshCodemodeTokenFile(

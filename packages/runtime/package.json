@@ -79,6 +79,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@opengeni/ogtool": "workspace:*",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
   }
