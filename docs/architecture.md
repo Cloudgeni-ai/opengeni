@@ -1153,19 +1153,15 @@ See [`session-mcp-servers.md`](session-mcp-servers.md).
 
 [MCP recovery](mcp-operation-recovery.md) observes outcomes without mutation replay.
 
-`@opengeni/tool-gateway` is the protocol-neutral catalog, validation,
-authorization, approval-classification, and execution boundary. Runtime prepares
-one canonical provider set from enabled first-party and integration MCP servers;
-the model adapter, exact-attempt Codemode adapter, current-human MCP route, and
-workspace HTTP/SDK adapter project that same catalog and invoke the same executor
-closures. Friendly model names and JavaScript paths are projections of the
-opaque `{serverId, toolName}` identity and never authority. Canonical allocation
-adds an identity-derived suffix whenever a requested path must be normalized, so
-the resulting path does not change when neighboring catalog entries appear or
-disappear, and rejects every remaining namespace/tool prefix or exact collision
-before a catalog can be published. In-process local model tools
-bind only to the final combined local-plus-MCP attempt environment used by
-Codemode, never to a provisional local-only gateway.
+`@opengeni/tool-gateway` owns protocol-neutral catalogs, validation, authorization,
+approval classification, and execution. Runtime builds one enabled first-party
+and integration MCP catalog. Model, exact-attempt Codemode, current-human MCP,
+and workspace HTTP/SDK adapters share its executor closures. Friendly names and
+JavaScript paths project opaque `{serverId, toolName}` identities, never authority.
+Normalized paths receive identity-derived suffixes, remaining stable across
+neighbor changes. Allocation rejects namespace/tool-prefix and exact collisions
+before publication. Local model tools bind only to the final combined local/MCP
+attempt environment used by Codemode, never a provisional local-only gateway.
 
 Managed-client delivery: `packages/runtime/src/sandbox/codemode-client.ts`.
 Mid-turn home repair fences client-only preparation to the exact replacement
