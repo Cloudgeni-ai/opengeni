@@ -104,7 +104,7 @@ preserving lineage. See [`run-lifecycle.md`](run-lifecycle.md).
 `runAgentTurn` is non-retryable by default: model/tool/sandbox/Git/connector/cloud
 operations have external effects. Recovery is explicit and attempt-fenced.
 Provider work stays outside retries; retry only idempotent settlement.
-Replay: [notices](run-lifecycle.md),
+Replay: [notices/catalogs](run-lifecycle.md),
 [compaction](context-compaction.md).
 
 Failed-session retry differs from Pause/Resume and prompt admission.

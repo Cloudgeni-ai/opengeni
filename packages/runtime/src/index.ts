@@ -2022,6 +2022,8 @@ export type BuildAgentOptions = {
   skillActivations?: readonly RuntimeSkillActivation[];
   /** Host-owned descriptors and reader; mutually exclusive with skillActivations. */
   skillCatalog?: readonly SkillCatalogDescriptor[];
+  /** Worker has persisted the catalog in conversation history before inference. */
+  skillCatalogInHistory?: boolean;
   /**
    * Internal per-attempt cancellation boundary. The worker supplies Temporal's
    * signal so an in-flight shell process is interrupted immediately instead of
@@ -2230,12 +2232,12 @@ export function inspectPersistentAgentInstructions(
       });
     }
     push("workspace_memory", "Workspace memory", options.workspaceMemory);
-    if (options.skillCatalog)
+    if (options.skillCatalog && !options.skillCatalogInHistory)
       push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
     push("session_instructions", "Session instructions", options.sessionInstructions);
   } else {
     push("workspace_governance", "Workspace governance", options.workspaceGovernance);
-    if (options.skillCatalog)
+    if (options.skillCatalog && !options.skillCatalogInHistory)
       push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
     push("session_instructions", "Session instructions", options.sessionInstructions);
     if (codemodeIsAvailable(options)) {
