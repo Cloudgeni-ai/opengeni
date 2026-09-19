@@ -4347,7 +4347,11 @@ describe("provider-neutral browser account acceptance", () => {
     const context = await browser.newContext({
       viewport: { width: 1440, height: 960 },
     });
-    const otherBrowserSet = await browser.newContext({
+    // Keep the independent account set out of the shared-tab journey's native
+    // connection pool, as for responsive evidence. The two racing tabs still
+    // share one context and browser; no request assertions are relaxed.
+    const independentBrowser = await launchAccountBrowser(engine);
+    const otherBrowserSet = await independentBrowser.newContext({
       viewport: { width: 1024, height: 768 },
     });
     const page = await context.newPage();
@@ -5126,6 +5130,7 @@ describe("provider-neutral browser account acceptance", () => {
     } finally {
       await context.close().catch(() => undefined);
       await otherBrowserSet.close().catch(() => undefined);
+      await independentBrowser.close().catch(() => undefined);
       await browser.close().catch(() => undefined);
     }
   }, 600_000);

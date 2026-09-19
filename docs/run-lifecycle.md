@@ -915,15 +915,25 @@ catalog includes `builtin:opengeni-client`, generated from the repository client
 guide; an ordinary session can read it and its references without installing a
 Skill, attaching a repository, or provisioning compute. Explicit host bundle
 selections still narrow this catalog, including `[]` to exclude all defaults.
-The worker builds the configured Skill descriptor catalog during each turn-attempt
-preparation. `formatSkillCatalog` renders the bounded `Skills` instruction layer,
-after workspace governance (or workspace memory on the unstructured path) and
-before session instructions. A separate rendering supplies contribution telemetry;
-it does not append a history item. The constructed agent retains that index while
-it runs, including while lazy tool preparation completes. A subsequent turn or
-rebuilt attempt can see catalog changes; this is not a session-lifetime snapshot.
-Tool reads return current authorized content, so a read can observe a saved revision
-newer than its initial descriptor. Read outputs enter ordinary tool-call history.
+The worker discovers configured Skill descriptors during turn preparation, but
+freezes the rendered catalog once per logical turn using an attempt-fenced history
+receipt. The first catalog and subsequent changed catalogs are persisted developer
+messages before accepted input; unchanged catalogs add no message. Earlier catalogs
+remain byte-identical, and retries reuse their turn's receipt even if descriptors
+changed meanwhile. The worker excludes this catalog from Agent.instructions.
+Both compaction strategies restore only the latest configured catalog before retained
+messages and the summary; receipts may reference inactive audit rows after compaction.
+Empty catalogs explicitly report that no configured Skills are available. Provider
+projection preserves developer messages for Responses and maps them to system
+messages for Chat Completions without mutating canonical history. These descriptors
+never grant authority. Contribution telemetry uses the frozen rendered catalog.
+Existing sessions experience one instruction-prefix transition when this activates.
+Standalone runtime callers retain their instruction-catalog behavior unless they
+explicitly provide a durable catalog through skillCatalogInHistory.
+Workspace-managed Skill reads return current authorized content, so a read can
+observe a saved revision newer than its initial descriptor. Bundled/session Skill
+reads use the selected attempt's artifacts. Read outputs enter ordinary tool-call
+history.
 If repository resources are attached, ordinary repository setup first makes
 their existing checkout available; runtime then indexes canonical
 `.agents/skills` and compatible `.claude/skills` directories through the bound
@@ -938,7 +948,8 @@ sources, even when names match. Repository metadata uses the same YAML parser as
 portable Skills, retaining multiline description text in the JSON descriptor.
 Discovery, inventories, and reading accept ordinary files and directories;
 symlink Skill entrypoints are excluded because portable filesystem APIs cannot
-prove target containment. The repository index is fixed for the bound capability; reads
+prove target containment. The repository index remains a separate sandbox-SDK instruction source, outside
+the configured-catalog history lifecycle above. It is fixed for the bound capability; reads
 observe live edits or report missing files, and rebinding refreshes discovery.
 
 Host-owned rotating sandbox run credentials split resolution from sandbox
