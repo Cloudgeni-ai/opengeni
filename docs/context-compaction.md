@@ -404,3 +404,27 @@ reasoning configuration can change provider-side instructions before the long
 history is summarized. Durable turn-scoped operational notices remain at their
 original positions in the compaction input. The resulting summarized history is
 still a deliberate new prefix.
+
+### Reasoning effort updates (opt-in)
+
+`OPENGENI_REASONING_CONFIGURATION_UPDATES_ENABLED` defaults to false pending
+live Codex backend verification. For GPT-6 Astra on the built-in OpenAI/Codex
+Responses routes, accepted effort changes become durable `configuration_update`
+items before the accepted turn input. The first enabled turn establishes the
+request-level baseline; later changes keep that baseline. Existing sessions may
+incur one baseline transition when enabled. Unsupported models, providers and
+reasoning efforts retain the existing request-level behavior.
+
+The exact attempt fence protects insertion and retries do not duplicate updates.
+Private baseline metadata stays in canonical history, outside SDK-visible items;
+only protocol fields pass through the SDK unknown-item adapter. Updates are
+removed from model input on unsupported routes. Adjacent updates are coalesced
+in the provider projection because the API rejects consecutive updates.
+
+Explicit compaction retains the actual summary landmark and stores a fresh
+configuration item after it, carrying the selected effort and original baseline.
+Portable replacement fingerprints include this trailing item. Do not combine
+these updates with provider automatic compaction/truncation or `/responses/compact`.
+Our remote-v2 path uses an explicit `compaction_trigger` on `/responses`.
+The response's effort field reports the baseline, not the selected update;
+accepted turn policy remains the source of the user's selected effort.

@@ -26,6 +26,12 @@ import {
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
 
+import {
+  latestReasoningConfiguration,
+  reasoningConfigurationItem,
+  readReasoningConfiguration,
+} from "@opengeni/codex";
+
 export type CompactionItem = Record<string, unknown>;
 
 /**
@@ -1626,6 +1632,8 @@ export function buildCompactionReplacementHistory(
   const attachmentCatalog = buildAttachmentCatalogItem(items, history);
   if (attachmentCatalog) history.push(attachmentCatalog);
   history.push(buildSummaryItem(summaryBody));
+  const reasoning = latestReasoningConfiguration(items);
+  if (reasoning) history.push(reasoningConfigurationItem(reasoning));
   return history;
 }
 
@@ -1691,6 +1699,8 @@ export function buildRemoteV2ReplacementHistory(
     encrypted_content: compactionItem.encrypted_content,
     ...(typeof compactionItem.summary === "string" ? { summary: compactionItem.summary } : {}),
   });
+  const reasoning = latestReasoningConfiguration(items);
+  if (reasoning) history.push(reasoningConfigurationItem(reasoning));
   return history;
 }
 
@@ -1800,7 +1810,9 @@ export function latestCompactionReplacementFingerprint(
 ): string | null {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     if (isCompactionSummary(items[index])) {
-      return compactionReplacementFingerprint(items.slice(0, index + 1));
+      const end =
+        items[index + 1] && readReasoningConfiguration(items[index + 1]!) ? index + 2 : index + 1;
+      return compactionReplacementFingerprint(items.slice(0, end));
     }
   }
   return null;
