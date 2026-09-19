@@ -90,9 +90,11 @@ See `docs/architecture.md` and `docs/remote-mcp-credentials.md`.
 
 For a map of every app, package, and how the parts fit together, start at [`docs/architecture.md`](docs/architecture.md) and follow its links to the focused topic docs.
 
-Skill descriptors enter the agent instructions during turn-attempt preparation;
-the eager `skill_read` reads text without sandbox setup, and lazy `skill_checkout`
-copies files only on demand. Preserve repository-file discovery independently.
+Configured Skill descriptors enter durable developer-message history during
+turn-attempt preparation; unchanged catalogs add nothing and retries reuse the
+same snapshot. The eager `skill_read` reads text without sandbox setup, and lazy
+`skill_checkout` copies files only on demand. Preserve repository-file discovery
+independently; it still uses the sandbox SDK instruction source.
 See `docs/run-lifecycle.md` for catalog refresh and prompt-placement boundaries.
 
 - Public clients talk only to the API.
