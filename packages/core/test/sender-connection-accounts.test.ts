@@ -108,6 +108,35 @@ test("child work retains the parent's account and owner", () => {
   ).toEqual(selected);
 });
 
+test("resource-bound accounts on the same provider are selected before ambiguity checks", () => {
+  const resource = "https://mail.example.test/org/one/mcp";
+  const target = { ...connection(), metadata: { resource: `${resource}/` } };
+  const other = {
+    ...connection(),
+    metadata: { resource: "https://mail.example.test/org/two/mcp" },
+  };
+  const input = {
+    servers: [{ ...server, connectionRef: { ...server.connectionRef, resource } }],
+    subjectId: "user:alice",
+    connections: [other, connection(), target],
+  };
+  expect(personalConnectionDelegationsFromVisibleConnections(input)).toMatchObject([
+    { connectionId: target.id, ownerSubjectId: "user:alice" },
+  ]);
+  expect(() =>
+    personalConnectionDelegationsFromVisibleConnections({
+      ...input,
+      authoritySelections: [{ serverId: server.id, connectionId: other.id }],
+    }),
+  ).toThrow("Selected account is unavailable");
+  expect(() =>
+    personalConnectionDelegationsFromVisibleConnections({
+      ...input,
+      connections: [target, { ...connection(), metadata: { resource } }],
+    }),
+  ).toThrow("Choose an account");
+});
+
 test("account-choice inputs accept neither ownership nor old consent grants", () => {
   const choice = { serverId: server.id, connectionId: crypto.randomUUID() };
   expect(McpConnectionAccountSelection.safeParse(choice).success).toBe(true);

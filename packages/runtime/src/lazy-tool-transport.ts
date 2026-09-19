@@ -489,6 +489,12 @@ export class LazyToolRuntime {
           tools: descriptors,
           total: tools.length,
           nextCursor: index < tools.length ? descriptors.at(-1)!.name : null,
+          ...(prefix && tools.length === 0
+            ? {
+                message:
+                  "No tool names match this literal prefix. Retry tool_list without namePrefix to browse the authorized catalog; tool names can include a server namespace.",
+              }
+            : {}),
         });
       },
     }) as unknown as Tool;

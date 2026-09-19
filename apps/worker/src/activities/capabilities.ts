@@ -22,6 +22,7 @@ import {
   getWorkspaceOpenRouterCustomModelForExecution,
   listSessionMcpServerMetadata,
   listSessionMcpServersForRun,
+  getSessionAttemptMcpApprovalPolicies,
   listWorkspaceGatewayCustomModels,
   listWorkspaceOpenRouterCustomModels,
   workspaceCodexSubscriptionActive,
@@ -47,10 +48,24 @@ export async function settingsWithSessionMcpServersForRun(
   },
 ): Promise<Settings> {
   const encryptionKey = environmentsEncryptionKeyBytes(settings);
+  const policies = await getSessionAttemptMcpApprovalPolicies(
+    db,
+    workspaceId,
+    sessionId,
+    attemptId,
+  );
+  const policySettings = {
+    ...settings,
+    mcpServers: settings.mcpServers.map((server) =>
+      Object.hasOwn(policies, server.id)
+        ? { ...server, requireApproval: policies[server.id] }
+        : server,
+    ),
+  };
   if (!encryptionKey) {
     const metadata = await listSessionMcpServerMetadata(db, workspaceId, sessionId);
     if (metadata.length === 0) {
-      return settings;
+      return policySettings;
     }
     if (metadata.some((server) => server.headerNames.length > 0)) {
       throw new Error(
@@ -69,7 +84,7 @@ export async function settingsWithSessionMcpServersForRun(
   // overlaid into settings. A session projection read earlier in the turn can
   // be stale after a concurrent mcpCredentialUpdates renewal.
   options?.onResolvedServers?.(servers);
-  return settingsWithSessionMcpServers(settings, servers);
+  return settingsWithSessionMcpServers(policySettings, servers);
 }
 
 export function settingsWithSessionMcpServers(

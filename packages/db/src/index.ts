@@ -1,3 +1,4 @@
+export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 import {
   projectSessionAdmissionBlock,
@@ -214,6 +215,7 @@ import type {
   SessionHumanInputRequest,
   LineageNode,
   SessionMcpApprovalPolicy,
+  SessionMcpApprovalPolicyTarget,
   SessionBackgroundCommand,
   SessionSkill,
   SessionMcpServerMetadata,
@@ -6193,6 +6195,7 @@ export type EnabledMcpCapabilityServer = {
   timeoutMs?: number;
   cacheToolsList?: boolean;
   requireApproval?: SessionMcpApprovalPolicy;
+  approvalFloor?: SessionMcpApprovalPolicy;
   /**
    * Credential request headers stored encrypted at enable time
    * (AES-256-GCM under the workspace-variableSets key). Decrypted only at
@@ -6226,7 +6229,7 @@ export type UpdateSessionMcpServerCredentialsResult = {
 };
 
 export type UpdateSessionMcpApprovalPolicyResult = {
-  server: SessionMcpServerMetadata | null;
+  server: SessionMcpApprovalPolicyTarget | null;
   changed: boolean;
 };
 
@@ -9574,6 +9577,9 @@ export async function listEnabledMcpCapabilityServers(
         ...(timeoutMs ? { timeoutMs } : {}),
         ...(cacheToolsList !== undefined ? { cacheToolsList } : {}),
         ...(requireApproval !== undefined ? { requireApproval } : {}),
+        ...(item.workspaceId === null
+          ? { approvalFloor: sessionMcpApprovalPolicyConfig(metadata.requireApproval) ?? false }
+          : {}),
         ...(headersEncrypted ? { headersEncrypted } : {}),
         ...(connectionRef ? { connectionRef } : {}),
       },
@@ -30186,18 +30192,19 @@ export async function updateSessionMcpApprovalPolicy(
     requireApproval: SessionMcpApprovalPolicy;
   },
 ): Promise<UpdateSessionMcpApprovalPolicyResult> {
-  return await withWorkspaceRls(
+  return await withWorkspaceSessionActivityRls(
     db,
     input.workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(
-        async (tx) => await updateSessionMcpApprovalPolicyInTransaction(tx, input),
+        async (tx) =>
+          await updateSessionMcpApprovalPolicyInTransaction(tx as unknown as Database, input),
       ),
   );
 }
 
 async function updateSessionMcpApprovalPolicyInTransaction(
-  tx: Pick<Database, "select" | "update">,
+  tx: Database,
   input: {
     workspaceId: string;
     sessionId: string;
@@ -30218,7 +30225,42 @@ async function updateSessionMcpApprovalPolicyInTransaction(
     .for("update")
     .limit(1);
   if (!existing) {
-    return { server: null, changed: false };
+    const enabled = await listEnabledMcpCapabilityServers(tx, input.workspaceId);
+    const inherited = enabled.find((server) => server.id === input.serverId);
+    if (!inherited) return { server: null, changed: false };
+    const [session] = await tx
+      .select({ policies: schema.sessions.mcpApprovalPolicies })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!session) return { server: null, changed: false };
+    const policy =
+      requireApprovalWithFloor(input.requireApproval, inherited.approvalFloor, true) ?? false;
+    const server = { id: input.serverId, source: "workspace" as const, requireApproval: policy };
+    if (
+      Object.hasOwn(session.policies, input.serverId) &&
+      JSON.stringify(session.policies[input.serverId]) === JSON.stringify(policy)
+    ) {
+      return { server, changed: false };
+    }
+    await withWorkspaceSessionActivityRls(tx, input.workspaceId, async (activityDb) =>
+      activityDb
+        .update(schema.sessions)
+        .set({ mcpApprovalPolicies: { ...session.policies, [input.serverId]: policy } })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        ),
+    );
+    return { server, changed: true };
   }
   const current = existing.requireApproval ?? false;
   if (JSON.stringify(current) === JSON.stringify(input.requireApproval)) {
@@ -31628,6 +31670,7 @@ export type SessionCreateInput = {
   skills?: SessionSkill[];
   tools?: ToolRef[];
   toolPolicy?: SessionToolPolicy;
+  mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy>;
   metadata: Record<string, unknown>;
   createdBy?: TurnInitiator;
   createdByContext?: TurnInitiatorContext;
@@ -32367,6 +32410,7 @@ async function createSessionInTransaction(
               inheritedFromSessionId: input.parentSessionId ?? null,
             },
             metadata: sessionMetadata,
+            mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
             ...creatorColumns(frozenCreator),
             ...(privateCreateOwnerMembershipId
               ? {
@@ -65389,6 +65433,26 @@ export async function claimSessionWorkForAttempt(
           const mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy> = Object.fromEntries(
             policyRows.map((row) => [row.serverId, row.requireApproval ?? false]),
           );
+          const inheritedPolicies = session.mcpApprovalPolicies ?? {};
+          if (Object.keys(inheritedPolicies).length > 0) {
+            const enabled = await listEnabledMcpCapabilityServers(
+              tx as unknown as Database,
+              workspaceId,
+            );
+            for (const server of enabled) {
+              if (
+                Object.hasOwn(inheritedPolicies, server.id) &&
+                !Object.hasOwn(mcpApprovalPolicies, server.id)
+              ) {
+                mcpApprovalPolicies[server.id] =
+                  requireApprovalWithFloor(
+                    inheritedPolicies[server.id],
+                    server.approvalFloor,
+                    true,
+                  ) ?? false;
+              }
+            }
+          }
           const connectorPolicyRows = await tx
             .select({
               id: schema.connectorActionPolicies.id,
@@ -77577,7 +77641,7 @@ export async function appendSessionEventsWithLockedSessionUpdate(
               updates,
             }),
           updateSessionMcpApprovalPolicy: async (serverId, requireApproval) =>
-            await updateSessionMcpApprovalPolicyInTransaction(tx, {
+            await updateSessionMcpApprovalPolicyInTransaction(tx as unknown as Database, {
               workspaceId,
               sessionId,
               serverId,
@@ -77900,6 +77964,7 @@ function mapSession(
     tools: row.tools as ToolRef[],
     toolPolicy: row.toolPolicy as SessionToolPolicy,
     toolPolicyVersion: Number(row.toolPolicyVersion),
+    mcpApprovalPolicies: row.mcpApprovalPolicies,
     metadata: row.metadata,
     ...(tenancyViewer?.activated
       ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) }
@@ -78777,7 +78842,7 @@ function sessionMcpApprovalPolicyConfig(value: unknown): SessionMcpApprovalPolic
  * registration owns its policy outright, with no OpenGeni-reviewed floor to
  * protect.
  */
-function requireApprovalWithFloor(
+export function requireApprovalWithFloor(
   rawConfigValue: unknown,
   rawMetadataValue: unknown,
   isGlobalRow: boolean,

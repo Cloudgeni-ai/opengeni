@@ -12,6 +12,8 @@ export type ConnectAccountsProps = {
   returnUrl?: string;
   /** Uses authenticated catalogue assets and exact connection references for service identity. */
   client?: OpenGeniClient | undefined;
+  /** Reconcile surrounding service state after a confirmed account disconnect. */
+  onDisconnected?: (() => void) | undefined;
 };
 
 /** Local credential revocation only. Unknown or changed versions must be
@@ -26,7 +28,13 @@ export function ConnectAccounts(props: ConnectAccountsProps) {
   return <ScopedAccounts key={generation} {...props} />;
 }
 
-function ScopedAccounts({ controller, className, returnUrl, client }: ConnectAccountsProps) {
+function ScopedAccounts({
+  controller,
+  className,
+  returnUrl,
+  client,
+  onDisconnected,
+}: ConnectAccountsProps) {
   const view = useConnect(controller);
   const [accounts, setAccounts] = useState<ConnectAccount[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -55,7 +63,7 @@ function ScopedAccounts({ controller, className, returnUrl, client }: ConnectAcc
       })
       .then(([result, metadata]) => {
         if (!abort.signal.aborted) {
-          setAccounts(structuredClone(result));
+          setAccounts(structuredClone(result.filter((account) => account.status !== "disabled")));
           if (client && metadata) setCatalog({ client, items: metadata.items });
         }
       })
@@ -84,7 +92,10 @@ function ScopedAccounts({ controller, className, returnUrl, client }: ConnectAcc
         expectedVersion,
         signal: abort.signal,
       });
-      if (!abort.signal.aborted) setReload((value) => value + 1);
+      if (!abort.signal.aborted) {
+        setReload((value) => value + 1);
+        onDisconnected?.();
+      }
     } catch {
       if (!abort.signal.aborted) {
         // Outcome may be unknown. Drop the inventory so a second click cannot

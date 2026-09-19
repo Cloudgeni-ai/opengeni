@@ -36,7 +36,7 @@ export type McpServerOption = {
   name: string;
   logoSrc?: string | null;
   detail?: string;
-  connectionStatus?: "ready" | "reconnect" | "unavailable" | "unknown";
+  connectionStatus?: "ready" | "connect" | "reconnect" | "unavailable" | "unknown";
 };
 
 const NON_SELECTABLE_SESSION_MCP_SERVER_IDS = new Set(["opengeni"]);

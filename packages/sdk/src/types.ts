@@ -699,9 +699,17 @@ export type UpdateSessionMcpApprovalPolicyRequest = {
 };
 
 export type UpdateSessionMcpApprovalPolicyResponse = {
-  server: SessionMcpServerMetadata;
+  server: SessionMcpApprovalPolicyTarget;
   effectiveFrom: "next_attempt";
 };
+
+export type SessionMcpApprovalPolicyTarget =
+  | SessionMcpServerMetadata
+  | {
+      id: string;
+      source: "workspace";
+      requireApproval: SessionMcpApprovalPolicy;
+    };
 
 export type ConnectionKind = "oauth2" | "api_key" | "app_install" | "delegated";
 export type ConnectionStatus = "active" | "needs_reauth" | "revoked" | "error";
@@ -1459,6 +1467,7 @@ export type Session = {
   firstPartyMcpPermissions: string[] | null;
   firstPartyMcpTools: FirstPartyMcpToolName[];
   mcpServers: SessionMcpServerMetadata[];
+  mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
   parentSessionId: string | null;
   /** Immutable server-authored nested-agent lineage and policy snapshot. */
   rootSessionId: string;
@@ -2991,6 +3000,8 @@ export type CreateSessionRequest = {
   firstPartyMcpPermissions?: string[] | undefined;
   firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
+  mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   /** Atomically attach the server-derived personal Variable Set/Rig closure to the initial turn. */
   personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,

@@ -35,6 +35,9 @@ See [product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), and [run lifecycle](run-lifecycle.md).
 
+Session `mcpApprovalPolicies` requires session-control authority. Claims freeze
+inherited approvals with catalog floors; policies grant neither capabilities nor credentials.
+
 ---
 
 ## 3. Core invariants

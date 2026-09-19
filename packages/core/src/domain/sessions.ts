@@ -60,6 +60,7 @@ import {
   type SessionMcpCredentialUpdateInput,
   type SessionMcpServerInput,
   type SessionMcpServerMetadata,
+  type SessionMcpApprovalPolicyTarget,
   type SubmittedTimelineAnnotation,
   type TimelineAnnotation,
   type UpdateSessionMcpApprovalPolicyResponse,
@@ -90,6 +91,8 @@ import {
   listDistinctVariableSetSelectionsInGroup,
   listDistinctRigVersionIdsInGroup,
   listInstalledPortableSkills,
+  listEnabledMcpCapabilityServers,
+  requireApprovalWithFloor,
   getSandbox,
   getSession,
   getInitializedSessionCreateReplay,
@@ -847,6 +850,7 @@ export async function createAndStartSessionWithOutcome(input: {
   // Encrypted DB rows plus matching safe metadata for create-time per-session
   // MCP servers. Metadata is the only shape emitted in events/responses.
   mcpServers?: CreateSessionMcpServerInput[];
+  mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy>;
   sessionMcpServers?: SessionMcpServerMetadata[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
@@ -1069,6 +1073,7 @@ export async function createAndStartSessionWithOutcome(input: {
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
+      mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
       personalConnectionDelegations: input.personalConnectionDelegations ?? [],
       initialPersonalResourceAttachmentIntent:
         input.initialPersonalResourceAttachmentIntent ?? null,
@@ -1163,6 +1168,7 @@ export async function createAndStartSessionWithOutcome(input: {
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
+      mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
       personalConnectionDelegations: input.personalConnectionDelegations ?? [],
       initialPersonalResourceAttachmentIntent:
         input.initialPersonalResourceAttachmentIntent ?? null,
@@ -2344,6 +2350,23 @@ async function createSessionForRequestInFileScope(
     capabilityRuntimeSettings,
     sessionMcpServers.runtimeServers,
   );
+  const requestedMcpPolicies =
+    payload.mcpApprovalPolicies ?? parentSession?.mcpApprovalPolicies ?? {};
+  const mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy> = {};
+  if (Object.keys(requestedMcpPolicies).length > 0) {
+    requirePermission(grant, "sessions:control");
+    const inheritedServers = await listEnabledMcpCapabilityServers(db, workspaceId);
+    for (const [id, policy] of Object.entries(requestedMcpPolicies)) {
+      const inherited = inheritedServers.find((server) => server.id === id);
+      if (!inherited || sessionMcpServers.runtimeServers.some((server) => server.id === id)) {
+        throw new HTTPException(422, {
+          message: `MCP approval policy must name an enabled inherited capability: ${id}`,
+        });
+      }
+      mcpApprovalPolicies[id] =
+        requireApprovalWithFloor(policy, inherited.approvalFloor, true) ?? false;
+    }
+  }
   const resources = normalizeResources(
     hasOwnProperty(rawPayload, "resources")
       ? payload.resources
@@ -3168,6 +3191,7 @@ async function createSessionForRequestInFileScope(
       firstPartyMcpPermissions,
       firstPartyMcpTools,
       mcpServers: sessionMcpServers.dbServers,
+      mcpApprovalPolicies,
       sessionMcpServers: sessionMcpServers.metadata,
       personalConnectionDelegations,
       initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
@@ -3793,7 +3817,7 @@ export async function updateSessionMcpApprovalPolicy(
   });
   requirePermission(grant, "sessions:control");
 
-  const outcome: { server?: SessionMcpServerMetadata } = {};
+  const outcome: { server?: SessionMcpApprovalPolicyTarget } = {};
   const events = await appendSessionEventsWithLockedSessionUpdate(
     deps.db,
     grant.workspaceId,
