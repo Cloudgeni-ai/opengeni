@@ -143,6 +143,49 @@ test("history hydration preserves a request while a distinct failure gets a fres
   expect(container.querySelector("button")!.textContent).toBe("Retry requested");
 });
 
+test("safety refusal never offers retry and preserves model selection and a new message", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  let retries = 0;
+  let modelOpens = 0;
+  await act(async () =>
+    root!.render(
+      <>
+        <FailedSessionBanner
+          failure={{
+            reason: "Provider declined this request",
+            failedAt: null,
+            consecutiveRecoveryCount: null,
+            safetyRefusal: true,
+          }}
+          actions={{
+            onRetry: async () => {
+              retries++;
+              return true;
+            },
+            retryBlocker: null,
+            modelDisabled: false,
+            onChooseModel: () => {
+              modelOpens++;
+            },
+          }}
+        />
+        <textarea aria-label="Message" defaultValue="My new request" />
+      </>,
+    ),
+  );
+  const buttons = [...container.querySelectorAll("button")];
+  expect(buttons.map((button) => button.textContent)).toEqual(["Choose another model"]);
+  expect(container.textContent).toContain("This request cannot be retried");
+  expect(container.textContent).toContain("send a new message below");
+  await act(async () => buttons[0]!.click());
+  expect(modelOpens).toBe(1);
+  expect(retries).toBe(0);
+  expect(container.querySelector("textarea")?.value).toBe("My new request");
+  expect(container.querySelector("textarea")?.disabled).toBe(false);
+});
+
 test("credit exhaustion retains model selection without offering automatic retry", async () => {
   const container = document.createElement("div");
   document.body.append(container);
