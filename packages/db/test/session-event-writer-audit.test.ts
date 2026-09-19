@@ -414,6 +414,9 @@ const expectedOutboxWriters: Record<
 
 const expectedFailedChildOutboxCallers = [
   "applySessionTurnSettlement",
+  // arm owns the canonical child-lifecycle prefix (including parent session)
+  // before atomically emitting a false-capacity-recovery terminal boundary.
+  "armCodexCapacityWait",
   "failSessionWorkBeforeAttemptClaim",
   "recoverSessionDispatch",
   "settleCodexCredentialFailover",

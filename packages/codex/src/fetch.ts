@@ -11,6 +11,7 @@
 // Stream parsing is delegated to the SDK (SSE passthrough; spec §0(d)).
 
 import { randomUUID } from "node:crypto";
+import { hasMeaningfulCodexOutput } from "./meaningful-output";
 import { CODEX_ORIGINATOR } from "./constants";
 import { normalizeCodexRequestBody } from "./normalize";
 import { opaqueProviderArtifactFingerprints } from "./opaque-artifact";
@@ -232,6 +233,7 @@ type RequestTerminalOutcome = "completed" | "failed" | "timed_out";
 
 type SemanticTerminalState = {
   phase: "completed" | "failed" | null;
+  meaningfulOutput?: boolean;
   /** Non-streaming callers must parse the complete SSE body before settling. */
   deferTransportTerminal: boolean;
 };
@@ -321,6 +323,13 @@ function markSemanticTerminal(state: SemanticTerminalState, phase: "completed" |
   if (state.phase === null) {
     state.phase = phase;
   }
+}
+
+/** EOF and post-terminal cleanup must preserve the same recovery evidence. */
+function semanticCompletionEvidence(state: SemanticTerminalState | undefined): {
+  meaningfulOutput?: boolean;
+} {
+  return state?.phase === "completed" ? { meaningfulOutput: state.meaningfulOutput === true } : {};
 }
 
 function terminalOutcomeForPhase(
@@ -437,6 +446,7 @@ async function observedResponse(
     if (semanticTerminal) markSemanticTerminal(semanticTerminal, "failed");
     await emitRequestEvent(audit, {
       phase: semanticTerminal?.phase ?? (res.ok ? "completed" : "failed"),
+      ...semanticCompletionEvidence(semanticTerminal),
       responseObserved: true,
       status: res.status,
       ...(requestId ? { providerRequestId: requestId } : {}),
@@ -470,6 +480,7 @@ async function observedResponse(
         void reader.cancel(error).catch(() => undefined);
         void emitRequestEvent(audit, {
           phase,
+          ...semanticCompletionEvidence(semanticTerminal),
           responseObserved: true,
           ...(phase === "timed_out" ? { timeoutClass: klass } : {}),
           status: res.status,
@@ -497,6 +508,7 @@ async function observedResponse(
         void reader.cancel(reason).catch(() => undefined);
         void emitRequestEvent(audit, {
           phase: semanticTerminal?.phase ?? "failed",
+          ...semanticCompletionEvidence(semanticTerminal),
           responseObserved: true,
           status: res.status,
           ...(requestId ? { providerRequestId: requestId } : {}),
@@ -531,6 +543,7 @@ async function observedResponse(
           if (!semanticTerminal?.deferTransportTerminal || semanticTerminal.phase !== null) {
             await emitRequestEvent(audit, {
               phase: semanticTerminal?.phase ?? (res.ok ? "completed" : "failed"),
+              ...semanticCompletionEvidence(semanticTerminal),
               responseObserved: true,
               status: res.status,
               ...(requestId ? { providerRequestId: requestId } : {}),
@@ -566,6 +579,7 @@ async function observedResponse(
         }
         await emitRequestEvent(audit, {
           phase: semanticPhase ?? "failed",
+          ...semanticCompletionEvidence(semanticTerminal),
           responseObserved: true,
           status: res.status,
           ...(requestId ? { providerRequestId: requestId } : {}),
@@ -586,6 +600,7 @@ async function observedResponse(
         }
         await emitRequestEvent(audit, {
           phase: semanticTerminal?.phase ?? "failed",
+          ...semanticCompletionEvidence(semanticTerminal),
           responseObserved: true,
           status: res.status,
           ...(requestId ? { providerRequestId: requestId } : {}),
@@ -846,8 +861,9 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         return buffered;
       }
       if (callerWantsStream) {
-        res = validateCodexStream(res, (phase) => {
+        res = validateCodexStream(res, (phase, meaningfulOutput) => {
           markSemanticTerminal(semanticTerminal, phase);
+          semanticTerminal.meaningfulOutput = meaningfulOutput === true;
         });
       } else {
         res = await sseToJsonResponse(res, audit, semanticTerminal);
@@ -1092,6 +1108,7 @@ async function sseToJsonResponse(
   markSemanticTerminal(semanticTerminal, "completed");
   await emitRequestEvent(audit, {
     phase: "completed",
+    meaningfulOutput: hasMeaningfulCodexOutput(final?.output),
     responseObserved: true,
     status: res.status,
     ...(upstreamRequestId ? { providerRequestId: upstreamRequestId } : {}),
@@ -1373,7 +1390,7 @@ function codexSseFailureError(
  */
 function validateCodexStream(
   res: Response,
-  onSemanticTerminal?: (phase: "completed" | "failed") => void,
+  onSemanticTerminal?: (phase: "completed" | "failed", meaningfulOutput?: boolean) => void,
 ): Response {
   if (!res.body) {
     onSemanticTerminal?.("failed");
@@ -1400,6 +1417,12 @@ function validateCodexStream(
   const encoder = new TextEncoder();
   let buffer = "";
   let successfulTerminalSeen = false;
+  let meaningfulOutput = false;
+  const observeOutput = (output: unknown) => {
+    meaningfulOutput ||= hasMeaningfulCodexOutput(output);
+  };
+  const observeTerminal = (phase: "completed" | "failed") =>
+    onSemanticTerminal?.(phase, phase === "completed" && meaningfulOutput);
   const emitCompleteBlocks = (
     controller: TransformStreamDefaultController<Uint8Array>,
     final: boolean,
@@ -1409,7 +1432,7 @@ function validateCodexStream(
       const block = buffer.slice(0, boundary.start);
       const separator = buffer.slice(boundary.start, boundary.end);
       buffer = buffer.slice(boundary.end);
-      successfulTerminalSeen ||= inspectCodexSseBlock(block, res, onSemanticTerminal);
+      successfulTerminalSeen ||= inspectCodexSseBlock(block, res, observeTerminal, observeOutput);
       controller.enqueue(encoder.encode(`${block}${separator}`));
       boundary = findSseBlockBoundary(buffer, final);
     }
@@ -1423,7 +1446,12 @@ function validateCodexStream(
       buffer += decoder.decode();
       emitCompleteBlocks(controller, true);
       if (buffer.length > 0) {
-        successfulTerminalSeen ||= inspectCodexSseBlock(buffer, res, onSemanticTerminal);
+        successfulTerminalSeen ||= inspectCodexSseBlock(
+          buffer,
+          res,
+          observeTerminal,
+          observeOutput,
+        );
         controller.enqueue(encoder.encode(buffer));
         buffer = "";
       }
@@ -1486,14 +1514,15 @@ const CODEX_TERMINAL_TYPE_HINTS = [
 ] as const;
 
 /**
- * Parse only blocks that can be terminal. Ordinary deltas and output items pass
- * without object allocation; failed/error/incomplete terminals throw before the
+ * Parse terminal blocks and completed output items (retaining only a progress
+ * boolean). Ordinary deltas pass without object allocation; failure terminals throw before the
  * model can mistake them for an ordinary response_done event.
  */
 function inspectCodexSseBlock(
   block: string,
   source: Response,
   onSemanticTerminal?: (phase: "completed" | "failed") => void,
+  onOutput?: (output: unknown) => void,
 ): boolean {
   const lines = block.split(/\r\n|\r|\n/);
   const dataStr = lines
@@ -1503,7 +1532,10 @@ function inspectCodexSseBlock(
   if (!dataStr || dataStr === "[DONE]") {
     return false;
   }
-  if (!CODEX_TERMINAL_TYPE_HINTS.some((terminalType) => dataStr.includes(terminalType))) {
+  if (
+    !dataStr.includes('"response.output_item.done"') &&
+    !CODEX_TERMINAL_TYPE_HINTS.some((terminalType) => dataStr.includes(terminalType))
+  ) {
     return false;
   }
   let ev: CodexSseEvent;
@@ -1513,6 +1545,7 @@ function inspectCodexSseBlock(
     return false;
   }
   const terminal = classifyCodexSseTerminal(ev);
+  if (ev.type === "response.output_item.done") onOutput?.([ev.item]);
   if (terminal?.phase === "failed") {
     onSemanticTerminal?.("failed");
     throw codexSseFailureError(
@@ -1528,6 +1561,7 @@ function inspectCodexSseBlock(
     );
   }
   if (terminal?.phase === "completed") {
+    onOutput?.(ev.response?.output);
     onSemanticTerminal?.("completed");
     return true;
   }

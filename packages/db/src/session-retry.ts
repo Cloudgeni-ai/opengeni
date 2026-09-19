@@ -8,6 +8,7 @@ import {
 import { and, desc, eq, sql } from "drizzle-orm";
 import { rawRows, type Database, type SessionActivityDatabase } from "./database";
 import * as schema from "./schema";
+import { clearCodexCapacityRecovery } from "./codex-capacity-recovery";
 import { fromPostgresLosslessJson, withLosslessContentWriteVersion } from "./lossless-json";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 import {
@@ -193,6 +194,29 @@ export async function retryFailedSessionInTransaction(
   // its original user history item is inserted. Started turns retain history.
   const preclaim = turn.executionGeneration === 0;
   const policy = input.executionPolicy;
+  const capacityRecoveryRetry =
+    failurePayload !== null &&
+    typeof failurePayload === "object" &&
+    !Array.isArray(failurePayload) &&
+    (failurePayload as Record<string, unknown>).code === "codex_capacity_recovery_exhausted";
+  // Only this explicitly authorized, exact failure-event Retry may replenish
+  // the breaker. Preserve accepted credential policy/refusal ledgers and all
+  // unrelated recovery budgets. Receipt replay returned above cannot reset it.
+  const retryMetadata = capacityRecoveryRetry
+    ? clearCodexCapacityRecovery(turn.metadata ?? {})
+    : turn.metadata;
+  if (capacityRecoveryRetry) {
+    await db
+      .update(schema.sessionGoals)
+      .set({ continuationSuppressedTurnId: null, updatedAt: now })
+      .where(
+        and(
+          eq(schema.sessionGoals.workspaceId, workspaceId),
+          eq(schema.sessionGoals.sessionId, sessionId),
+          eq(schema.sessionGoals.continuationSuppressedTurnId, turn.id),
+        ),
+      );
+  }
   await db
     .update(schema.sessionTurns)
     .set({
@@ -203,7 +227,7 @@ export async function retryFailedSessionInTransaction(
       model: policy.productModelId,
       reasoningEffort: policy.reasoningEffort,
       latencyMode: policy.latencyMode,
-      metadata: metadataWithTurnExecutionPolicyV1(turn.metadata, policy),
+      metadata: metadataWithTurnExecutionPolicyV1(retryMetadata, policy),
     })
     .where(eq(schema.sessionTurns.id, turn.id));
   const events = await db

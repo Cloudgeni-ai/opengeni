@@ -1166,6 +1166,11 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           { onArmed: () => (leases.codex.held = false) },
         );
         control.activityError = error;
+        if (evaluated.action === "stopped") {
+          control.activityStatus = evaluated.sessionStatus === "queued" ? "idle" : "failed";
+          control.turnMetricOutcome = "failed";
+          return claimedResult({ status: control.activityStatus });
+        }
         if (evaluated.action === "resumed") {
           control.activityStatus = "recovering";
           control.turnMetricOutcome = "recovering";

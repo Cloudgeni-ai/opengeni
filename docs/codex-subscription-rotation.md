@@ -175,6 +175,46 @@ accepted holder.
 
 ## Public status semantics
 
+### Same-turn capacity recovery
+
+Capacity reconciliation and credential acquisition apply the same accepted model,
+failure exclusions and failover limit, including manual pins and rotation-off.
+Quota refusals require a newer verified cooldown clear; elapsed time or an account
+wake alone does not clear them. Typed rate-limit refusals can recover after the
+same or a newer rate-limit revision's deadline expires. Auth/status refusals
+require active health at a newer credential version, produced by reconnect or
+explicit status repair. Status repair advances that version and wakes waiters.
+Legacy ID-only refusals remain excluded when their ordering cannot be proven.
+Typed quota cooldowns remain eligible for the
+existing bounded control-plane refresh even after their reset time passes.
+
+Genuine `waiting_capacity` has no elapsed-time expiry. Provider resets and durable
+account revisions re-evaluate the same turn, without a model call or retry-budget
+charge. Manual pins, rotation-off, selected model and accepted source policy stay
+binding, and Pause prevents resumption.
+
+The turn's `codexCapacityRecoveryV1` metadata separately tracks false resumptions:
+an available decision followed by its resumed execution returning to capacity
+waiting without a completed model request. Each such failure spends
+one of ten attempts. A persisted equal-jitter exponential delay starts at 30–60
+seconds and caps at 15 minutes; account wakes acknowledge their revisions but do
+not bypass that delay. Wait timers and metadata checks do not spend or reset the
+budget. A current, exact-attempt completed model-request event clears it only
+with transport-proven substantive assistant/tool output. Empty, reasoning-only,
+failed or stale completion events cannot clear it. A worker redispatch or credential failover preserves
+the outstanding resumption receipt, but only its exact current attempt may close
+it; stale predecessor attempts cannot charge the budget.
+
+The tenth false resumption atomically closes the attempt and turn as failed,
+supersedes the waiter, emits `codex_capacity_recovery_exhausted`, and suppresses
+automatic goal continuation. The session is failed (or queued for already accepted
+human input), not falsely presented as still recovering. The authorized exact
+failure-event Retry reopens the retained turn, replenishes only its capacity
+budget and clears only its matching goal suppression; accepted credential policy
+and refusal ledgers remain intact. Pause, unresolved execution and receipt replay
+cannot reset the budget. A new Continue message starts a new turn; no credits are redeemed, model is
+switched, or pause is overridden automatically.
+
 `GET /v1/workspaces/:id/codex/status` keeps the backward-compatible
 `activeAccount` and `valid` fields. `valid` is a live model-catalog probe of the
 active account only; it is not a readiness claim about every connected account.

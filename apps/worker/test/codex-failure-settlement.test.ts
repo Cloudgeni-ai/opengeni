@@ -502,84 +502,91 @@ describe("definitive Codex failure settlement", () => {
     });
   }
 
-  test("immediately re-evaluates a newly armed wait and recovers when capacity won the race", async () => {
-    const callOrder: string[] = [];
-    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
-      codexAccount("serving"),
-      codexAccount("alternate"),
-    ] as never);
-    const getRotation = spyOn(opengeniDb, "getCodexRotationSettings").mockResolvedValue({
-      activeCredentialId: "serving",
-      rotationEnabled: false,
-      rotationStrategy: "most_remaining",
-    } as never);
-    const getSession = spyOn(opengeniDb, "getSessionCodexState").mockResolvedValue({
-      pinnedCredentialId: null,
-      lastCredentialId: "serving",
-      pinSource: null,
-    });
-    const getGoal = spyOn(opengeniDb, "getSessionGoal").mockResolvedValue({
-      id: "goal-1",
-      status: "active",
-      version: 3,
-    } as never);
-    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
-      action: "recorded",
-      failoverCount: 1,
-      maxFailovers: 1,
-      exhausted: false,
-    });
-    const armWait = spyOn(opengeniDb, "armCodexCapacityWait").mockImplementation(async () => {
-      callOrder.push("arm");
-      return {
-        action: "waiting",
-        waiter: {
-          id: "waiter-1",
-          generation: 4,
-          nextCheckAt: new Date("2026-09-03T12:00:00.000Z"),
-          wakeRevision: 7,
-        },
-        events: [],
-      } as never;
-    });
-    const reconcileWait = spyOn(opengeniDb, "reconcileCodexCapacityWait").mockImplementation(
-      async () => {
-        callOrder.push("reconcile");
+  for (const armedAction of ["waiting", "stopped"] as const) {
+    test(`capacity settlement ${armedAction === "waiting" ? "immediately reconciles a new wait" : "publishes the breaker and exits failed without reconciling"}`, async () => {
+      const callOrder: string[] = [];
+      const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
+        codexAccount("serving"),
+        codexAccount("alternate"),
+      ] as never);
+      const getRotation = spyOn(opengeniDb, "getCodexRotationSettings").mockResolvedValue({
+        activeCredentialId: "serving",
+        rotationEnabled: false,
+        rotationStrategy: "most_remaining",
+      } as never);
+      const getSession = spyOn(opengeniDb, "getSessionCodexState").mockResolvedValue({
+        pinnedCredentialId: null,
+        lastCredentialId: "serving",
+        pinSource: null,
+      });
+      const getGoal = spyOn(opengeniDb, "getSessionGoal").mockResolvedValue({
+        id: "goal-1",
+        status: "active",
+        version: 3,
+      } as never);
+      const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+        action: "recorded",
+        failoverCount: 1,
+        maxFailovers: 1,
+        exhausted: false,
+      });
+      const armWait = spyOn(opengeniDb, "armCodexCapacityWait").mockImplementation(async () => {
+        callOrder.push("arm");
         return {
-          action: "resumed",
-          waiter: { id: "waiter-1", generation: 4 },
+          action: armedAction,
+          sessionStatus: "failed",
+          waiter: {
+            id: "waiter-1",
+            generation: 4,
+            nextCheckAt: new Date("2026-09-03T12:00:00.000Z"),
+            wakeRevision: 7,
+          },
           events: [],
         } as never;
-      },
-    );
-    const { deps, control } = codexFailureDeps();
-
-    try {
-      const result = await settleTurnFailure(deps as never);
-
-      expect(result).toEqual({ status: "recovering", turnId: "turn-1", attemptId: "attempt-1" });
-      expect(callOrder).toEqual(["arm", "reconcile"]);
-      expect(armWait).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({
-          goalId: "goal-1",
-          goalVersion: 3,
-          resetKind: "mutation_only",
-        }),
+      });
+      const reconcileWait = spyOn(opengeniDb, "reconcileCodexCapacityWait").mockImplementation(
+        async () => {
+          callOrder.push("reconcile");
+          return {
+            action: "resumed",
+            waiter: { id: "waiter-1", generation: 4 },
+            events: [],
+          } as never;
+        },
       );
-      expect(deps.leases.codex.held).toBe(false);
-      expect(control.activityStatus).toBe("recovering");
-      expect(control.turnMetricOutcome).toBe("recovering");
-    } finally {
-      listAccounts.mockRestore();
-      getRotation.mockRestore();
-      getSession.mockRestore();
-      getGoal.mockRestore();
-      quarantine.mockRestore();
-      armWait.mockRestore();
-      reconcileWait.mockRestore();
-    }
-  });
+      const { deps, control } = codexFailureDeps();
+
+      try {
+        const result = await settleTurnFailure(deps as never);
+
+        expect(result).toEqual({
+          status: armedAction === "stopped" ? "failed" : "recovering",
+          turnId: "turn-1",
+          attemptId: "attempt-1",
+        });
+        expect(callOrder).toEqual(armedAction === "stopped" ? ["arm"] : ["arm", "reconcile"]);
+        expect(armWait).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            goalId: "goal-1",
+            goalVersion: 3,
+            resetKind: "mutation_only",
+          }),
+        );
+        expect(deps.leases.codex.held).toBe(false);
+        expect(control.activityStatus).toBe(armedAction === "stopped" ? "failed" : "recovering");
+        expect(control.turnMetricOutcome).toBe(armedAction === "stopped" ? "failed" : "recovering");
+      } finally {
+        listAccounts.mockRestore();
+        getRotation.mockRestore();
+        getSession.mockRestore();
+        getGoal.mockRestore();
+        quarantine.mockRestore();
+        armWait.mockRestore();
+        reconcileWait.mockRestore();
+      }
+    });
+  }
 
   test("recovers without poisoning a credential reconnected after the failing request", async () => {
     const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({

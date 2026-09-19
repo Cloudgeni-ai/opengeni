@@ -1,6 +1,14 @@
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 export * from "./session-retry";
+import { unresolvedCodexCredentialFailures } from "./codex-failure-eligibility";
+import {
+  CODEX_CAPACITY_RECOVERY_KEY,
+  CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT,
+  readCodexCapacityRecovery,
+  codexFalseResumptionBackoffMs,
+  clearCodexCapacityRecovery,
+} from "./codex-capacity-recovery";
 import {
   projectSessionAdmissionBlock,
   type SessionAdmissionFence,
@@ -23901,30 +23909,46 @@ export async function setCodexCredentialStatusById(
   status: "active" | "needs_relogin" | "error",
   lastError: string | null,
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
-    if (!pool.condition) return false;
-    const [row] = await scopedDb
-      .select({ version: schema.codexSubscriptionCredentials.version })
-      .from(schema.codexSubscriptionCredentials)
-      .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), pool.condition))
-      .limit(1);
-    if (!row) {
-      return false;
-    }
-    const updated = await scopedDb
-      .update(schema.codexSubscriptionCredentials)
-      .set({ status, lastError, updatedAt: new Date() })
-      .where(
-        and(
-          eq(schema.codexSubscriptionCredentials.id, credentialId),
-          pool.condition,
-          eq(schema.codexSubscriptionCredentials.version, row.version),
-        ),
-      )
-      .returning({ id: schema.codexSubscriptionCredentials.id });
-    return updated.length > 0;
-  });
+  const mutation = await withCodexCapacityMutation(
+    db,
+    { workspaceId, reason: "credential_status_changed" },
+    async (scopedDb) => {
+      const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
+      if (!pool.condition) return { result: false, changed: false };
+      const [row] = await scopedDb
+        .select({
+          version: schema.codexSubscriptionCredentials.version,
+          status: schema.codexSubscriptionCredentials.status,
+        })
+        .from(schema.codexSubscriptionCredentials)
+        .where(and(eq(schema.codexSubscriptionCredentials.id, credentialId), pool.condition))
+        .limit(1);
+      if (!row) {
+        return { result: false, changed: false };
+      }
+      const updated = await scopedDb
+        .update(schema.codexSubscriptionCredentials)
+        .set({
+          status,
+          lastError,
+          updatedAt: new Date(),
+          // Explicit reactivation is a new credential-health generation. A
+          // same-turn status refusal can recover only after this or reconnect.
+          ...(status === "active" && row.status !== "active" ? { version: row.version + 1 } : {}),
+        })
+        .where(
+          and(
+            eq(schema.codexSubscriptionCredentials.id, credentialId),
+            pool.condition,
+            eq(schema.codexSubscriptionCredentials.version, row.version),
+            eq(schema.codexSubscriptionCredentials.status, row.status),
+          ),
+        )
+        .returning({ id: schema.codexSubscriptionCredentials.id });
+      return { result: updated.length > 0, changed: updated.length > 0 };
+    },
+  );
+  return mutation.result;
 }
 
 /**
@@ -24216,6 +24240,9 @@ export type CodexLeaseAccountStatus = Omit<
   | "source"
 > & {
   activeLeaseCount: number;
+  /** Absent only in pre-0383 compatibility schemas. */
+  exhaustedRevision?: number;
+  credentialVersion?: number;
   selectionCount: number;
   lastSelectedAt: Date | null;
 };
@@ -24273,6 +24300,8 @@ export type CodexCredentialLeaseSelectionContext<
   existingCredentialId: string | null;
   /** Credentials already consumed by a definitive refusal on this accepted turn. */
   failedCredentialIds?: readonly string[];
+  failoverExhausted?: boolean;
+  modelId?: string;
   /** Downstream-owned accepted-turn policy; absent until a resolver is supplied. */
   policyScope: TPolicyScope | null;
   /** Diagnostics produced while choosing one policy scope for this NEW allocation. */
@@ -24404,6 +24433,8 @@ type CodexLeaseCandidateRow = {
   usage_checked_at: Date | string | null;
   exhausted_until: Date | string | null;
   exhausted_kind: string | null;
+  exhausted_revision?: number | string | null;
+  credential_version?: number | string | null;
   selection_count: number;
   last_selected_at: Date | string | null;
   active_lease_count: number;
@@ -24437,6 +24468,8 @@ function mapCodexLeaseCandidate(
     secondaryResetAt: codexMetadataDate(row.secondary_reset_at),
     usageCheckedAt: codexMetadataDate(row.usage_checked_at),
     exhaustedUntil: codexMetadataDate(row.exhausted_until),
+    exhaustedRevision: Number(row.exhausted_revision ?? 0),
+    credentialVersion: Number(row.credential_version ?? 0),
     exhaustedKind:
       row.exhausted_kind === "quota" || row.exhausted_kind === "rate_limit"
         ? row.exhausted_kind
@@ -24490,6 +24523,7 @@ async function listCodexLeaseCandidatesInTransaction(
     select
       c.id,
       c.chatgpt_account_id,
+      c.version as credential_version,
       c.allowed_model_ids,
       c.label,
       c.account_email,
@@ -24510,6 +24544,7 @@ async function listCodexLeaseCandidatesInTransaction(
       -- pre-0383 compatibility schema while returning the real value once the
       -- additive column exists.
       to_jsonb(c) ->> 'exhausted_kind' as exhausted_kind,
+      to_jsonb(c) ->> 'exhausted_revision' as exhausted_revision,
       c.selection_count,
       c.last_selected_at,
       ${
@@ -24841,7 +24876,9 @@ export async function acquireCodexCredentialLease<
         rotationEnabled,
         rotationStrategy,
         existingCredentialId,
-        failedCredentialIds: [...failoverMetadata.failedCredentialIds],
+        failedCredentialIds: unresolvedCodexCredentialFailures(turn.metadata, accounts),
+        failoverExhausted: failoverMetadata.exhausted,
+        modelId: turn.model,
         policyScope,
         unavailableDiagnostics,
       });
@@ -25107,6 +25144,12 @@ export type CodexCapacitySelectionContext<
 export type ArmCodexCapacityWaitResult =
   | { action: "waiting"; waiter: CodexCapacityWait; events: SessionEvent[] }
   | {
+      action: "stopped";
+      sessionStatus: "failed" | "queued";
+      waiter: CodexCapacityWait;
+      events: SessionEvent[];
+    }
+  | {
       action: "stale";
       waiter: CodexCapacityWait | null;
       events: SessionEvent[];
@@ -25281,9 +25324,14 @@ export async function armCodexCapacityWait(
   ) {
     throw new Error("Codex capacity goal fence must be absent or contain a positive version");
   }
-  return await withSessionActivityRlsContext(
+  return await retrySessionActivityRls(
     db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+    input.workspaceId,
+    {
+      stage: "session_lifecycle_outbox.arm_codex_capacity_wait",
+      eventTypes: ["codex.capacity.waiting", "turn.failed", "session.status.changed"],
+      maxAttempts: 3,
+    },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {
         const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
@@ -25348,7 +25396,8 @@ export async function armCodexCapacityWait(
           turn?.sessionId === input.sessionId &&
           attempt?.accountId === input.accountId &&
           attempt?.sessionId === input.sessionId &&
-          attempt?.turnId === input.turnId;
+          attempt?.turnId === input.turnId &&
+          attempt?.executionGeneration === turn?.executionGeneration;
         if (!exactRowsMatch) {
           return {
             action: "stale",
@@ -25400,6 +25449,48 @@ export async function armCodexCapacityWait(
           } as const;
         }
 
+        const recovery = readCodexCapacityRecovery(turn.metadata);
+        const falseResumption =
+          recovery.resumeGeneration !== null &&
+          recovery.resumeGeneration <= turn.executionGeneration &&
+          existing?.status === "resumed" &&
+          existing.blockedTurnId === turn.id &&
+          existing.blockedTurnGeneration + 1 === recovery.resumeGeneration;
+        // A worker-death redispatch or credential failover can replace the first
+        // resumed attempt without making progress. Keep its one resumption
+        // receipt until an exact current attempt closes it or proves progress.
+        // The active-attempt/generation checks above reject stale predecessors.
+        const falseResumptions = recovery.falseResumptions + (falseResumption ? 1 : 0);
+        const stopped = falseResumptions >= CODEX_CAPACITY_FALSE_RESUMPTION_LIMIT;
+        const retryNotBefore =
+          falseResumption && !stopped
+            ? new Date(
+                now.getTime() + codexFalseResumptionBackoffMs(falseResumptions),
+              ).toISOString()
+            : recovery.retryNotBefore;
+        const recoveryMetadata = {
+          ...metadataWithoutTurnDispatchAttempt(turn.metadata),
+          [CODEX_CAPACITY_RECOVERY_KEY]: {
+            falseResumptions,
+            resumeGeneration: null,
+            retryNotBefore,
+          },
+        };
+        const [waitingPrompt] = stopped
+          ? await tx
+              .select({ id: schema.sessionTurns.id })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, input.sessionId),
+                  eq(schema.sessionTurns.status, "queued"),
+                  inArray(schema.sessionTurns.source, ["user", "api"]),
+                ),
+              )
+              .limit(1)
+          : [];
+        const sessionStatus = stopped ? (waitingPrompt ? "queued" : "failed") : "waiting_capacity";
         await closeSessionTurnAttemptInTransaction(tx, {
           id: input.attemptId,
           accountId: input.accountId,
@@ -25407,16 +25498,19 @@ export async function armCodexCapacityWait(
           sessionId: input.sessionId,
           turnId: input.turnId,
           executionGeneration: turn.executionGeneration,
-          outcome: "waiting_capacity",
+          outcome: stopped ? "failed" : "waiting_capacity",
           closedAt: now,
         });
 
         const generation = (existing?.generation ?? 0) + 1;
-        const nextCheckAt = nextCodexCapacityCheckAt(
+        const capacityCheckAt = nextCodexCapacityCheckAt(
           input.earliestResetAt,
           input.resetKind,
           0,
           now,
+        );
+        const nextCheckAt = new Date(
+          Math.max(capacityCheckAt.getTime(), retryNotBefore ? Date.parse(retryNotBefore) : 0),
         );
         const wakeRevision = (existing?.wakeRevision ?? 0) + 1;
         const waiterValues = {
@@ -25428,7 +25522,7 @@ export async function armCodexCapacityWait(
           blockedTurnGeneration: turn.executionGeneration,
           workflowId: input.workflowId,
           generation,
-          status: "waiting",
+          status: stopped ? "superseded" : "waiting",
           goalVersion,
           policyHash,
           earliestResetAt: input.earliestResetAt,
@@ -25440,7 +25534,7 @@ export async function armCodexCapacityWait(
           // Only a later capacity mutation creates pending outbox work.
           wakeRevision,
           observedWakeRevision: wakeRevision,
-          lastWakeReason: "capacity_wait_armed",
+          lastWakeReason: stopped ? "capacity_recovery_stopped" : "capacity_wait_armed",
           resumedUpdateId: null,
           updatedAt: now,
         } as const;
@@ -25464,7 +25558,7 @@ export async function armCodexCapacityWait(
           reason: "codex_capacity_wait",
           sequence,
           now,
-          preserveInterruptionRows: true,
+          preserveInterruptionRows: !stopped,
         });
         sequence = closedTools.sequence;
         const inserted = await tx
@@ -25477,7 +25571,7 @@ export async function armCodexCapacityWait(
                   workspaceId: input.workspaceId,
                   sessionId: input.sessionId,
                   sequence: ++sequence,
-                  type: "codex.capacity.waiting",
+                  type: stopped ? "turn.failed" : "codex.capacity.waiting",
                   payload: {
                     ...input.failurePayload,
                     recovery: "codex_capacity",
@@ -25492,6 +25586,18 @@ export async function armCodexCapacityWait(
                     resetKind: input.resetKind,
                     earliestResetAt: input.earliestResetAt?.toISOString() ?? null,
                     nextCheckAt: nextCheckAt.toISOString(),
+                    falseResumptions,
+                    ...(stopped
+                      ? {
+                          error:
+                            "Automatic capacity recovery stopped after 10 resumptions returned immediately to unavailable capacity. Use Retry or send Continue after checking subscription capacity.",
+                          code: "codex_capacity_recovery_exhausted",
+                          recovery: "user_message",
+                          recoveryExhausted: true,
+                          retryable: false,
+                          rotated: false,
+                        }
+                      : {}),
                   },
                   turnId: input.turnId,
                   turnGeneration: turn.executionGeneration,
@@ -25506,8 +25612,8 @@ export async function armCodexCapacityWait(
                   sequence: ++sequence,
                   type: "session.status.changed",
                   payload: {
-                    status: "waiting_capacity",
-                    reason: "codex_capacity",
+                    status: sessionStatus,
+                    reason: stopped ? "codex_capacity_recovery_exhausted" : "codex_capacity",
                   },
                   turnId: input.turnId,
                   turnGeneration: turn.executionGeneration,
@@ -25524,11 +25630,11 @@ export async function armCodexCapacityWait(
         const [waitingTurn] = await tx
           .update(schema.sessionTurns)
           .set({
-            status: "waiting_capacity",
+            status: stopped ? "failed" : "waiting_capacity",
             activeAttemptId: null,
-            metadata: metadataWithoutTurnDispatchAttempt(turn.metadata),
+            metadata: recoveryMetadata,
             version: turn.version + 1,
-            finishedAt: null,
+            finishedAt: stopped ? now : null,
             updatedAt: now,
           })
           .where(
@@ -25546,9 +25652,10 @@ export async function armCodexCapacityWait(
         const [waitingSession] = await tx
           .update(schema.sessions)
           .set({
-            status: "waiting_capacity",
-            activeTurnId: input.turnId,
+            status: sessionStatus,
+            activeTurnId: stopped ? null : input.turnId,
             lastSequence: sequence,
+            ...(stopped ? { queueVersion: session.queueVersion + 1 } : {}),
             updatedAt: now,
           })
           .where(
@@ -25563,12 +25670,41 @@ export async function armCodexCapacityWait(
         if (!waitingSession) {
           throw new Error("Codex capacity session changed during atomic arm");
         }
-        await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
-          turnId: input.turnId,
-          waiterId: waiterRow.id,
-          provider: "codex",
-          nextCheckAt,
-        });
+        if (stopped) {
+          await cancelTurnInteractionInterventionsInTransaction(tx, input);
+          await settleSessionMaintenanceInTransaction(tx, input);
+          const terminalEvent = inserted[0]!;
+          await projectSessionRealtimeDelegationTerminalInTransaction(tx, {
+            ...input,
+            turnStatus: "failed",
+            terminalEvent: {
+              id: terminalEvent.id,
+              type: "turn.failed",
+              payload: sessionEventPayloadRecord(
+                terminalEvent.payload,
+                terminalEvent.payloadCodecVersion,
+              ),
+            },
+            now,
+          });
+          await enqueueFailedChildOutboxForTurnTx(tx, input.workspaceId, session, turn);
+          await tx
+            .update(schema.sessionGoals)
+            .set({ continuationSuppressedTurnId: turn.id, updatedAt: now })
+            .where(
+              and(
+                eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                eq(schema.sessionGoals.sessionId, input.sessionId),
+                eq(schema.sessionGoals.status, "active"),
+              ),
+            );
+        } else
+          await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
+            turnId: input.turnId,
+            waiterId: waiterRow.id,
+            provider: "codex",
+            nextCheckAt,
+          });
         if (input.leaseFence) {
           await tx.execute(sql`
             delete from codex_credential_leases
@@ -25579,6 +25715,13 @@ export async function armCodexCapacityWait(
               and generation = ${input.leaseFence.generation}
           `);
         }
+        if (stopped)
+          return {
+            action: "stopped",
+            sessionStatus: waitingPrompt ? "queued" : "failed",
+            waiter: mapCodexCapacityWaiter(waiterRow),
+            events: [...closedTools.events, ...inserted.map(mapEvent)],
+          } as const;
         return {
           action: "waiting",
           waiter: mapCodexCapacityWaiter(waiterRow),
@@ -26091,6 +26234,25 @@ export async function reconcileCodexCapacityWait<
           return { action: "superseded", ...superseded } as const;
         }
 
+        const recovery = readCodexCapacityRecovery(blockedTurn.metadata);
+        // Account revisions can prompt a recheck, but cannot bypass a persisted
+        // false-resumption delay. Acknowledge the wake to avoid a signal spin.
+        if (recovery.retryNotBefore && Date.parse(recovery.retryNotBefore) > now.getTime()) {
+          const [delayed] = await tx
+            .update(schema.codexCapacityWaiters)
+            .set({
+              nextCheckAt: new Date(recovery.retryNotBefore),
+              observedWakeRevision: waiter.wakeRevision,
+              updatedAt: now,
+            })
+            .where(eq(schema.codexCapacityWaiters.id, waiter.id))
+            .returning();
+          return {
+            action: "waiting",
+            waiter: mapCodexCapacityWaiter(delayed!),
+            events: [],
+          } as const;
+        }
         const acceptedCodexPolicy = readCodexCredentialPolicySnapshotV1(blockedTurn.metadata);
         const codexPolicySnapshot =
           acceptedCodexPolicy.kind === "valid" ? acceptedCodexPolicy.policy : null;
@@ -26138,6 +26300,13 @@ export async function reconcileCodexCapacityWait<
           rotationEnabled,
           rotationStrategy,
           existingCredentialId: null,
+          failedCredentialIds: unresolvedCodexCredentialFailures(
+            blockedTurn.metadata,
+            filtered.accounts,
+            now,
+          ),
+          failoverExhausted: codexFailoverMetadata(blockedTurn.metadata).exhausted,
+          modelId: blockedTurn.model,
           policyScope,
           unavailableDiagnostics: filtered.unavailableDiagnostics,
           sessionId: session.id,
@@ -26261,7 +26430,13 @@ export async function reconcileCodexCapacityWait<
           .set({
             status: "recovering",
             activeAttemptId: null,
-            metadata: metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+            metadata: {
+              ...metadataWithoutTurnDispatchAttempt(blockedTurn.metadata),
+              [CODEX_CAPACITY_RECOVERY_KEY]: {
+                ...recovery,
+                resumeGeneration: blockedTurn.executionGeneration + 1,
+              },
+            },
             version: blockedTurn.version + 1,
             finishedAt: null,
             updatedAt: now,
@@ -27731,7 +27906,13 @@ export async function quarantineCodexCredentialForLease(
           } as const;
         }
         const [credential] = await tx
-          .select({ version: schema.codexSubscriptionCredentials.version })
+          .select({
+            version: schema.codexSubscriptionCredentials.version,
+            exhaustedRevision:
+              input.quarantine.kind === "cooldown"
+                ? schema.codexSubscriptionCredentials.exhaustedRevision
+                : sql<number>`0`,
+          })
           .from(schema.codexSubscriptionCredentials)
           .where(
             and(
@@ -27803,6 +27984,25 @@ export async function quarantineCodexCredentialForLease(
               ...turn.metadata,
               codexCredentialFailureAccountingVersion: 1,
               codexCredentialFailedIds: failedCredentialIds,
+              codexCredentialFailureCooldownRevisions: {
+                ...(turn.metadata?.codexCredentialFailureCooldownRevisions as
+                  | Record<string, unknown>
+                  | undefined),
+                [input.credentialId]:
+                  input.quarantine.kind === "cooldown" ? credential.exhaustedRevision + 1 : null,
+              },
+              codexCredentialFailureEvidenceV1: {
+                ...(turn.metadata?.codexCredentialFailureEvidenceV1 as
+                  | Record<string, unknown>
+                  | undefined),
+                [input.credentialId]:
+                  input.quarantine.kind === "status"
+                    ? { kind: "status", credentialVersion: credential.version }
+                    : {
+                        kind: input.quarantine.cooldownKind,
+                        cooldownRevision: credential.exhaustedRevision + 1,
+                      },
+              },
               codexCredentialFailovers: failoverCount,
               codexCredentialFailoverLimit: maxFailovers,
               codexCredentialFailoverExhausted: exhausted,
@@ -70718,12 +70918,16 @@ function hasCompletedCurrentModelRequest(
       "type" | "payload" | "payloadCodecVersion" | "turnAssociation"
     >
   >,
+  requireMeaningfulOutput = false,
 ): boolean {
   return events.some(
     (event) =>
       event.turnAssociation === "current" &&
       event.type === "agent.model.request" &&
-      sessionEventPayloadRecord(event.payload, event.payloadCodecVersion).phase === "completed",
+      sessionEventPayloadRecord(event.payload, event.payloadCodecVersion).phase === "completed" &&
+      (!requireMeaningfulOutput ||
+        sessionEventPayloadRecord(event.payload, event.payloadCodecVersion).meaningfulOutput ===
+          true),
   );
 }
 
@@ -77203,14 +77407,21 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                         now,
                       },
                     );
-                    if (
+                    const resetProviderRecovery =
                       providerRecoveryCountFromTurnMetadata(fence.turn!.metadata) > 0 &&
-                      hasCompletedCurrentModelRequest(inserted)
-                    ) {
+                      hasCompletedCurrentModelRequest(inserted);
+                    const resetCapacityRecovery =
+                      fence.turn!.metadata?.[CODEX_CAPACITY_RECOVERY_KEY] !== undefined &&
+                      hasCompletedCurrentModelRequest(inserted, true);
+                    if (resetProviderRecovery || resetCapacityRecovery) {
+                      let metadata = fence.turn!.metadata ?? {};
+                      if (resetProviderRecovery)
+                        metadata = metadataWithoutProviderRecoveryCount(metadata);
+                      if (resetCapacityRecovery) metadata = clearCodexCapacityRecovery(metadata);
                       const [resetTurn] = await tx
                         .update(schema.sessionTurns)
                         .set({
-                          metadata: metadataWithoutProviderRecoveryCount(fence.turn!.metadata),
+                          metadata,
                           version: fence.turn!.version + 1,
                           updatedAt: now,
                         })
