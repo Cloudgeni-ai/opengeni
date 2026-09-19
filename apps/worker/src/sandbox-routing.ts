@@ -748,7 +748,7 @@ function settleRetainedProcessForTurn(
     if (
       !durable ||
       durable.providerSessionId !== process.providerSessionId ||
-      durable.providerBackend !== backend.kind ||
+      durable.providerBackend !== (sandboxBackendForSdkBackendId(backend.kind) ?? backend.kind) ||
       durable.providerInstanceId !== backend.providerInstanceId ||
       durable.leaseEpoch !== backend.leaseEpoch ||
       durable.routeKind !== (backend.sandboxId === null ? "home" : "active") ||
@@ -796,7 +796,7 @@ function adoptRetainedProcessAsBackgroundCommandForTurn(
     if (
       !durable ||
       durable.providerSessionId !== process.providerSessionId ||
-      durable.providerBackend !== backend.kind ||
+      durable.providerBackend !== (sandboxBackendForSdkBackendId(backend.kind) ?? backend.kind) ||
       durable.providerInstanceId !== backend.providerInstanceId ||
       durable.leaseEpoch !== backend.leaseEpoch ||
       durable.routeKind !== (backend.sandboxId === null ? "home" : "active") ||

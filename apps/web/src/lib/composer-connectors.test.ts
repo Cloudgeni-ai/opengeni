@@ -82,6 +82,33 @@ describe("composer connector inventory", () => {
       ),
     ).toEqual(["offline"]);
   });
+  test("a missing personal account needs initial setup, not reauthorization", () => {
+    const entry = item("personal", {
+      connectionRef: { providerDomain: "slack.com", kind: "oauth2", subjectScope: "subject" },
+    });
+    expect(composerConnectorOptions([], [entry], [], asset)[0]?.connectionStatus).toBe("connect");
+    expect(composerConnectorOptions([], [entry], null, asset)[0]?.connectionStatus).toBe("unknown");
+    const personal = { ...connection("needs_reauth"), subjectId: "user:viewer" };
+    expect(composerConnectorOptions([], [entry], [personal], asset)[0]?.connectionStatus).toBe(
+      "reconnect",
+    );
+    expect(
+      composerConnectorOptions([], [entry], [{ ...personal, status: "revoked" }], asset)[0]
+        ?.connectionStatus,
+    ).toBe("unavailable");
+    expect(
+      composerConnectorOptions([], [entry], [{ ...personal, status: "active" }], asset)[0]
+        ?.connectionStatus,
+    ).toBe("ready");
+  });
+  test("a missing workspace credential does not claim the viewer needs a personal account", () => {
+    const entry = item("workspace", {
+      connectionRef: { providerDomain: "slack.com", kind: "oauth2", connectionId: "missing" },
+    });
+    expect(composerConnectorOptions([], [entry], [], asset)[0]?.connectionStatus).toBe(
+      "unavailable",
+    );
+  });
 });
 
 describe("connector selection policy", () => {

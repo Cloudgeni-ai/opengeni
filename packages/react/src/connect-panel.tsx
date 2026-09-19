@@ -48,12 +48,14 @@ export function ConnectPanel({
           controller={setup.controller}
           returnUrl={returnUrl}
           client={client}
+          onDisconnected={() => setInventoryRevision((value) => value + 1)}
         />
       )}
       {!activeSetup &&
         (client && presentation === "catalog" ? (
           <>
             <ConnectionDiscovery
+              key={inventoryRevision}
               client={client}
               workspaceId={setup.controller.workspaceId}
               returnUrl={returnUrl}

@@ -1,4 +1,4 @@
-import { CheckIcon, RefreshCwIcon, Loader2Icon } from "lucide-react";
+import { CheckIcon, PlugIcon, RefreshCwIcon, Loader2Icon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
@@ -53,6 +53,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
         }
       />
       <div className="min-h-0 shrink overflow-y-auto overscroll-contain p-2">
+        <p className="px-2 pb-2 text-xs text-fg-muted">Personal connections use your account.</p>
         {props.loading && !connectors.length ? (
           <p className="px-2 py-4 text-xs text-fg-muted" role="status">
             Loading connectors…
@@ -66,28 +67,31 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
         {connectors.map((server) => {
           const selected = props.selection.mcpServerIds.has(server.id);
           const repair = server.connectionStatus === "reconnect";
+          const connect = server.connectionStatus === "connect";
           const unavailable = server.connectionStatus === "unavailable";
           const busy = props.busyId === server.id;
-          const rowLocked = !customizing && !repair && !unavailable;
+          const rowLocked = !customizing && !connect && !repair && !unavailable;
           return (
             <ConnectorAction
               presentation={props.presentation}
               keepOpen
               key={server.id}
-              checked={repair || unavailable || rowLocked ? undefined : selected}
+              checked={connect || repair || unavailable || rowLocked ? undefined : selected}
               label={
-                repair
-                  ? `Reconnect ${server.name}`
-                  : unavailable
-                    ? `${server.name} unavailable`
-                    : rowLocked
-                      ? `${server.name}${selected ? ", on for this session" : ", off for this session"}`
+                connect
+                  ? `Connect your ${server.name} account`
+                  : repair
+                    ? `Reconnect ${server.name}`
+                    : unavailable
+                      ? `${server.name} unavailable`
+                      : rowLocked
+                        ? `${server.name}${selected ? ", on for this session" : ", off for this session"}`
                       : server.name
               }
               disabled={busy}
               locked={rowLocked}
               onAction={() => {
-                if (repair || unavailable) {
+                if (connect || repair || unavailable) {
                   props.onReconnect?.(server.id);
                   return;
                 }
@@ -117,9 +121,13 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
                 {server.detail ? (
                   <span className="mt-1 block truncate text-xs text-fg-muted">{server.detail}</span>
                 ) : null}
-                {repair || unavailable ? (
+                {connect || repair || unavailable ? (
                   <span className="block text-2xs text-status-waiting">
-                    {repair ? "Reconnect required" : "Unavailable · Manage connection"}
+                    {connect
+                      ? "Connect your account"
+                      : repair
+                        ? "Reconnect required"
+                        : "Unavailable · Manage connection"}
                   </span>
                 ) : null}
                 {server.connectionStatus === "unknown" ? (
@@ -128,6 +136,8 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
               </span>
               {busy ? (
                 <Loader2Icon className="size-4 animate-spin" />
+              ) : connect ? (
+                <PlugIcon className="size-4 text-fg-muted" />
               ) : repair || unavailable ? (
                 <RefreshCwIcon className="size-4 text-fg-muted" />
               ) : customizing ? (

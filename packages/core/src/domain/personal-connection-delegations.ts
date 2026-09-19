@@ -340,6 +340,18 @@ function sameProviderDomain(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase();
 }
 
+function canonicalConnectionResource(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return value.trim();
+    url.hash = "";
+    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+    return url.toString();
+  } catch {
+    return value.trim();
+  }
+}
+
 /** An account choice needs user attention; retrying the same work cannot fix it. */
 export class ConnectionAccountSelectionError extends HTTPException {
   override name = "ConnectionAccountSelectionError";
@@ -371,6 +383,10 @@ export function personalConnectionDelegationsFromVisibleConnections(input: {
         candidate.authorityId !== null &&
         sameProviderDomain(candidate.providerDomain, ref.providerDomain) &&
         (!ref.kind || candidate.kind === ref.kind) &&
+        (!ref.resource ||
+          (typeof candidate.metadata.resource === "string" &&
+            canonicalConnectionResource(candidate.metadata.resource) ===
+              canonicalConnectionResource(ref.resource))) &&
         (!ref.connectionId || candidate.id === ref.connectionId),
     );
     if (!selection && eligible.length > 1) {

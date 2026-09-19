@@ -18,7 +18,11 @@ export function composerConnectorOptions(
     const health = connectionHealth(item, connections ?? [], connections !== null);
     const state =
       health.state === "attention"
-        ? "reconnect"
+        ? !health.connection && item.connectionRef?.subjectScope === "subject"
+          ? "connect"
+          : health.connection?.status === "needs_reauth"
+            ? "reconnect"
+            : "unavailable"
         : health.state === "unverified"
           ? "unknown"
           : !item.runtime.available || item.lifecycle.readiness === "unavailable"

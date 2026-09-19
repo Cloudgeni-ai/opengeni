@@ -935,6 +935,7 @@ export type {
   RotateSessionMcpCredentialsRequest,
   RotateSessionMcpCredentialsReceipt,
   SessionMcpApprovalPolicy,
+  SessionMcpApprovalPolicyTarget,
   SessionMcpServerInput,
   SessionMcpServerMetadata,
   SessionToolPolicy,

@@ -5,7 +5,7 @@ import { ConnectionLogo } from "./connection-logo";
 import { ConnectionSkeleton } from "./connection-skeleton";
 import { capabilityLogoFallback } from "./capability-logo-fallback";
 import { McpConnectionCard } from "./components/session-mcp-capability-card";
-import { matchingActiveMcpConnections } from "./mcp-connection-status";
+import { mcpConnectionDiscoveryState } from "./mcp-connection-status";
 
 export type ConnectionDiscoveryProps = {
   client: OpenGeniClient;
@@ -97,18 +97,16 @@ function ScopedDiscovery({
           <>
             <div>
               {matches.slice(0, limit).map((item) => {
-                const connected = matchingActiveMcpConnections(item, connections).length === 1;
+                const state = mcpConnectionDiscoveryState(item, connections);
                 return (
                   <CapabilityCatalogRow
                     key={item.id}
                     name={item.name}
                     description={item.description ?? undefined}
                     icon={<ServiceLogo client={client} item={item} />}
-                    status={connected ? "added" : item.enabled ? "attention" : "available"}
-                    statusLabel={
-                      connected ? "Connected" : item.enabled ? "Review connection" : "Connect"
-                    }
-                    showStatusLabel={connected}
+                    status={state.status}
+                    statusLabel={state.label}
+                    showStatusLabel
                     onOpen={() => {
                       opener.current =
                         document.activeElement instanceof HTMLElement

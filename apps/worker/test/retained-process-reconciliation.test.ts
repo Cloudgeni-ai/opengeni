@@ -774,6 +774,35 @@ describe("retained-process terminal-owner reconciliation", () => {
     expect(new Set(chunkIds).size).toBe(1);
   }, 60_000);
 
+  test("local SDK resume identity can recover retained terminal output without crossing providers", async () => {
+    if (!available) throw new Error("PostgreSQL required for retained-process regression");
+    const fixture = await promoteTurnProcess({ outcome: "completed" });
+    const originalLease = await readLease(db, fixture.workspaceId, fixture.groupId);
+    if (!originalLease) throw new Error("Expected lease");
+    const process = { ...fixture.process, providerBackend: "local" };
+    const lease = { ...originalLease, backend: "local", resumeBackendId: "unix_local" };
+    const result = "Process exited with code 0\n\nOutput:\nretained tail";
+    await expect(
+      captureRetainedProbeOutput(process.id, result, async () => {
+        throw new Error("temporary persistence failure");
+      }),
+    ).rejects.toThrow("temporary persistence failure");
+    expect(
+      await probeRetainedProcessAtProvider(
+        SETTINGS,
+        { ...lease, resumeBackendId: "docker" },
+        process,
+      ),
+    ).toEqual({ status: "deferred", reason: "identity_mismatch" });
+    const outputs: unknown[] = [];
+    expect(
+      await probeRetainedProcessAtProvider(SETTINGS, lease, process, "observe", async (output) => {
+        outputs.push(output);
+      }),
+    ).toMatchObject({ status: "proved", proof: { outcome: "exited", exitCode: 0 } });
+    expect(outputs).toEqual([result]);
+  }, 60_000);
+
   test("running and terminal reaper output is retained without observing completion", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({ outcome: "completed", backgroundCommand: "work" });

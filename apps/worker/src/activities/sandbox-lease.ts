@@ -1813,7 +1813,8 @@ export async function probeRetainedProcessAtProvider(
     lease.leaseEpoch !== process.leaseEpoch ||
     lease.backend !== process.providerBackend ||
     lease.instanceId !== process.providerInstanceId ||
-    lease.resumeBackendId !== process.providerBackend ||
+    !lease.resumeBackendId ||
+    sandboxBackendForSdkBackendId(lease.resumeBackendId) !== process.providerBackend ||
     process.routeTargetId !== null
   ) {
     return { status: "deferred", reason: "identity_mismatch" };
@@ -1828,7 +1829,11 @@ export async function probeRetainedProcessAtProvider(
     return classifyRetainedProcessPollResult(pending.result, process.providerSessionId);
   }
   const envelopeBackend = (lease.resumeState as { backendId?: unknown }).backendId;
-  if (envelopeBackend !== undefined && envelopeBackend !== process.providerBackend) {
+  if (
+    envelopeBackend !== undefined &&
+    (typeof envelopeBackend !== "string" ||
+      sandboxBackendForSdkBackendId(envelopeBackend) !== process.providerBackend)
+  ) {
     return { status: "deferred", reason: "identity_mismatch" };
   }
   if (sandboxProviderInstanceIdFromEnvelope(lease.resumeState) !== process.providerInstanceId) {
@@ -1862,7 +1867,11 @@ export async function probeRetainedProcessAtProvider(
   } catch {
     return { status: "deferred", reason: "provider_error" };
   }
-  if (!client || client.backendId !== process.providerBackend || !client.resume) {
+  if (
+    !client ||
+    sandboxBackendForSdkBackendId(client.backendId) !== process.providerBackend ||
+    !client.resume
+  ) {
     return { status: "deferred", reason: "backend_unsupported" };
   }
   const envelopeSessionState =

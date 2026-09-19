@@ -5822,6 +5822,25 @@ export const SessionMcpServerMetadata = z
   .strict();
 export type SessionMcpServerMetadata = z.infer<typeof SessionMcpServerMetadata>;
 
+/** Session-local policies for inherited MCP capabilities, not server attachments. */
+export const SessionMcpApprovalPolicies = z
+  .record(SessionMcpServerId, SessionMcpApprovalPolicy)
+  .refine(
+    (policies) => Object.keys(policies).length <= 64,
+    "At most 64 MCP approval policies are allowed",
+  );
+export const SessionMcpApprovalPolicyTarget = z.union([
+  SessionMcpServerMetadata,
+  z
+    .object({
+      id: SessionMcpServerId,
+      requireApproval: SessionMcpApprovalPolicy,
+      source: z.literal("workspace"),
+    })
+    .strict(),
+]);
+export type SessionMcpApprovalPolicyTarget = z.infer<typeof SessionMcpApprovalPolicyTarget>;
+
 export const UpdateSessionMcpApprovalPolicyRequest = z
   .object({
     requireApproval: SessionMcpApprovalPolicy,
@@ -5833,7 +5852,7 @@ export type UpdateSessionMcpApprovalPolicyRequest = z.infer<
 
 export const UpdateSessionMcpApprovalPolicyResponse = z
   .object({
-    server: SessionMcpServerMetadata,
+    server: SessionMcpApprovalPolicyTarget,
     effectiveFrom: z.literal("next_attempt"),
   })
   .strict();
@@ -12097,6 +12116,7 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // Per-session third-party MCP servers, metadata only. Credential values are
     // write-only and never appear here.
     mcpServers: z.array(SessionMcpServerMetadata).default([]),
+    mcpApprovalPolicies: SessionMcpApprovalPolicies.optional(),
     // The manager session that spawned this one via session_create (set only
     // when the creating grant carried a worker-signed sessionId claim); null for
     // direct API creates and scheduled-task runs. When set, this session's
@@ -14736,6 +14756,9 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // permission. Credential headers are write-only: create responses and events
       // expose only SessionMcpServerMetadata.
       mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
+      // Override approval policy without copying inherited capability definitions.
+      // Unknown/disabled servers are rejected; curated approval floors still apply.
+      mcpApprovalPolicies: SessionMcpApprovalPolicies.optional(),
       /** Optional account choices among the authenticated sender’s own connections. */
       connectionAuthorities: z.never().optional(),
       connectionAccounts: McpConnectionAccountSelections.default([]),

@@ -1672,81 +1672,88 @@ describe("useGoal", () => {
 });
 
 describe("useSessionMcpApprovalPolicy", () => {
-  test("updates optimistically and reconciles the authoritative policy event", async () => {
-    let reads = 0;
-    let currentPolicy: SessionMcpApprovalPolicy = false;
-    const metadata = (): SessionMcpServerMetadata => ({
-      id: "external_tools",
-      name: "External tools",
-      url: "https://tools.example.test/mcp",
-      headerNames: [],
-      credentialVersion: 1,
-      requireApproval: currentPolicy,
-      connectionRef: null,
-    });
-    const client = {
-      ...fakeClient({
-        getSession: async () => {
-          reads += 1;
-          return {
-            id: SESSION_ID,
-            lastSequence: reads,
-            mcpServers: [metadata()],
-          } as never;
-        },
-      }),
-      updateSessionMcpApprovalPolicy: async (_workspaceId, _sessionId, serverId, request) => {
-        expect(serverId).toBe("external_tools");
-        currentPolicy = request.requireApproval;
-        return { server: metadata(), effectiveFrom: "next_attempt" };
-      },
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
-    const hook = await renderHook(
-      (events: SessionEvent[]) =>
-        useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
-          client,
-          workspaceId: WORKSPACE_ID,
-          events,
-        }),
-      [] as SessionEvent[],
-    );
-    await flush();
-    expect(hook.result.current.policy).toBe(false);
-    expect(reads).toBe(1);
-
-    await flushing(async () => {
-      const response = await hook.result.current.update(["write_record"]);
-      expect(response?.effectiveFrom).toBe("next_attempt");
-    });
-    expect(hook.result.current.policy).toEqual(["write_record"]);
-
-    currentPolicy = ["write_record", "delete_record"];
-    await hook.rerender([
-      makeEvent(1, "session.mcp.approval_policy.updated", {
-        serverId: "another_server",
-        requireApproval: true,
-        effectiveFrom: "next_attempt",
-      }),
-    ]);
-    await flush(200);
-    expect(reads).toBe(2);
-    await hook.rerender([
-      makeEvent(1, "session.mcp.approval_policy.updated", {
-        serverId: "another_server",
-        requireApproval: true,
-        effectiveFrom: "next_attempt",
-      }),
-      makeEvent(2, "session.mcp.approval_policy.updated", {
-        serverId: "external_tools",
+  for (const inherited of [false, true])
+    test(`updates ${inherited ? "inherited" : "attached"} policy and reconciles the authoritative policy event`, async () => {
+      let reads = 0;
+      let currentPolicy: SessionMcpApprovalPolicy = false;
+      const metadata = (): SessionMcpServerMetadata => ({
+        id: "external_tools",
+        name: "External tools",
+        url: "https://tools.example.test/mcp",
+        headerNames: [],
+        credentialVersion: 1,
         requireApproval: currentPolicy,
-        effectiveFrom: "next_attempt",
-      }),
-    ]);
-    await flush(250);
-    expect(reads).toBe(3);
-    expect(hook.result.current.policy).toEqual(["write_record", "delete_record"]);
-    await hook.unmount();
-  });
+        connectionRef: null,
+      });
+      const client = {
+        ...fakeClient({
+          getSession: async () => {
+            reads += 1;
+            return {
+              id: SESSION_ID,
+              lastSequence: reads,
+              mcpServers: inherited ? [] : [metadata()],
+              ...(inherited ? { mcpApprovalPolicies: { external_tools: currentPolicy } } : {}),
+            } as never;
+          },
+        }),
+        updateSessionMcpApprovalPolicy: async (_workspaceId, _sessionId, serverId, request) => {
+          expect(serverId).toBe("external_tools");
+          currentPolicy = request.requireApproval;
+          return {
+            server: inherited
+              ? { id: serverId, source: "workspace" as const, requireApproval: currentPolicy }
+              : metadata(),
+            effectiveFrom: "next_attempt",
+          };
+        },
+      } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+      const hook = await renderHook(
+        (events: SessionEvent[]) =>
+          useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
+            client,
+            workspaceId: WORKSPACE_ID,
+            events,
+          }),
+        [] as SessionEvent[],
+      );
+      await flush();
+      expect(hook.result.current.policy).toBe(false);
+      expect(reads).toBe(1);
+
+      await flushing(async () => {
+        const response = await hook.result.current.update(["write_record"]);
+        expect(response?.effectiveFrom).toBe("next_attempt");
+      });
+      expect(hook.result.current.policy).toEqual(["write_record"]);
+
+      currentPolicy = ["write_record", "delete_record"];
+      await hook.rerender([
+        makeEvent(1, "session.mcp.approval_policy.updated", {
+          serverId: "another_server",
+          requireApproval: true,
+          effectiveFrom: "next_attempt",
+        }),
+      ]);
+      await flush(200);
+      expect(reads).toBe(2);
+      await hook.rerender([
+        makeEvent(1, "session.mcp.approval_policy.updated", {
+          serverId: "another_server",
+          requireApproval: true,
+          effectiveFrom: "next_attempt",
+        }),
+        makeEvent(2, "session.mcp.approval_policy.updated", {
+          serverId: "external_tools",
+          requireApproval: currentPolicy,
+          effectiveFrom: "next_attempt",
+        }),
+      ]);
+      await flush(250);
+      expect(reads).toBe(3);
+      expect(hook.result.current.policy).toEqual(["write_record", "delete_record"]);
+      await hook.unmount();
+    });
 
   test("a delayed pre-mutation read cannot clear the newer policy response", async () => {
     const metadata = (requireApproval: SessionMcpApprovalPolicy): SessionMcpServerMetadata => ({

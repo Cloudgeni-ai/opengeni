@@ -4564,6 +4564,10 @@ export const sessions = pgTable(
     toolPolicy: jsonb("tool_policy").$type<SessionToolPolicy>().notNull(),
     // Optimistic-concurrency fence for durable session tool-policy writes.
     toolPolicyVersion: integer("tool_policy_version").notNull().default(1),
+    mcpApprovalPolicies: jsonb("mcp_approval_policies")
+      .$type<Record<string, SessionMcpApprovalPolicy>>()
+      .notNull()
+      .default({}),
     // The manager session that spawned this one via session_create. Set only
     // when the creating grant carried a worker-signed sessionId claim (a session
     // spawning a worker); null for direct API creates and scheduled-task runs.
