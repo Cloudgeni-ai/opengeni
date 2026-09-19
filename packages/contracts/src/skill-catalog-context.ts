@@ -2,7 +2,7 @@
 export const SKILL_CATALOG_CONTEXT_PREFIX = "<opengeni_skill_catalog>\n";
 export const SKILL_CATALOG_CONTEXT_SUFFIX = "\n</opengeni_skill_catalog>";
 const GUIDANCE =
-  "This is the current Skill index and replaces earlier Skill indexes. " +
+  "This is the current configured Skill index and replaces earlier configured Skill indexes. " +
   "Entries describe discoverability, not permission or full instructions. " +
   "Use skill_read for instructions and skill_search for current discovery; tool authorization remains authoritative.\n\n";
 
