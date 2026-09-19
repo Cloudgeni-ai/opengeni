@@ -423,6 +423,9 @@ Managed sandbox lifecycle belongs to the lease and reaper. API/viewer handles
 are non-owned: request completion must not terminate them. Provider identity is
 persisted before setup; workspace capture fences every writer. Provider loss
 retires only the matching instance and never licenses ambiguous effect replay.
+Agent tools and model streams keep the lazy routing wrapper even after provisioning
+resolves the raw provider handle; that raw handle is for lifecycle setup and capture,
+not a replacement agent execution path (`turn-sandbox-access.ts`).
 
 Ordinary snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains
 and rotations may use `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` (unset inherits
