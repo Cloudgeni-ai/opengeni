@@ -761,8 +761,8 @@ export async function runTurnStreamAttempt(
         eventing.firstModelRequestPreparationStartedAt = performance.now();
         eventing.firstModelRequestCheckpointAt = eventing.firstModelRequestPreparationStartedAt;
       }
-      const providerDispatchStartedAt = performance.now();
-      let providerDispatchOutcome: "completed" | "failed" = "completed";
+      const streamInitializationStartedAt = performance.now();
+      let streamInitializationOutcome: "completed" | "failed" = "completed";
       try {
         // This histogram describes worker preparation until the first entry
         // into the runtime. Lazy SDK request preparation and the durable
@@ -896,15 +896,15 @@ export async function runTurnStreamAttempt(
             : {}),
         });
       } catch (error) {
-        providerDispatchOutcome = "failed";
+        streamInitializationOutcome = "failed";
         throw error;
       } finally {
         recordTurnStartupPhase(observability, {
-          phase: "provider_dispatch",
+          phase: "runtime_stream_initialization",
           provider: turnExecutionPolicy.providerId,
           backend: activeSandboxBackend ?? groupBoxBackend,
-          outcome: providerDispatchOutcome,
-          durationSeconds: (performance.now() - providerDispatchStartedAt) / 1_000,
+          outcome: streamInitializationOutcome,
+          durationSeconds: (performance.now() - streamInitializationStartedAt) / 1_000,
         });
       }
     };

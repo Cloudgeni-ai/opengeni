@@ -64,7 +64,7 @@ import {
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
-import { recordTurnStartupPhase } from "../../observability-metrics";
+import { recordToolPreparationPhase, recordTurnStartupPhase } from "../../observability-metrics";
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
@@ -996,13 +996,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         localMcpServers,
         ...(deferNonEagerToolPreparation ? { deferNonEagerUntilToolDemand: true } : {}),
         onPreparationPhase: (measurement) => {
-          recordTurnStartupPhase(observability, {
-            phase: `tool_${measurement.phase}`,
+          recordToolPreparationPhase(observability, {
+            ...measurement,
             provider: turnExecutionPolicy.providerId,
             backend: activeSandboxBackend ?? groupBoxBackend,
-            outcome: measurement.outcome,
-            durationSeconds: measurement.durationSeconds,
-            count: githubRestMcp.tools.length,
           });
         },
         onAttemptToolCatalog: async (catalog) => {

@@ -18,6 +18,7 @@ import {
   recordTurnSandboxEstablishPolicy,
   recordTurnStartupMilestone,
   recordTurnStartupPhase,
+  recordToolPreparationPhase,
   recordTurnWorkerPreparationTotal,
   StreamTimingMetrics,
   sessionEventBatchSizeClass,
@@ -358,6 +359,30 @@ describe("turn startup phase diagnostics", () => {
     );
     expect(metrics).toMatch(
       /opengeni_turn_startup_phase_duration_seconds_count\{[^}]*phase="tool_attempt_catalog_persist"[^}]*\} 1\b/,
+    );
+  });
+
+  test("background tool preparation cannot inflate startup histograms", async () => {
+    const observability = worker();
+    for (const execution of ["blocking", "background"] as const) {
+      recordToolPreparationPhase(observability, {
+        phase: "optional_connect",
+        execution,
+        provider: "codex-subscription",
+        backend: "modal",
+        outcome: "completed",
+        durationSeconds: execution === "blocking" ? 0.01 : 30,
+      });
+    }
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_turn_startup_phase_duration_seconds_count\{[^}]*phase="tool_optional_connect"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_turn_startup_phase_duration_seconds_sum\{[^}]*phase="tool_optional_connect"[^}]*\} 0\.01\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_tool_background_preparation_duration_seconds_sum\{[^}]*phase="optional_connect"[^}]*\} 30\b/,
     );
   });
 

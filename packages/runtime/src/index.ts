@@ -3716,6 +3716,8 @@ export type ToolPreparationPhase =
 
 export type ToolPreparationPhaseMeasurement = {
   phase: ToolPreparationPhase;
+  /** Background preparation starts immediately but is not a first-request dependency. */
+  execution: "blocking" | "background";
   outcome: "completed" | "failed";
   durationSeconds: number;
 };
@@ -3832,6 +3834,7 @@ async function measureToolPreparationPhase<T>(
   options: PrepareToolsOptions,
   phase: ToolPreparationPhase,
   operation: () => Promise<T>,
+  execution: ToolPreparationPhaseMeasurement["execution"] = "blocking",
 ): Promise<T> {
   const startedAt = performance.now();
   let outcome: ToolPreparationPhaseMeasurement["outcome"] = "completed";
@@ -3844,6 +3847,7 @@ async function measureToolPreparationPhase<T>(
     try {
       options.onPreparationPhase?.({
         phase,
+        execution,
         outcome,
         durationSeconds: (performance.now() - startedAt) / 1_000,
       });
@@ -4303,6 +4307,7 @@ export async function prepareAgentTools(
     entries: typeof servers,
     strict: boolean,
     phase: "required_connect" | "optional_connect",
+    execution: ToolPreparationPhaseMeasurement["execution"],
   ): Promise<ConnectedMcpServerBatches | null> =>
     entries.length === 0
       ? null
@@ -4317,6 +4322,7 @@ export async function prepareAgentTools(
                 connectTimeoutMs: mcpOuterConnectTimeoutMs(entries.map((entry) => entry.timeoutMs)),
               },
             ),
+          execution,
         );
   const warnBestEffortFailures = (connected: ConnectedMcpServerBatches | null): void => {
     if (!connected) return;
@@ -4343,13 +4349,14 @@ export async function prepareAgentTools(
   const connectEntryGroups = async (
     required: typeof servers,
     bestEffort: typeof servers,
+    execution: ToolPreparationPhaseMeasurement["execution"],
   ): Promise<{
     required: ConnectedMcpServerBatches | null;
     bestEffort: ConnectedMcpServerBatches | null;
   }> => {
     const [requiredResult, bestEffortResult] = await Promise.allSettled([
-      connectEntries(required, true, "required_connect"),
-      connectEntries(bestEffort, false, "optional_connect"),
+      connectEntries(required, true, "required_connect", execution),
+      connectEntries(bestEffort, false, "optional_connect", execution),
     ]);
     const connectedBestEffort =
       bestEffortResult.status === "fulfilled" ? bestEffortResult.value : null;
@@ -4364,7 +4371,11 @@ export async function prepareAgentTools(
     }
     return { required: requiredResult.value, bestEffort: connectedBestEffort };
   };
-  const connectedEager = await connectEntryGroups(eagerRequiredEntries, eagerBestEffortEntries);
+  const connectedEager = await connectEntryGroups(
+    eagerRequiredEntries,
+    eagerBestEffortEntries,
+    "blocking",
+  );
   const connectedEagerRequired = connectedEager.required;
   const connectedEagerBestEffort = connectedEager.bestEffort;
   warnBestEffortFailures(connectedEagerBestEffort);
@@ -4384,6 +4395,7 @@ export async function prepareAgentTools(
     await connectedEagerRequired?.close().catch(() => undefined);
   };
   const completePreparation = async (): Promise<PreparedAgentTools> => {
+    const execution = exposesDeferredPreparation ? "background" : "blocking";
     let attemptToolEnvironment: AttemptToolEnvironment | null = null;
     let toolGatewayCatalog: ToolGatewayCatalog | null = null;
     let toolGateway: ToolGateway | null = null;
@@ -4391,6 +4403,7 @@ export async function prepareAgentTools(
       const connectedDeferred = await connectEntryGroups(
         deferredRequiredEntries,
         deferredBestEffortEntries,
+        execution,
       );
       connectedDeferredRequired = connectedDeferred.required;
       connectedDeferredBestEffort = connectedDeferred.bestEffort;
@@ -4411,14 +4424,20 @@ export async function prepareAgentTools(
             resolvedMcpConnectionIds,
             options,
           ),
+        execution,
       );
       if (attemptToolEnvironment && localToolServer) {
         localToolServer.bindAttemptToolEnvironment(attemptToolEnvironment);
       }
       if (attemptToolEnvironment) {
-        await measureToolPreparationPhase(options, "attempt_catalog_persist", async () => {
-          await options.onAttemptToolCatalog?.(attemptToolEnvironment!.catalog);
-        });
+        await measureToolPreparationPhase(
+          options,
+          "attempt_catalog_persist",
+          async () => {
+            await options.onAttemptToolCatalog?.(attemptToolEnvironment!.catalog);
+          },
+          execution,
+        );
       }
       if (options.workspaceToolGateway) {
         const prepared = await measureToolPreparationPhase(
@@ -4426,6 +4445,7 @@ export async function prepareAgentTools(
           "workspace_gateway_catalog_build",
           async () =>
             await prepareWorkspaceToolGatewayEnvironment(activeMcpServers, registry, options),
+          execution,
         );
         toolGatewayCatalog = prepared.catalog;
         toolGateway = prepared.gateway;
