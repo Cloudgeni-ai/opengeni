@@ -1,7 +1,4 @@
-import {
-  newSessionPersonalResourceAttachment,
-  buildPersonalResourceAttachmentIntent,
-} from "../src/lib/personal-resource-attachments";
+import { newSessionPersonalResourceAttachment } from "../src/lib/personal-resource-attachments";
 import { FailedSessionBanner } from "../src/components/session/failed-session-banner";
 import { SessionChrome, type UseTurnQueueResult } from "@opengeni/react";
 import { useMemo, useState } from "react";
@@ -139,30 +136,7 @@ function Fixture() {
             reason: "matching personal-resource grant required",
             failedAt: "2026-09-07T14:11:21Z",
             failureEventId: "failure-one",
-            recoveryCount: 0,
-            failedTurnCount: 0,
-          }}
-          actions={{
-            failureId: "failure-one",
-            continuationBlocker: null,
-            composerBlocker: controller.intent ? null : "personal_decision",
-            onContinue: async () => {
-              setSendReceipt(
-                JSON.stringify({
-                  delivery: "continue",
-                  ...buildPersonalResourceAttachmentIntent({
-                    mode: "session",
-                    visibility: "workspace",
-                    acknowledged: true,
-                    expectedAuthorityEpoch: epoch,
-                    resourceCount: controller.selected.resourceCount,
-                  }),
-                }),
-              );
-              return true;
-            },
-            onChooseModel: () => {},
-            modelDisabled: true,
+            consecutiveRecoveryCount: 0,
           }}
         />
         <SessionChrome
