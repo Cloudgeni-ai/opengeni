@@ -8,6 +8,7 @@ import {
   loadWorkspaceVercelAiGatewayCredentialLease,
   getExternalLinkTurnAuthorization,
   getSessionTurnForAttempt,
+  ensureSessionReasoningConfiguration,
 } from "@opengeni/db";
 import {
   formatSkillCatalog,
@@ -24,7 +25,7 @@ import {
   resolveModelProvider,
   type Settings,
 } from "@opengeni/config";
-import { type CodexRequestContext } from "@opengeni/codex";
+import { type CodexRequestContext, supportsReasoningConfiguration } from "@opengeni/codex";
 import { executeXaiSubscriptionImageGeneration } from "../xai-image-generation";
 import { rigProviderImageContentHash, videoGenerationCapabilitiesForPolicy } from "@opengeni/core";
 import {
@@ -581,6 +582,24 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   );
   if (linkedToolAuthority && !linkedToolAuthority.authorized)
     throw new Error("Native identity link was revoked");
+  const useReasoningUpdates =
+    eventing.modelRunSettings.reasoningConfigurationUpdatesEnabled &&
+    resolvedModel?.provider.api === "responses" &&
+    (resolvedModel.provider.id === "codex" || resolvedModel.provider.id === "openai") &&
+    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort);
+  const requestReasoningEffort =
+    useReasoningUpdates &&
+    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort)
+      ? await ensureSessionReasoningConfiguration(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          expectedExecutionGeneration: turn.executionGeneration,
+          expectedAttemptId: input.attemptId,
+          effort: turn.reasoningEffort,
+        })
+      : turn.reasoningEffort;
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
@@ -605,7 +624,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             }
           : {}),
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
-        reasoningEffort: turn.reasoningEffort,
+        reasoningEffort: requestReasoningEffort,
         latencyMode: turnExecutionPolicy.latencyMode,
         ...(serviceTier ? { serviceTier } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),

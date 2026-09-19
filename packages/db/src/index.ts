@@ -1,3 +1,8 @@
+import {
+  readReasoningConfiguration,
+  reasoningConfigurationItem,
+  type ConfigurationEffort,
+} from "@opengeni/codex";
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 export * from "./session-retry";
@@ -40154,6 +40159,105 @@ export async function installOrReadTurnExecutionPolicyForAttempt(
  * repeated writers (streaming writes + turn-end reconciliation) converge
  * instead of duplicating.
  */
+/** Install a turn's immutable effort update before its accepted input, under the attempt fence. */
+export async function ensureSessionReasoningConfiguration(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    effort: ConfigurationEffort;
+  },
+): Promise<ConfigurationEffort> {
+  return withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.expectedExecutionGeneration,
+          attemptId: input.expectedAttemptId,
+        });
+        if (!fence.allowed) throw new Error("Reasoning configuration attempt is fenced");
+        if (fence.turn.reasoningEffort !== input.effort)
+          throw new Error("Reasoning configuration differs from accepted turn");
+        // Read only small control records and positions, never the full conversation.
+        const scope = and(
+          eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+          eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+          eq(schema.sessionHistoryItems.active, true),
+        );
+        const controls = await tx
+          .select({
+            item: schema.sessionHistoryItems.item,
+            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+          })
+          .from(schema.sessionHistoryItems)
+          .where(
+            and(
+              scope,
+              sql`${schema.sessionHistoryItems.item}->>'type' = 'unknown'`,
+              sql`${schema.sessionHistoryItems.item}->'opengeniReasoningConfiguration' IS NOT NULL`,
+            ),
+          )
+          .orderBy(desc(schema.sessionHistoryItems.position))
+          .limit(1);
+        const state = controls[0]
+          ? readReasoningConfiguration(
+              fromPostgresLosslessJson(controls[0].item, controls[0].itemCodecVersion),
+            )
+          : null;
+        if (state?.turnId === input.turnId || state?.effort === input.effort)
+          return state.baselineEffort;
+        const [boundary] = await tx
+          .select({ position: schema.sessionHistoryItems.position })
+          .from(schema.sessionHistoryItems)
+          .where(and(scope, eq(schema.sessionHistoryItems.turnId, input.turnId)))
+          .orderBy(asc(schema.sessionHistoryItems.position))
+          .limit(1);
+        if (!boundary) throw new Error("Reasoning update requires durable accepted input");
+        const [previous] = await tx
+          .select({ position: schema.sessionHistoryItems.position })
+          .from(schema.sessionHistoryItems)
+          .where(and(scope, lt(schema.sessionHistoryItems.position, boundary.position)))
+          .orderBy(desc(schema.sessionHistoryItems.position))
+          .limit(1);
+        const position = previous
+          ? (previous.position + boundary.position) / 2
+          : boundary.position - 0.25;
+        if (!(position < boundary.position) || (previous && !(position > previous.position)))
+          throw new Error("Reasoning configuration position exhausted");
+        const baselineEffort = state?.baselineEffort ?? input.effort;
+        await tx.insert(schema.sessionHistoryItems).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              position,
+              item: reasoningConfigurationItem({
+                version: 1,
+                baselineEffort,
+                effort: input.effort,
+                turnId: input.turnId,
+              }),
+            },
+            "item",
+            "itemCodecVersion",
+          ),
+        );
+        return baselineEffort;
+      }),
+  );
+}
+
 export async function appendSessionHistoryItems(
   db: Database,
   input: {
@@ -41270,6 +41374,7 @@ export async function applyContextCompaction(
     expectedAttemptId: string;
     replacementItems: Array<Record<string, unknown>>;
     summaryItem: Record<string, unknown>;
+    trailingItems?: Array<Record<string, unknown>>;
     clearRequestedCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
   },
@@ -41344,6 +41449,23 @@ export async function applyContextCompaction(
             "itemCodecVersion",
           ),
         );
+        if (input.trailingItems?.length) {
+          await tx.insert(schema.sessionHistoryItems).values(
+            withLosslessContentWriteVersion(
+              input.trailingItems.map((item, index) => ({
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: null,
+                position: summaryPosition + 1 + index,
+                item: omitOutputOnlyHistoryItemFields(item),
+                active: true,
+              })),
+              "item",
+              "itemCodecVersion",
+            ),
+          );
+        }
         const insertedEvents = input.eventPayload
           ? await tx
               .insert(schema.sessionEvents)
