@@ -412,6 +412,10 @@ for (const path of TEMPORAL_WORKFLOW_INTEGRATION_TESTS) {
 }
 
 const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {
+  "test/e2e/browser-account-axe-diagnostics.ts": [
+    "test/e2e/browser-accounts-acceptance.e2e.ts",
+    "test/e2e/browser-account-request-observation.browser.e2e.ts",
+  ],
   "test/e2e/browser-account-request-observation.ts": [
     "test/e2e/browser-accounts-acceptance.e2e.ts",
     "test/e2e/browser-account-request-observation.browser.e2e.ts",

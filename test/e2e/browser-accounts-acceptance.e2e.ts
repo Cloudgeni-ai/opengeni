@@ -35,6 +35,7 @@ import {
 } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
+import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics";
 import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
 import {
   sanitizeRaceProjection,
@@ -2679,8 +2680,10 @@ async function captureResponsiveEvidenceInBrowser(
   );
   expect(menuTargetSizes.length).toBeGreaterThan(0);
   expect(menuTargetSizes.every(({ height, width }) => height >= 44 && width >= 44)).toBe(true);
-  await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
-  await expectNoAxeViolations(touchPage, '[data-slot="dropdown-menu-content"]');
+  await withAccountMenuAxeDiagnostics(touchPage, async () => {
+    await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
+    await expectNoAxeViolations(touchPage, '[data-slot="dropdown-menu-content"]');
+  });
   await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
   await expectAccountMenuEvidenceVisible(touchPage, alpha.displayName);
   const touchScreenshot = await touchPage.screenshot({
