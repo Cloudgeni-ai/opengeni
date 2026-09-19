@@ -21,17 +21,14 @@ if [ ! -f .env ]; then
   echo "Created .env from .env.example. Configure model and sandbox credentials before running agent sessions."
 fi
 
-set -a
 # shellcheck disable=SC1091
-. ./.env
-set +a
+. ./scripts/dev-stack-backend.sh
+opengeni_load_dev_environment ./.env
 
 # Docker remains the preferred local infrastructure backend when its daemon is
 # reachable. Restricted sandboxes commonly have no daemon (or only a dead CLI),
 # so auto falls back to equivalent native processes without changing `bun run
 # dev`. An explicit Docker request still fails closed.
-# shellcheck disable=SC1091
-. ./scripts/dev-stack-backend.sh
 OPENGENI_DEV_BACKEND="$(opengeni_resolve_dev_backend)"
 export OPENGENI_DEV_BACKEND
 

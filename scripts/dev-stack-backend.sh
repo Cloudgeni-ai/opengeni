@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 # Resolve the infrastructure backend used by scripts/dev-stack.sh.
 
+opengeni_load_dev_environment() {
+  # An invocation's backend choice is authority, not a default that a copied
+  # .env.example may silently replace. Other dotenv behavior is unchanged.
+  local backend_was_set="${OPENGENI_DEV_BACKEND+x}"
+  local invocation_backend="${OPENGENI_DEV_BACKEND-}"
+  set -a
+  # shellcheck disable=SC1090
+  . "$1"
+  set +a
+  if [ "$backend_was_set" = x ]; then
+    export OPENGENI_DEV_BACKEND="$invocation_backend"
+  fi
+}
+
 opengeni_docker_usable() {
   command -v docker >/dev/null 2>&1 || return 1
 
