@@ -179,6 +179,7 @@ function BehaviorReviewList({
           revisionId: skill.revisionId,
           expectedRevisionId: skill.activeRevisionId,
           expectedScopeVersion: skill.scopeVersion,
+          ...(skill.removalOperationId ? { removalOperationId: skill.removalOperationId } : {}),
           reason: `${decision === "approve" ? "Approved" : "Rejected"} in Knowledge review`,
         });
       setSkill(null);
@@ -277,13 +278,19 @@ function BehaviorReviewList({
           <DialogHeader>
             <DialogTitle>{skill?.title ?? "Review workspace instruction"}</DialogTitle>
             <DialogDescription>
-              Approval makes this exact revision available to agents in{" "}
-              {skill?.scope === "user"
-                ? "your personal space"
-                : skill?.scope === "organization"
-                  ? "the company"
-                  : "this workspace"}
-              .
+              {skill?.removalOperationId ? (
+                "Permanently deletes this Skill and all stored revisions. This cannot be undone. Conversations remain unchanged."
+              ) : (
+                <>
+                  Approval makes this exact revision available to agents in{" "}
+                  {skill?.scope === "user"
+                    ? "your personal space"
+                    : skill?.scope === "organization"
+                      ? "the company"
+                      : "this workspace"}
+                  .
+                </>
+              )}
             </DialogDescription>
           </DialogHeader>
           {instruction ? (
@@ -338,7 +345,7 @@ function BehaviorReviewList({
               }
               onClick={() => void decide("approve")}
             >
-              Approve
+              {skill?.removalOperationId ? "Permanently delete Skill" : "Approve"}
             </Button>
             <Button variant="outline" disabled={busy} onClick={() => void decide("reject")}>
               Reject

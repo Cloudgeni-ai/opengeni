@@ -3,11 +3,33 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import type { SkillRecord } from "@opengeni/sdk";
 
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 const accountId = "00000000-0000-4000-8000-000000000002";
 const revisionId = "00000000-0000-4000-8000-000000000003";
 const baselineRevisionId = "00000000-0000-4000-8000-000000000004";
+let removalVisible = false;
+const removal: SkillRecord = {
+  id: crypto.randomUUID(),
+  stableKey: "obsolete-skill",
+  title: "obsolete-skill",
+  description: "Remove obsolete instructions",
+  scope: "workspace",
+  scopeVersion: 1,
+  status: "active",
+  activationMode: "workspace_managed",
+  activeRevisionId: crypto.randomUUID(),
+  revisionId,
+  pendingRevisionIds: [revisionId],
+  removalOperationId: crypto.randomUUID(),
+  contentHash: null,
+  source: null,
+  files: [{ path: "SKILL.md", content: "Obsolete instructions" }],
+};
+const approveRemoval = mock(async (_workspace: string, _skill: string, _request: unknown) => ({
+  removed: true,
+}));
 let resolveBaseline!: (value: { content: string }) => void;
 const baseline = new Promise<{ content: string }>((resolve) => {
   resolveBaseline = resolve;
@@ -43,7 +65,12 @@ const context = {
       ],
       nextCursor: null,
     })),
-    listWorkspaceSkills: mock(async () => ({ skills: [], nextCursor: null })),
+    listWorkspaceSkills: mock(async () => ({
+      skills: removalVisible ? [removal] : [],
+      nextCursor: null,
+    })),
+    readWorkspaceSkill: async () => removal,
+    approveWorkspaceSkill: approveRemoval,
     listWorkspaceInstructionPolicies: mock(async () => ({
       activeHeads: [
         {
@@ -76,6 +103,48 @@ beforeAll(() => {
 afterAll(() => {
   mock.restore();
   GlobalRegistrator.unregister();
+});
+
+test("Skill removal review clearly describes irreversible deletion and submits the exact operation binding", async () => {
+  removalVisible = true;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<BehaviorReviews workspaceId={workspaceId} />);
+    });
+    const open = [...container.querySelectorAll("button")].find((button) =>
+      button.parentElement?.textContent?.includes("obsolete-skill"),
+    );
+    expect(open).toBeDefined();
+    await act(async () => {
+      open!.click();
+    });
+    expect(container.textContent).toContain("all stored revisions");
+    expect(container.textContent).toContain("This cannot be undone");
+    const approve = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Permanently delete Skill",
+    );
+    expect(approve).toBeDefined();
+    await act(async () => {
+      approve!.click();
+    });
+    expect(approveRemoval).toHaveBeenCalledWith(
+      workspaceId,
+      removal.id,
+      expect.objectContaining({
+        removalOperationId: removal.removalOperationId,
+        revisionId,
+        expectedRevisionId: removal.activeRevisionId,
+        expectedScopeVersion: 1,
+      }),
+    );
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    removalVisible = false;
+  }
 });
 
 test("instruction approval stays disabled until current and proposed text are visible", async () => {

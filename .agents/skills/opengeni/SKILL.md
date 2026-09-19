@@ -291,6 +291,10 @@ be read without sandbox staging via `loadNativeToolSkillArtifacts`; do not infer
 embedding selection controls or Connected Machine visibility from that helper.
 `packages/contracts/src/skill-metadata.ts` owns the shared YAML interpretation.
 Every active Skill's name and description come from `SKILL.md` frontmatter;
+Permanent agent removal uses `skill_remove` through the same Learning/authority
+lifecycle as saves. Inspect `0488_permanent_skill_removal.sql` and the Skill
+lifecycle tests before changing deletion: approval binds an explicit removal
+operation, revisions are physically deleted, and conversations remain unchanged.
 database/catalog metadata is a derived projection, never a second edit surface.
 Preserve valid YAML bytes and historical revisions. Legacy conversion and
 activation guards belong to the maintenance cutover, not a permanent fallback.

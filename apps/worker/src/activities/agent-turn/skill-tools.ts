@@ -18,6 +18,7 @@ import {
   readSkill,
   resolveSkillImport,
   saveSkill,
+  removeSkill,
 } from "@opengeni/core";
 import {
   buildPortableSkillArtifact,
@@ -31,6 +32,7 @@ import { createSkillReadAttemptToolDefinition, type SkillReadContent } from "./s
 import { createSkillSearchAttemptToolDefinition } from "./skill-search";
 import { createSkillSaveAttemptToolDefinition, type SkillSaveRequest } from "./skill-save";
 import { createSkillInstallAttemptToolDefinition } from "./skill-install";
+import { createSkillRemoveAttemptToolDefinition } from "./skill-remove";
 import {
   createSkillCheckoutAttemptToolDefinition,
   createSkillPublishAttemptToolDefinition,
@@ -122,6 +124,13 @@ export function createWorkspaceSkillTools(input: {
     );
   };
   return [
+    createSkillRemoveAttemptToolDefinition({
+      authorize,
+      remove: async (request) =>
+        withReviewState(
+          await removeSkill(input.db, { ...context, ...request, actor: input.actor }),
+        ),
+    }),
     createSkillReadAttemptToolDefinition({ authorize, load }),
     createSkillSearchAttemptToolDefinition({
       authorize,

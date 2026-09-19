@@ -2,6 +2,7 @@
 export type SkillFile = { path: string; content: string };
 export type SkillScope = "workspace" | "organization" | "user";
 export type SkillRecord = {
+  removalOperationId?: string | null;
   activationMode: "workspace_managed" | "session_selected";
   pendingRevisionIds: string[];
   id: string;
@@ -19,6 +20,7 @@ export type SkillRecord = {
 };
 export type SkillSummary = Omit<SkillRecord, "files">;
 export type SkillWriteReceipt = {
+  removed?: boolean | undefined;
   operationId: string;
   skillId: string;
   revisionId: string;
@@ -51,6 +53,7 @@ export type SaveWorkspaceSkillRequest = {
   reason: string;
 };
 export type ApplyWorkspaceSkillRevisionRequest = {
+  removalOperationId?: string;
   operationId: string;
   revisionId: string;
   expectedRevisionId: string | null;
