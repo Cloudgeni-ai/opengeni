@@ -1038,14 +1038,31 @@ ID, an equally sanitized typed cause, and allowlisted catalog identifiers—neve
 raw SQL text, a raw driver cause, or bound parameters.
 
 An activity failure can occur before that transaction creates its attempt row.
-The turn worker exports a stable typed Temporal disposition. Every typed
-persistence failure from the atomic claim transaction is retryable, including
-constraints and authorization guards: no provider or tool effect can have
-occurred, and a deployment or authority repair may make the exact accepted work
-admissible. Operational database unavailability and rolling-legacy unknowns use
-the same delayed recovery path. Only malformed non-database state and permanent
-claim invariants are terminal. The failure activity distinguishes this from a
-stale or settled attempt. Retryable and rolling-legacy unknown failures record a
+The turn worker exports a stable typed Temporal disposition. Operational
+database failures remain retryable. Other typed persistence rejections at the
+exact `session_attempts.claim` stage with `retryOutcome = not_retryable` park
+accepted work in `sessions.admission_block` with `status = requires_action`,
+a sanitized SQLSTATE and `retryPolicy = explicit_recheck`; they are not terminal
+failures and do not consume or rewrite queued turns, pending machine input,
+history, grants, or captured principals. `OG001` identifies the exact reviewed
+personal-resource initiating-membership guard; `OG002` identifies its matching
+grant guard. Other errors, including unqualified `P0002`/`42501`, carry the generic
+`database_claim_rejected` reason rather than a guessed authority diagnosis.
+The control transaction compares the pre-dispatch session sequence/control
+version and exact workflow/account, and refuses to park if a live attempt exists
+or newer accepted work/control has won. A duplicate settlement is idempotent.
+Claim, peek and wake acknowledgement honor the durable fence; unchanged blocked
+work does not dispatch turn activities or schedule retry timers.
+
+An authorized explicit Resume clears the selected session's block and commits
+a new wake, even when inference control was already active. A newly accepted
+Send or Steer also rechecks; an ordinary Send does not become Steer merely
+because admission is blocked. Neither action grants missing authority or
+changes earlier accepted snapshots. Repair authority through its normal
+authorized lifecycle, then explicitly recheck; authority changes alone are not
+a polling trigger. Pause and cancellation remain independent controls.
+Only malformed non-database state and permanent claim invariants are terminal.
+Retryable and rolling-legacy unknown failures record a
 delayed `session_workflow_wake_outbox` revision and return an explicit
 `unclaimed` result; new workflow histories retain the logical turn, back off
 exponentially to a one-minute ceiling, and re-peek durable work. User/queue,
@@ -1056,6 +1073,15 @@ in flight. A permanent failure atomically fails the exact still-runnable turn
 compaction/internal-update obligation), session, events, maintenance, and child
 terminal outbox without fabricating an attempt row or looping. Raw SQL and
 invariant messages never enter workflow history.
+
+Migration 0483 is additive rolling storage. Its attempt-insert trigger prevents
+old binaries from claiming through a stored block, but old workers can still
+retry that rejection and old API workers do not implement explicit recheck.
+Complete the API/control/turn-worker rollout before relying on the new behavior.
+The workflow command change is patch-gated at each admission peek; pre-patch
+commands retain their recorded shapes while the next live admission cycle can
+activate the fix without a workflow restart. No migration backfills or
+repairs authority, accepted input, or live session state.
 
 Older workers could misclassify an application SQLSTATE from a session-level
 internal-update claim as permanent and mark its undelivered child inputs plus

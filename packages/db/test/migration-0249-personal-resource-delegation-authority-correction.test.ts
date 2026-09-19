@@ -3,12 +3,14 @@ import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/test
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
-import { createDb, createSession } from "../src";
+import { createDb, createSession, nestedPostgresSqlState } from "../src";
 import { migrate } from "../src/migrate";
 import { embeddingMigrationTail } from "./embedding-migration-tail";
 
 const migrationName = "0249_personal_resource_delegation_authority_correction.sql";
 const commonAuthorityMigrationName = "0253_common_user_resource_authority_lifecycle.sql";
+// 0483 source-asserts the guard installed by withheld 0253; replay them together.
+const typedAdmissionMigrationName = "0483_preclaim_admission_block.sql";
 const connectionAuthorityMigrationName = "0256_connection_authority_delegation.sql";
 const connectionAuthorityActivationMigrationName =
   "0264_connection_authority_runtime_activation.sql";
@@ -125,6 +127,42 @@ describe("migration 0249 personal-resource delegation authority correction", () 
     });
   }, 180_000);
 
+  test("latest admission guard exposes typed membership and grant denials without repairing authority", async () => {
+    await withBlankDatabase("migration-0483-typed-guards", async (sql, databaseUrl) => {
+      await migrate(databaseUrl);
+      for (const denied of ["membership", "grant"] as const) {
+        const ids = await createFixture(sql, databaseUrl, {
+          target: "ordinary",
+          workspaceMembership: true,
+        });
+        if (denied === "membership") {
+          await sql`update organization_memberships set status = 'revoked', revoked_at = now()
+            where account_id = ${ids.accountId} and subject_id = ${ids.subjectId}`;
+        } else {
+          await sql`update organization_user_resource_grants set status = 'revoked', revoked_at = now()
+            where account_id = ${ids.accountId} and session_id = ${ids.sessionId}`;
+        }
+        let error: unknown;
+        try {
+          await insertAttempt(sql, ids, ids.attemptId);
+        } catch (caught) {
+          error = caught;
+        }
+        expect(nestedPostgresSqlState(error)).toBe(denied === "membership" ? "OG001" : "OG002");
+        expect(
+          await sql`select id from session_turn_attempts where id = ${ids.attemptId}`,
+        ).toHaveLength(0);
+        expect(
+          await sql`select attempt_id from session_attempt_personal_resource_snapshots
+          where attempt_id = ${ids.attemptId}`,
+        ).toHaveLength(0);
+        const [membership] = await sql`select status from organization_memberships
+          where account_id = ${ids.accountId} and subject_id = ${ids.subjectId}`;
+        expect(membership!.status).toBe(denied === "membership" ? "revoked" : "active");
+      }
+    });
+  }, 180_000);
+
   test("admission and resolution reject every constructible non-running owner state", async () => {
     await withBlankDatabase("migration-0249-running-attempt-only", async (sql, databaseUrl) => {
       await migrate(databaseUrl);
@@ -186,6 +224,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         values
           (${migrationName}),
           (${commonAuthorityMigrationName}),
+          (${typedAdmissionMigrationName}),
           (${connectionAuthorityMigrationName}),
           (${connectionAuthorityActivationMigrationName}),
           (${scheduledConnectionAuthorityMigrationName}),
@@ -211,6 +250,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
       // during fixture setup, then remove them before the ordered replay.
       await sql`
         alter table sessions
+        add column admission_block jsonb,
         add column scope_subject_id text,
         add column input_wait_turn_id uuid,
         add column input_wait_until timestamptz,
@@ -222,6 +262,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         where name = any(${embeddingMigrationTail}::text[]) or name in (
           ${migrationName},
           ${commonAuthorityMigrationName},
+          ${typedAdmissionMigrationName},
           ${connectionAuthorityMigrationName},
           ${connectionAuthorityActivationMigrationName},
           ${scheduledConnectionAuthorityMigrationName},
@@ -268,6 +309,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
 
       await sql`
         alter table sessions
+        drop column admission_block,
         drop column scope_subject_id,
         drop column input_wait_turn_id,
         drop column input_wait_until,

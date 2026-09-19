@@ -276,22 +276,38 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
  * Convert the atomic claim transaction's failure into a small, stable
  * Temporal wire contract. The original error remains in activity diagnostics,
  * but SQL text, parameters, and arbitrary invariant messages never enter
- * workflow history. Every database failure is safe to re-read after backoff
- * because the claim transaction contains no model/tool effects. Database
- * constraints and authorization guards can also be repaired by a deployment or
- * authority refresh, so they must preserve pending work. Only a non-database
- * claim invariant is terminal.
+ * workflow history. Operational failures retry; other persistence rejections
+ * retain accepted work behind a durable explicit-recheck fence. Repeating the
+ * same rejected transaction without changed conditions is not recovery.
  */
 export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
   const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
   const retryableCode = retryableDatabaseFailureCode(error);
-  // The workflow retries after a durable re-read and bounded delay. A
-  // SessionEventPersistenceError proves the failure happened inside the atomic
-  // claim boundary, before provider or tool work; retaining it is safer than
-  // destroying accepted machine input on an application SQLSTATE.
+  const rejectedClaim =
+    persistenceFailure?.details.stage === "session_attempts.claim" &&
+    persistenceFailure.details.retryOutcome === "not_retryable" &&
+    !retryableCode;
   const detail: PreClaimFailureDetail = {
-    disposition: persistenceFailure || retryableCode ? "retryable" : "permanent",
+    disposition: rejectedClaim
+      ? "blocked"
+      : persistenceFailure || retryableCode
+        ? "retryable"
+        : "permanent",
     code: retryableCode ?? persistenceFailure?.details.code ?? "claim_invariant",
+    ...(persistenceFailure && rejectedClaim
+      ? {
+          sqlState: persistenceFailure.details.sqlState,
+          reason:
+            persistenceFailure.details.stage === "session_attempts.claim" &&
+            persistenceFailure.details.sqlState === "OG001"
+              ? ("initiator_membership_required" as const)
+              : persistenceFailure.details.stage === "session_attempts.claim" &&
+                  persistenceFailure.details.sqlState === "OG002"
+                ? ("personal_resource_grant_required" as const)
+                : ("database_claim_rejected" as const),
+          retryPolicy: "explicit_recheck" as const,
+        }
+      : {}),
   };
   return ApplicationFailure.create({
     message: PRE_CLAIM_FAILURE_MESSAGE,

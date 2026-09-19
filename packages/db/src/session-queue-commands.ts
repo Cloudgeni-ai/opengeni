@@ -1904,6 +1904,7 @@ export async function submitHumanPromptInTransaction(
     !isQueueEditSubmission &&
     before.state === "active" &&
     session.status === "requires_action" &&
+    !session.admissionBlock &&
     session.activeTurnId !== null
       ? "steer"
       : input.delivery;
@@ -2377,7 +2378,9 @@ export async function submitHumanPromptInTransaction(
   );
   const noCurrentAfter =
     effectiveDelivery === "steer" ? liveCurrentTurnId === null : !session.activeTurnId;
-  const nextStatus = noCurrentAfter ? "queued" : session.status;
+  const nextStatus = noCurrentAfter
+    ? "queued"
+    : (session.admissionBlock?.previousStatus ?? session.status);
   if (nextStatus !== session.status) {
     eventValues.push({
       accountId: input.accountId,
@@ -2424,6 +2427,7 @@ export async function submitHumanPromptInTransaction(
       tools: session.tools,
       activeTurnId: effectiveDelivery === "steer" ? liveCurrentTurnId : session.activeTurnId,
       status: nextStatus,
+      admissionBlock: null,
       queueVersion,
       queueHeadPosition: 0,
       queueTailPosition: ordered.length,
@@ -2738,7 +2742,11 @@ export async function sendAgentMessageInTransaction(
   }
   const eventIds = insertedEvents.map((event) => event.id);
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
-  const runnable = !realtimeActive && session.activeTurnId === null && effective.state === "active";
+  const runnable =
+    !session.admissionBlock &&
+    !realtimeActive &&
+    session.activeTurnId === null &&
+    effective.state === "active";
   const wake = runnable
     ? await registerInternalUpdateWakeInTransaction(db, {
         accountId: input.accountId,
@@ -3072,7 +3080,10 @@ export async function steerAgentSessionInTransaction(
     .update(schema.sessions)
     .set({
       activeTurnId: supersession.liveCurrentTurnId,
-      status: supersession.liveCurrentTurnId ? session.status : "queued",
+      status: supersession.liveCurrentTurnId
+        ? (session.admissionBlock?.previousStatus ?? session.status)
+        : "queued",
+      admissionBlock: null,
       lastSequence: sequence,
       updatedAt: now,
     })

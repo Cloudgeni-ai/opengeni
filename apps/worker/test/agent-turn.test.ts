@@ -5340,7 +5340,15 @@ describe("transient provider error classifier", () => {
       database: { constraint: "session_turn_attempts_pkey" },
     });
     expect(preClaimAdmissionFailure(constraint)).toMatchObject({
-      details: [{ disposition: "retryable", code: "db_failure" }],
+      details: [
+        {
+          disposition: "blocked",
+          code: "db_failure",
+          sqlState: "23505",
+          reason: "database_claim_rejected",
+          retryPolicy: "explicit_recheck",
+        },
+      ],
     });
     const authorizationGuard = new SessionEventPersistenceError({
       code: "db_failure",
@@ -5353,8 +5361,41 @@ describe("transient provider error classifier", () => {
       database: {},
     });
     expect(preClaimAdmissionFailure(authorizationGuard)).toMatchObject({
-      details: [{ disposition: "retryable", code: "db_failure" }],
+      details: [
+        {
+          disposition: "blocked",
+          code: "db_failure",
+          sqlState: "42501",
+          reason: "database_claim_rejected",
+          retryPolicy: "explicit_recheck",
+        },
+      ],
     });
+    for (const [sqlState, reason] of [
+      ["P0002", "database_claim_rejected"],
+      ["OG001", "initiator_membership_required"],
+      ["OG002", "personal_resource_grant_required"],
+    ] as const) {
+      const failure = new SessionEventPersistenceError({ ...authorizationGuard.details, sqlState });
+      expect(preClaimAdmissionFailure(failure)).toMatchObject({
+        details: [{ disposition: "blocked", reason, sqlState }],
+      });
+      const unrelated = new SessionEventPersistenceError({
+        ...failure.details,
+        stage: "other_stage",
+      });
+      expect(preClaimAdmissionFailure(unrelated)).toMatchObject({
+        details: [{ disposition: "retryable", code: "db_failure" }],
+      });
+      expect(
+        preClaimAdmissionFailure(
+          new SessionEventPersistenceError({
+            ...failure.details,
+            retryOutcome: "exhausted",
+          }),
+        ),
+      ).toMatchObject({ details: [{ disposition: "retryable", code: "db_failure" }] });
+    }
     expect(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))).toMatchObject({
       type: "OpenGeniPreClaimFailure",
       nonRetryable: true,
