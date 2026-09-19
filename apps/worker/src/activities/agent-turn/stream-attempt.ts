@@ -70,6 +70,7 @@ import {
   isCompletedGeneratedImageSdkEvent,
 } from "../generated-images";
 import { ToolResultSpill } from "./tool-result-spill";
+import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
@@ -652,8 +653,7 @@ export async function runTurnStreamAttempt(
         });
       }
     };
-    const ownedEstablished =
-      sandboxState.resolvedSandbox?.established ?? sandboxState.lazyOwnedSandbox;
+    const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
       const eagerResolvedSandbox = sandboxState.resolvedSandbox;
       // Eager owned sessions must settle the exact platform-setup provider

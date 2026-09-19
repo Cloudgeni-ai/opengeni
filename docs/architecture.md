@@ -413,16 +413,12 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
-A session has durable home-compute policy and may also have an active target
-pointer. The active pointer is epoch-fenced and establishment-safe: selection
-must prove that the current turn context can establish the target, and a stale
-or structurally invalid pointer is reconciled visibly rather than silently
-routing to an arbitrary provider.
-
-Managed sandbox lifecycle belongs to the lease and reaper. API/viewer handles
-are non-owned: request completion must not terminate them. Provider identity is
-persisted before setup; workspace capture fences every writer. Provider loss
-retires only the matching instance and never licenses ambiguous effect replay.
+Sessions have durable home-compute policy and optional epoch-fenced active targets.
+Selection proves turn-context establishment authority; invalid pointers reconcile visibly.
+The lease/reaper owns managed sandboxes, not API/viewer requests. Identity persists before
+setup; capture fences every writer. Provider loss retires only the matching instance,
+never licensing ambiguous replay. Agent execution keeps the lazy routing wrapper after
+provisioning; raw handles serve lifecycle setup/capture (`turn-sandbox-access.ts`).
 
 Ordinary snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains
 and rotations may use `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` (unset inherits
