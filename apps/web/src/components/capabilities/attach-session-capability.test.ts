@@ -16,7 +16,12 @@ function harness(mode = "explicit", selectedIds = ["old"], idsTruncated = false)
       firstPartyMcpTools: ["session_pause"],
       toolPolicyVersion: 7,
       toolPolicy: { mode },
-      effectiveToolPolicy: { selectedIds, idsTruncated },
+      effectiveToolPolicy: {
+        selectedIds: mode === "workspace_default" ? [] : selectedIds,
+        effectiveIds: [...selectedIds, "opengeni"],
+        mandatoryIds: ["opengeni"],
+        idsTruncated,
+      },
     }),
     updateSessionToolPolicy,
   } as unknown as OpenGeniBrowserClient;
