@@ -15,6 +15,70 @@ const textOutput = {
 };
 
 describe("capacity recovery progress evidence", () => {
+  for (const cleanup of ["cancel", "abort", "idle_timeout", "whole_timeout"] as const) {
+    for (const meaningful of [false, true]) {
+      test(`non-EOF ${cleanup} preserves terminal meaningfulOutput=${meaningful}`, async () => {
+        const events: CodexModelRequestEvent[] = [];
+        let signalTerminal!: () => void;
+        const terminal = new Promise<void>((resolve) => {
+          signalTerminal = resolve;
+        });
+        const abort = new AbortController();
+        const context: CodexRequestContext = {
+          clientVersion: "test",
+          getToken: async () => ({ accessToken: "test", chatgptAccountId: null, isFedramp: false }),
+          refresh: async () => ({ accessToken: "test", chatgptAccountId: null, isFedramp: false }),
+          resolveModel: (slug) => slug,
+          responseTimeoutPolicy: {
+            headersTimeoutMs: 5_000,
+            streamIdleTimeoutMs: cleanup === "idle_timeout" ? 250 : 5_000,
+            wholeRequestTimeoutMs: cleanup === "whole_timeout" ? 250 : 10_000,
+          },
+          onModelRequestEvent: (event) => {
+            events.push(event);
+            if (["completed", "failed", "timed_out"].includes(event.phase)) signalTerminal();
+          },
+        };
+        const response = await codexRequestStorage.run(context, () =>
+          codexSubscriptionFetch(
+            async () =>
+              new Response(
+                new ReadableStream<Uint8Array>({
+                  start(controller) {
+                    controller.enqueue(
+                      new TextEncoder().encode(
+                        `data: ${JSON.stringify({ type: "response.completed", response: { id: "open-response", status: "completed", output: meaningful ? [textOutput] : [] } })}\n\n`,
+                      ),
+                    );
+                    // Provider never closes EOF; SDK cleanup/abort/timer settles it.
+                  },
+                }),
+                { headers: { "content-type": "text/event-stream" } },
+              ),
+          )("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ stream: true }),
+            signal: abort.signal,
+          }),
+        );
+        const reader = response.body!.getReader();
+        expect((await reader.read()).done).toBe(false);
+        if (cleanup === "cancel") await reader.cancel("SDK terminal cleanup");
+        else if (cleanup === "abort") abort.abort("SDK terminal cleanup");
+        await terminal;
+        if (cleanup !== "cancel") expect((await reader.read()).done).toBe(true);
+        const terminalEvents = events.filter((event) =>
+          ["completed", "failed", "timed_out"].includes(event.phase),
+        );
+        expect(terminalEvents).toHaveLength(1);
+        expect(terminalEvents[0]).toMatchObject({
+          phase: "completed",
+          meaningfulOutput: meaningful,
+        });
+      });
+    }
+  }
+
   test("empty, reasoning-only, incomplete and bookkeeping output are not progress", () => {
     for (const output of [
       null,

@@ -325,6 +325,13 @@ function markSemanticTerminal(state: SemanticTerminalState, phase: "completed" |
   }
 }
 
+/** EOF and post-terminal cleanup must preserve the same recovery evidence. */
+function semanticCompletionEvidence(state: SemanticTerminalState | undefined): {
+  meaningfulOutput?: boolean;
+} {
+  return state?.phase === "completed" ? { meaningfulOutput: state.meaningfulOutput === true } : {};
+}
+
 function terminalOutcomeForPhase(
   phase: CodexModelRequestEvent["phase"],
 ): RequestTerminalOutcome | null {
@@ -439,6 +446,7 @@ async function observedResponse(
     if (semanticTerminal) markSemanticTerminal(semanticTerminal, "failed");
     await emitRequestEvent(audit, {
       phase: semanticTerminal?.phase ?? (res.ok ? "completed" : "failed"),
+      ...semanticCompletionEvidence(semanticTerminal),
       responseObserved: true,
       status: res.status,
       ...(requestId ? { providerRequestId: requestId } : {}),
@@ -472,6 +480,7 @@ async function observedResponse(
         void reader.cancel(error).catch(() => undefined);
         void emitRequestEvent(audit, {
           phase,
+          ...semanticCompletionEvidence(semanticTerminal),
           responseObserved: true,
           ...(phase === "timed_out" ? { timeoutClass: klass } : {}),
           status: res.status,
@@ -499,6 +508,7 @@ async function observedResponse(
         void reader.cancel(reason).catch(() => undefined);
         void emitRequestEvent(audit, {
           phase: semanticTerminal?.phase ?? "failed",
+          ...semanticCompletionEvidence(semanticTerminal),
           responseObserved: true,
           status: res.status,
           ...(requestId ? { providerRequestId: requestId } : {}),
@@ -533,9 +543,7 @@ async function observedResponse(
           if (!semanticTerminal?.deferTransportTerminal || semanticTerminal.phase !== null) {
             await emitRequestEvent(audit, {
               phase: semanticTerminal?.phase ?? (res.ok ? "completed" : "failed"),
-              ...(semanticTerminal?.phase === "completed"
-                ? { meaningfulOutput: semanticTerminal.meaningfulOutput === true }
-                : {}),
+              ...semanticCompletionEvidence(semanticTerminal),
               responseObserved: true,
               status: res.status,
               ...(requestId ? { providerRequestId: requestId } : {}),
@@ -571,9 +579,7 @@ async function observedResponse(
         }
         await emitRequestEvent(audit, {
           phase: semanticPhase ?? "failed",
-          ...(semanticPhase === "completed"
-            ? { meaningfulOutput: semanticTerminal?.meaningfulOutput === true }
-            : {}),
+          ...semanticCompletionEvidence(semanticTerminal),
           responseObserved: true,
           status: res.status,
           ...(requestId ? { providerRequestId: requestId } : {}),
@@ -594,6 +600,7 @@ async function observedResponse(
         }
         await emitRequestEvent(audit, {
           phase: semanticTerminal?.phase ?? "failed",
+          ...semanticCompletionEvidence(semanticTerminal),
           responseObserved: true,
           status: res.status,
           ...(requestId ? { providerRequestId: requestId } : {}),
