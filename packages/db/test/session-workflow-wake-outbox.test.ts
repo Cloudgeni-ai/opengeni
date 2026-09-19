@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { and, eq, sql } from "drizzle-orm";
 import { readTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { createSessionStateActivities } from "../../../apps/worker/src/activities/session-state";
 import {
   bootstrapWorkspace,
   blockSessionWorkBeforeAttemptClaim,
@@ -195,8 +196,38 @@ describe("transactional session workflow wake outbox", () => {
       }),
     ).toEqual({ action: "pending_admission", blocker: "session_unavailable" });
     expect(await wakeRow(workspaceId, sessionId)).toEqual(wake);
-    // These commits occur between independent observer transactions, the same
-    // boundary occupied by the optional Temporal metadata request.
+    // Run the actual activity factory and real DB peeks. Only the external
+    // Temporal metadata service is a barrier; it does not mutate database state.
+    const startInspection = (expectedActivityId: string) => {
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const activities = createSessionStateActivities(
+        async () =>
+          ({
+            db: client.db,
+            inspectSessionAttemptActivity: async (ref: { activityId: string }) => {
+              expect(ref.activityId).toBe(expectedActivityId);
+              entered();
+              await released;
+              return "settled" as const;
+            },
+          }) as any,
+      );
+      const result = activities.peekSessionWork({
+        workspaceId,
+        sessionId,
+        observerAccountId: ctx.grant.accountId,
+      });
+      return { started, release, result };
+    };
+    const originalInspection = startInspection(dispatchId);
+    await originalInspection.started;
     await requestSessionTurnRecovery(client.db, workspaceId, {
       sessionId,
       turnId: claim.turn.id,
@@ -214,21 +245,29 @@ describe("transactional session workflow wake outbox", () => {
       temporalActivityId: dispatchId,
     });
     const nextAttemptId = crypto.randomUUID();
+    const nextDispatchId = crypto.randomUUID();
     const successor = await claimSessionWorkForAttempt(client.db, workspaceId, {
       sessionId,
       workflowId,
       workflowRunId: crypto.randomUUID(),
-      dispatchId: crypto.randomUUID(),
+      dispatchId: nextDispatchId,
       attemptId: nextAttemptId,
       trigger: { kind: "next" },
     });
     if (successor.action !== "claimed") throw new Error("Missing successor");
-    expect(await observe()).toMatchObject({
+    const replacementEvents = await listSessionEvents(client.db, workspaceId, sessionId);
+    originalInspection.release();
+    const replacedObservation = await originalInspection.result;
+    expect(replacedObservation).toMatchObject({
       kind: "attempt-owned",
       attemptId: nextAttemptId,
       turnId: claim.turn.id,
       executionGeneration: claim.turn.executionGeneration + 1,
     });
+    expect(replacedObservation).not.toHaveProperty("ownerActivityState");
+    expect(await listSessionEvents(client.db, workspaceId, sessionId)).toEqual(replacementEvents);
+    const currentInspection = startInspection(nextDispatchId);
+    await currentInspection.started;
     await withWorkspaceRls(client.db, workspaceId, (db) =>
       db.transaction((tx) =>
         mutateSessionControlInTransaction(tx as unknown as typeof db, {
@@ -241,7 +280,13 @@ describe("transactional session workflow wake outbox", () => {
         }),
       ),
     );
-    expect(await observe()).toEqual({ kind: "interruption-pending", attemptId: nextAttemptId });
+    const pausedEvents = await listSessionEvents(client.db, workspaceId, sessionId);
+    currentInspection.release();
+    expect(await currentInspection.result).toEqual({
+      kind: "interruption-pending",
+      attemptId: nextAttemptId,
+    });
+    expect(await listSessionEvents(client.db, workspaceId, sessionId)).toEqual(pausedEvents);
     expect((await getSessionTurn(client.db, workspaceId, claim.turn.id))?.activeAttemptId).toBe(
       nextAttemptId,
     );
