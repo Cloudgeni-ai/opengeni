@@ -39312,7 +39312,7 @@ export async function acceptSessionHumanInputResponse(
           )
           .limit(1);
         const skillScopeLocked =
-          requestPreview?.questions.some((question) => question.skillReview !== undefined) ?? false;
+          requestPreview?.questions.some((question) => question.skillReview != null) ?? false;
         if (skillScopeLocked) {
           await tx.execute(
             sql`SELECT pg_advisory_xact_lock(hashtextextended(${`organization-membership:${input.accountId}`}, 0))`,
@@ -39349,9 +39349,7 @@ export async function acceptSessionHumanInputResponse(
           .for("update")
           .limit(1);
         if (!request) return { action: "not_found" } as const;
-        const hasSkillReview = request.questions.some(
-          (question) => question.skillReview !== undefined,
-        );
+        const hasSkillReview = request.questions.some((question) => question.skillReview != null);
         if (hasSkillReview && !skillScopeLocked) {
           throw new HumanInputResponseValidationError(
             "INVALID_RESPONSE",

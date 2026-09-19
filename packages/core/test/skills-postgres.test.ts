@@ -1924,14 +1924,16 @@ describe("one chat Skill confirmation", () => {
           response: { ...response, answers: [{ ...response.answers[0]!, other: "save anyway" }] },
         }),
       ).rejects.toThrow();
-      await expect(acceptSessionHumanInputResponse(client.db, input)).rejects.toThrow();
+      await expect(acceptSessionHumanInputResponse(client.db, input)).rejects.toThrow(
+        "Skill approval requires a verified human browser session.",
+      );
       await expect(
         acceptSessionHumanInputResponse(client.db, {
           ...input,
           canonicalHumanSession: true,
           respondedBy: "user:another",
         }),
-      ).rejects.toThrow();
+      ).rejects.toThrow("Only the human who started this work can answer its Skill review.");
       const [stillPending] =
         await shared.admin`select status,skill_review_human_authorized from session_human_input_requests where id=${requestId}`;
       expect(stillPending).toMatchObject({
