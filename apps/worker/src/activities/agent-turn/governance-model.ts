@@ -21,6 +21,7 @@ import {
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 import { settingsWithResolvedModelContext, type Settings } from "@opengeni/config";
+import { projectReasoningConfigurations, supportsReasoningConfiguration } from "@opengeni/codex";
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
 import { resolveRigProviderImageForRun } from "@opengeni/core";
 import { createModelHistoryAttachmentProjector } from "../run-input";
@@ -353,12 +354,20 @@ export async function prepareGovernanceAndModel(
         fileIds,
       }),
   );
+  const useReasoningUpdates =
+    runSettings.reasoningConfigurationUpdatesEnabled &&
+    providerApi === "responses" &&
+    (resolvedModel?.provider.id === "codex" || resolvedModel?.provider.id === "openai") &&
+    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort);
   const modelHistoryProjector = async (
     items: Array<Record<string, unknown>>,
     projectionOptions?: Parameters<typeof attachmentProjector>[1],
   ) =>
     projectModelInputForCapabilities(
-      await attachmentProjector(items, projectionOptions),
+      projectReasoningConfigurations(
+        await attachmentProjector(items, projectionOptions),
+        useReasoningUpdates,
+      ),
       modelInputPolicy,
     );
   const generatedImageHistoryProjector = async (

@@ -884,6 +884,80 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
     expect(event).toMatchObject({ id: result.eventId, sequence: result.eventSequence });
   }, 180_000);
 
+  test("message forks accept valid fractional reasoning controls but reject malformed and compacted history", async () => {
+    if (!shared || !client) throw new Error("test postgres unavailable");
+    const human = await provisionManagedHuman();
+    const workspaceId = human.personalWorkspaceId;
+    const sourceSessionId = await ownedSession(human, workspaceId);
+    const events: string[] = [];
+    const controls: Record<string, postgres.JSONValue>[] = [];
+    for (const [index, effort] of ["low", "high"].entries()) {
+      const turnId = crypto.randomUUID();
+      const eventId = crypto.randomUUID();
+      events.push(eventId);
+      await shared.admin`insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+        status, position, prompt, model, reasoning_effort, sandbox_backend
+      ) values (${turnId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${eventId}, 'reasoning-fork-test', 'completed', ${index + 1}, 'Question',
+        'gpt-6-astra', ${effort}, 'none')`;
+      await shared.admin`insert into session_events (
+        id, account_id, workspace_id, session_id, turn_id, sequence, type, payload
+      ) values (${eventId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${turnId}, ${index + 1}, 'user.message', '{"text":"Question"}')`;
+      const control = {
+        type: "unknown",
+        providerData: { type: "configuration_update", reasoning: { effort } },
+        opengeniReasoningConfiguration: { version: 1, baselineEffort: "low", effort, turnId },
+      };
+      controls.push(control);
+      for (const [position, item] of [
+        [index + 0.75, control],
+        [index + 1, { type: "message", role: "user", content: "Question" }],
+      ] as const) {
+        await shared.admin`insert into session_history_items (
+          account_id, workspace_id, session_id, turn_id, position, item
+        ) values (${human.accountId}, ${workspaceId}, ${sourceSessionId}, ${turnId},
+          ${position}, ${shared.admin.json(item)})`;
+      }
+    }
+    const fork = (sourceEventId = events[1]!) =>
+      forkSessionContent(client!.db, {
+        sourceWorkspaceId: workspaceId,
+        sourceSessionId,
+        actorSubjectId: human.subjectId,
+        destinationWorkspaceId: workspaceId,
+        destinationVisibility: "user_private",
+        workspaceSharedAcknowledged: false,
+        operationKey: crypto.randomUUID(),
+        sourceEventId,
+      });
+    expect((await fork(events[0]!)).copiedHistoryItemCount).toBe(2);
+    const switched = await fork();
+    expect(switched.copiedHistoryItemCount).toBe(4);
+    const rows = await shared.admin`select item from session_history_items
+      where session_id = ${switched.sessionId} order by position`;
+    expect(rows.filter((row) => row.item.type === "unknown").map((row) => row.item)).toEqual(
+      controls,
+    );
+    for (const invalid of [
+      { type: "unknown" },
+      {
+        ...controls[0],
+        providerData: { type: "configuration_update", reasoning: { effort: "high" } },
+      },
+      { ...controls[0], opengeniReasoningConfiguration: { version: 1, effort: "low" } },
+      { type: "compaction", encrypted_content: "test" },
+    ]) {
+      await shared.admin`update session_history_items set item = ${shared.admin.json(invalid)}
+        where session_id = ${sourceSessionId} and position = 0.75`;
+      await expect(fork()).rejects.toThrow("Session tenancy request is invalid");
+    }
+    await shared.admin`update session_history_items set item = ${shared.admin.json(controls[0]!)}, active = false
+      where session_id = ${sourceSessionId} and position = 0.75`;
+    await expect(fork()).rejects.toThrow("Session tenancy request is invalid");
+  }, 180_000);
+
   test("message fork copies the exact prefix and replays the same boundary", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();

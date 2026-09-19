@@ -195,6 +195,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     codexFleetPolicyShadowEnabled: false,
     codexProductSku: undefined,
     codexRotationNearExhaustionPct: 90,
+    reasoningConfigurationUpdatesEnabled: false,
     openaiReasoningEffort: "high",
     openaiAllowedReasoningEfforts: "low,medium,high,xhigh,max",
     openaiResponsesTransport: "http",

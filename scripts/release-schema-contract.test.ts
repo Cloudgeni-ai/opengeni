@@ -245,6 +245,9 @@ describe("release schema contract", () => {
     const preclaimAdmissionBlock = completeSourceContract.migrations.some(
       (migration) => migration.path === "0483_preclaim_admission_block.sql",
     );
+    const reasoningConfigurationMessageForks = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0486_reasoning_configuration_message_forks.sql",
+    );
     const inheritedMcpApprovalPolicies = completeSourceContract.migrations.some(
       (migration) => migration.path === "0485_inherited_mcp_approval_policies.sql",
     );
@@ -310,6 +313,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (reasoningConfigurationMessageForks ? 1 : 0) +
         (inheritedMcpApprovalPolicies ? 1 : 0) +
         (insightsUsageProjection ? 1 : 0) +
         (preclaimAdmissionBlock ? 1 : 0) +
@@ -503,36 +507,42 @@ describe("release schema contract", () => {
       ...(inheritedMcpApprovalPolicies
         ? { latestMigration: "0485_inherited_mcp_approval_policies.sql" }
         : {}),
+      ...(reasoningConfigurationMessageForks
+        ? { latestMigration: "0486_reasoning_configuration_message_forks.sql" }
+        : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: inheritedMcpApprovalPolicies
-        ? "0485_inherited_mcp_approval_policies.sql"
-        : insightsUsageProjection
-          ? "0484_insights_usage_projection.sql"
-          : preclaimAdmissionBlock
-            ? "0483_preclaim_admission_block.sql"
-            : packsRemoved
-              ? "0482_remove_packs.sql"
-              : personalConnectionVisibilityCleanup
-                ? "0481_personal_connection_visibility_cleanup.sql"
-                : privateSessionKeyAdministration
-                  ? "0480_private_session_organization_key_administration.sql"
-                  : connectionCreateIdempotency
-                    ? "0479_connection_create_idempotency.sql"
-                    : senderOwnedConnections
-                      ? "0478_sender_owned_connections.sql"
-                      : managedSignInMethods
-                        ? "0477_managed_sign_in_methods.sql"
-                        : sessionEventHistoryPolicyPlanning
-                          ? "0476_session_event_history_policy_planning.sql"
-                          : sessionEventHistoryStatistics
-                            ? "0475_session_event_history_statistics.sql"
-                            : goalReportRequirements
-                              ? "0474_goal_report_requirements.sql"
-                              : organizationUsageAnalyticalCapability
-                                ? "0473_organization_usage_analytical_capability.sql"
-                                : "0472_usage_events_workspace_recent_index.sql",
+      path: reasoningConfigurationMessageForks
+        ? "0486_reasoning_configuration_message_forks.sql"
+        : inheritedMcpApprovalPolicies
+          ? "0485_inherited_mcp_approval_policies.sql"
+          : insightsUsageProjection
+            ? "0484_insights_usage_projection.sql"
+            : preclaimAdmissionBlock
+              ? "0483_preclaim_admission_block.sql"
+              : packsRemoved
+                ? "0482_remove_packs.sql"
+                : personalConnectionVisibilityCleanup
+                  ? "0481_personal_connection_visibility_cleanup.sql"
+                  : privateSessionKeyAdministration
+                    ? "0480_private_session_organization_key_administration.sql"
+                    : connectionCreateIdempotency
+                      ? "0479_connection_create_idempotency.sql"
+                      : senderOwnedConnections
+                        ? "0478_sender_owned_connections.sql"
+                        : managedSignInMethods
+                          ? "0477_managed_sign_in_methods.sql"
+                          : sessionEventHistoryPolicyPlanning
+                            ? "0476_session_event_history_policy_planning.sql"
+                            : sessionEventHistoryStatistics
+                              ? "0475_session_event_history_statistics.sql"
+                              : goalReportRequirements
+                                ? "0474_goal_report_requirements.sql"
+                                : organizationUsageAnalyticalCapability
+                                  ? "0473_organization_usage_analytical_capability.sql"
+                                  : "0472_usage_events_workspace_recent_index.sql",
       deploymentMode:
+        !reasoningConfigurationMessageForks &&
         !inheritedMcpApprovalPolicies &&
         !insightsUsageProjection &&
         !preclaimAdmissionBlock &&
@@ -1664,6 +1674,9 @@ describe("release schema contract", () => {
     const preclaimAdmissionBlock = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0483_preclaim_admission_block.sql",
     );
+    const reasoningConfigurationMessageForks = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0486_reasoning_configuration_message_forks.sql",
+    );
     const inheritedMcpApprovalPolicies = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0485_inherited_mcp_approval_policies.sql",
     );
@@ -2170,6 +2183,7 @@ describe("release schema contract", () => {
       "0483_preclaim_admission_block.sql",
       "0484_insights_usage_projection.sql",
       "0485_inherited_mcp_approval_policies.sql",
+      "0486_reasoning_configuration_message_forks.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2618,8 +2632,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0485_inherited_mcp_approval_policies.sql",
       };
+    if (reasoningConfigurationMessageForks)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0486_reasoning_configuration_message_forks.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (reasoningConfigurationMessageForks ? 1 : 0) +
         (inheritedMcpApprovalPolicies ? 1 : 0) +
         (insightsUsageProjection ? 1 : 0) +
         (preclaimAdmissionBlock ? 1 : 0) +
@@ -3014,6 +3034,9 @@ describe("release schema contract", () => {
       ...(insightsUsageProjection ? { latestMigration: "0484_insights_usage_projection.sql" } : {}),
       ...(inheritedMcpApprovalPolicies
         ? { latestMigration: "0485_inherited_mcp_approval_policies.sql" }
+        : {}),
+      ...(reasoningConfigurationMessageForks
+        ? { latestMigration: "0486_reasoning_configuration_message_forks.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
