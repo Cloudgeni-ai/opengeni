@@ -86,7 +86,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
                       ? `${server.name} unavailable`
                       : rowLocked
                         ? `${server.name}${selected ? ", on for this session" : ", off for this session"}`
-                      : server.name
+                        : server.name
               }
               disabled={busy}
               locked={rowLocked}
