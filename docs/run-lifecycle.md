@@ -2438,12 +2438,18 @@ remain unchanged.
 
 Fleet metrics keep this drill-down identity-free:
 `opengeni_turn_worker_preparation_duration_seconds` measures the platform path,
-`opengeni_turn_startup_phase_duration_seconds` attributes its bounded phases,
+`opengeni_turn_startup_phase_duration_seconds` attributes its bounded operations,
 and `opengeni_turn_startup_milestone_duration_seconds` records real cumulative
 queue, provider-dispatch, and first-byte SLO samples from the durable turn queue
 timestamp. Their labels are limited to the closed provider/backend/outcome and,
 where applicable, phase/count/cache vocabularies; session, turn, request,
 credential, and content values remain only in authenticated durable events.
+Operation durations can nest and overlap; summing them does not produce a
+critical path. `runtime_stream_initialization` measures the enclosing runtime
+entry, not provider network dispatch. Background MCP connection/catalog work
+starts immediately but does not gate the first request; its measurements use
+`opengeni_tool_background_preparation_duration_seconds` instead of startup
+phases. Required and best-effort connections can also run concurrently.
 The database returns a milestone receipt only when the current transaction
 inserted the first canonical current-association checkpoint, so ordinary
 attempt recovery and callback replay cannot deterministically double-count it.

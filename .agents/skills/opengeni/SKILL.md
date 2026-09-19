@@ -59,6 +59,10 @@ Then open the smallest source files that answer the question:
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
+- Startup telemetry: `apps/worker/src/observability-metrics.ts` separates blocking
+  preparation from background MCP work. Phase durations can overlap; use durable
+  milestones for elapsed startup latency. Runtime stream initialization is not
+  the provider wire-dispatch milestone. See `docs/run-lifecycle.md`.
 - Runtime/sandbox/tools: `packages/runtime/src/index.ts` is the public agent-loop facade;
   retained Modal command observation uses the versioned task-router byte-offset
   boundary in `sandbox/providers/modal-command-control.ts`; output and cursor

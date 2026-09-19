@@ -9761,6 +9761,7 @@ describe("runtime event normalization", () => {
       },
     ];
     const settings = testSettings({ sandboxBackend: "none", mcpServers: configs });
+    const measurements: { phase: string; execution: string }[] = [];
     const prepared = await prepareAgentTools(
       settings,
       [
@@ -9770,6 +9771,9 @@ describe("runtime event normalization", () => {
       ],
       {
         deferNonEagerUntilToolDemand: true,
+        onPreparationPhase: (measurement) => {
+          measurements.push(measurement);
+        },
         localMcpServers: [
           { id: "eager", server: eager },
           { id: "strict", server: strict },
@@ -9779,6 +9783,9 @@ describe("runtime event normalization", () => {
     );
     try {
       expect(prepared.ready).toBeDefined();
+      expect(measurements.some((measurement) => measurement.execution === "background")).toBe(
+        false,
+      );
       const agent = buildOpenGeniAgent(settings, [], {
         mcpServers: prepared.mcpServers,
       });
@@ -9788,6 +9795,18 @@ describe("runtime event normalization", () => {
 
       releaseOptional();
       const complete = await prepared.ready!;
+      expect(measurements).toContainEqual(
+        expect.objectContaining({ phase: "required_connect", execution: "blocking" }),
+      );
+      expect(measurements).toContainEqual(
+        expect.objectContaining({ phase: "required_connect", execution: "background" }),
+      );
+      expect(measurements).toContainEqual(
+        expect.objectContaining({ phase: "optional_connect", execution: "background" }),
+      );
+      expect(measurements).toContainEqual(
+        expect.objectContaining({ phase: "attempt_catalog_build", execution: "background" }),
+      );
       expect((await agent.getMcpTools(new RunContext())).map((tool) => tool.name).sort()).toEqual([
         "eager__lookup",
         "optional__lookup",

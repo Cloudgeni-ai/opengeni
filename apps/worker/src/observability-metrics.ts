@@ -16,6 +16,7 @@ import {
   type RuntimeMetricsHooks,
   type SelfhostedOpObservation,
   type SelfhostedOpObserver,
+  type ToolPreparationPhaseMeasurement,
 } from "@opengeni/runtime";
 
 export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
@@ -1391,7 +1392,7 @@ export type TurnStartupPhase =
   | "history_generated_image_materialization"
   | "history_position_load"
   | "owned_sandbox_setup"
-  | "provider_dispatch"
+  | "runtime_stream_initialization"
   | "model_request_preparation"
   | "model_sdk_serialization"
   | "model_prepare_sandbox_agent_preparation"
@@ -1497,7 +1498,8 @@ export function turnStartupCountBucket(count: number | null): TurnStartupCountBu
 }
 
 /**
- * Measure the critical path from a durable turn start to provider dispatch.
+ * Measure startup operations, including nested and parallel work. These are
+ * not additive critical-path intervals; use milestones for elapsed latency.
  * Every label is a closed or configuration-derived enum; high-cardinality turn,
  * session, credential, connection, file, and model identifiers are forbidden.
  */
@@ -1529,6 +1531,42 @@ export function recordTurnStartupPhase(
       outcome: input.outcome,
       count_bucket: turnStartupCountBucket(input.count ?? null),
       cache: input.cache ?? "none",
+    },
+    value: Math.max(0, input.durationSeconds),
+  });
+}
+
+/** Background MCP preparation must not inflate startup phase distributions. */
+export function recordToolPreparationPhase(
+  observability: Observability,
+  input: ToolPreparationPhaseMeasurement & { provider: string; backend: string },
+): void {
+  if (input.execution === "blocking") {
+    recordTurnStartupPhase(observability, {
+      ...input,
+      phase: `tool_${input.phase}`,
+    });
+    return;
+  }
+  completedOperationSpan(
+    observability,
+    `worker.tool_prepare.${input.phase}`,
+    input.durationSeconds,
+    {
+      provider: input.provider,
+      backend: input.backend,
+      outcome: input.outcome,
+    },
+  );
+  observability.observeHistogram({
+    name: "opengeni_tool_background_preparation_duration_seconds",
+    help: "Nonblocking MCP preparation operations; may overlap startup and later execution.",
+    buckets: TURN_STARTUP_PHASE_BUCKETS,
+    labels: {
+      phase: input.phase,
+      provider: input.provider,
+      backend: input.backend,
+      outcome: input.outcome,
     },
     value: Math.max(0, input.durationSeconds),
   });
