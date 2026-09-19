@@ -535,12 +535,16 @@ export function wrapChannelABoxWithRouting(
         ? (value as PersistableMutationAdmission).admission?.workspaceGeneration
         : undefined,
     providerCommandPersistence: (process) =>
-      retainedProviderCommandPersistence(db, {
-        accountId: ids.accountId,
-        workspaceId: ids.workspaceId,
-        sessionId: ids.sessionId,
-        processId: process.id,
-      }),
+      retainedProviderCommandPersistence(
+        db,
+        {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: ids.sessionId,
+          processId: process.id,
+        },
+        bus ? (events) => bus.publish(ids.workspaceId, ids.sessionId, events) : undefined,
+      ),
     captureProcessOutput: async ({ process, chunkId, chunk, stream, streamFidelity }) => {
       const events = await appendSessionCommandOutput(db, {
         accountId: ids.accountId,

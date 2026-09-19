@@ -1541,12 +1541,18 @@ async function reconcileTerminalRetainedProcesses(
                     .publish(process.workspaceId, process.sessionId, events)
                     .catch(() => undefined);
               },
-              retainedProviderCommandPersistence(db, {
-                accountId: process.accountId,
-                workspaceId: process.workspaceId,
-                sessionId: process.sessionId,
-                processId: process.id,
-              }),
+              retainedProviderCommandPersistence(
+                db,
+                {
+                  accountId: process.accountId,
+                  workspaceId: process.workspaceId,
+                  sessionId: process.sessionId,
+                  processId: process.id,
+                },
+                bus
+                  ? (events) => bus.publish(process.workspaceId, process.sessionId, events)
+                  : undefined,
+              ),
             );
           } catch (error) {
             observability.warn("sandbox reaper: retained-process provider probe failed", {
@@ -1962,6 +1968,11 @@ export async function probeRetainedProcessAtProvider(
       return;
     }
     const page = session.getProviderCommandOutput?.(value);
+    if (page?.command.kind === "modal-router-v1" && typeof value === "string") {
+      if (!session.captureCommandOutput || !(await session.captureCommandOutput(value)))
+        throw new Error("Byte-offset output requires atomic capture before settlement");
+      return;
+    }
     if (page) {
       for (const chunk of page.chunks)
         if (chunk.text)

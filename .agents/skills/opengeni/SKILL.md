@@ -60,6 +60,10 @@ Then open the smallest source files that answer the question:
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
 - Runtime/sandbox/tools: `packages/runtime/src/index.ts` is the public agent-loop facade;
+  retained Modal command observation uses the versioned task-router byte-offset
+  boundary in `sandbox/providers/modal-command-control.ts`; output and cursor
+  capture is atomic in `packages/db/src/retained-provider-commands.ts`. Never
+  reinterpret a legacy batch locator or infer exit from missing output.
   `skill-catalog.ts` renders Skill descriptors into the turn-attempt instruction
   layer; the worker's `skill-read.ts` exposes eager text reads and `skill-checkout.ts`
   exposes on-demand filesystem copies. Repository Skill discovery is independent.

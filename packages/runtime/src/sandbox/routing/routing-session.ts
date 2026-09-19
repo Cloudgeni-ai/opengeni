@@ -1303,6 +1303,31 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     result?: unknown,
   ): Promise<void> {
     if (!this.deps.captureProcessOutput) return;
+    // Router byte-offset pages atomically append output and advance the exact
+    // expected cursor. Never send these through the legacy append-then-ack path.
+    const atomicReceipt =
+      record.pendingProviderReceipt ?? (typeof result === "string" ? result : undefined);
+    if (
+      atomicReceipt &&
+      record.backend.session.captureCommandOutput &&
+      record.backend.session.getProviderCommandOutput?.(atomicReceipt)?.command.kind ===
+        "modal-router-v1"
+    ) {
+      record.pendingProviderReceipt = atomicReceipt;
+      try {
+        if (await record.backend.session.captureCommandOutput(atomicReceipt)) {
+          delete record.pendingProviderReceipt;
+          return;
+        }
+      } catch (error) {
+        throw new RoutingMutationOutcomeUnknownError(
+          "captureProcessOutput",
+          "Provider output atomic capture remains pending; the provider operation was not replayed",
+          { cause: error, retainedProcess: record.process },
+        );
+      }
+      delete record.pendingProviderReceipt;
+    }
     const providerPage = record.backend.session.getProviderCommandOutput?.(result);
     const structured =
       result && typeof result === "object"

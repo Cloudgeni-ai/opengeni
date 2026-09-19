@@ -10005,7 +10005,7 @@ export const sandboxRetainedProcesses = pgTable(
       sql`${table.providerCommand} IS NULL OR ((
         ${table.providerBackend} = 'modal'
         AND jsonb_typeof(${table.providerCommand}) = 'object'
-        AND ${table.providerCommand}->>'kind' = 'modal-control-v1'
+        AND ${table.providerCommand}->>'kind' IN ('modal-control-v1', 'modal-router-v1')
         AND ${table.providerCommand}->>'sandboxId' = ${table.providerInstanceId}
         AND length(${table.providerCommand}->>'taskId') > 0
         AND length(${table.providerCommand}->>'execId') > 0

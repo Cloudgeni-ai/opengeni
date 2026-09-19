@@ -1463,6 +1463,14 @@ independent age limit on healthy interaction sessions; it interrupts only when
 the underlying finite provider identity has entered its mandatory handoff
 window.
 
+Modal command output uses authenticated task-router byte offsets. The exact
+retained process owns the locator; output events and cursor advancement commit
+atomically under an expected-cursor fence. Concurrent readers reread after a
+lost fence instead of duplicating output or settling an uncaptured tail. Router
+credentials stay in memory, never in command records or sandbox files. The
+explicit legacy batch reader exists only to drain already-launched commands;
+its locators are never reinterpreted as byte offsets.
+
 Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;
 unobserved outcomes become lost. Command backoff never suppresses rotation's
