@@ -2,21 +2,29 @@
 # Resolve the infrastructure backend used by scripts/dev-stack.sh.
 
 opengeni_docker_usable() {
-  command -v docker >/dev/null 2>&1 || return 1
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker probe failed: Docker client is unavailable." >&2
+    return 1
+  fi
 
   # A Docker client may be installed while its daemon/socket is unavailable in
   # a restricted sandbox. Bound the server probe so automatic startup cannot
   # hang on a dead desktop daemon or forwarded socket.
   local probe_timeout="${OPENGENI_DOCKER_PROBE_TIMEOUT_SECONDS:-3}"
+  local probe_status=0
   if command -v timeout >/dev/null 2>&1; then
     timeout "${probe_timeout}s" \
       env DOCKER_CLIENT_TIMEOUT="$probe_timeout" COMPOSE_HTTP_TIMEOUT="$probe_timeout" \
-      docker info >/dev/null 2>&1
+      docker info >/dev/null || probe_status=$?
   else
     DOCKER_CLIENT_TIMEOUT="$probe_timeout" \
       COMPOSE_HTTP_TIMEOUT="$probe_timeout" \
-      docker info >/dev/null 2>&1
+      docker info >/dev/null || probe_status=$?
   fi
+  if [ "$probe_status" -ne 0 ]; then
+    echo "Docker probe failed: docker info exit $probe_status (configured timeout ${probe_timeout}s)." >&2
+  fi
+  return "$probe_status"
 }
 
 opengeni_resolve_dev_backend() {
