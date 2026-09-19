@@ -14,6 +14,12 @@ import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 import {
+  admissionRecheckControl,
+  admissionControlNeedsRefresh,
+  recheckSessionAdmission,
+  SessionAdmissionNotice,
+} from "@/components/session/session-admission-notice";
+import {
   connectorSelectionUpdate,
   followWorkspaceConnectorPolicy,
   sessionConnectorPolicyIsCustomized,
@@ -1023,6 +1029,7 @@ export function SessionRoute({
     <SessionChatPane
       key={session.id}
       session={session}
+      admissionSessionControl={sessionSeed?.effectiveControl ?? session.effectiveControl}
       events={events}
       timeline={timeline}
       searchTarget={searchTarget}
@@ -1423,6 +1430,8 @@ function useSessionEditableArtifactSummaries(input: {
 
 function SessionChatPane(props: {
   session: Session;
+  /** Keep the raw detail snapshot: the general route projection prefers queue control. */
+  admissionSessionControl: Session["effectiveControl"];
   events: SessionEvent[];
   timeline: TimelineItem[];
   searchTarget: SessionSearchRoute;
@@ -2171,6 +2180,17 @@ function SessionChatPane(props: {
     retryOptimisticMessage,
   ]);
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
+  const admissionControl = admissionRecheckControl(
+    props.admissionSessionControl,
+    props.queue.effectiveControl,
+    composer.effectiveControl,
+  );
+  const admissionRefreshRequired = admissionControlNeedsRefresh(
+    admissionControl,
+    props.admissionSessionControl,
+    props.queue.effectiveControl,
+    composer.effectiveControl,
+  );
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     props.session.status,
     (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
@@ -2620,6 +2640,26 @@ function SessionChatPane(props: {
           and agents as one dock. Hides entirely when there are no signals. */}
       <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
+          <SessionAdmissionNotice
+            key={`${props.session.workspaceId}:${props.session.id}`}
+            session={props.session}
+            canControl={workspacePermissions.includes("sessions:control")}
+            paused={admissionControl.state === "paused"}
+            refreshRequired={admissionRefreshRequired}
+            busy={composer.resuming || composer.pausing || composer.sending || props.queue.mutating}
+            onRecheck={() =>
+              recheckSessionAdmission({
+                control: admissionControl,
+                refreshOnly: admissionRefreshRequired,
+                resume: (control) =>
+                  context.client.resumeSession(props.session.workspaceId, props.session.id, {
+                    clientEventId: crypto.randomUUID(),
+                    expectedControlEtag: control.controlEtag,
+                  }),
+                refresh: [props.onReloadSession, props.queue.refresh],
+              })
+            }
+          />
           <SessionChrome
             sessionStatus={props.session.status}
             onOpenSession={props.onOpenSession}
