@@ -61,6 +61,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     // the production shapes.
     await admin`
       alter table sessions
+      add column mcp_approval_policies jsonb not null default '{}'::jsonb,
       add column admission_block jsonb,
       add column variable_set_ids jsonb not null default '[]'::jsonb,
       add column input_wait_turn_id uuid,
@@ -268,6 +269,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       alter table sessions
       drop column admission_block,
       drop column variable_set_ids,
+      drop column mcp_approval_policies,
       drop column input_wait_turn_id,
       drop column input_wait_until,
       drop column input_wait_reason,

@@ -35,11 +35,8 @@ See [product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), and [run lifecycle](run-lifecycle.md).
 
-Session `mcpApprovalPolicies` configures inherited workspace MCP approvals without
-copying server definitions or credentials. Creation and policy updates require
-session-control authority. Attempt claim freezes the effective policy, including
-curated catalog floors; later edits affect the next attempt only. The session
-policy never enables a capability or grants connection access.
+Session `mcpApprovalPolicies` requires session-control authority. Claims freeze
+inherited approvals with catalog floors; policies grant neither capabilities nor credentials.
 
 ---
 

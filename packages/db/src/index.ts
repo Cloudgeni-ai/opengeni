@@ -30192,7 +30192,7 @@ export async function updateSessionMcpApprovalPolicy(
     requireApproval: SessionMcpApprovalPolicy;
   },
 ): Promise<UpdateSessionMcpApprovalPolicyResult> {
-  return await withWorkspaceRls(
+  return await withWorkspaceSessionActivityRls(
     db,
     input.workspaceId,
     async (scopedDb) =>
@@ -30249,15 +30249,17 @@ async function updateSessionMcpApprovalPolicyInTransaction(
     ) {
       return { server, changed: false };
     }
-    await tx
-      .update(schema.sessions)
-      .set({ mcpApprovalPolicies: { ...session.policies, [input.serverId]: policy } })
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, input.workspaceId),
-          eq(schema.sessions.id, input.sessionId),
+    await withWorkspaceSessionActivityRls(tx, input.workspaceId, async (activityDb) =>
+      activityDb
+        .update(schema.sessions)
+        .set({ mcpApprovalPolicies: { ...session.policies, [input.serverId]: policy } })
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
         ),
-      );
+    );
     return { server, changed: true };
   }
   const current = existing.requireApproval ?? false;
