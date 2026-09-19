@@ -4012,7 +4012,7 @@ describe("runtime event normalization", () => {
     expect(JSON.stringify(second.input)).toContain("Keep this direction across tool calls.");
   });
 
-  test("delivers platform recovery context as ephemeral system input", async () => {
+  test("delivers platform recovery context as durable turn-scoped system input", async () => {
     const prepared = await prepareRunInput(
       buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
       {
@@ -4024,7 +4024,7 @@ describe("runtime event normalization", () => {
       {
         type: "message",
         role: "system",
-        content: "Continue the same inference after recovery.",
+        content: expect.stringContaining("Continue the same inference after recovery."),
       },
     ]);
     expect(JSON.stringify(prepared.input)).not.toContain("opengeni_internal_resume");

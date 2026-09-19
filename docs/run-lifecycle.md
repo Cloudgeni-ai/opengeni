@@ -2504,3 +2504,17 @@ captured content. Detail views read continuously, virtualize large text internal
 Find, and preserve full content for copying. New captures wait for an
 explicit Load latest action while a user inspects an existing request. This is the
 last captured model request, not an archive of the entire session.
+
+### Operational notice and attachment replay stability
+
+Runtime internal context is labeled as an OpenGeni turn-scoped operational notice.
+History reconciliation persists these notices at their original positions,
+including when replayed for remote compaction. Their status is historical on
+later turns; current authorization and tool availability remain independently
+enforced. Other unscoped synthetic system messages remain excluded.
+
+Attachment receipt text derives only from the durable file reference and mount
+directory. Resolving, losing, or renaming live file metadata does not rewrite
+that text. Active image bytes still require current authorized metadata and
+checksum-valid content; compacted attachment catalogs remain receipt-only.
+The receipt-format change incurs a one-time prefix change for existing histories.

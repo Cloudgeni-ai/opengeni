@@ -57,7 +57,7 @@ export type RemoteCompactionPrefix = {
   tools: Awaited<ReturnType<typeof serializedToolsForRemoteCompaction>>;
   instructions: string;
   toolsReady: boolean;
-  agent: Parameters<typeof serializedToolsForRemoteCompaction>[0] | null;
+  agent: ReturnType<ActivityServices["runtime"]["buildAgent"]> | null;
 };
 
 export type CompactionPrepDeps = {
@@ -271,6 +271,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               provider: resolvedModel.provider,
               model: turnExecutionPolicy.upstreamModelId,
               systemInstructions: remotePrefix.instructions,
+              reasoning: remotePrefix.agent?.modelSettings.reasoning,
               onUsage: recordCompactionUsage,
               tools: remotePrefix.tools,
               ...(promptCacheKey ? { promptCacheKey } : {}),
