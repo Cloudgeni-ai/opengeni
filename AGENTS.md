@@ -215,6 +215,8 @@ See `docs/run-lifecycle.md` for catalog refresh and prompt-placement boundaries.
 
 ## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
 
+- **Route behavior before saving.** Persistent behavior belongs in scoped workspace instructions or applicable Skills, not retrieval-only Knowledge phrased as a preference fact. Keep this routing and instruction-edit safety in unconditional CORE, independent of active governance. Preserve owner scope and each destination's learning policy; never substitute another destination to bypass review, Off, limits or unavailable tools. See `docs/company-brain-write-routing.md`.
+
 Three principles here are load-bearing and easy to break by accident:
 
 - **No default run-length limits, by design.** OpenGeni runs agents that legitimately work for days. Budget/admission policy and explicit goal completion or pause bound execution; OpenGeni does not infer "no progress" from tool/event shape. Do not add or lower caps on model calls per turn, continuation count, or activity timeout as a way to "be safe" — fix the pathology instead. See `docs/run-lifecycle.md` and `docs/goals.md`.
