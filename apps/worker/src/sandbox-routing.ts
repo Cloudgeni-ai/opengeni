@@ -1031,12 +1031,18 @@ export function wrapTurnBoxWithRouting(
     ...(ids.workspaceMutationFence
       ? {
           providerCommandPersistence: (process: RoutingRetainedProcess) =>
-            retainedProviderCommandPersistence(db, {
-              accountId: ids.workspaceMutationFence!.accountId,
-              workspaceId: ids.workspaceId,
-              sessionId: ids.sessionId,
-              processId: process.id,
-            }),
+            retainedProviderCommandPersistence(
+              db,
+              {
+                accountId: ids.workspaceMutationFence!.accountId,
+                workspaceId: ids.workspaceId,
+                sessionId: ids.sessionId,
+                processId: process.id,
+              },
+              services.bus
+                ? (events) => services.bus!.publish(ids.workspaceId, ids.sessionId, events)
+                : undefined,
+            ),
         }
       : {}),
     ...(beforeMutation ? { beforeMutation } : {}),
@@ -1282,12 +1288,18 @@ export function wrapLazyTurnBoxWithRouting(
     ...(ids.workspaceMutationFence
       ? {
           providerCommandPersistence: (process: RoutingRetainedProcess) =>
-            retainedProviderCommandPersistence(db, {
-              accountId: ids.workspaceMutationFence!.accountId,
-              workspaceId: ids.workspaceId,
-              sessionId: ids.sessionId,
-              processId: process.id,
-            }),
+            retainedProviderCommandPersistence(
+              db,
+              {
+                accountId: ids.workspaceMutationFence!.accountId,
+                workspaceId: ids.workspaceId,
+                sessionId: ids.sessionId,
+                processId: process.id,
+              },
+              services.bus
+                ? (events) => services.bus!.publish(ids.workspaceId, ids.sessionId, events)
+                : undefined,
+            ),
         }
       : {}),
     ...(beforeMutation ? { beforeMutation } : {}),

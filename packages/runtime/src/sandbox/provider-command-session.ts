@@ -1,8 +1,10 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { SandboxProviderCommand } from "@opengeni/contracts";
+import type { SandboxProviderCommand, ModalRouterProviderCommand } from "@opengeni/contracts";
 
 export type ProviderCommandOutput = {
   command: SandboxProviderCommand;
+  /** Exact read baseline for atomic byte-offset capture; absent for legacy pages. */
+  expected?: ModalRouterProviderCommand;
   chunks: Array<{ stream: "stdout" | "stderr"; chunkId: string; text: string }>;
   exitCode: number | null;
   streamFidelity?: "separate" | "merged";
@@ -13,7 +15,13 @@ export type ProviderCommandOutput = {
 export type ProviderCommandPersistence = {
   load(): Promise<SandboxProviderCommand | null>;
   acknowledge(command: SandboxProviderCommand): Promise<SandboxProviderCommand>;
-  reserveInput(): Promise<number>;
+  reserveInput(byteLength?: number): Promise<number>;
+  captureRouterPage?(page: {
+    expected: ModalRouterProviderCommand;
+    command: ModalRouterProviderCommand;
+    stdout: string;
+    stderr: string;
+  }): Promise<{ command: ModalRouterProviderCommand; captured: boolean }>;
 };
 
 export type ProviderCommandSession = {
@@ -27,6 +35,9 @@ export type ProviderCommandSession = {
   ): void;
   getProviderCommandOutput?(result: unknown): ProviderCommandOutput | null;
   acknowledgeCommandOutput?(result: string): Promise<void>;
+  /** Returns false for a legacy receipt. True means bytes and offsets committed
+   * together (or the page lost a cursor CAS and was safely discarded). */
+  captureCommandOutput?(result: string): Promise<boolean>;
 };
 
 const admission = new AsyncLocalStorage<number>();

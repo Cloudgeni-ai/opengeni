@@ -1693,19 +1693,36 @@ whose timeout never cancels the command.
 
 A resumed Modal SDK session restores the sandbox but not adapter-local numeric
 process handles. New commands use `modal-command-control.ts` and the verified
-Modal 0.9.0 control-plane RPC contract: the admitted workspace generation is
+Modal 0.9.0 task-command-router RPC contract: the admitted workspace generation is
 their route-scoped numeric alias, while opaque provider execution identity and
 per-stream output cursors live in `sandbox_retained_processes.provider_command`.
 Promotion commits the locator with process retention. API, worker, and reaper
-readers adopt only the original sandbox identity, capture stable stream pages,
-then acknowledge cursors. Both streams must drain through provider terminal
-status before settlement. Sandbox files and printed status text are never
+readers adopt only the original sandbox identity. `modal-router-v1` stores a
+client-generated execution UUID and independent stdout/stderr byte offsets.
+Output and offsets commit in one expected-cursor transaction; an overlapping
+reader discards its stale page and rereads before exposing a terminal receipt.
+Bounded reads may stop inside a provider chunk and resume at the exact byte
+offset. Split UTF-8 suffixes survive that boundary. Stdin reserves byte offsets
+before dispatch; ambiguous sends never replay silently. Both streams must reach
+EOF and authenticated provider polling must prove exit before settlement.
+Sandbox files and printed status text are never
 execution authority. Failed initial observation still retains a successful
 start's locator; an ambiguous start is never automatically replayed.
-The dedicated command client preserves abort signals through a version-guarded
-non-retrying middleware factory: Modal 0.9.0 otherwise drops them for streaming
-and retry-disabled calls. Cancelling observation is not process-exit proof;
+Router access credentials remain in memory, use authenticated TLS, and are
+renewed between operations. The narrow gRPC wire boundary preserves aborts and
+does not retry mutations. Control-plane access uses a version-guarded
+non-retrying middleware factory: Modal 0.9.0 otherwise drops abort signals for
+streaming and retry-disabled calls. Cancelling observation is not process-exit proof;
 the existing token/PGID cleanup fence still owns physical cancellation.
+
+`modal-control-v1` is an explicit legacy reader for already launched commands;
+new starts never select it. Its batch API does not guarantee full replay, so
+historical missing output cannot be reconstructed or called complete. Never
+reinterpret its `tp-` execution IDs or batch indices as router UUIDs/byte offsets.
+The locator-schema rollout requires a maintenance worker cutover because old
+readers cannot parse the new discriminator. After old active locators have
+settled or passed the existing evidence-backed drain, remove the legacy live
+reader; historical records remain immutable and do not authorize execution.
 
 SDK-internal setup/readiness commands still use their original live SDK observer
 and may yield. Their adapter-local aliases are above the admitted command range

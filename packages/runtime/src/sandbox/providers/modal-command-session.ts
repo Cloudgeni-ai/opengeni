@@ -20,6 +20,7 @@ type Entry = {
 
 function sameExecution(a: ModalProviderCommand, b: ModalProviderCommand): boolean {
   return (
+    a.kind === b.kind &&
     a.sandboxId === b.sandboxId &&
     a.taskId === b.taskId &&
     a.execId === b.execId &&
@@ -36,7 +37,7 @@ export function installModalCommandSession(
     writeStdin?: ChannelASession["writeStdin"];
     verifyMaterializedPath?: (path: string, workdir: string) => Promise<void>;
   },
-  control: ModalCommandControl,
+  control: Pick<ModalCommandControl, "start" | "read" | "readProbe" | "write">,
 ): void {
   markTypedExecHandleLoss(session);
   const originalExec = session.execCommand?.bind(session);
@@ -52,6 +53,33 @@ export function installModalCommandSession(
   const setupHandles = new Map<number, number>();
   let nextSetupHandle = MAX_PROVIDER_COMMAND_HANDLE + 1;
   const receipts = new Map<string, { handle: number; page: ProviderCommandOutput }>();
+  const atomicallyCaptured = new WeakSet<ProviderCommandOutput>();
+
+  const captureRouterPage = async (entry: Entry, page: ProviderCommandOutput): Promise<boolean> => {
+    if (
+      page.command.kind !== "modal-router-v1" ||
+      !page.expected ||
+      !entry.persistence?.captureRouterPage
+    )
+      throw new Error("Modal byte-offset output requires atomic retained capture");
+    const result = await entry.persistence.captureRouterPage({
+      expected: page.expected,
+      command: page.command,
+      stdout: page.chunks
+        .filter((chunk) => chunk.stream === "stdout")
+        .map((chunk) => chunk.text)
+        .join(""),
+      stderr: page.chunks
+        .filter((chunk) => chunk.stream === "stderr")
+        .map((chunk) => chunk.text)
+        .join(""),
+    });
+    if (!sameExecution(entry.command, result.command))
+      throw new Error("Modal output capture changed execution identity");
+    entry.command = result.command;
+    if (result.captured) atomicallyCaptured.add(page);
+    return result.captured;
+  };
 
   const setupPage = (raw: string, handle: number, sdkHandle: number): string => {
     const banner = parseExecResponseBanner(raw);
@@ -102,7 +130,20 @@ export function installModalCommandSession(
         throw new Error("Original Modal command identity is unavailable");
       entry.command = retained;
     }
-    const page = await control.read(entry.command, yieldTimeMs, signal);
+    let page = await control.read(entry.command, yieldTimeMs, signal);
+    if (entry.persistence && page.command.kind === "modal-router-v1") {
+      // A stale concurrent observer must reread from the committed cursor before
+      // exposing a terminal receipt; its uncommitted tail is not settlement proof.
+      let captured = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (await captureRouterPage(entry, page)) {
+          captured = true;
+          break;
+        }
+        if (attempt < 2) page = await control.read(entry.command, yieldTimeMs, signal);
+      }
+      if (!captured) throw new Error("Modal command output cursor changed during bounded capture");
+    }
     // The receipt is generated here, not parsed from command output. Its only
     // purpose is correlating this return value with a trusted in-memory page.
     return formatPage(handle, page, maxOutputTokens);
@@ -174,6 +215,45 @@ export function installModalCommandSession(
   };
   session.getProviderCommandOutput = (result) =>
     typeof result === "string" ? (receipts.get(result)?.page ?? null) : null;
+  session.captureCommandOutput = async (result) => {
+    const receipt = receipts.get(result);
+    if (!receipt || receipt.page.command.kind !== "modal-router-v1") return false;
+    if (atomicallyCaptured.has(receipt.page)) {
+      receipts.delete(result);
+      return true;
+    }
+    const entry = entries.get(receipt.handle);
+    if (!entry?.persistence?.captureRouterPage || !receipt.page.expected)
+      throw new Error("Modal byte-offset output requires atomic retained capture");
+    if (!(await captureRouterPage(entry, receipt.page))) {
+      const target = receipt.page.command;
+      const covered = () =>
+        entry.command.kind === "modal-router-v1" &&
+        (["stdout", "stderr"] as const).every((stream) => {
+          const current = entry.command.streams[stream];
+          // This narrowing stays inside the discriminator's synchronous scope.
+          if (!("byteOffset" in current)) return false;
+          const wanted = target.streams[stream];
+          return (
+            current.byteOffset >= wanted.byteOffset &&
+            (!wanted.eof || current.eof) &&
+            (wanted.exitCode === null || current.exitCode === wanted.exitCode)
+          );
+        });
+      for (let attempt = 0; !covered() && attempt < 3; attempt++) {
+        // Initial promotion can race reconciliation before background adoption.
+        // Re-read, never re-execute; only a committed cursor covering the original
+        // page makes that page's terminal proof eligible for settlement.
+        const refreshedReceipt = await read(receipt.handle, entry, 250);
+        const refreshed = receipts.get(refreshedReceipt);
+        if (refreshed && atomicallyCaptured.has(refreshed.page)) receipts.delete(refreshedReceipt);
+      }
+      if (!covered())
+        throw new Error("Initial Modal output tail remains uncommitted after bounded capture");
+    }
+    receipts.delete(result);
+    return true;
+  };
   session.acknowledgeCommandOutput = async (result) => {
     const receipt = receipts.get(result);
     if (!receipt) return;
@@ -201,7 +281,7 @@ export function installModalCommandSession(
       const retained = await entry.persistence.load();
       if (!retained || !sameExecution(entry.command, retained))
         throw new Error("Original Modal command identity is unavailable");
-      const index = await entry.persistence.reserveInput();
+      const index = await entry.persistence.reserveInput(Buffer.byteLength(args.chars));
       await control.write(retained, args.chars, index);
     }
     return read(args.sessionId, entry, args.yieldTimeMs ?? 250, args.maxOutputTokens);
