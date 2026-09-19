@@ -10,7 +10,7 @@ export async function withAccountMenuAxeDiagnostics<T>(
     const initialPath = location.pathname;
     const startedAt = performance.now();
     const samples: Array<{
-      event: string;
+      event: "start" | "mutation" | "focus" | "blur" | "stop";
       elapsedMs: number;
       menuCount: number;
       openMenuCount: number;
@@ -23,7 +23,7 @@ export async function withAccountMenuAxeDiagnostics<T>(
     let stopped = false;
     let previousNodes: Element[] = [];
     let previousState = "";
-    const record = (event: string) => {
+    const record = (event: "start" | "mutation" | "focus" | "blur" | "stop") => {
       const nodes = [...document.querySelectorAll(selector)];
       const sample = {
         event,

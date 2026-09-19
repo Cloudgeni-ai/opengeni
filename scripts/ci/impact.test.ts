@@ -466,10 +466,14 @@ describe("fail-closed change impact", () => {
     for (const path of [
       "test/e2e/browser-account-request-observation.ts",
       "test/e2e/browser-account-axe-diagnostics.ts",
+      "test/e2e/browser-account-read-diagnostics.ts",
     ]) {
       const helper = createImpactPlan([path]);
       expect(helper.mode).toBe("focused");
       expect(helper.browserAcceptanceLanes).toContain("accounts");
+      if (path === "test/e2e/browser-account-read-diagnostics.ts") {
+        expect(helper.unitTests).toContain("test/e2e/browser-account-read-diagnostics.test.ts");
+      }
     }
   });
 

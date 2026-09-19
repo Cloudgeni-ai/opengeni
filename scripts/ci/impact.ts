@@ -331,6 +331,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/browser-account-request-observation.browser.e2e.ts": [],
+  "test/e2e/browser-account-read-diagnostics.test.ts": [],
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/appearance.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/capability-catalog.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
@@ -412,6 +413,10 @@ for (const path of TEMPORAL_WORKFLOW_INTEGRATION_TESTS) {
 }
 
 const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {
+  "test/e2e/browser-account-read-diagnostics.ts": [
+    "test/e2e/browser-accounts-acceptance.e2e.ts",
+    "test/e2e/browser-account-read-diagnostics.test.ts",
+  ],
   "test/e2e/browser-account-axe-diagnostics.ts": [
     "test/e2e/browser-accounts-acceptance.e2e.ts",
     "test/e2e/browser-account-request-observation.browser.e2e.ts",
