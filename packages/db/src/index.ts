@@ -70867,12 +70867,16 @@ function hasCompletedCurrentModelRequest(
       "type" | "payload" | "payloadCodecVersion" | "turnAssociation"
     >
   >,
+  requireMeaningfulOutput = false,
 ): boolean {
   return events.some(
     (event) =>
       event.turnAssociation === "current" &&
       event.type === "agent.model.request" &&
-      sessionEventPayloadRecord(event.payload, event.payloadCodecVersion).phase === "completed",
+      sessionEventPayloadRecord(event.payload, event.payloadCodecVersion).phase === "completed" &&
+      (!requireMeaningfulOutput ||
+        sessionEventPayloadRecord(event.payload, event.payloadCodecVersion).meaningfulOutput ===
+          true),
   );
 }
 
@@ -77352,17 +77356,21 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                         now,
                       },
                     );
-                    if (
-                      (providerRecoveryCountFromTurnMetadata(fence.turn!.metadata) > 0 ||
-                        fence.turn!.metadata?.[CODEX_CAPACITY_RECOVERY_KEY] !== undefined) &&
-                      hasCompletedCurrentModelRequest(inserted)
-                    ) {
+                    const resetProviderRecovery =
+                      providerRecoveryCountFromTurnMetadata(fence.turn!.metadata) > 0 &&
+                      hasCompletedCurrentModelRequest(inserted);
+                    const resetCapacityRecovery =
+                      fence.turn!.metadata?.[CODEX_CAPACITY_RECOVERY_KEY] !== undefined &&
+                      hasCompletedCurrentModelRequest(inserted, true);
+                    if (resetProviderRecovery || resetCapacityRecovery) {
+                      let metadata = fence.turn!.metadata ?? {};
+                      if (resetProviderRecovery)
+                        metadata = metadataWithoutProviderRecoveryCount(metadata);
+                      if (resetCapacityRecovery) metadata = clearCodexCapacityRecovery(metadata);
                       const [resetTurn] = await tx
                         .update(schema.sessionTurns)
                         .set({
-                          metadata: clearCodexCapacityRecovery(
-                            metadataWithoutProviderRecoveryCount(fence.turn!.metadata),
-                          ),
+                          metadata,
                           version: fence.turn!.version + 1,
                           updatedAt: now,
                         })

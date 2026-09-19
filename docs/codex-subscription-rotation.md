@@ -195,8 +195,9 @@ waiting without a completed model request. Each such failure spends
 one of ten attempts. A persisted equal-jitter exponential delay starts at 30–60
 seconds and caps at 15 minutes; account wakes acknowledge their revisions but do
 not bypass that delay. Wait timers and metadata checks do not spend or reset the
-budget. A current, exact-attempt completed model-request event clears it; stale
-completion events cannot. A worker redispatch or credential failover preserves
+budget. A current, exact-attempt completed model-request event clears it only
+with transport-proven substantive assistant/tool output. Empty, reasoning-only,
+failed or stale completion events cannot clear it. A worker redispatch or credential failover preserves
 the outstanding resumption receipt, but only its exact current attempt may close
 it; stale predecessor attempts cannot charge the budget.
 

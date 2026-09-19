@@ -389,6 +389,19 @@ describe("durable Codex capacity waits", () => {
     expect(
       await claimTestTurn(dbB, scenario.workspaceId, scenario.sessionId, scenario.workflowId),
     ).toBeNull();
+    const control = (action: "pause" | "resume") =>
+      withSessionActivityRlsContext(dbA, ws, async (scoped) =>
+        scoped.transaction(async (tx) =>
+          mutateSessionControlInTransaction(tx as unknown as SessionActivityDatabase, {
+            ...ws,
+            sessionId: scenario.sessionId,
+            actor: { type: "human", subjectId: "capacity-test-operator" },
+            operationKey: crypto.randomUUID(),
+            action,
+          }),
+        ),
+      );
+    await control("pause");
     const continued = await withSessionActivityRlsContext(
       dbA,
       ws,
@@ -411,6 +424,10 @@ describe("durable Codex capacity waits", () => {
             }),
         ),
     );
+    expect(
+      await claimTestTurn(dbB, scenario.workspaceId, scenario.sessionId, scenario.workflowId),
+    ).toBeNull();
+    await control("resume");
     const newTurn = await claimTestTurn(
       dbB,
       scenario.workspaceId,
@@ -419,6 +436,7 @@ describe("durable Codex capacity waits", () => {
     );
     expect(newTurn?.id).toBe(continued.turnId);
     expect(newTurn?.id).not.toBe(scenario.turnId);
+    expect(newTurn?.model).toBe("codex/gpt-5.6-sol");
     expect(readCodexCapacityRecovery(newTurn?.metadata).falseResumptions).toBe(0);
   });
 
@@ -484,7 +502,12 @@ describe("durable Codex capacity waits", () => {
     );
     if (!claimed?.activeAttemptId) throw new Error("expected attempt");
     await admin`update session_turns set metadata = metadata || ${admin.json({ [CODEX_CAPACITY_RECOVERY_KEY]: { falseResumptions: 9, resumeGeneration: claimed.executionGeneration, retryNotBefore: null } })}::jsonb where id = ${scenario.turnId}`;
-    const append = (attemptId: string, generation: number, phase: string) =>
+    const append = (
+      attemptId: string,
+      generation: number,
+      phase: string,
+      meaningfulOutput = false,
+    ) =>
       appendSessionEventsForTurnAttempt(
         dbA,
         ws.workspaceId,
@@ -492,9 +515,9 @@ describe("durable Codex capacity waits", () => {
         scenario.turnId,
         generation,
         attemptId,
-        [{ type: "agent.model.request", payload: { phase } }],
+        [{ type: "agent.model.request", payload: { phase, meaningfulOutput } }],
       );
-    expect((await append(originalAttemptId, 1, "completed")).accepted).toBe(false);
+    expect((await append(originalAttemptId, 1, "completed", true)).accepted).toBe(false);
     expect(
       (await append(claimed.activeAttemptId, claimed.executionGeneration, "failed")).accepted,
     ).toBe(true);
@@ -505,6 +528,15 @@ describe("durable Codex capacity waits", () => {
     ).toBe(9);
     expect(
       (await append(claimed.activeAttemptId, claimed.executionGeneration, "completed")).accepted,
+    ).toBe(true);
+    expect(
+      readCodexCapacityRecovery(
+        (await getSessionTurn(dbB, ws.workspaceId, scenario.turnId))?.metadata,
+      ).falseResumptions,
+    ).toBe(9);
+    expect(
+      (await append(claimed.activeAttemptId, claimed.executionGeneration, "completed", true))
+        .accepted,
     ).toBe(true);
     expect(
       (await getSessionTurn(dbB, ws.workspaceId, scenario.turnId))?.metadata,
