@@ -249,7 +249,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0486_reasoning_configuration_message_forks.sql",
     );
     const permanentSkillRemoval = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0487_permanent_skill_removal.sql",
+      (migration) => migration.path === "0488_permanent_skill_removal.sql",
     );
     const inheritedMcpApprovalPolicies = completeSourceContract.migrations.some(
       (migration) => migration.path === "0485_inherited_mcp_approval_policies.sql",
@@ -514,11 +514,11 @@ describe("release schema contract", () => {
       ...(reasoningConfigurationMessageForks
         ? { latestMigration: "0486_reasoning_configuration_message_forks.sql" }
         : {}),
-      ...(permanentSkillRemoval ? { latestMigration: "0487_permanent_skill_removal.sql" } : {}),
+      ...(permanentSkillRemoval ? { latestMigration: "0488_permanent_skill_removal.sql" } : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
       path: permanentSkillRemoval
-        ? "0487_permanent_skill_removal.sql"
+        ? "0488_permanent_skill_removal.sql"
         : reasoningConfigurationMessageForks
           ? "0486_reasoning_configuration_message_forks.sql"
           : inheritedMcpApprovalPolicies
@@ -1686,7 +1686,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0486_reasoning_configuration_message_forks.sql",
     );
     const permanentSkillRemoval = unfilteredSourceContract.migrations.some(
-      (migration) => migration.path === "0487_permanent_skill_removal.sql",
+      (migration) => migration.path === "0488_permanent_skill_removal.sql",
     );
     const inheritedMcpApprovalPolicies = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0485_inherited_mcp_approval_policies.sql",
@@ -2195,7 +2195,7 @@ describe("release schema contract", () => {
       "0484_insights_usage_projection.sql",
       "0485_inherited_mcp_approval_policies.sql",
       "0486_reasoning_configuration_message_forks.sql",
-      "0487_permanent_skill_removal.sql",
+      "0488_permanent_skill_removal.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2652,7 +2652,7 @@ describe("release schema contract", () => {
     if (permanentSkillRemoval)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0487_permanent_skill_removal.sql",
+        latestMigration: "0488_permanent_skill_removal.sql",
       };
     expect(completeSourceContract).toMatchObject({
       fileCount:
@@ -3056,7 +3056,7 @@ describe("release schema contract", () => {
       ...(reasoningConfigurationMessageForks
         ? { latestMigration: "0486_reasoning_configuration_message_forks.sql" }
         : {}),
-      ...(permanentSkillRemoval ? { latestMigration: "0487_permanent_skill_removal.sql" } : {}),
+      ...(permanentSkillRemoval ? { latestMigration: "0488_permanent_skill_removal.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport

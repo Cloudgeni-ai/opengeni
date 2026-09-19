@@ -32,11 +32,11 @@ export async function migrateBefore(
     await ledger.end();
     await migrate(url, undefined, options);
     // These historical fixtures exercise old lifecycle behavior with today's
-    // TypeScript readers. Supply only the nullable reader column, not the 0487
+    // TypeScript readers. Supply only the nullable reader column, not the 0488
     // deletion lifecycle or guards (which would change the behavior under test).
     if (
       upperBound > "0433_unified_skill_lifecycle.sql" &&
-      upperBound <= "0487_permanent_skill_removal.sql"
+      upperBound <= "0488_permanent_skill_removal.sql"
     ) {
       const readerColumns = postgres(url, { max: 1, onnotice: () => undefined });
       try {

@@ -53,7 +53,7 @@ lifecycle; removal refuses rather than modifying unrelated components. Removed
 source content can be explicitly installed again as a new Skill; old operation
 receipts remain historical results, not proof of a current installation.
 
-Migration `0487_permanent_skill_removal.sql` is a maintenance cutover. Drain all
+Migration `0488_permanent_skill_removal.sql` is a maintenance cutover. Drain all
 API/control/turn workers, provide the complete runtime role list, migrate and
 provision roles, then start matching binaries. Never restart pre-0487 binaries:
 old review UIs do not label removal intent. The migration changes no historical
