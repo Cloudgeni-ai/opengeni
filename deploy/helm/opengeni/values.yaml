@@ -196,6 +196,9 @@ externalSecret:
   dataFrom: []
 
 api:
+  # Additional Kubernetes volumes and mounts for the API container (for example TLS Secrets).
+  extraVolumes: []
+  extraVolumeMounts: []
   enabled: true
   replicaCount: 2
   strategy:
@@ -273,6 +276,9 @@ api:
     targetCPUUtilizationPercentage: 70
 
 worker:
+  # Shared by control and turn workers; appended to any built-in volumes and mounts.
+  extraVolumes: []
+  extraVolumeMounts: []
   enabled: true
   image:
     repository: opengeni-worker
@@ -1222,6 +1228,9 @@ observability:
     endpoint: ""
   collector:
     enabled: false
+    # Appended to the collector's built-in config volume and mount.
+    extraVolumes: []
+    extraVolumeMounts: []
     image:
       repository: otel/opentelemetry-collector-contrib
       tag: "0.139.0"
