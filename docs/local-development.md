@@ -25,6 +25,9 @@ artifact services, Connected Machines relay, and web app. With
 `OPENGENI_DEV_BACKEND=auto` (the default), it uses Docker when the daemon is
 reachable and otherwise starts PostgreSQL, NATS, Temporal, and MinIO as native
 processes. Set the backend explicitly to `docker` or `native` when required.
+An invocation's `OPENGENI_DEV_BACKEND` takes precedence over `.env`; when unset,
+the file's setting remains effective. An explicit `docker` request fails if the
+daemon is unavailable instead of silently starting native infrastructure.
 
 The development web server forwards `/v1` requests to `VITE_API_BASE_URL`
 (the API port selected by the launcher), matching production ingress routing.

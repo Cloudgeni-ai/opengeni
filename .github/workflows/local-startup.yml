@@ -49,7 +49,10 @@ jobs:
           bun-version-file: .bun-version
       - name: Check startup ownership and prerequisite regressions
         timeout-minutes: 2
-        run: bun test scripts/check-development-prerequisites.test.ts scripts/dev-stack-lock.test.ts scripts/run-development-stack.test.ts
+        run: bun test scripts/check-development-prerequisites.test.ts scripts/dev-stack-lock.test.ts scripts/run-development-stack.test.ts scripts/dev-stack-backend.test.ts
+      - name: Verify the runner Docker dependency
+        timeout-minutes: 1
+        run: timeout 30s docker info
       - name: Start the documented stack from a clean checkout
         timeout-minutes: 50
         run: bash scripts/ci/local-startup.sh first
