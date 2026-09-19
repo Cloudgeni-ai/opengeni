@@ -309,9 +309,9 @@ Canonical: `packages/core/src/access/index.ts`,
 
 ### 3.7 Contracts and configuration are code-owned
 
-`@opengeni/contracts` owns cross-boundary schemas, enums, permissions, event
-shapes, capability descriptors, and token envelopes. `@opengeni/config` owns
-settings parsing, defaults, validation, and derived runtime configuration.
+`@opengeni/contracts` owns cross-boundary schemas, enums, permissions, event shapes,
+capability descriptors, and token envelopes; `@opengeni/config` owns settings
+parsing, defaults, validation, and derived runtime configuration.
 
 Catalog membership, selectability, and cost are separate authorities. Deployment
 membership comes from `code` or an operator-owned database singleton. Workspace
@@ -326,10 +326,9 @@ The accepted turn policy freezes executable provider identity, not the separate
 workspace-facing cost policy. Operators must drain or fence accepted turns
 before changing `free`/`credits` for a product.
 
-Documentation may explain why a contract exists, but it must not copy complete
-lists that can drift. Cross-boundary enum evolution is additive within a major
-release unless the whole release train takes a breaking change. Contract-parity
-tests pin intentional mirrors in clients and deployment code.
+Documentation explains contracts without duplicating drift-prone lists.
+Cross-boundary enums are additive within major releases unless the whole release
+train breaks compatibility. Contract-parity tests pin intentional client/deployment mirrors.
 
 Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
 `packages/core/src/model-catalog.ts`, [`model-providers.md`](model-providers.md),
@@ -338,31 +337,27 @@ and `packages/sdk/test/contract-parity.test.ts`.
 
 ### 3.8 A Connected Machine is first-class primary compute
 
-A Connected Machine (`selfhosted` internally) is a user's own computer. When
-selected for a turn, the agent runs on that machine directly; OpenGeni does not
-create, lease, or bill a hidden provisioned sandbox behind it.
+A Connected Machine (`selfhosted` internally) is the user's computer. When selected
+for a turn, agents run there directly; OpenGeni creates, leases, and bills no hidden sandbox.
 
-The machine owns its filesystem, Git authentication, ambient environment, and
-long-lived platform credentials. OpenGeni does not clone repositories onto it
-or install durable control-plane credentials. Exact-attempt Codemode authority
-is the narrow transient exception and is supplied only to an authorized child
-process.
+The machine owns its filesystem, Git authentication, environment, and long-lived
+platform credentials. OpenGeni neither clones repositories nor installs durable
+control-plane credentials there. Only authorized child processes receive the
+narrow transient exception: exact-attempt Codemode authority.
 
-Machine paths are host-native and session-specific rather than aliases for a
-universal `/workspace`. An unavailable machine surfaces as a typed operation
-outcome; text-only reasoning can still begin without contacting it. OpenGeni
-never interprets an offline machine as permission to cold-create a rival box,
-snapshot it, or provider-terminate the user's computer.
+Machine paths are host-native and session-specific, not universal `/workspace`
+aliases. Unavailability produces a typed operation outcome; text-only reasoning
+can begin without contact. An offline machine never authorizes cold-creating a
+rival box, snapshotting it, or provider-terminating the user's computer.
 
-The structured Files boundary advertises the selected machine's effective
-host-native working directory as `FileSystem.root`. Canonical file links and
-tree nodes stay in that namespace. Connected Machine file reads also accept
-absolute paths outside the working directory, subject to the machine account’s
-OS permissions; the working directory is a browsing default, not a read boundary.
-Managed provider reads and structured mutations retain workspace confinement. Files requests carry the capability epoch plus root;
-the API binds one active route for the request and returns a retryable conflict
-if the selected target or root changes instead of reinterpreting the path on a
-different filesystem.
+Structured Files exposes the selected machine's effective host-native working
+directory as `FileSystem.root`; canonical links and tree nodes share that namespace.
+Connected Machine reads accept external absolute paths under the machine account's
+OS permissions: working directories are browsing defaults, not read boundaries.
+Managed provider reads and structured mutations remain workspace-confined. Files
+requests carry capability epoch and root. The API binds one active route per
+request; target/root changes return retryable conflicts, never reinterpret paths
+on another filesystem.
 
 Generated-session schedules follow the same explicit route: they persist an
 exact workspace- or organization-scoped machine target and seed the session's
