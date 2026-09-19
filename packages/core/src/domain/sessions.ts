@@ -1,4 +1,11 @@
 import { knowledgeContextForAccess } from "./knowledge";
+import {
+  getSessionEvent,
+  getSessionRetryReceiptInTransaction,
+  retryFailedSessionInTransaction,
+  SessionRetryConflictError,
+} from "@opengeni/db";
+import type { SessionRetryRequest, SessionRetryResponse } from "@opengeni/contracts";
 import { saveAgentLearningSettings } from "@opengeni/db";
 import { withSessionRlsActorContext } from "@opengeni/db";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
@@ -1995,6 +2002,116 @@ async function resolveWorkspaceModelBoundarySettings(
       ...(retainedProductModelId !== undefined ? { retainedProductModelId } : {}),
     })
   ).settings;
+}
+
+/** Explicit recovery, never a new prompt or a Pause/Resume command. */
+export async function retryFailedSession(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  workspaceId: string,
+  sessionId: string,
+  request: SessionRetryRequest,
+): Promise<SessionRetryResponse> {
+  requirePermission(grant, "sessions:control");
+  await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.control",
+    surface: "core",
+  });
+  const replay = await withWorkspaceSubjectSessionActivityRls(
+    deps.db,
+    workspaceId,
+    grant.subjectId,
+    async (db) =>
+      await getSessionRetryReceiptInTransaction(db, {
+        workspaceId,
+        sessionId,
+        subjectId: grant.subjectId,
+        request,
+      }),
+  );
+  if (replay) return replay;
+  const session = await requireSession(deps.db, workspaceId, sessionId);
+  const failure = await getSessionEvent(deps.db, workspaceId, request.failureEventId);
+  if (!failure || failure.sessionId !== sessionId)
+    throw new SessionRetryConflictError("RETRY_STALE_FAILURE", "The failure event is unavailable");
+  const turn = failure?.turnId ? await getSessionTurn(deps.db, workspaceId, failure.turnId) : null;
+  const retainedModel = turn?.model ?? session.model;
+  const settings = await resolveWorkspaceModelBoundarySettings(
+    deps,
+    grant,
+    workspaceId,
+    [request.model ?? retainedModel],
+    retainedModel,
+  );
+  const model = canonicalConfiguredModel(settings, request.model ?? retainedModel)!;
+  try {
+    assertSessionAllowsProductModel(session, model);
+  } catch (error) {
+    if (error instanceof CodexCompactionV2ProviderLockedError)
+      throw new HTTPException(422, { message: error.message, cause: error });
+    throw error;
+  }
+  await assertWorkspaceModelPolicyAllows(deps.db, settings, workspaceId, model);
+  const executionPolicy = resolveTurnExecutionPolicyV1(settings, {
+    modelId: model,
+    requestedModelId: request.model ?? null,
+    modelSource: request.model === undefined ? "session" : "explicit",
+    reasoningEffort: request.reasoningEffort ?? turn?.reasoningEffort ?? session.reasoningEffort,
+    reasoningSource: request.reasoningEffort === undefined ? "session" : "explicit",
+    latencyMode: request.latencyMode ?? turn?.latencyMode ?? session.latencyMode,
+    latencyModeSource: request.latencyMode === undefined ? "session" : "explicit",
+  });
+  await requireLimit(deps, {
+    accountId: grant.accountId,
+    workspaceId,
+    action: "agent_run:create",
+    quantity: 1,
+    model,
+  });
+  const result = await runIdempotentPersistenceTransaction(
+    {
+      stage: "session.retry",
+      eventTypes: ["turn.recovery.requested", "session.status.changed"],
+      maxAttempts: 3,
+    },
+    async () =>
+      await withWorkspaceSubjectSessionActivityRls(
+        deps.db,
+        workspaceId,
+        grant.subjectId,
+        async (db) =>
+          await retryFailedSessionInTransaction(db, {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+            request,
+            executionPolicy,
+          }),
+      ),
+  );
+  // Fanout and workflow dispatch are reconstructible after the durable commit.
+  // Never report an admitted retry as failed because one notification is down.
+  void Promise.all([
+    deps.workflowClient.requestSessionWorkflowWakeDispatch(),
+    (async () => {
+      const events = await Promise.all(
+        result.eventIds.map((id) => getSessionEvent(deps.db, workspaceId, id)),
+      );
+      await publishDurableSessionEvents(
+        deps.bus,
+        workspaceId,
+        sessionId,
+        events.filter((event): event is SessionEvent => event !== null),
+      );
+    })(),
+  ]).catch(() => {
+    console.warn("[sessions] retry notification failed; durable recovery remains", {
+      errorCode: "session_retry_notification_failed",
+    });
+  });
+  return { outcome: result.outcome, turnId: result.turnId, failureEventId: result.failureEventId };
 }
 
 async function withSessionCreateUsageRecording(input: {

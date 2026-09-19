@@ -429,6 +429,8 @@ import type {
   SaveNewSessionDraftRequest,
   SteerSessionQueueItemRequest,
   SessionControlResponse,
+  SessionRetryRequest,
+  SessionRetryResponse,
   WorkspaceInferenceControlResponse,
   WorkspaceControlEvent,
   SessionTurn,
@@ -2509,6 +2511,19 @@ export class OpenGeniClient {
     return await this.requestSessionCommand<SubmitComposerDraftResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft/submit`,
+      request,
+    );
+  }
+
+  /** Retry the exact failed turn. Keep clientEventId unchanged on transport retries. */
+  async retrySession(
+    workspaceId: string,
+    sessionId: string,
+    request: SessionRetryRequest,
+  ): Promise<SessionRetryResponse> {
+    return await this.requestSessionCommand<SessionRetryResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/retry`,
       request,
     );
   }

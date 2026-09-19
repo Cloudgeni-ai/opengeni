@@ -45,6 +45,7 @@ import {
   RenewSessionRealtimeRequest,
   SyncSessionRealtimeLedgerRequest,
   SessionControlRequest,
+  SessionRetryRequest,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SessionEventPayloadMode,
   SessionEventReadDirection,
@@ -259,6 +260,7 @@ import {
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { SessionRetryConflictError } from "@opengeni/db";
 import {
   attachViewer,
   detachViewer,
@@ -276,6 +278,7 @@ import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../co
 import {
   acceptSessionUserMessage,
   controlHumanSessionWorkstream,
+  retryFailedSession,
   createSessionForRequest,
   deleteHumanQueuePrompt,
   editHumanQueuePrompt,
@@ -3124,6 +3127,22 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/retry", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const parsed = SessionRetryRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid session retry request" });
+    try {
+      return c.json(
+        await retryFailedSession(deps, grant, workspaceId, c.req.param("sessionId"), parsed.data),
+      );
+    } catch (error) {
+      if (error instanceof SessionRetryConflictError)
+        return c.json({ code: error.code, message: error.message }, 409);
+      return commandConflictResponse(c, error);
+    }
+  });
+
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/control", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
@@ -4694,6 +4713,7 @@ export function sessionAuthorizationOperationForHttp(
   // acceptSessionUserMessageWithOutcome after the body is parsed.
   if (suffix === "/composer-draft/submit" && verb === "POST") return "session.append";
   if (suffix === "/control" && verb === "POST") return "session.control";
+  if (suffix === "/retry" && verb === "POST") return "session.control";
   if (suffix === "/steer" && verb === "POST") return "session.steer";
   if (suffix === "/human-input-requests" && verb === "GET") {
     return "session.human_input.read";

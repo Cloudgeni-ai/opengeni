@@ -1967,11 +1967,36 @@ crash loops: the transaction that exceeds the ceiling appends the failure
 events and fails the exact turn/session, and the workflow performs no second
 split failure settlement.
 
-**Failed sessions are revivable by talking to them.** Conversation truth is
-items, so a failed turn does not invalidate history. A new `user.message`
-into a failed session transitions it failed → queued, restarts the session
-workflow (signalWithStart), and the next turn runs from the stored items.
-Only `cancelled` — an explicit terminal Cancel — is irreversible.
+**Try again retains the failed logical turn.** `POST
+/v1/workspaces/:workspaceId/sessions/:sessionId/retry` and SDK
+`retrySession(workspaceId, sessionId, request)` require `sessions:control` and
+the normal session-authorization seam. The request binds `clientEventId` to
+`failureEventId`, with optional `model`, `reasoningEffort`, and `latencyMode`.
+Clients retain that operation key and payload after a lost response. Success
+returns `{ outcome: "accepted" | "replayed", turnId, failureEventId }`.
+
+The activity-gated transaction checks the exact latest failure, active control,
+and absence of live attempts, unresolved writers, pending tools, or retained
+unknown tool outcomes. It reserves a durable receipt, updates only the failed
+turn's execution selection/status, appends recovery audit events, and registers
+a workflow wake atomically. It preserves the prompt, trigger, immutable authority,
+goal snapshot, and canonical conversation/tool history. A never-claimed human
+prompt becomes queued so ordinary first claim inserts its original history item
+once; a started turn becomes recovering, and ordinary claim increments its
+execution generation without inserting another user message. Completed tool
+results are not replayed. Model selection remains subject to current model,
+billing, provider-compaction, and retained execution-authority boundaries.
+
+Stale failures, unresolved execution, and deliberate pauses return distinct 409
+conflicts. Retry never resumes a paused workstream. Failures with no retained
+logical turn and settled scheduled occurrences fail closed as unsupported;
+idle credit exhaustion is not a failed-session retry boundary. A committed
+operation replays before mutable model/billing checks, even after work advances.
+
+A genuinely new `user.message` can still transition failed → queued and start a
+new turn from stored history. This is a different intent from Try again, and
+clients must not manufacture such a message for retry. Only `cancelled` — an
+explicit terminal Cancel — is irreversible.
 
 Every transaction that creates or re-enables workflow work also increments the
 session's durable wake revision. An active goal has a second, goal-owned

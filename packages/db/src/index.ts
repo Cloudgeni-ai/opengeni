@@ -1,5 +1,6 @@
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
+export * from "./session-retry";
 import {
   projectSessionAdmissionBlock,
   type SessionAdmissionFence,
