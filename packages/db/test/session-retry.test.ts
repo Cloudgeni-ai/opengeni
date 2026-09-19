@@ -50,7 +50,11 @@ const executionPolicy = resolveTurnExecutionPolicyV1(testSettings(), {
   latencyModeSource: "session",
 });
 
-async function fixture(preclaim = false, tool: "none" | "completed" | "unknown" = "none") {
+async function fixture(
+  preclaim = false,
+  tool: "none" | "completed" | "unknown" = "none",
+  failureCode?: string,
+) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -148,7 +152,10 @@ async function fixture(preclaim = false, tool: "none" | "completed" | "unknown" 
       sessionStatus: "failed",
       activeTurnId: null,
       events: [
-        { type: "turn.failed", payload: { error: "provider failure" } },
+        {
+          type: "turn.failed",
+          payload: { error: "provider failure", ...(failureCode ? { code: failureCode } : {}) },
+        },
         { type: "session.status.changed", payload: { status: "failed" } },
       ],
     });
@@ -176,6 +183,65 @@ async function fixture(preclaim = false, tool: "none" | "completed" | "unknown" 
 }
 
 describe("intent-preserving failed-session retry", () => {
+  test("an earlier committed retry receipt still replays after a later safety refusal", async () => {
+    const f = await fixture();
+    await f.retry();
+    const claimed = await f.claim();
+    if (claimed.action !== "claimed") throw new Error("retry not claimed");
+    await applySessionTurnSettlement(client.db, f.workspaceId, {
+      sessionId: f.session.id,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId: claimed.turn.activeAttemptId!,
+      turnStatus: "failed",
+      sessionStatus: "failed",
+      activeTurnId: null,
+      events: [
+        { type: "turn.failed", payload: { code: "provider_safety_refusal", retryable: false } },
+        { type: "session.status.changed", payload: { status: "failed" } },
+      ],
+    });
+    const before = await getSessionTurn(client.db, f.workspaceId, f.turnId);
+    const events = await listSessionEvents(client.db, f.workspaceId, f.session.id);
+    expect(await f.retry()).toMatchObject({
+      outcome: "replayed",
+      failureEventId: f.request.failureEventId,
+    });
+    const refusal = events.filter((event) => event.type === "turn.failed").at(-1)!;
+    await expect(
+      f.retry({ clientEventId: crypto.randomUUID(), failureEventId: refusal.id }),
+    ).rejects.toMatchObject({ code: "RETRY_UNSUPPORTED_FAILURE" });
+    expect(await getSessionTurn(client.db, f.workspaceId, f.turnId)).toEqual(before);
+    expect(await listSessionEvents(client.db, f.workspaceId, f.session.id)).toEqual(events);
+  });
+
+  test("provider safety refusal cannot reopen the turn, including with a model change", async () => {
+    const f = await fixture(false, "completed", "provider_safety_refusal");
+    const before = await getSessionTurn(client.db, f.workspaceId, f.turnId);
+    const history = await getActiveSessionHistoryItems(client.db, f.workspaceId, f.session.id);
+    const events = await listSessionEvents(client.db, f.workspaceId, f.session.id);
+    await expect(f.retry()).rejects.toMatchObject({ code: "RETRY_UNSUPPORTED_FAILURE" });
+    await expect(f.retry({ model: "another-model" })).rejects.toMatchObject({
+      code: "RETRY_UNSUPPORTED_FAILURE",
+    });
+    expect(await getSessionTurn(client.db, f.workspaceId, f.turnId)).toEqual(before);
+    expect(await getActiveSessionHistoryItems(client.db, f.workspaceId, f.session.id)).toEqual(
+      history,
+    );
+    expect(await listSessionEvents(client.db, f.workspaceId, f.session.id)).toEqual(events);
+    expect((await getSession(client.db, f.workspaceId, f.session.id))!.status).toBe("failed");
+    expect(
+      await f.scope((db) =>
+        getSessionRetryReceiptInTransaction(db, {
+          workspaceId: f.workspaceId,
+          sessionId: f.session.id,
+          subjectId: f.grant.subjectId,
+          request: f.request,
+        }),
+      ),
+    ).toBeNull();
+  });
+
   test("same turn, history, authority and original prompt survive concurrent idempotent retry", async () => {
     const f = await fixture(false, "completed");
     const before = await getSessionTurn(client.db, f.workspaceId, f.turnId);

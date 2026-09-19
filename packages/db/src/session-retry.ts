@@ -8,7 +8,7 @@ import {
 import { and, desc, eq, sql } from "drizzle-orm";
 import { rawRows, type Database, type SessionActivityDatabase } from "./database";
 import * as schema from "./schema";
-import { withLosslessContentWriteVersion } from "./lossless-json";
+import { fromPostgresLosslessJson, withLosslessContentWriteVersion } from "./lossless-json";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 import {
   canonicalSessionCommandHash,
@@ -131,6 +131,17 @@ export async function retryFailedSessionInTransaction(
     throw new SessionRetryConflictError(
       "RETRY_STALE_FAILURE",
       "The failure event is no longer current",
+    );
+  const failurePayload = fromPostgresLosslessJson(failure.payload, failure.payloadCodecVersion);
+  if (
+    failurePayload !== null &&
+    typeof failurePayload === "object" &&
+    !Array.isArray(failurePayload) &&
+    (failurePayload as Record<string, unknown>).code === "provider_safety_refusal"
+  )
+    throw new SessionRetryConflictError(
+      "RETRY_UNSUPPORTED_FAILURE",
+      "A provider safety refusal cannot be retried as the same logical turn",
     );
   if (!failure.turnId)
     throw new SessionRetryConflictError(
