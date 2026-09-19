@@ -20,6 +20,8 @@ import {
   settleSessionIdleWithParentOutbox,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { CancelledFailure } from "@temporalio/activity";
+import { currentActivityContext } from "./streaming";
 import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
 import { recordTurnsQueuedGauge, recordWorkerDeathRecoveryMetrics } from "../observability-metrics";
 import {
@@ -521,13 +523,53 @@ export function createSessionStateActivities(
   }
 
   async function peekSessionWork(input: PeekSessionWorkInput) {
-    const { db, observability } = await services();
+    const { db, observability, inspectSessionAttemptActivity } = await services();
     const peek = await peekSessionWorkFn(
       db,
       input.workspaceId,
       input.sessionId,
       input.includeAdmissionFence,
+      input.observerAccountId,
     );
+    if (peek.kind === "unavailable") return peek;
+    if (peek.kind === "attempt-owned") {
+      // Observation never revokes a writer or recovers a live owner. In
+      // particular, a settled Temporal activity is not physical-writer proof.
+      let ownerActivityState: "pending" | "settled" | "unknown" = "unknown";
+      if (inspectSessionAttemptActivity) {
+        try {
+          ownerActivityState = await inspectSessionAttemptActivity(peek.activityRef);
+        } catch (error) {
+          if (error instanceof CancelledFailure) throw error;
+          if (currentActivityContext()?.cancellationSignal.aborted)
+            throw new CancelledFailure("Control observation cancelled");
+          // This optional metadata observation grants no recovery authority.
+          // An unavailable inspector must not pin the control activity in
+          // retries and prevent a fresh Pause/owner/visibility observation.
+          // Database reads below remain outside this catch and retry normally.
+        }
+      }
+      if (currentActivityContext()?.cancellationSignal.aborted)
+        throw new CancelledFailure("Control observation cancelled");
+      const current = await peekSessionWorkFn(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        input.includeAdmissionFence,
+        input.observerAccountId,
+      );
+      if (
+        current.kind !== "attempt-owned" ||
+        current.turnId !== peek.turnId ||
+        current.attemptId !== peek.attemptId ||
+        current.executionGeneration !== peek.executionGeneration ||
+        current.activityRef.workflowId !== peek.activityRef.workflowId ||
+        current.activityRef.workflowRunId !== peek.activityRef.workflowRunId ||
+        current.activityRef.activityId !== peek.activityRef.activityId
+      )
+        return current;
+      return { ...current, ownerActivityState };
+    }
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
     return peek;
   }

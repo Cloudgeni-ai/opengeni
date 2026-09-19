@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { and, eq, sql } from "drizzle-orm";
 import { readTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { createSessionStateActivities } from "../../../apps/worker/src/activities/session-state";
 import {
   bootstrapWorkspace,
   blockSessionWorkBeforeAttemptClaim,
@@ -140,6 +141,157 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 }
 
 describe("transactional session workflow wake outbox", () => {
+  test("safe observer preserves unavailable work and reports an exact live owner without dispatch", async () => {
+    const ctx = await fixture();
+    await send(ctx, "preserve this accepted input");
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    const observe = (accountId = ctx.grant.accountId) =>
+      peekSessionWork(client.db, workspaceId, sessionId, false, accountId);
+    const before = await listSessionTurns(client.db, workspaceId, sessionId);
+    expect(await observe(crypto.randomUUID())).toEqual({ kind: "unavailable" });
+    expect(
+      await peekSessionWork(
+        client.db,
+        workspaceId,
+        crypto.randomUUID(),
+        false,
+        ctx.grant.accountId,
+      ),
+    ).toEqual({ kind: "unavailable" });
+    expect(await observe()).toEqual({ kind: "runnable" });
+    expect(await listSessionTurns(client.db, workspaceId, sessionId)).toEqual(before);
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${sessionId}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId,
+      workflowId,
+      workflowRunId,
+      dispatchId,
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("Missing owner");
+    expect(await observe()).toEqual({
+      kind: "attempt-owned",
+      turnId: claim.turn.id,
+      attemptId,
+      executionGeneration: claim.turn.executionGeneration,
+      activityRef: { workflowId, workflowRunId, activityId: dispatchId, quiesced: false },
+    });
+    expect((await getSessionTurn(client.db, workspaceId, claim.turn.id))?.activeAttemptId).toBe(
+      attemptId,
+    );
+    const wake = await wakeRow(workspaceId, sessionId);
+    if (!wake) throw new Error("Missing accepted wake");
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId,
+        sessionId: crypto.randomUUID(),
+        temporalWorkflowId: workflowId,
+        wakeRevision: wake.wakeRevision,
+      }),
+    ).toEqual({ action: "pending_admission", blocker: "session_unavailable" });
+    expect(await wakeRow(workspaceId, sessionId)).toEqual(wake);
+    // Run the actual activity factory and real DB peeks. Only the external
+    // Temporal metadata service is a barrier; it does not mutate database state.
+    const startInspection = (expectedActivityId: string) => {
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const activities = createSessionStateActivities(
+        async () =>
+          ({
+            db: client.db,
+            inspectSessionAttemptActivity: async (ref: { activityId: string }) => {
+              expect(ref.activityId).toBe(expectedActivityId);
+              entered();
+              await released;
+              return "settled" as const;
+            },
+          }) as any,
+      );
+      const result = activities.peekSessionWork({
+        workspaceId,
+        sessionId,
+        observerAccountId: ctx.grant.accountId,
+      });
+      return { started, release, result };
+    };
+    const originalInspection = startInspection(dispatchId);
+    await originalInspection.started;
+    await requestSessionTurnRecovery(client.db, workspaceId, {
+      sessionId,
+      turnId: claim.turn.id,
+      triggerEventId: claim.turn.triggerEventId,
+      attemptId,
+      reason: "worker_shutdown",
+    });
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId,
+      sessionId,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+    });
+    const nextAttemptId = crypto.randomUUID();
+    const nextDispatchId = crypto.randomUUID();
+    const successor = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId,
+      workflowId,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: nextDispatchId,
+      attemptId: nextAttemptId,
+      trigger: { kind: "next" },
+    });
+    if (successor.action !== "claimed") throw new Error("Missing successor");
+    const replacementEvents = await listSessionEvents(client.db, workspaceId, sessionId);
+    originalInspection.release();
+    const replacedObservation = await originalInspection.result;
+    expect(replacedObservation).toMatchObject({
+      kind: "attempt-owned",
+      attemptId: nextAttemptId,
+      turnId: claim.turn.id,
+      executionGeneration: claim.turn.executionGeneration + 1,
+    });
+    expect(replacedObservation).not.toHaveProperty("ownerActivityState");
+    expect(await listSessionEvents(client.db, workspaceId, sessionId)).toEqual(replacementEvents);
+    const currentInspection = startInspection(nextDispatchId);
+    await currentInspection.started;
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId,
+          sessionId,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    const pausedEvents = await listSessionEvents(client.db, workspaceId, sessionId);
+    currentInspection.release();
+    expect(await currentInspection.result).toEqual({
+      kind: "interruption-pending",
+      attemptId: nextAttemptId,
+    });
+    expect(await listSessionEvents(client.db, workspaceId, sessionId)).toEqual(pausedEvents);
+    expect((await getSessionTurn(client.db, workspaceId, claim.turn.id))?.activeAttemptId).toBe(
+      nextAttemptId,
+    );
+  });
+
   test("blocked recovery retains its active logical turn on Send but explicit Steer supersedes it", async () => {
     for (const delivery of ["send", "steer"] as const) {
       const ctx = await fixture();

@@ -470,6 +470,24 @@ The same database-owned transition covers a lost claim commit response: if the
 activity reports retryable pre-claim failure but the control lane finds its
 exact active attempt, that durable attempt wins and is recovered.
 
+Versioned control observers distinguish unavailable session reads from idle
+business state. Missing and RLS-hidden rows are indistinguishable; neither is
+evidence of deletion, completion, or permission to resume. An unavailable
+observer retains a signal-interruptible 30-second control wait because restoring
+visibility is not guaranteed to produce a wake. The wake outbox retains its
+revision with `session_unavailable` and its existing bounded retry schedule.
+Restoring visibility never undoes an authoritative Pause or cancellation.
+
+A running turn with an exact live attempt is an `attempt-owned` observation,
+not another dispatch. The control activity inspects the exact Temporal
+workflow/run/activity and re-reads the turn/attempt/generation afterward.
+Pending, settled, or unavailable inspector results never revoke that writer or
+admit a successor: a settled Temporal activity alone is not physical-writer
+quiescence proof. The workflow waits for a signal or its bounded control timer;
+normal history rollover preserves the observer. Recovery of an orphaned live
+owner remains a separate exact-proof lifecycle operation, not an age-based
+fallback or a reuse of the closed-attempt quiescence reconciler.
+
 A permanent admission failure with no claimed turn records the supplied failure
 message and, when available, its classified admission cause on the durable
 `session.status.changed` event. The absence of a `turn.failed` event must not

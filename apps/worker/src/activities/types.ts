@@ -357,6 +357,8 @@ export type PeekSessionWorkInput = {
   workspaceId: string;
   sessionId: string;
   includeAdmissionFence?: boolean;
+  /** Versioned workflow observer opt-in, never a caller authorization grant. */
+  observerAccountId?: string;
 };
 
 export type SettleSessionInputWaitInput = {

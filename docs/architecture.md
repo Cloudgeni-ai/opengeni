@@ -78,6 +78,11 @@ provider transcripts stay outside workflow history; streams use ordinary events.
 Canonical: `apps/worker/src/workflows/session.ts` and
 [`run-lifecycle.md`](run-lifecycle.md).
 
+Control observation is not settlement: unavailable scoped reads and exact
+still-owned attempts retain bounded signal-interruptible waits without marking
+work idle, revoking writers, or dispatching successors. Temporal inspection is
+metadata evidence, not a replacement for physical-writer quiescence proof.
+
 ### 3.3 Logical turns and physical attempts are different
 
 A **turn** is accepted work; an **attempt**, replaceable execution without duplicate
