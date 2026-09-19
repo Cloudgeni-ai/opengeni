@@ -27,9 +27,6 @@ recovery, compute, files, artifacts, usage, and observability. The API authorize
 clients and bounded browser access to storage, sandboxes, relays, Codex WebRTC,
 and Gateway realtime WebSockets. Workers run agents in sandboxes or Connected Machines.
 
-§13 maps ownership and canonical sources for sessions, tools, Knowledge, Skills,
-artifacts and clients.
-
 External users require explicit live membership. `asUser()` supplies canonical
 identity; an end-user label does not. Private/shared visibility differs from
 cross-tree `agentAccess`. Personal Knowledge follows the verified active-turn
@@ -1666,7 +1663,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 
 ## 14. Keeping this current
 
-Update this map with ownership, invariant, flow, lifecycle and source changes.
+Update ownership, invariants, flows, lifecycles and sources here.
 Keep mechanics and rollout in [`README.md`](README.md)'s focused docs.
 
 Goal resume/pause semantics: [goals](goals.md).
