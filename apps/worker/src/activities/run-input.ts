@@ -304,19 +304,13 @@ function attachmentRefsFromItem(item: Record<string, unknown>): FileResourceRef[
   return refs;
 }
 
-function attachmentReceiptText(ref: FileResourceRef, file: FileAsset | undefined): string {
-  if (!file) {
-    return (
-      `[Earlier attachment: fileId=${ref.fileId}; mountDirectory=${resourceMountPath(ref)}. ` +
-      `Use the existing file there, or call files__files_get_download_url with this fileId and ` +
-      `download it with the shell.]`
-    );
-  }
-  const path = sandboxFilePath(ref, file);
+function attachmentReceiptText(ref: FileResourceRef): string {
+  // The durable reference is immutable; live metadata/authority must not rewrite
+  // old receipt text. Pixel delivery remains subject to current file authority.
   return (
-    `[Attachment: ${file.safeFilename}; fileId=${file.id}; type=${file.contentType}; ` +
-    `bytes=${file.sizeBytes}; path=${path}. If the local path is absent, call ` +
-    `files__files_get_download_url with this fileId and download it with the shell.]`
+    `[Attachment: fileId=${ref.fileId}; mountDirectory=${resourceMountPath(ref)}. ` +
+    `Use the existing file there, or call files__files_get_download_url with this fileId and ` +
+    `download it with the shell.]`
   );
 }
 
@@ -434,7 +428,7 @@ export function createModelHistoryAttachmentProjector(
         const attachment = currentFile ? contentById.get(ref.fileId) : undefined;
         const receipt = {
           type: "input_text",
-          text: attachmentReceiptText(ref, currentFile),
+          text: attachmentReceiptText(ref),
         };
         if (!attachment || attachment.kind !== "image") {
           return [receipt];

@@ -1679,3 +1679,28 @@ test("remote compaction reserves image tokens while truncating retained text", (
   expect(content).toContainEqual(image);
   expect(estimateTextTokens(content[0]!.text as string) + 10000).toBeLessThanOrEqual(64000);
 });
+
+test("remote compaction preserves explicitly selected reasoning instructions on the wire", async () => {
+  let body: any;
+  const client = {
+    responses: {
+      create: async (request: any) => {
+        body = request;
+        return {
+          id: "compact_test",
+          status: "completed",
+          output: [{ type: "compaction", encrypted_content: "blob" }],
+        };
+      },
+    },
+  } as unknown as OpenAI;
+  for (const effort of ["low", "medium", "high"] as const) {
+    await requestRemoteCompactionV2(testSettings(), [user("hi")], {
+      client,
+      model: "gpt-5.6-sol",
+      systemInstructions: "stable",
+      reasoning: { effort, summary: "detailed" },
+    });
+    expect(body.reasoning).toEqual({ effort, summary: "detailed" });
+  }
+});
