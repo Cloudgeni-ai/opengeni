@@ -930,8 +930,10 @@ never grant authority. Contribution telemetry uses the frozen rendered catalog.
 Existing sessions experience one instruction-prefix transition when this activates.
 Standalone runtime callers retain their instruction-catalog behavior unless they
 explicitly provide a durable catalog through skillCatalogInHistory.
-Tool reads return current authorized content, so a read can observe a saved revision
-newer than its initial descriptor. Read outputs enter ordinary tool-call history.
+Workspace-managed Skill reads return current authorized content, so a read can
+observe a saved revision newer than its initial descriptor. Bundled/session Skill
+reads use the selected attempt's artifacts. Read outputs enter ordinary tool-call
+history.
 If repository resources are attached, ordinary repository setup first makes
 their existing checkout available; runtime then indexes canonical
 `.agents/skills` and compatible `.claude/skills` directories through the bound
