@@ -100,15 +100,9 @@ preserving lineage. See [`run-lifecycle.md`](run-lifecycle.md).
 
 `runAgentTurn` is non-retryable by default: model/tool/sandbox/Git/connector/cloud
 operations have external effects. Recovery is explicit and attempt-fenced.
-Provider work stays outside database retries; only idempotent settlement
-transactions may retry. Turn-scoped operational notices are durable model history,
-not refreshed prefix instructions. Attachment receipts use immutable references;
-remote compaction preserves the ordinary reasoning configuration. Opt-in Astra
-effort updates are inserted under the exact attempt fence by
-`ensureSessionReasoningConfiguration` in `packages/db/src/index.ts`;
-`packages/codex/src/reasoning-configuration.ts` owns their durable format and
-provider projection. See
-[`run-lifecycle.md`](run-lifecycle.md) and [`context-compaction.md`](context-compaction.md).
+Provider work stays outside retries; retry only idempotent settlement.
+Replay: [notices](run-lifecycle.md),
+[compaction](context-compaction.md).
 
 Failed-session retry differs from Pause/Resume and prompt admission.
 `packages/db/src/session-retry.ts` fences failure identity, reserves actor-scoped

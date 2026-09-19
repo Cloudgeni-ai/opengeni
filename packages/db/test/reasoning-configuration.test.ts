@@ -11,6 +11,7 @@ import {
   getActiveSessionHistoryItems,
   applySessionTurnSettlement,
   applyContextCompaction,
+  requestSessionCompaction,
 } from "../src/index";
 import { readReasoningConfiguration } from "@opengeni/codex";
 let shared: SharedTestDatabase;
@@ -20,6 +21,70 @@ beforeAll(async () => {
   if (!db) throw new Error("test postgres unavailable");
   shared = db;
   client = createDb(db.appUrl);
+}, 180_000);
+
+test("manual compaction installs configuration without a user-input row", async () => {
+  const suffix = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: suffix,
+    accountName: "maintenance",
+    workspaceExternalSource: "test",
+    workspaceExternalId: suffix,
+    workspaceName: "maintenance",
+    subjectId: `subject-${suffix}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const workspaceId = grant.workspaceId!;
+  const session = await createSession(client.db, {
+    accountId: grant.accountId,
+    workspaceId,
+    initialMessage: "",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "high",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+  });
+  await requestSessionCompaction(client.db, workspaceId, session.id);
+  const claimed = await claimSessionWorkForAttempt(client.db, workspaceId, {
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") throw new Error("maintenance not claimed");
+  expect(claimed.turn.source).toBe("compaction");
+  expect(await getActiveSessionHistoryItems(client.db, workspaceId, session.id)).toHaveLength(0);
+  const identity = {
+    accountId: grant.accountId,
+    workspaceId,
+    sessionId: session.id,
+    turnId: claimed.turn.id,
+    expectedExecutionGeneration: claimed.turn.executionGeneration,
+    expectedAttemptId: claimed.turn.activeAttemptId!,
+    effort: "high" as const,
+  };
+  expect(await ensureSessionReasoningConfiguration(client.db, identity)).toBe("high");
+  expect(await ensureSessionReasoningConfiguration(client.db, identity)).toBe("high");
+  const history = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
+  expect(history).toHaveLength(1);
+  expect(readReasoningConfiguration(history[0]!.item)?.effort).toBe("high");
+  expect(history.some((row) => row.item.role === "user")).toBe(false);
+  expect(
+    (
+      await applyContextCompaction(client.db, {
+        ...identity,
+        replacementItems: [],
+        summaryItem: { type: "compaction", encrypted_content: "test" },
+        trailingItems: [history[0]!.item],
+      })
+    ).applied,
+  ).toBe(true);
+  expect(await ensureSessionReasoningConfiguration(client.db, identity)).toBe("high");
 }, 180_000);
 afterAll(async () => {
   await client?.close();
@@ -132,4 +197,54 @@ test("effort changes persist once before accepted input while baseline stays fix
   await expect(
     ensureSessionReasoningConfiguration(client.db, identity(first, "low")),
   ).rejects.toThrow("fenced");
+  await applySessionTurnSettlement(client.db, workspaceId, {
+    sessionId: session.id,
+    turnId: second.id,
+    triggerEventId: second.triggerEventId,
+    attemptId: second.activeAttemptId!,
+    turnStatus: "completed",
+    sessionStatus: "idle",
+    activeTurnId: null,
+    events: [{ type: "turn.completed", payload: {} }],
+  });
+  // A turn run while the feature is disabled can leave an older control behind.
+  const third = await claim("low");
+  await applySessionTurnSettlement(client.db, workspaceId, {
+    sessionId: session.id,
+    turnId: third.id,
+    triggerEventId: third.triggerEventId,
+    attemptId: third.activeAttemptId!,
+    turnStatus: "completed",
+    sessionStatus: "idle",
+    activeTurnId: null,
+    events: [{ type: "turn.completed", payload: {} }],
+  });
+  const beforeMaintenance = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
+  await requestSessionCompaction(client.db, workspaceId, session.id);
+  const maintenance = await claimSessionWorkForAttempt(client.db, workspaceId, {
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (maintenance.action !== "claimed") throw new Error("maintenance not claimed");
+  expect(maintenance.turn.source).toBe("compaction");
+  expect(
+    await ensureSessionReasoningConfiguration(client.db, identity(maintenance.turn, "low")),
+  ).toBe("low");
+  expect(
+    await ensureSessionReasoningConfiguration(client.db, identity(maintenance.turn, "low")),
+  ).toBe("low");
+  const afterMaintenance = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
+  expect(afterMaintenance.slice(0, -1)).toEqual(beforeMaintenance);
+  const tail = afterMaintenance.at(-1)!;
+  expect(readReasoningConfiguration(tail.item)?.effort).toBe("low");
+  expect(tail.position).toBeGreaterThan(
+    Math.max(
+      ...updated.map((row) => row.position),
+      ...beforeMaintenance.map((row) => row.position),
+    ),
+  );
 }, 180_000);

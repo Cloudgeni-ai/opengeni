@@ -40153,13 +40153,7 @@ export async function installOrReadTurnExecutionPolicyForAttempt(
   );
 }
 
-/**
- * Append conversation items (verbatim SDK AgentInputItems) to the session's
- * history. Idempotent on (workspace, session, position): concurrent or
- * repeated writers (streaming writes + turn-end reconciliation) converge
- * instead of duplicating.
- */
-/** Install a turn's immutable effort update before its accepted input, under the attempt fence. */
+/** Install an effort update before accepted input, or at the maintenance tail, under the attempt fence. */
 export async function ensureSessionReasoningConfiguration(
   db: Database,
   input: {
@@ -40221,18 +40215,37 @@ export async function ensureSessionReasoningConfiguration(
           .where(and(scope, eq(schema.sessionHistoryItems.turnId, input.turnId)))
           .orderBy(asc(schema.sessionHistoryItems.position))
           .limit(1);
-        if (!boundary) throw new Error("Reasoning update requires durable accepted input");
-        const [previous] = await tx
-          .select({ position: schema.sessionHistoryItems.position })
-          .from(schema.sessionHistoryItems)
-          .where(and(scope, lt(schema.sessionHistoryItems.position, boundary.position)))
-          .orderBy(desc(schema.sessionHistoryItems.position))
-          .limit(1);
-        const position = previous
-          ? (previous.position + boundary.position) / 2
-          : boundary.position - 0.25;
-        if (!(position < boundary.position) || (previous && !(position > previous.position)))
-          throw new Error("Reasoning configuration position exhausted");
+        let position: number;
+        if (!boundary) {
+          if (fence.turn.source !== "compaction")
+            throw new Error("Reasoning update requires durable accepted input");
+          // Maintenance turns deliberately have no user message. Append before
+          // the compaction trigger; include inactive rows when reserving a slot.
+          const [tail] = await tx
+            .select({ position: schema.sessionHistoryItems.position })
+            .from(schema.sessionHistoryItems)
+            .where(
+              and(
+                eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+                eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+              ),
+            )
+            .orderBy(desc(schema.sessionHistoryItems.position))
+            .limit(1);
+          position = tail ? Math.floor(tail.position) + 1 : 0;
+        } else {
+          const [previous] = await tx
+            .select({ position: schema.sessionHistoryItems.position })
+            .from(schema.sessionHistoryItems)
+            .where(and(scope, lt(schema.sessionHistoryItems.position, boundary.position)))
+            .orderBy(desc(schema.sessionHistoryItems.position))
+            .limit(1);
+          position = previous
+            ? (previous.position + boundary.position) / 2
+            : boundary.position - 0.25;
+          if (!(position < boundary.position) || (previous && !(position > previous.position)))
+            throw new Error("Reasoning configuration position exhausted");
+        }
         const baselineEffort = state?.baselineEffort ?? input.effort;
         await tx.insert(schema.sessionHistoryItems).values(
           withLosslessContentWriteVersion(
@@ -40258,6 +40271,12 @@ export async function ensureSessionReasoningConfiguration(
   );
 }
 
+/**
+ * Append conversation items (verbatim SDK AgentInputItems) to the session's
+ * history. Idempotent on (workspace, session, position): concurrent or
+ * repeated writers (streaming writes + turn-end reconciliation) converge
+ * instead of duplicating.
+ */
 export async function appendSessionHistoryItems(
   db: Database,
   input: {
