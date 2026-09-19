@@ -463,9 +463,18 @@ describe("fail-closed change impact", () => {
     expect(plan.browserAcceptanceLanes).toEqual(["accounts"]);
     expect(plan.e2eTests).not.toContain(regression);
     expect(discoverTestFiles().e2e).not.toContain(regression);
-    const helper = createImpactPlan(["test/e2e/browser-account-request-observation.ts"]);
-    expect(helper.mode).toBe("focused");
-    expect(helper.browserAcceptanceLanes).toContain("accounts");
+    for (const path of [
+      "test/e2e/browser-account-request-observation.ts",
+      "test/e2e/browser-account-axe-diagnostics.ts",
+      "test/e2e/browser-account-read-diagnostics.ts",
+    ]) {
+      const helper = createImpactPlan([path]);
+      expect(helper.mode).toBe("focused");
+      expect(helper.browserAcceptanceLanes).toContain("accounts");
+      if (path === "test/e2e/browser-account-read-diagnostics.ts") {
+        expect(helper.unitTests).toContain("test/e2e/browser-account-read-diagnostics.test.ts");
+      }
+    }
   });
 
   test("Personal workspace accessibility coverage follows only its web dependency", () => {

@@ -35,6 +35,8 @@ import {
 } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
+import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics";
+import { createAccountReadDiagnostics } from "./browser-account-read-diagnostics";
 import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
 import {
   sanitizeRaceProjection,
@@ -766,6 +768,10 @@ let edgeCookieSummary = "not-observed";
 let completionResponseLoss: CompletionResponseLoss | null = null;
 const actorMutationAcceptances: ActorMutationAcceptance[] = [];
 const observedBrowserProblems = new WeakMap<Page, BrowserProblems>();
+let companionReadDiagnostics: {
+  page: Page;
+  ledger: ReturnType<typeof createAccountReadDiagnostics>;
+} | null = null;
 let alpha: AccountFixture;
 let beta: AccountFixture;
 
@@ -874,6 +880,9 @@ function observeBrowser(page: Page): BrowserProblems {
   page.on("request", (request) => {
     const requestUrl = new URL(request.url());
     const pathname = requestUrl.pathname;
+    if (companionReadDiagnostics?.page === page) {
+      companionReadDiagnostics.ledger.start("browser", request, request.method(), pathname);
+    }
     const actorEpoch = request.headers()[MANAGED_AUTH_ACTOR_EPOCH_HEADER] ?? null;
     const startedAt = performance.now();
     const requestSessionSetAuthorityHash = request
@@ -924,6 +933,9 @@ function observeBrowser(page: Page): BrowserProblems {
   });
   page.on("response", (response) => {
     const request = response.request();
+    if (companionReadDiagnostics?.page === page) {
+      companionReadDiagnostics.ledger.response("browser", request, response.status());
+    }
     const pathname = new URL(response.url()).pathname;
     const retiredTerminalProblem = retiredFiniteReadTerminalProblem(
       problems.retiredFiniteReadTombstones.get(request),
@@ -977,6 +989,9 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   });
   page.on("requestfinished", (request) => {
+    if (companionReadDiagnostics?.page === page) {
+      companionReadDiagnostics.ledger.finish("browser", request, "finished");
+    }
     const finishedAt = performance.now();
     const finishedUrl = new URL(request.url());
     const finishedFiniteRead = problems.pendingFiniteReads.get(request);
@@ -1028,6 +1043,9 @@ function observeBrowser(page: Page): BrowserProblems {
     problems.pageErrors.push(message);
   });
   page.on("requestfailed", (request) => {
+    if (companionReadDiagnostics?.page === page) {
+      companionReadDiagnostics.ledger.finish("browser", request, "failed");
+    }
     const failedAt = performance.now();
     const dispatch = requestPhases.get(request);
     const failure = request.failure()?.errorText ?? "unknown";
@@ -2468,6 +2486,8 @@ async function observeAccountApiRequest(
   request: Request,
   dispatch: () => Response | Promise<Response>,
 ) {
+  const readDiagnostics = companionReadDiagnostics?.ledger;
+  readDiagnostics?.start("server", request, request.method, new URL(request.url).pathname);
   const metadata = sanitizeRaceRequest({
     method: request.method,
     pathname: new URL(request.url).pathname,
@@ -2482,7 +2502,13 @@ async function observeAccountApiRequest(
   }
   pendingAccountApiRequests.set(request, metadata);
   try {
-    return await dispatch();
+    const response = await dispatch();
+    readDiagnostics?.response("server", request, response.status);
+    readDiagnostics?.finish("server", request, "handler-resolved");
+    return response;
+  } catch (failure) {
+    readDiagnostics?.finish("server", request, "handler-rejected");
+    throw failure;
   } finally {
     pendingAccountApiRequests.delete(request);
   }
@@ -2679,8 +2705,10 @@ async function captureResponsiveEvidenceInBrowser(
   );
   expect(menuTargetSizes.length).toBeGreaterThan(0);
   expect(menuTargetSizes.every(({ height, width }) => height >= 44 && width >= 44)).toBe(true);
-  await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
-  await expectNoAxeViolations(touchPage, '[data-slot="dropdown-menu-content"]');
+  await withAccountMenuAxeDiagnostics(touchPage, async () => {
+    await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
+    await expectNoAxeViolations(touchPage, '[data-slot="dropdown-menu-content"]');
+  });
   await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
   await expectAccountMenuEvidenceVisible(touchPage, alpha.displayName);
   const touchScreenshot = await touchPage.screenshot({
@@ -4562,6 +4590,8 @@ describe("provider-neutral browser account acceptance", () => {
       await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems]);
       const oldProjection = await sessionSet(secondTab);
       const delay = await delayedWorkspaceResponse(secondTab, oldProjection.actorEpoch);
+      const companionDiagnostics = createAccountReadDiagnostics();
+      companionReadDiagnostics = { page: secondTab, ledger: companionDiagnostics };
       let reloadOutcome = "pending";
       const reload = secondTab.reload({ waitUntil: "domcontentloaded" }).then(
         (response) => {
@@ -4573,8 +4603,18 @@ describe("provider-neutral browser account acceptance", () => {
           return null;
         },
       );
-      const intentionallyHeldRequest = await delay.intercepted;
-      await waitForCompanionFiniteReadQuiescence(secondTabProblems, intentionallyHeldRequest);
+      try {
+        const intentionallyHeldRequest = await delay.intercepted;
+        companionDiagnostics.markHeld(intentionallyHeldRequest);
+        await waitForCompanionFiniteReadQuiescence(secondTabProblems, intentionallyHeldRequest);
+      } catch (cause) {
+        throw new Error(
+          `companion read lifecycle evidence: ${JSON.stringify(companionDiagnostics.snapshot())}`,
+          { cause },
+        );
+      } finally {
+        companionReadDiagnostics = null;
+      }
       setBrowserPhase(pageProblems, "late-old-epoch-alpha-to-beta");
       setBrowserPhase(secondTabProblems, "late-old-epoch-alpha-to-beta");
       await selectAccount(page, alpha, beta);
