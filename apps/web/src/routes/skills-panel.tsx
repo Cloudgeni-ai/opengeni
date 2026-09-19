@@ -342,6 +342,9 @@ export function SkillsPanelContent({
     setNotice(null);
     try {
       const version = {
+        ...(operation === "approve" && record.removalOperationId
+          ? { removalOperationId: record.removalOperationId }
+          : {}),
         operationId: crypto.randomUUID(),
         expectedRevisionId: record.activeRevisionId,
         expectedScopeVersion: record.scopeVersion,
@@ -365,6 +368,12 @@ export function SkillsPanelContent({
                 : client.restoreWorkspaceSkill.bind(client)
             )(workspaceId, record.id, { ...version, revisionId: record.revisionId! });
       if (generation.current !== current) return;
+      if (receipt.removed) {
+        setRecord(null);
+        setSkills((await client.listWorkspaceSkills(workspaceId)).skills);
+        setNotice("Skill and all stored revisions permanently deleted.");
+        return;
+      }
       const inventoryRequest = ++inventoryGeneration.current;
       const [updated, inventory, detail] = await Promise.all([
         client.readWorkspaceSkill(workspaceId, receipt.skillId),
@@ -658,7 +667,9 @@ export function SkillsPanelContent({
                   }
                 >
                   {record.pendingRevisionIds.includes(record.revisionId)
-                    ? "Approve this revision"
+                    ? record.removalOperationId
+                      ? "Permanently delete Skill and all revisions (cannot be undone)"
+                      : "Approve this revision"
                     : "Restore as a new revision"}
                 </Button>
               ) : null}

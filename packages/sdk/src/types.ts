@@ -1833,6 +1833,7 @@ export type HumanInputOption = {
 };
 
 export type SkillReviewReference = {
+  removalOperationId?: string | undefined;
   sourceOperationId: string;
   skillId: string;
   revisionId: string;

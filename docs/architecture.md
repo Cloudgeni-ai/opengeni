@@ -34,6 +34,9 @@ user; task notes cover temporary tree coordination. Linking never merges users.
 See [product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), and [run lifecycle](run-lifecycle.md).
+Skill removal is a guarded physical deletion of the scoped registry head and
+all revisions, with exact removal approval and Learning enforcement through the
+same Skill lifecycle. It does not rewrite accepted conversation context.
 
 Session `mcpApprovalPolicies` requires session-control authority. Claims freeze
 inherited approvals with catalog floors; policies grant neither capabilities nor credentials.
@@ -1491,19 +1494,15 @@ Turn-end review capture yields to queued turns and fences late commits. Single-r
 | Sandbox/provider storage | Live workspace and optional native checkpoints | Must be fenced and represented by durable lease/checkpoint evidence |
 | Search indexes | Canonical Knowledge retrieval projections | Rebuildable from authorized source records |
 
-Postgres tables are cross-service contracts. Forward migrations and the exact
-runtime-role/RLS posture are owned by `@opengeni/db`; this document does not
-track migration ordinals, table totals, or privilege counts.
+`@opengeni/db` owns cross-service Postgres contracts, forward migrations, and
+runtime-role/RLS posture.
 
-Object storage endpoints and signed URLs are transport details. Postgres owns
-which tenant and resource may access an object, whether an upload is complete,
-and whether retained evidence is still live. URLs, object keys, and provider
-identities should not leak into prompt history when a provider-neutral receipt
-is sufficient.
+Postgres owns object access, upload completion, and retained-evidence liveness.
+Storage endpoints and signed URLs are transport details; keep URLs, object keys,
+and provider identities out of prompt history when a provider-neutral receipt suffices.
 
-Search is authority-first: resolve the allowed organization/workspace/user
-scope, then rank eligible records. ACL tags and relevance scores refine results
-but do not replace access control.
+Search resolves authorized organization/workspace/user scope before ranking;
+ACL tags and relevance never replace access control.
 
 Canonical: `packages/db/src/schema.ts`, `packages/db/src/runtime-posture.ts`,
 `packages/storage/src/index.ts`, `packages/documents/src/index.ts`,

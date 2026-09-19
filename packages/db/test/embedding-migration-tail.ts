@@ -39,4 +39,6 @@ export const embeddingMigrationTail = [
   // Replayed 0402/0433 still consume historical Pack tables. Remove them only
   // after those earlier accepted-work and Skill cutovers have completed.
   "0482_remove_packs.sql",
+  // Patches the exact Skill lifecycle rewritten by 0461; replay after it.
+  "0488_permanent_skill_removal.sql",
 ];

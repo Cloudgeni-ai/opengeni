@@ -159,6 +159,9 @@ function HumanInputRequestForm({
           revisionId: question.skillReview!.revisionId,
           expectedRevisionId: question.skillReview!.expectedRevisionId,
           expectedScopeVersion: question.skillReview!.expectedScopeVersion,
+          ...(question.skillReview!.removalOperationId
+            ? { removalOperationId: question.skillReview!.removalOperationId }
+            : {}),
         },
       })),
   );
@@ -188,6 +191,7 @@ function HumanInputRequestForm({
         if (
           record.id !== reference.skillId ||
           record.revisionId !== reference.revisionId ||
+          (record.removalOperationId ?? undefined) !== reference.removalOperationId ||
           !record.files.some((file) => file.path === "SKILL.md")
         ) {
           throw new Error("The requested Skill revision could not be verified.");
@@ -230,7 +234,9 @@ function HumanInputRequestForm({
               {record.title ?? "Skill"} · {record.scope} · {record.files.length} files
             </p>
             <p className="text-og-xs text-og-fg-muted">
-              Saving activates these exact files. No additional review is required.
+              {question.skillReview.removalOperationId
+                ? "Permanently deletes this Skill and all stored revisions. This cannot be undone; conversations remain unchanged."
+                : "Saving activates these exact files. No additional review is required."}
             </p>
             {record.files.map((file) => (
               <details key={file.path} open={file.path === "SKILL.md"}>
@@ -357,7 +363,11 @@ function HumanInputRequestForm({
         ),
     );
     if (unreviewedSave) {
-      setValidationErrors({ [unreviewedSave.id]: "Load the exact Skill files before saving." });
+      setValidationErrors({
+        [unreviewedSave.id]: unreviewedSave.skillReview?.removalOperationId
+          ? "Load the exact Skill proposal before approving permanent deletion."
+          : "Load the exact Skill files before saving.",
+      });
       return;
     }
     await submitResponse({ outcome: "answered", answers: result.answers });

@@ -31,6 +31,21 @@ export async function migrateBefore(
     // Do not keep a second idle connection alive across the maintenance drain.
     await ledger.end();
     await migrate(url, undefined, options);
+    // These historical fixtures exercise old lifecycle behavior with today's
+    // TypeScript readers. Supply only the nullable reader column, not the 0488
+    // deletion lifecycle or guards (which would change the behavior under test).
+    if (
+      upperBound > "0433_unified_skill_lifecycle.sql" &&
+      upperBound <= "0488_permanent_skill_removal.sql"
+    ) {
+      const readerColumns = postgres(url, { max: 1, onnotice: () => undefined });
+      try {
+        await readerColumns`ALTER TABLE preference_registry_revisions
+          ADD COLUMN IF NOT EXISTS skill_removal_operation_id uuid`;
+      } finally {
+        await readerColumns.end();
+      }
+    }
   } finally {
     await ledger.end();
     const cleanup = postgres(url, { max: 1, onnotice: () => undefined });
