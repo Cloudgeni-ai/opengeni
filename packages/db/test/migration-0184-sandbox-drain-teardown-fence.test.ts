@@ -68,6 +68,8 @@ const withheldMigrationNames = [
   "0478_sender_owned_connections.sql",
   // The destructive removal must follow the historical 0402/0433 readers.
   "0482_remove_packs.sql",
+  // Patches the exact Skill lifecycle rewritten by 0461; replay after it.
+  "0487_permanent_skill_removal.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
