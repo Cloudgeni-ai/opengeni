@@ -5173,6 +5173,20 @@ export type SessionSystemUpdate = {
   createdAt: string;
 };
 
+export type SessionRetryRequest = {
+  clientEventId: string;
+  failureEventId: string;
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
+  latencyMode?: LatencyMode;
+};
+
+export type SessionRetryResponse = {
+  outcome: "accepted" | "replayed";
+  turnId: string;
+  failureEventId: string;
+};
+
 export type SessionControlResponse = {
   receipt: SessionCommandReceipt;
   effectiveControl: EffectiveSessionControl;

@@ -103,6 +103,12 @@ operations have external effects. Recovery is explicit and attempt-fenced.
 Provider work stays outside database retries; only idempotent settlement
 transactions may retry.
 
+Explicit failed-session retry is distinct from Pause/Resume and new prompt
+admission. `packages/db/src/session-retry.ts` fences the current failure event,
+reserves an actor-scoped command receipt, rejects unresolved execution, and
+re-enables the original logical turn with its retained history and authority.
+The API/SDK accept the selected model policy without synthesizing human input.
+
 Active-run writes prove the exact current attempt/generation. Stale workers may
 remain alive but cannot authoritatively write or settle replacements. Temporal
 cancellation is intent; durable quiescence gates replacements, including closed

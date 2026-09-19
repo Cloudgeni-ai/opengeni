@@ -67,6 +67,29 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
 }
 
 describe("OpenGeniClient", () => {
+  test("retrySession preserves the exact failure and selected policy without a message", async () => {
+    const request = {
+      clientEventId: crypto.randomUUID(),
+      failureEventId: crypto.randomUUID(),
+      model: "selected-model",
+      reasoningEffort: "high" as const,
+      latencyMode: "fast" as const,
+    };
+    const response = {
+      outcome: "accepted" as const,
+      turnId: crypto.randomUUID(),
+      failureEventId: request.failureEventId,
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    expect(await client.retrySession(WORKSPACE_ID, SESSION_ID, request)).toEqual(response);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("POST");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/retry`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual(request);
+    expect(requests[0]!.body).not.toContain('"text"');
+  });
   test("session pages require affirmative sort and archive acknowledgments", async () => {
     for (const response of [
       [],

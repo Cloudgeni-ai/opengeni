@@ -827,6 +827,36 @@ await client.cancelSession(workspaceId, sessionId, {
 await client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision: "approve" });
 ```
 
+## Retry a failed session without changing its intent
+
+Try again is separate from Pause/Resume and `sendMessage`. Retain the request
+across an ambiguous transport response; never synthesize a continuation prompt:
+
+```ts
+const retryRequest = {
+  clientEventId: crypto.randomUUID(),
+  failureEventId, // the current durable turn.failed event id
+  model: selectedModel,
+  reasoningEffort: "high" as const,
+  latencyMode: "standard" as const,
+};
+const retry = await client.retrySession(workspaceId, sessionId, retryRequest);
+// { outcome: "accepted" | "replayed", turnId, failureEventId }
+```
+
+Requires `sessions:control` and session access. Recovery keeps the logical turn,
+original question, frozen authority, and completed history/tool results; it
+does not create a user message. Omitted policy fields retain the failed turn's
+selection. The selected policy is revalidated for new admission. A duplicate
+operation replays its receipt even after execution advances.
+
+HTTP 409 codes distinguish `RETRY_STALE_FAILURE`, `RETRY_EXECUTION_UNRESOLVED`,
+`RETRY_PAUSED`, `RETRY_UNSUPPORTED_FAILURE`, and `IDEMPOTENCY_KEY_REUSED`.
+Unresolved tool outcomes cannot be blindly replayed. A deliberate Pause must
+be resumed separately. Failure without a retained logical turn, a settled
+scheduled occurrence, and idle credit exhaustion are not supported retry
+boundaries. See [run lifecycle](../../docs/run-lifecycle.md).
+
 ## Session tool policy and native web search
 
 For standalone credential maintenance, use the dedicated operation rather than

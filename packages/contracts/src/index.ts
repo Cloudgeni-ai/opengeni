@@ -7642,6 +7642,24 @@ export const SessionControlRequest = z.object({
 });
 export type SessionControlRequest = z.infer<typeof SessionControlRequest>;
 
+/** Retry an exact failed boundary without admitting another human message. */
+export const SessionRetryRequest = z
+  .object({
+    clientEventId: SessionOperationKey,
+    failureEventId: z.string().uuid(),
+    model: z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
+    latencyMode: LatencyMode.optional(),
+  })
+  .strict();
+export type SessionRetryRequest = z.infer<typeof SessionRetryRequest>;
+export const SessionRetryResponse = z.object({
+  outcome: z.enum(["accepted", "replayed"]),
+  turnId: z.string().uuid(),
+  failureEventId: z.string().uuid(),
+});
+export type SessionRetryResponse = z.infer<typeof SessionRetryResponse>;
+
 export const WorkspaceInferenceControlRequest = z.object({
   action: z.enum(["pause", "resume"]),
   reason: WorkspaceControlReason.optional(),
