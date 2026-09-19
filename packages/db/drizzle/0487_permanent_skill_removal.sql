@@ -13,7 +13,13 @@ BEGIN
   THEN RAISE EXCEPTION 'Skill removal requires drained application sessions' USING ERRCODE='55000'; END IF;
 END $drain$;
 
-ALTER TABLE preference_registry_revisions ADD COLUMN skill_removal_operation_id uuid;
+ALTER TABLE preference_registry_revisions ADD COLUMN IF NOT EXISTS skill_removal_operation_id uuid;
+-- Keep content-free operation receipts: forgetting a create/save operation would
+-- allow its delayed retry to recreate the deleted Skill. Referential cleanup
+-- also reaches personal-Skill receipts written through another workspace.
+ALTER TABLE skill_write_receipts DROP CONSTRAINT skill_write_receipts_activation_event_id_fkey;
+ALTER TABLE skill_write_receipts ADD CONSTRAINT skill_write_receipts_activation_event_id_fkey
+  FOREIGN KEY (activation_event_id) REFERENCES preference_registry_events(id) ON DELETE SET NULL;
 -- No content is copied to a tombstone. Existing foreign keys remain restrictive
 -- for surviving cross-scope references; removal deletes only its scoped audit
 -- rows that hold live references. Content-free removal receipts remain replayable.
@@ -45,15 +51,16 @@ BEGIN
 
   definition := pg_get_functiondef('opengeni_private.guard_workspace_owned_skill_history_delete()'::regprocedure);
   anchor := $a$IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN RETURN OLD; END IF;$a$;
-  replacement := $r$IF TG_OP='DELETE'
+  replacement := $r$IF TG_TABLE_NAME='skill_write_receipts' AND TG_OP='UPDATE' AND pg_trigger_depth()>1 THEN
+    IF OLD.activation_event_id IS NOT NULL AND NEW.activation_event_id IS NULL
+      AND (to_jsonb(NEW)-'activation_event_id')=(to_jsonb(OLD)-'activation_event_id')
+    THEN RETURN NEW; END IF;
+  END IF;
+  IF TG_OP='DELETE'
     AND current_user=pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid=TG_RELID))
     AND nullif(current_setting('opengeni.skill_remove_head',true),'') IS NOT NULL
     AND nullif(current_setting('opengeni.account_id',true),'')::uuid=OLD.account_id THEN
-    IF TG_TABLE_NAME='skill_write_receipts' THEN
-      IF OLD.workspace_id=nullif(current_setting('opengeni.workspace_id',true),'')::uuid
-        AND OLD.receipt->>'skillId'=current_setting('opengeni.skill_remove_head',true)
-        AND OLD.activation_event_id IS NOT NULL THEN RETURN OLD; END IF;
-    ELSIF TG_TABLE_NAME='company_brain_preference_proposal_receipts' THEN
+    IF TG_TABLE_NAME='company_brain_preference_proposal_receipts' THEN
       IF OLD.workspace_id=nullif(current_setting('opengeni.workspace_id',true),'')::uuid
         AND OLD.preference_id::text=current_setting('opengeni.skill_remove_head',true) THEN RETURN OLD; END IF;
     END IF;
@@ -92,6 +99,23 @@ BEGIN
     IF (length(definition)-length(replace(definition,anchor,'')))/length(anchor)<>1 THEN RAISE EXCEPTION 'Skill removal lifecycle anchor mismatch: %',anchor; END IF;
     definition:=replace(definition,anchor,replacement);
   END LOOP;
+  anchor := $a$  SELECT * INTO head FROM preference_registry_preferences h WHERE h.id=skill_id AND h.account_id=p_account_id FOR UPDATE;$a$;
+  replacement := $r$  -- Distribution removals acquire facet/owner rows before the Skill head.
+  -- NOWAIT also prevents a publication-lock/facet-lock cycle with installation.
+  -- Contention aborts atomically; the caller can retry the same operation.
+  IF operation='remove' OR p_request ? 'removalOperationId' THEN
+    PERFORM fi.id FROM capability_facet_installations fi JOIN skill_source_bindings b
+      ON b.skill_facet_id=fi.facet_id AND b.workspace_id=fi.workspace_id
+      WHERE b.preference_id=skill_id AND b.account_id=p_account_id AND b.workspace_id=p_workspace_id
+      ORDER BY fi.id FOR UPDATE OF fi NOWAIT;
+    PERFORM o.id FROM capability_component_owners o JOIN capability_facet_installations fi ON fi.id=o.facet_installation_id
+      JOIN skill_source_bindings b ON b.skill_facet_id=fi.facet_id AND b.workspace_id=fi.workspace_id
+      WHERE b.preference_id=skill_id AND b.account_id=p_account_id AND b.workspace_id=p_workspace_id
+      ORDER BY o.id FOR UPDATE OF o NOWAIT;
+  END IF;
+  SELECT * INTO head FROM preference_registry_preferences h WHERE h.id=skill_id AND h.account_id=p_account_id FOR UPDATE;$r$;
+  IF (length(definition)-length(replace(definition,anchor,'')))/length(anchor)<>1 THEN RAISE EXCEPTION 'Skill removal lock anchor mismatch'; END IF;
+  definition:=replace(definition,anchor,replacement);
   anchor := $a$  IF outcome IS NULL THEN
     IF operation IN ('approve','restore','reject') THEN$a$;
   replacement := $r$  -- Marked proposals are never ordinary approvals/restores. The reviewer must
@@ -151,8 +175,6 @@ BEGIN
         WHERE b.preference_id=skill_id AND b.account_id=p_account_id AND b.workspace_id=p_workspace_id
           AND fi.facet_id=b.skill_facet_id AND fi.account_id=p_account_id AND fi.workspace_id=p_workspace_id;
       PERFORM set_config('opengeni.skill_remove_head',skill_id::text,true);
-      DELETE FROM skill_write_receipts r WHERE r.account_id=p_account_id AND r.workspace_id=p_workspace_id
-        AND r.receipt->>'skillId'=skill_id::text AND r.activation_event_id IS NOT NULL;
       DELETE FROM company_brain_preference_proposal_receipts r
         WHERE r.account_id=p_account_id AND r.workspace_id=p_workspace_id AND r.preference_id=skill_id;
       DELETE FROM preference_registry_preferences WHERE id=skill_id AND account_id=p_account_id;
@@ -160,7 +182,7 @@ BEGIN
       outcome:='applied';
     END IF;
     result:=jsonb_build_object('operationId',operation_id,'skillId',skill_id,'revisionId',revision_id,
-      'outcome',outcome,'removed',outcome='applied','replayed',false);
+      'outcome',outcome,'removed',outcome='applied','removedScope',head.scope,'replayed',false);
     IF outcome='pending' THEN result:=result||jsonb_build_object('pendingReason','approval','skillReview',
       jsonb_build_object('sourceOperationId',operation_id,'removalOperationId',operation_id,'skillId',skill_id,
         'revisionId',revision_id,'expectedRevisionId',head.active_revision_id,'expectedScopeVersion',head.scope_version)); END IF;

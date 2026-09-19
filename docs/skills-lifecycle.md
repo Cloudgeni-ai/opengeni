@@ -41,9 +41,10 @@ uncertainty. Committed removal replays without reading deleted content, but stil
 requires valid live actor authority. Changed arguments with the same key fail.
 Direct database deletion remains unavailable to runtime roles. Only the scoped
 SECURITY DEFINER lifecycle can open the exact-head deletion guard; head deletion
-cascades to its revisions, events and source binding. Scoped audit rows with live
-foreign keys to the deleted content are removed; content-free removal receipts
-remain replayable. Foreign keys are not relaxed. Cross-Skill
+cascades to its revisions, events and source binding. Content-free operation
+receipts remain replayable, with their deleted activation-event link cleared by
+the foreign key. This prevents delayed save retries from recreating a deleted Skill.
+Scoped proposal audit rows with live references are removed. Cross-Skill
 references still fail atomically rather than deleting another Skill's history.
 
 A direct installation releases only its scoped Skill facet. A non-direct

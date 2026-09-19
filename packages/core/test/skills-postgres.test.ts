@@ -446,6 +446,14 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
         await expect(removeSkill(client.db, request)).rejects.toThrow();
         expect(await readSkill(client.db, f.context, request.skillId)).not.toBeNull();
       } else {
+        // An uninstall can hold the facet while waiting for the head. Removal
+        // must refuse contention before taking that head, rather than deadlock.
+        await shared!.admin.begin(async (sql) => {
+          await sql`SELECT id FROM capability_facet_installations
+            WHERE workspace_id=${f.context.workspaceId} AND facet_id=${installed.facetId} FOR UPDATE`;
+          await expectDatabaseGuard(removeSkill(client!.db, request), "could not obtain lock");
+          await sql`SELECT id FROM preference_registry_preferences WHERE id=${request.skillId} FOR UPDATE NOWAIT`;
+        });
         expect((await removeSkill(client.db, request)).removed).toBe(true);
         expect(await listInstalledPortableSkills(client.db, f.context.workspaceId)).toHaveLength(0);
         const files = await shared!
@@ -485,6 +493,12 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       .admin`SELECT id FROM preference_registry_revisions WHERE preference_id=${first.skillId}`;
     expect(rows).toHaveLength(0);
     expect(await removeSkill(client.db, request)).toEqual({ ...removed, replayed: true });
+    // Delayed create/save retries must remain historical receipts, not recreate content.
+    expect(await saveSkill(client.db, f.input)).toEqual({ ...first, replayed: true });
+    expect(await readSkill(client.db, f.context, first.skillId)).toBeNull();
+    const retained = await shared!.admin`SELECT activation_event_id FROM skill_write_receipts
+      WHERE workspace_id=${f.context.workspaceId} AND operation_id=${f.input.operationId}`;
+    expect(retained).toEqual([{ activation_event_id: null }]);
     await expect(removeSkill(client.db, { ...request, reason: "Changed retry" })).rejects.toThrow();
     await expect(
       removeSkill(client.db, { ...request, actor: { ...request.actor, executionGeneration: 99 } }),
@@ -492,6 +506,47 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     const sessions = await shared!
       .admin`SELECT id FROM sessions WHERE id=${f.agent.actor.sessionId}`;
     expect(sessions).toHaveLength(1);
+  });
+
+  test("personal removal clears activation links across workspaces without erasing operation receipts", async () => {
+    if (!client) return;
+    const f = await fixture("automatic", true);
+    const first = await saveSkill(client.db, f.input);
+    const other = await createWorkspace(client.db, {
+      accountId: f.context.accountId,
+      name: "Personal Skill receipt",
+    });
+    const secondInput = {
+      ...f.input,
+      workspaceId: other.id,
+      operationId: crypto.randomUUID(),
+      expectedRevisionId: first.revisionId,
+    };
+    const second = await saveSkill(client.db, secondInput);
+    expect(
+      (
+        await removeSkill(client.db, {
+          ...f.human,
+          operationId: crypto.randomUUID(),
+          skillId: first.skillId,
+          expectedRevisionId: second.revisionId,
+          expectedScopeVersion: 1,
+          reason: "Remove personal Skill",
+        })
+      ).removed,
+    ).toBe(true);
+    const receipts = await shared!.admin`SELECT activation_event_id FROM skill_write_receipts
+      WHERE account_id=${f.context.accountId} AND receipt->>'skillId'=${first.skillId}`;
+    expect(receipts).toHaveLength(3);
+    expect(receipts.every((row) => row.activation_event_id === null)).toBe(true);
+    expect(await saveSkill(client.db, secondInput)).toEqual({ ...second, replayed: true });
+    expect(
+      await readSkill(
+        client.db,
+        { ...f.context, subjectId: f.human.actor.subjectId },
+        first.skillId,
+      ),
+    ).toBeNull();
   });
 
   test("permanent removal obeys Off, scope/head CAS, and does not expose a direct DELETE privilege", async () => {

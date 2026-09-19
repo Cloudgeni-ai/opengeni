@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { SkillFile, type SkillWriteReceipt } from "@opengeni/contracts";
+import { readSkillRemovalScope } from "@opengeni/db";
 import {
   approveSkill,
   rejectSkill,
@@ -181,8 +182,22 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
         { accountId: access.grant.accountId, workspaceId, subjectId: access.grant.subjectId },
         skillId,
       );
-      if (!current) throw new HTTPException(404, { message: "Skill not found" });
-      authorizePreferenceRegistryScopeMutation(access, current.scope);
+      const scope =
+        current?.scope ??
+        (operation === "approve" && request.removalOperationId
+          ? await readSkillRemovalScope(
+              deps.db,
+              {
+                accountId: access.grant.accountId,
+                workspaceId,
+                subjectId: access.grant.subjectId,
+              },
+              skillId,
+              request.operationId,
+            )
+          : null);
+      if (!scope) throw new HTTPException(404, { message: "Skill not found" });
+      authorizePreferenceRegistryScopeMutation(access, scope);
       const apply =
         operation === "approve"
           ? approveSkill
@@ -215,7 +230,7 @@ async function skillMutation(run: () => Promise<SkillWriteReceipt>): Promise<Ski
     let current: unknown = error;
     for (let depth = 0; depth < 4 && current && typeof current === "object"; depth++) {
       const candidate = current as { code?: unknown; cause?: unknown };
-      if (candidate.code === "23505" || candidate.code === "40001")
+      if (candidate.code === "23505" || candidate.code === "40001" || candidate.code === "55P03")
         throw new HTTPException(409, {
           message:
             "Skill changed or this operation key was reused. Reload and reconcile the change.",

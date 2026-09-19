@@ -118,6 +118,30 @@ export type SkillReadContext = {
   subjectId?: string;
 };
 
+/** Scope only, for authorizing an exact human deletion retry after the head is gone.
+ * The lifecycle still verifies the complete request fingerprint before replay.
+ */
+export async function readSkillRemovalScope(
+  db: Database,
+  context: SkillReadContext & { subjectId: string },
+  skillId: string,
+  operationId: string,
+): Promise<"workspace" | "user" | null> {
+  return withWorkspaceSubjectRls(db, context.workspaceId, context.subjectId, async (tx) => {
+    const [row] = await rawRows<{ scope: string }>(
+      tx,
+      sql`
+      SELECT receipt->>'removedScope' AS scope FROM skill_write_receipts
+      WHERE account_id=${context.accountId}::uuid AND workspace_id=${context.workspaceId}::uuid
+        AND operation_id=${operationId}::uuid AND receipt->>'skillId'=${skillId}
+        AND receipt->>'removed'='true' AND actor->>'kind'='human'
+        AND actor->>'principalKind'='human_session' AND actor->>'subjectId'=${context.subjectId}
+    `,
+    );
+    return row?.scope === "workspace" || row?.scope === "user" ? row.scope : null;
+  });
+}
+
 /** Recheck the host-bound attempt before any agent-facing Skill read/search. */
 export async function assertSkillReadAttempt(
   db: Database,
