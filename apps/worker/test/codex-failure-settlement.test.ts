@@ -503,7 +503,7 @@ describe("definitive Codex failure settlement", () => {
   }
 
   for (const armedAction of ["waiting", "stopped"] as const) {
-    test(`capacity settlement ${armedAction === "waiting" ? "immediately reconciles a new wait" : "publishes the breaker and exits idle without reconciling"}`, async () => {
+    test(`capacity settlement ${armedAction === "waiting" ? "immediately reconciles a new wait" : "publishes the breaker and exits failed without reconciling"}`, async () => {
       const callOrder: string[] = [];
       const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
         codexAccount("serving"),
@@ -534,6 +534,7 @@ describe("definitive Codex failure settlement", () => {
         callOrder.push("arm");
         return {
           action: armedAction,
+          sessionStatus: "failed",
           waiter: {
             id: "waiter-1",
             generation: 4,
@@ -559,7 +560,7 @@ describe("definitive Codex failure settlement", () => {
         const result = await settleTurnFailure(deps as never);
 
         expect(result).toEqual({
-          status: armedAction === "stopped" ? "idle" : "recovering",
+          status: armedAction === "stopped" ? "failed" : "recovering",
           turnId: "turn-1",
           attemptId: "attempt-1",
         });
@@ -573,7 +574,7 @@ describe("definitive Codex failure settlement", () => {
           }),
         );
         expect(deps.leases.codex.held).toBe(false);
-        expect(control.activityStatus).toBe(armedAction === "stopped" ? "idle" : "recovering");
+        expect(control.activityStatus).toBe(armedAction === "stopped" ? "failed" : "recovering");
         expect(control.turnMetricOutcome).toBe(armedAction === "stopped" ? "failed" : "recovering");
       } finally {
         listAccounts.mockRestore();

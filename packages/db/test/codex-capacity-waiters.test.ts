@@ -5,6 +5,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
+import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { eq, sql } from "drizzle-orm";
 import * as schema from "../src/schema";
 import {
@@ -27,6 +28,7 @@ import {
   mutateSessionControlInTransaction,
   reconcileCodexCapacityWait,
   requestSessionTurnRecovery,
+  retryFailedSessionInTransaction,
   recordCodexAccountUsageWithWakeTargets,
   registerPendingSessionToolCall,
   setCodexCredentialExhausted,
@@ -279,6 +281,57 @@ afterAll(async () => {
 }, 180_000);
 
 describe("durable Codex capacity waits", () => {
+  test("actual breaker failure supports explicit same-turn Retry with a fresh capacity budget", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const credentialId = await connectCredential(ws, true);
+    const scenario = await seedScenario(ws);
+    const armed = await arm(scenario);
+    if (armed.action !== "waiting") throw new Error("expected waiter");
+    await reconcileCodexCapacityWait(
+      dbA,
+      { ...scenario, waiterId: armed.waiter.id, generation: armed.waiter.generation },
+      () => availableDecision(credentialId),
+    );
+    const claimed = await claimTestTurn(
+      dbB,
+      ws.workspaceId,
+      scenario.sessionId,
+      scenario.workflowId,
+    );
+    if (!claimed?.activeAttemptId) throw new Error("expected resumed attempt");
+    await admin`update session_turns set metadata = metadata || ${admin.json({ [CODEX_CAPACITY_RECOVERY_KEY]: { falseResumptions: 9, resumeGeneration: claimed.executionGeneration, retryNotBefore: null } })}::jsonb where id = ${scenario.turnId}`;
+    const stopped = await arm({ ...scenario, attemptId: claimed.activeAttemptId });
+    expect(stopped.action).toBe("stopped");
+    if (stopped.action !== "stopped") throw new Error("expected breaker");
+    expect(stopped.sessionStatus).toBe("failed");
+    const failure = stopped.events.find((event) => event.type === "turn.failed")!;
+    const retried = await withSessionActivityRlsContext(dbA, ws, async (scoped) =>
+      scoped.transaction(async (tx) =>
+        retryFailedSessionInTransaction(tx as unknown as SessionActivityDatabase, {
+          ...ws,
+          sessionId: scenario.sessionId,
+          subjectId: "capacity-test-operator",
+          request: { clientEventId: crypto.randomUUID(), failureEventId: failure.id },
+          executionPolicy: resolveTurnExecutionPolicyV1(settings, {
+            modelId: "codex/gpt-5.6-sol",
+            requestedModelId: null,
+            modelSource: "session",
+            reasoningEffort: "xhigh",
+            reasoningSource: "session",
+            latencyMode: "standard",
+            latencyModeSource: "session",
+          }),
+        }),
+      ),
+    );
+    expect(retried).toMatchObject({ outcome: "accepted", turnId: scenario.turnId });
+    const next = await claimTestTurn(dbB, ws.workspaceId, scenario.sessionId, scenario.workflowId);
+    expect(next?.id).toBe(scenario.turnId);
+    expect(next?.model).toBe("codex/gpt-5.6-sol");
+    expect(readCodexCapacityRecovery(next?.metadata).falseResumptions).toBe(0);
+  });
+
   test("ten false resumptions persist across clients, back off despite wakes, and require explicit Continue", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

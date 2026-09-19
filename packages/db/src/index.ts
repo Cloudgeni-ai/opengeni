@@ -1,5 +1,6 @@
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
+export * from "./session-retry";
 import { unresolvedCodexCredentialFailures } from "./codex-failure-eligibility";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
@@ -25142,7 +25143,12 @@ export type CodexCapacitySelectionContext<
 
 export type ArmCodexCapacityWaitResult =
   | { action: "waiting"; waiter: CodexCapacityWait; events: SessionEvent[] }
-  | { action: "stopped"; waiter: CodexCapacityWait; events: SessionEvent[] }
+  | {
+      action: "stopped";
+      sessionStatus: "failed" | "queued";
+      waiter: CodexCapacityWait;
+      events: SessionEvent[];
+    }
   | {
       action: "stale";
       waiter: CodexCapacityWait | null;
@@ -25484,7 +25490,7 @@ export async function armCodexCapacityWait(
               )
               .limit(1)
           : [];
-        const sessionStatus = stopped ? (waitingPrompt ? "queued" : "idle") : "waiting_capacity";
+        const sessionStatus = stopped ? (waitingPrompt ? "queued" : "failed") : "waiting_capacity";
         await closeSessionTurnAttemptInTransaction(tx, {
           id: input.attemptId,
           accountId: input.accountId,
@@ -25709,8 +25715,15 @@ export async function armCodexCapacityWait(
               and generation = ${input.leaseFence.generation}
           `);
         }
+        if (stopped)
+          return {
+            action: "stopped",
+            sessionStatus: waitingPrompt ? "queued" : "failed",
+            waiter: mapCodexCapacityWaiter(waiterRow),
+            events: [...closedTools.events, ...inserted.map(mapEvent)],
+          } as const;
         return {
-          action: stopped ? "stopped" : "waiting",
+          action: "waiting",
           waiter: mapCodexCapacityWaiter(waiterRow),
           events: [...closedTools.events, ...inserted.map(mapEvent)],
         } as const;

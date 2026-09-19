@@ -905,6 +905,8 @@ export type {
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
   SessionControlResponse,
+  SessionRetryRequest,
+  SessionRetryResponse,
   ComposerDraft,
   DeleteSessionQueueItemRequest,
   EditSessionQueueItemRequest,

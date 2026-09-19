@@ -300,6 +300,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  "packages/db/src/session-retry.ts#retryFailedSessionInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/session-control.ts#cancelSessionSubtreeInTransaction": {
     inserts: 1,
     contract: "owned_suffix",

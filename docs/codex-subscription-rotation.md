@@ -207,9 +207,12 @@ it; stale predecessor attempts cannot charge the budget.
 
 The tenth false resumption atomically closes the attempt and turn as failed,
 supersedes the waiter, emits `codex_capacity_recovery_exhausted`, and suppresses
-automatic goal continuation. The session is idle (or queued for already accepted
-human input), not falsely presented as still recovering. Existing explicit Retry
-or a new Continue message starts fresh work; no credits are redeemed, model is
+automatic goal continuation. The session is failed (or queued for already accepted
+human input), not falsely presented as still recovering. The authorized exact
+failure-event Retry reopens the retained turn, replenishes only its capacity
+budget and clears only its matching goal suppression; accepted credential policy
+and refusal ledgers remain intact. Pause, unresolved execution and receipt replay
+cannot reset the budget. A new Continue message starts a new turn; no credits are redeemed, model is
 switched, or pause is overridden automatically.
 
 `GET /v1/workspaces/:id/codex/status` keeps the backward-compatible

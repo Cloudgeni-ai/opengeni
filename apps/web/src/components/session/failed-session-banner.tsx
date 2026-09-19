@@ -120,10 +120,25 @@ export function FailedSessionBanner({
             ) : null}
             {failure.detailsTruncated ? "Some error details are shortened. " : null}
             {failure.safetyRefusal
-              ? "The conversation history is preserved. Automatic retries are stopped."
-              : "The conversation history is preserved — send a message to revive the session and keep working."}
+              ? "The conversation history is preserved. This request cannot be retried. You can send a new message below."
+              : "Your request and conversation history are preserved. Try again to pick up where execution stopped, or send a new message below."}
           </div>
-          {actions ? <FailedSessionActions {...actions} /> : null}
+          {actions ? (
+            failure.safetyRefusal ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                className="mt-3"
+                disabled={actions.modelDisabled}
+                onClick={actions.onChooseModel}
+              >
+                Choose another model
+              </Button>
+            ) : (
+              <FailedSessionActions {...actions} />
+            )
+          ) : null}
         </div>
       </div>
     </div>

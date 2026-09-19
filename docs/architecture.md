@@ -20,14 +20,14 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-OpenGeni is a self-hostable, session-based agent runtime: Postgres owns durable
+OpenGeni: a self-hostable session-based agent runtime. Postgres owns durable
 truth, Temporal execution coordination, and NATS reconstructible transport.
-Control-plane ownership: identity, tenancy, sessions, human intervention, goals,
+Control plane: identity, tenancy, sessions, human intervention, goals,
 recovery, compute, files, artifacts, usage, and observability. The API authorizes
 clients and bounded browser access to storage, sandboxes, relays, Codex WebRTC,
 and Gateway realtime WebSockets. Workers run agents in sandboxes or Connected Machines.
 
-External users require explicit live membership. `asUser()` supplies canonical
+External users require live membership. `asUser()` supplies canonical
 identity; an end-user label does not. Private/shared visibility differs from
 cross-tree `agentAccess`. Personal Knowledge follows the verified active-turn
 user; task notes cover temporary tree coordination. Linking never merges users.
@@ -102,6 +102,12 @@ preserving lineage. See [`run-lifecycle.md`](run-lifecycle.md).
 operations have external effects. Recovery is explicit and attempt-fenced.
 Provider work stays outside database retries; only idempotent settlement
 transactions may retry.
+
+Failed-session retry differs from Pause/Resume and prompt admission.
+`packages/db/src/session-retry.ts` fences failure identity, reserves actor-scoped
+receipts, rejects unresolved execution and safety refusals, and re-enables the
+original turn with retained history/authority and selected model policy—never
+synthetic human input.
 
 Active-run writes prove the exact current attempt/generation. Stale workers may
 remain alive but cannot authoritatively write or settle replacements. Temporal
