@@ -66,6 +66,7 @@ spec:
             - secretRef:
                 name: {{ include "opengeni.secretName" . }}
           env:
+            {{- include "opengeni.deploymentRevisionEnv" . | nindent 12 }}
             - name: OPENGENI_WORKER_HTTP_PORT
               value: {{ .Values.worker.containerPort | quote }}
             - name: OPENGENI_WORKER_ROLE

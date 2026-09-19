@@ -1,5 +1,17 @@
 # OpenGeni chart volume hooks
 
+## Release identity
+
+`config.OPENGENI_DEPLOYMENT_REVISION` is rendered explicitly into each enabled
+runtime role, including relay and artifact workers. This non-secret release
+identity stays authoritative over runtime Secret defaults and survives ordinary
+Helm upgrades without relying on a canary post-renderer. An empty revision adds
+no explicit entry. Other provider credentials and configuration keep their
+existing precedence. Canary renderers must preserve an already-correct entry's
+position so saved values reproduce the same pod template on later upgrades.
+
+## Volumes
+
 The chart accepts native Kubernetes volume and volume-mount lists at:
 
 | Workload | Pod volumes | Container mounts |
