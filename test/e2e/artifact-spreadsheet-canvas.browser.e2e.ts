@@ -490,7 +490,17 @@ describe("artifact spreadsheet retained canvas", () => {
         await page.waitForFunction(
           () => document.querySelector('[aria-label="Selected range"]')?.textContent === "C1",
         );
+        // Selection renders before the effect that refreshes the formula draft.
+        // Wait for the editor itself, not just the selected-range indicator.
+        await page.waitForFunction(
+          () =>
+            document.querySelector<HTMLInputElement>('[aria-label="Formula or value"]')?.value ===
+            "=0.1+0.2",
+          undefined,
+          { timeout: 2_000 },
+        );
         expect(await formulaBar.inputValue()).toBe("=0.1+0.2");
+        expect(await readGeneralDisplayProof(page)).toEqual(stored);
         if (engineName === "Chromium") {
           await page.screenshot({
             path: "test-results/artifacts/spreadsheet-chromium-general-display.png",
