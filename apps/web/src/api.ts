@@ -349,6 +349,22 @@ export async function managedActorFetch(
       void response.body?.cancel().catch(() => undefined);
       throw new DOMException("Ignored a response from the previous browser account", "AbortError");
     }
+    // Native fetch can expose an empty stream even when HTTP forbids a body.
+    // Wrapping it would construct an invalid Response for 204/205/304 statuses.
+    if (
+      requestMethod(input, init) === "HEAD" ||
+      response.status === 204 ||
+      response.status === 205 ||
+      response.status === 304
+    ) {
+      void response.body?.cancel().catch(() => undefined);
+      finishAnalytics(response.status);
+      return new Response(null, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    }
     if (!response.body) {
       finishAnalytics(response.status);
       return response;

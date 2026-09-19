@@ -26,6 +26,59 @@ import {
 } from "./api";
 
 describe("web API auth helpers", () => {
+  test.each([
+    ["DELETE", 204],
+    ["POST", 205],
+    ["GET", 304],
+    ["HEAD", 200],
+  ] as const)(
+    "preserves bodyless %s %i responses with native empty streams",
+    async (method, status) => {
+      const originalFetch = globalThis.fetch;
+      const cancel = jest.fn();
+      const response = new Response(null, {
+        status,
+        headers: { "content-type": "application/json", "x-test-response": "preserved" },
+      });
+      // Model native browser responses that expose a stream despite their HTTP semantics.
+      Object.defineProperty(response, "body", {
+        value: new ReadableStream({ cancel }),
+      });
+      globalThis.fetch = (async () => response) as unknown as typeof fetch;
+      try {
+        configureManagedActorEpoch("bodyless-response-test");
+        const result = await managedActorFetch("https://api.example.test/v1/resource", { method });
+        expect(result.status).toBe(status);
+        expect(result.headers.get("x-test-response")).toBe("preserved");
+        expect(result.body).toBeNull();
+        expect(cancel).toHaveBeenCalledTimes(1);
+        expect(managedActorMutationBusySnapshot()).toBe(false);
+        configureManagedActorEpoch(null);
+        expect(cancel).toHaveBeenCalledTimes(1);
+      } finally {
+        configureManagedActorEpoch(null);
+        globalThis.fetch = originalFetch;
+      }
+    },
+  );
+
+  test("SDK goal deletion accepts a 204 with an empty native stream", async () => {
+    const originalFetch = globalThis.fetch;
+    const cancel = jest.fn();
+    const response = new Response(null, { status: 204 });
+    Object.defineProperty(response, "body", { value: new ReadableStream({ cancel }) });
+    globalThis.fetch = (async () => response) as unknown as typeof fetch;
+    try {
+      configureManagedActorEpoch("bodyless-goal-test");
+      await createOpenGeniClient().deleteGoal("workspace-test", "session-test");
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(managedActorMutationBusySnapshot()).toBe(false);
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("preserves structured retry and outcome ambiguity from API error envelopes", () => {
     const error = apiErrorFromResponseBody(
       503,
