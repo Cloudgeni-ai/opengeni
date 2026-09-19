@@ -132,6 +132,7 @@ describe("skill_read gateway definition", () => {
 
   for (const [name, directory] of [
     ["opengeni-help", "bundled_default_skills"],
+    ["opengeni-client", "bundled_default_skills"],
     ["opengeni-projects", "bundled_project_skills"],
     ["opengeni-visualize", "bundled_default_skills"],
     ["document-parsing", "bundled_default_skills"],

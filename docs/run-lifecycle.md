@@ -892,7 +892,11 @@ name and remains actionable.
 Session creation persists skill selection but never starts a sandbox. At turn
 execution, bundled, curated, and inline session Skills use the shared
 descriptor index and eager sandbox-free `skill_read`. Only an explicit
-`skill_checkout` copies a selected Skill directory to the filesystem.
+`skill_checkout` copies a selected Skill directory to the filesystem. The default
+catalog includes `builtin:opengeni-client`, generated from the repository client
+guide; an ordinary session can read it and its references without installing a
+Skill, attaching a repository, or provisioning compute. Explicit host bundle
+selections still narrow this catalog, including `[]` to exclude all defaults.
 The worker builds the configured Skill descriptor catalog during each turn-attempt
 preparation. `formatSkillCatalog` renders the bounded `Skills` instruction layer,
 after workspace governance (or workspace memory on the unstructured path) and

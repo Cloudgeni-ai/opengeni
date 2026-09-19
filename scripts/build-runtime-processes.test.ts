@@ -28,6 +28,7 @@ test("production process bundles retain every runtime skill asset directory", as
     for (const [directoryName, skillName] of [
       ["curated_skill_library", "azure-verified-modules"],
       ["bundled_default_skills", "document-parsing"],
+      ["bundled_default_skills", "opengeni-client"],
       ["bundled_artifact_skills", "opengeni-spreadsheets"],
       ["bundled_project_skills", "opengeni-projects"],
       ["bundled_site_skills", "opengeni-sites"],

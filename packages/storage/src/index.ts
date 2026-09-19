@@ -814,9 +814,14 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
     },
     async putObjectStreamIfAbsent(args) {
       const blobClient = requestContainerClient.getBlockBlobClient(args.key);
+      // Azure's buffer scheduler expects Buffer chunks, not object-mode Uint8Arrays.
+      const source = Readable.from(args.chunks, {
+        objectMode: false,
+        highWaterMark: INTERNAL_STREAM_BUFFER_BYTES,
+      });
       try {
         await blobClient.uploadStream(
-          Readable.from(args.chunks),
+          source,
           INTERNAL_STREAM_BUFFER_BYTES,
           INTERNAL_STREAM_CONCURRENCY,
           {
@@ -830,6 +835,8 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
       } catch (error) {
         if (isAzureVersionMismatch(error)) return false;
         throw error;
+      } finally {
+        source.destroy();
       }
     },
     async headFile(file) {

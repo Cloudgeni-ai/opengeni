@@ -25,9 +25,10 @@ SDK exports/types, and authorized live configuration or probes. Report a failed
 documentation fetch explicitly and use another authoritative source. Do not
 ask the customer to supply OpenGeni's own API contract before trying these sources.
 
-For implementation, use the current product-integration guide and, when
-available, the `opengeni-client` repository Skill. Ordinary product questions
-do not require cloning the OpenGeni repository.
+For implementation, read the bundled `opengeni-client` Skill with `skill_read`
+and follow its relevant references. It is available by default without a Pack,
+installation, or repository clone. If an embedding host excludes it, respect
+that selection; the public product-integration guide remains reference material.
 
 ## Integration and account setup
 
