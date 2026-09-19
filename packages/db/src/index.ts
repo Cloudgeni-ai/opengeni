@@ -1,4 +1,9 @@
 import {
+  SKILL_CATALOG_CONTEXT_PREFIX,
+  readSkillCatalogContext,
+  skillCatalogContextItem,
+} from "@opengeni/contracts";
+import {
   readReasoningConfiguration,
   reasoningConfigurationItem,
   type ConfigurationEffort,
@@ -40349,6 +40354,141 @@ export async function installOrReadTurnExecutionPolicyForAttempt(
           policy,
           turn: mapSessionTurn(updated),
         };
+      }),
+  );
+}
+
+/** Persist the current catalog once per logical turn; retries reuse its exact snapshot. */
+export async function ensureSessionSkillCatalog(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    catalog: string;
+  },
+): Promise<string> {
+  return withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.expectedExecutionGeneration,
+          attemptId: input.expectedAttemptId,
+        });
+        if (!fence.allowed) throw new Error("Skill catalog attempt is fenced");
+        const scope = and(
+          eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+          eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+        );
+        const frozen = fence.turn.metadata.opengeniSkillCatalogHistoryId;
+        if (frozen !== undefined && typeof frozen !== "string")
+          throw new Error("Invalid skill catalog receipt");
+        const [previous] = await tx
+          .select({
+            id: schema.sessionHistoryItems.id,
+            item: schema.sessionHistoryItems.item,
+            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+          })
+          .from(schema.sessionHistoryItems)
+          .where(
+            and(
+              scope,
+              typeof frozen === "string"
+                ? eq(schema.sessionHistoryItems.id, frozen)
+                : and(
+                    eq(schema.sessionHistoryItems.active, true),
+                    sql`${schema.sessionHistoryItems.item}->>'type' = 'message'`,
+                    sql`${schema.sessionHistoryItems.item}->>'role' = 'developer'`,
+                    sql`starts_with(${schema.sessionHistoryItems.item}->>'content', ${SKILL_CATALOG_CONTEXT_PREFIX})`,
+                  ),
+            ),
+          )
+          .orderBy(desc(schema.sessionHistoryItems.position))
+          .limit(1);
+        const previousCatalog = previous
+          ? readSkillCatalogContext(
+              fromPostgresLosslessJson(previous.item, previous.itemCodecVersion),
+            )
+          : null;
+        if (frozen !== undefined) {
+          if (previousCatalog === null) throw new Error("Missing durable skill catalog snapshot");
+          return previousCatalog;
+        }
+        let historyId = previous?.id;
+        if (previousCatalog !== input.catalog) {
+          const [boundary] = await tx
+            .select({ position: schema.sessionHistoryItems.position })
+            .from(schema.sessionHistoryItems)
+            .where(
+              and(
+                scope,
+                eq(schema.sessionHistoryItems.active, true),
+                eq(schema.sessionHistoryItems.turnId, input.turnId),
+              ),
+            )
+            .orderBy(asc(schema.sessionHistoryItems.position))
+            .limit(1);
+          let position: number;
+          if (boundary) {
+            const [prior] = await tx
+              .select({ position: schema.sessionHistoryItems.position })
+              .from(schema.sessionHistoryItems)
+              .where(and(scope, lt(schema.sessionHistoryItems.position, boundary.position)))
+              .orderBy(desc(schema.sessionHistoryItems.position))
+              .limit(1);
+            position = prior ? (prior.position + boundary.position) / 2 : boundary.position - 0.25;
+            if (!(position < boundary.position) || (prior && !(position > prior.position)))
+              throw new Error("Skill catalog position exhausted");
+          } else {
+            if (fence.turn.source !== "compaction")
+              throw new Error("Skill catalog requires durable accepted input");
+            const [tail] = await tx
+              .select({ position: schema.sessionHistoryItems.position })
+              .from(schema.sessionHistoryItems)
+              .where(scope)
+              .orderBy(desc(schema.sessionHistoryItems.position))
+              .limit(1);
+            position = tail ? Math.floor(tail.position) + 1 : 0;
+          }
+          historyId = crypto.randomUUID();
+          await tx.insert(schema.sessionHistoryItems).values(
+            withLosslessContentWriteVersion(
+              {
+                id: historyId,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                position,
+                item: skillCatalogContextItem(input.catalog),
+              },
+              "item",
+              "itemCodecVersion",
+            ),
+          );
+        }
+        if (!historyId) throw new Error("Missing skill catalog history identity");
+        await tx
+          .update(schema.sessionTurns)
+          .set({
+            metadata: { ...fence.turn.metadata, opengeniSkillCatalogHistoryId: historyId },
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, input.turnId),
+            ),
+          );
+        return input.catalog;
       }),
   );
 }

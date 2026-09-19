@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readSkillCatalogContext } from "@opengeni/contracts";
 import { generateKeyPairSync } from "node:crypto";
 import {
   addDocumentToBase,
@@ -2657,10 +2658,13 @@ describe("worker activities integration", () => {
       session.id,
     );
     expect(itemsAfterTurn1.length).toBeGreaterThanOrEqual(2);
-    expect(itemsAfterTurn1.map((row) => row.position)).toEqual(
-      itemsAfterTurn1.map((_, index) => index),
+    expect(readSkillCatalogContext(itemsAfterTurn1[0]!.item)).not.toBeNull();
+    const conversation = itemsAfterTurn1.filter(
+      (row) => readSkillCatalogContext(row.item) === null,
     );
-    expect(JSON.stringify(itemsAfterTurn1[0]?.item)).toContain("remember the codeword zebra");
+    expect(conversation.map((row) => row.position)).toEqual(conversation.map((_, index) => index));
+    expect(itemsAfterTurn1[0]!.position).toBeLessThan(conversation[0]!.position);
+    expect(JSON.stringify(conversation[0]?.item)).toContain("remember the codeword zebra");
 
     // The follow-up reads conversation truth from the canonical items table.
     const itemsActivities = createWorkerActivities({
@@ -2698,6 +2702,10 @@ describe("worker activities integration", () => {
       session.id,
     );
     expect(itemsAfterTurn2.length).toBeGreaterThan(itemsAfterTurn1.length);
+    expect(itemsAfterTurn2.slice(0, itemsAfterTurn1.length)).toEqual(itemsAfterTurn1);
+    expect(
+      itemsAfterTurn2.filter((row) => readSkillCatalogContext(row.item) !== null),
+    ).toHaveLength(1);
     expect(await getLatestRunState(dbClient.db, grant.workspaceId, session.id)).toBeNull();
   });
 

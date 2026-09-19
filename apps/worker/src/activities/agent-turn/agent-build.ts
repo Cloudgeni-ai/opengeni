@@ -9,6 +9,7 @@ import {
   getExternalLinkTurnAuthorization,
   getSessionTurnForAttempt,
   ensureSessionReasoningConfiguration,
+  ensureSessionSkillCatalog,
 } from "@opengeni/db";
 import {
   formatSkillCatalog,
@@ -557,7 +558,15 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     turnExecutionPolicy.latencyMode,
   );
   const approvedToolCallId = approvedConnectorActionCallId(trigger);
-  const modelVisibleSkillCatalogText = formatSkillCatalog(deps.skillCatalog);
+  const modelVisibleSkillCatalogText = await ensureSessionSkillCatalog(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    expectedExecutionGeneration: turn.executionGeneration,
+    expectedAttemptId: input.attemptId,
+    catalog: formatSkillCatalog(deps.skillCatalog),
+  });
   try {
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
       buildCompanyBrainContributionReceiptFor(modelVisibleSkillCatalogText),
@@ -726,6 +735,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             }),
         onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
         skillCatalog: deps.skillCatalog,
+        skillCatalogInHistory: true,
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
           : {}),
