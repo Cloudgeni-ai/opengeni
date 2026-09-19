@@ -68170,14 +68170,6 @@ async function pausedSessionAttemptAwaitingRecoveryProjection(
         eq(schema.sessionTurns.id, schema.sessionTurnAttempts.turnId),
       ),
     )
-    .innerJoin(
-      schema.sessionAttemptInterruptions,
-      and(
-        eq(schema.sessionAttemptInterruptions.workspaceId, schema.sessionTurnAttempts.workspaceId),
-        eq(schema.sessionAttemptInterruptions.sessionId, schema.sessionTurnAttempts.sessionId),
-        eq(schema.sessionAttemptInterruptions.attemptId, schema.sessionTurnAttempts.id),
-      ),
-    )
     .where(
       and(
         eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
@@ -68188,7 +68180,24 @@ async function pausedSessionAttemptAwaitingRecoveryProjection(
         isNotNull(schema.sessionTurnAttempts.quiescedAt),
         eq(schema.sessionTurns.status, "recovering"),
         isNull(schema.sessionTurns.activeAttemptId),
-        inArray(schema.sessionAttemptInterruptions.state, ["settled", "rejected_stale"]),
+        // Provider recovery closes an attempt through its recovery-request
+        // event, not an interruption row. Match the receipt transaction's two
+        // evidence paths without borrowing an event from another attempt.
+        sql`(exists (
+          select 1 from session_attempt_interruptions interruption
+          where interruption.workspace_id = ${schema.sessionTurnAttempts.workspaceId}
+            and interruption.session_id = ${schema.sessionTurnAttempts.sessionId}
+            and interruption.attempt_id = ${schema.sessionTurnAttempts.id}
+            and interruption.state in ('settled', 'rejected_stale')
+        ) or exists (
+          select 1 from session_events event
+          where event.account_id = ${schema.sessionTurnAttempts.accountId}
+            and event.workspace_id = ${schema.sessionTurnAttempts.workspaceId}
+            and event.session_id = ${schema.sessionTurnAttempts.sessionId}
+            and event.turn_id = ${schema.sessionTurnAttempts.turnId}
+            and event.turn_attempt_id = ${schema.sessionTurnAttempts.id}
+            and event.type = 'turn.recovery.requested'
+        ))`,
       ),
     )
     .orderBy(desc(schema.sessionTurnAttempts.startedAt), desc(schema.sessionTurnAttempts.id))
