@@ -106,7 +106,7 @@ export async function readWorkspaceInsightsUsageBundle(
       with current_visible as materialized (
         select usage_row.event_type, usage_row.quantity, usage_row.occurred_at,
           usage_row.source_resource_id
-        from opengeni_private.visible_workspace_insights_usage_events(
+        from opengeni_private.visible_workspace_insights_usage_projection(
           ${input.workspaceId},
           ${input.since.toISOString()}::timestamp with time zone,
           ${input.until.toISOString()}::timestamp with time zone,
@@ -129,7 +129,7 @@ export async function readWorkspaceInsightsUsageBundle(
           coalesce(sum(usage_row.quantity) filter (
             where usage_row.event_type = 'sandbox.warm_seconds'
           ), 0) as prior_warm_seconds
-        from opengeni_private.visible_workspace_insights_usage_events(
+        from opengeni_private.visible_workspace_insights_usage_projection(
           ${input.workspaceId},
           ${input.priorSince.toISOString()}::timestamp with time zone,
           ${input.priorUntil.toISOString()}::timestamp with time zone,
@@ -145,7 +145,7 @@ export async function readWorkspaceInsightsUsageBundle(
             where usage_row.event_type = 'agent_run.created'
               and usage_row.occurred_at > ${input.monthSince.toISOString()}::timestamp with time zone
           ), 0) as agent_runs_used
-        from opengeni_private.visible_workspace_insights_usage_events(
+        from opengeni_private.visible_workspace_insights_usage_projection(
           ${input.workspaceId},
           ${input.monthSince.toISOString()}::timestamp with time zone,
           'infinity'::timestamp with time zone,

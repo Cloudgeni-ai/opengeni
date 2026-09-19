@@ -693,6 +693,7 @@ export {
   type UserProfileLookup,
 } from "./database";
 export { withSessionRlsActorContext } from "./database";
+export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./database-timing";
 export { normalizedCredentialHeaders } from "./connection-token-resolver";
 import {
   buildCodexTokenResolver as buildCodexTokenResolverCore,
