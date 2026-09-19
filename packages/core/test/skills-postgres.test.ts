@@ -51,7 +51,15 @@ import { provisionRoles } from "@opengeni/db/provision-roles";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import type { SkillSaveInput } from "@opengeni/contracts";
 import { stableJson, skillReviewHumanInput, type SkillReviewReference } from "@opengeni/contracts";
-import { approveSkill, listSkills, readSkill, restoreSkill, saveSkill } from "../src/domain/skills";
+import {
+  approveSkill,
+  rejectSkill,
+  removeSkill,
+  listSkills,
+  readSkill,
+  restoreSkill,
+  saveSkill,
+} from "../src/domain/skills";
 import { serializeHumanInputRequests } from "../../runtime/src/run-events";
 
 let shared: SharedTestDatabase | null = null;
@@ -228,7 +236,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture(mode: "off" | "suggest" | "automatic" | null) {
+async function fixture(mode: "off" | "suggest" | "automatic" | null, personal = false) {
   const key = crypto.randomUUID();
   const subjectId = `user:skill-${key}`;
   const grant = (
@@ -252,10 +260,10 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null) {
       client!.db,
       {
         ...human,
-        actor: { ...human.actor, settingsScopes: ["workspace"] },
+        actor: { ...human.actor, settingsScopes: [personal ? "personal" : "workspace"] },
       },
       {
-        scope: "workspace",
+        scope: personal ? "personal" : "workspace",
         operationId: crypto.randomUUID(),
         expectedVersion: 0,
         settings: {
@@ -270,6 +278,7 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null) {
     createSession(client!.db, {
       ...context,
       initialMessage: "test Skills",
+      ...(personal ? { memoryScope: "user" as const } : {}),
       resources: [],
       metadata: {},
       model: "test-model",
@@ -316,6 +325,7 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null) {
     expectedRevisionId: null,
     expectedScopeVersion: 1,
     stableKey: `test-${key}`,
+    ...(personal ? { scope: "user" as const } : {}),
     files: [
       { path: "SKILL.md", content: skillMarkdown("# Test Skill\nUse original behavior.") },
       { path: "references/context.txt", content: "context" },
@@ -326,6 +336,288 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null) {
 }
 
 describe("unified Skill real PostgreSQL lifecycle", () => {
+  test("personal removal follows the accepted user scope and cannot remove workspace Skills", async () => {
+    if (!client) return;
+    const f = await fixture("automatic", true);
+    const personal = await saveSkill(client.db, f.input);
+    const workspace = await saveSkill(client.db, {
+      ...f.input,
+      scope: "workspace",
+      skillId: crypto.randomUUID(),
+      operationId: crypto.randomUUID(),
+    });
+    const request = {
+      ...f.agent,
+      operationId: crypto.randomUUID(),
+      skillId: workspace.skillId,
+      expectedRevisionId: workspace.revisionId,
+      expectedScopeVersion: 1,
+      reason: "Remove",
+    };
+    await expect(removeSkill(client.db, request)).rejects.toThrow();
+    expect(
+      (
+        await removeSkill(client.db, {
+          ...request,
+          skillId: personal.skillId,
+          expectedRevisionId: personal.revisionId,
+        })
+      ).removed,
+    ).toBe(true);
+    expect(
+      await readSkill(
+        client.db,
+        { ...f.context, subjectId: f.human.actor.subjectId },
+        personal.skillId,
+      ),
+    ).toBeNull();
+    expect(await readSkill(client.db, f.context, workspace.skillId)).not.toBeNull();
+  });
+
+  test("a concurrent save and removal have one winner under the same head CAS", async () => {
+    if (!client) return;
+    const f = await fixture("automatic");
+    const saved = await saveSkill(client.db, f.input);
+    const results = await Promise.allSettled([
+      removeSkill(client.db, {
+        ...f.agent,
+        operationId: crypto.randomUUID(),
+        skillId: saved.skillId,
+        expectedRevisionId: saved.revisionId,
+        expectedScopeVersion: 1,
+        reason: "Delete",
+      }),
+      saveSkill(client.db, {
+        ...f.input,
+        ...f.agent,
+        operationId: crypto.randomUUID(),
+        expectedRevisionId: saved.revisionId,
+      }),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+  });
+
+  test("permanent removal releases only a direct Skill facet and refuses other distribution owners", async () => {
+    if (!client) return;
+    for (const owned of [false, true, "locked"] as const) {
+      const f = await fixture("automatic");
+      const key = crypto.randomUUID();
+      const content = skillMarkdown("Installed removal test");
+      const hash = createHash("sha256").update(content).digest("hex");
+      const input: InstallPortableSkillInput = {
+        ...f.context,
+        subjectId: f.human.actor.subjectId,
+        skillActor: f.human.actor,
+        capabilityId: `skill:${key}`,
+        pluginKey: `skill/test/${key}`,
+        source: "github",
+        sourceUrl: "https://example.test/skills",
+        repositoryUrl: "https://example.test/repo",
+        sourceCommit: "a".repeat(40),
+        sourcePath: key,
+        name: "test-skill",
+        description: "Test Skill folder",
+        contentSha256: hash,
+        totalBytes: Buffer.byteLength(content),
+        files: [
+          { path: "SKILL.md", content, byteSize: Buffer.byteLength(content), contentSha256: hash },
+        ],
+        ...(owned
+          ? {
+              owner: {
+                kind: owned === "locked" ? ("direct" as const) : ("migration" as const),
+                id: owned === "locked" ? "direct" : key,
+                removable: false,
+              },
+            }
+          : {}),
+      };
+      const installed = await installPortableSkill(client.db, input);
+      const request = {
+        ...f.agent,
+        operationId: crypto.randomUUID(),
+        skillId: installed.skillReceipt.skillId,
+        expectedRevisionId: installed.skillReceipt.revisionId,
+        expectedScopeVersion: 1,
+        reason: "Permanently remove",
+      };
+      if (owned) {
+        await expect(removeSkill(client.db, request)).rejects.toThrow();
+        expect(await readSkill(client.db, f.context, request.skillId)).not.toBeNull();
+      } else {
+        expect((await removeSkill(client.db, request)).removed).toBe(true);
+        expect(await listInstalledPortableSkills(client.db, f.context.workspaceId)).toHaveLength(0);
+        const files = await shared!
+          .admin`SELECT path FROM capability_skill_files WHERE skill_facet_id=${installed.facetId}`;
+        expect(files).toHaveLength(1); // Shared immutable upstream source is not a workspace revision.
+        const installedAgain = await installPortableSkill(client.db, {
+          ...input,
+          expectedInstallationVersion: installed.installationVersion,
+        });
+        expect(installedAgain.skillReceipt.skillId).not.toBe(request.skillId);
+      }
+    }
+  });
+
+  test("permanent removal physically deletes every revision and replays without loading deleted content", async () => {
+    if (!client) return;
+    const f = await fixture("automatic");
+    const first = await saveSkill(client.db, f.input);
+    const second = await saveSkill(client.db, {
+      ...f.input,
+      operationId: crypto.randomUUID(),
+      expectedRevisionId: first.revisionId,
+    });
+    const request = {
+      ...f.agent,
+      operationId: crypto.randomUUID(),
+      skillId: first.skillId,
+      expectedRevisionId: second.revisionId,
+      expectedScopeVersion: 1,
+      reason: "Permanently delete all versions",
+    };
+    const removed = await removeSkill(client.db, request);
+    expect(removed).toMatchObject({ outcome: "applied", removed: true, replayed: false });
+    expect(await readSkill(client.db, f.context, first.skillId)).toBeNull();
+    expect(await readSkill(client.db, f.context, first.skillId, first.revisionId)).toBeNull();
+    const rows = await shared!
+      .admin`SELECT id FROM preference_registry_revisions WHERE preference_id=${first.skillId}`;
+    expect(rows).toHaveLength(0);
+    expect(await removeSkill(client.db, request)).toEqual({ ...removed, replayed: true });
+    await expect(removeSkill(client.db, { ...request, reason: "Changed retry" })).rejects.toThrow();
+    await expect(
+      removeSkill(client.db, { ...request, actor: { ...request.actor, executionGeneration: 99 } }),
+    ).rejects.toThrow();
+    const sessions = await shared!
+      .admin`SELECT id FROM sessions WHERE id=${f.agent.actor.sessionId}`;
+    expect(sessions).toHaveLength(1);
+  });
+
+  test("permanent removal obeys Off, scope/head CAS, and does not expose a direct DELETE privilege", async () => {
+    if (!client) return;
+    const f = await fixture("off");
+    const saved = await saveSkill(client.db, f.input);
+    const request = {
+      ...f.agent,
+      operationId: crypto.randomUUID(),
+      skillId: saved.skillId,
+      expectedRevisionId: saved.revisionId,
+      expectedScopeVersion: 1,
+      reason: "Remove",
+    };
+    await expect(removeSkill(client.db, request)).rejects.toThrow();
+    await expect(
+      removeSkill(client.db, { ...request, ...f.human, expectedScopeVersion: 2 }),
+    ).rejects.toThrow();
+    await expect(
+      removeSkill(client.db, { ...request, ...f.human, expectedRevisionId: null }),
+    ).rejects.toThrow();
+    const foreign = await fixture("automatic");
+    await expect(removeSkill(client.db, { ...request, ...foreign.agent })).rejects.toThrow();
+    const { sql } = await import("drizzle-orm");
+    await expect(
+      withWorkspaceRls(client.db, f.context.workspaceId, async (tx) => {
+        await tx.execute(
+          sql`select set_config('opengeni.skill_remove_head',${saved.skillId},true)`,
+        );
+        await tx.execute(
+          sql`delete from preference_registry_preferences where id=${saved.skillId}::uuid`,
+        );
+      }),
+    ).rejects.toThrow();
+    expect((await removeSkill(client.db, { ...request, ...f.human })).removed).toBe(true);
+  });
+
+  test("removal review binds explicit deletion intent, refuses legacy activation, and rejects without deleting", async () => {
+    if (!client) return;
+    const f = await fixture("suggest");
+    const saved = await saveSkill(client.db, f.input);
+    const pending = await removeSkill(client.db, {
+      ...f.agent,
+      operationId: crypto.randomUUID(),
+      skillId: saved.skillId,
+      expectedRevisionId: saved.revisionId,
+      expectedScopeVersion: 1,
+      reason: "Remove",
+    });
+    expect(pending).toMatchObject({ outcome: "pending", removed: false });
+    expect(pending.skillReview?.removalOperationId).toBe(pending.operationId);
+    expect(skillReviewHumanInput(pending.skillReview!).questions[0]!.label).toBe(
+      "Permanently delete this Skill?",
+    );
+    const request = {
+      ...f.human,
+      operationId: crypto.randomUUID(),
+      skillId: saved.skillId,
+      revisionId: pending.revisionId,
+      expectedRevisionId: saved.revisionId,
+      expectedScopeVersion: 1,
+      reason: "Review",
+    };
+    await expect(approveSkill(client.db, request)).rejects.toThrow();
+    await expect(restoreSkill(client.db, request)).rejects.toThrow();
+    await expect(
+      approveSkill(client.db, { ...request, ...f.agent, removalOperationId: pending.operationId }),
+    ).rejects.toThrow();
+    const rejected = await rejectSkill(client.db, {
+      ...request,
+      removalOperationId: pending.operationId,
+    });
+    expect(rejected).toMatchObject({ outcome: "preserved", decision: "rejected", removed: false });
+    expect((await readSkill(client.db, f.context, saved.skillId))?.activeRevisionId).toBe(
+      saved.revisionId,
+    );
+    await expect(
+      approveSkill(client.db, {
+        ...request,
+        operationId: crypto.randomUUID(),
+        removalOperationId: pending.operationId,
+      }),
+    ).rejects.toThrow();
+  });
+
+  test("exact deletion review applies once and later pending edits invalidate approval", async () => {
+    if (!client) return;
+    for (const stale of [false, true]) {
+      const f = await fixture("suggest");
+      const saved = await saveSkill(client.db, f.input);
+      const pending = await removeSkill(client.db, {
+        ...f.agent,
+        operationId: crypto.randomUUID(),
+        skillId: saved.skillId,
+        expectedRevisionId: saved.revisionId,
+        expectedScopeVersion: 1,
+        reason: "Remove",
+      });
+      const approval = {
+        ...f.human,
+        operationId: crypto.randomUUID(),
+        skillId: saved.skillId,
+        revisionId: pending.revisionId,
+        expectedRevisionId: saved.revisionId,
+        expectedScopeVersion: 1,
+        removalOperationId: pending.operationId,
+        reason: "Explicitly delete every revision",
+      };
+      if (stale) {
+        await saveSkill(client.db, {
+          ...f.input,
+          ...f.agent,
+          operationId: crypto.randomUUID(),
+          expectedRevisionId: saved.revisionId,
+        });
+        await expect(approveSkill(client.db, approval)).rejects.toThrow();
+      } else {
+        const removed = await approveSkill(client.db, approval);
+        expect(removed.removed).toBe(true);
+        expect(await skillReviewResolution(client.db, f.context, pending.skillReview!)).toBe(
+          "removed",
+        );
+        expect(await approveSkill(client.db, approval)).toEqual({ ...removed, replayed: true });
+      }
+    }
+  });
   for (const kind of ["plugin"] as const) {
     for (const scenario of [
       "suggest",
@@ -1698,6 +1990,74 @@ async function answeredSkillInput(
 }
 
 describe("one chat Skill confirmation", () => {
+  test("chat removal requires the exact irreversible-delete card and leaves conversation rows unchanged", async () => {
+    if (!client || !shared) return;
+    const f = await fixture("suggest");
+    const saved = await saveSkill(client.db, f.input);
+    const pending = await removeSkill(client.db, {
+      ...f.agent,
+      operationId: crypto.randomUUID(),
+      skillId: saved.skillId,
+      expectedRevisionId: saved.revisionId,
+      expectedScopeVersion: 1,
+      reason: "Delete obsolete guidance permanently",
+    });
+    const misleading = await answeredSkillInput(
+      f,
+      pending.skillReview!,
+      ["save"],
+      f.human.actor.subjectId,
+      { label: "Save this Skill?" },
+    );
+    await expect(
+      confirmSkillHumanResponse(client.db, {
+        ...f.context,
+        subjectId: f.human.actor.subjectId,
+        requestId: misleading,
+      }),
+    ).rejects.toThrow();
+    const unverified = await answeredSkillInput(
+      f,
+      pending.skillReview!,
+      ["save"],
+      f.human.actor.subjectId,
+      { authorized: false },
+    );
+    await expect(
+      confirmSkillHumanResponse(client.db, {
+        ...f.context,
+        subjectId: f.human.actor.subjectId,
+        requestId: unverified,
+      }),
+    ).rejects.toThrow();
+    const requestId = await answeredSkillInput(
+      f,
+      pending.skillReview!,
+      ["save"],
+      f.human.actor.subjectId,
+      { serializeWire: true },
+    );
+    const before =
+      await shared.admin`SELECT id,questions,response FROM session_human_input_requests WHERE session_id=${f.agent.actor.sessionId} ORDER BY id`;
+    const result = await confirmSkillHumanResponse(client.db, {
+      ...f.context,
+      subjectId: f.human.actor.subjectId,
+      requestId,
+    });
+    expect(result?.removed).toBe(true);
+    expect(
+      await confirmSkillHumanResponse(client.db, {
+        ...f.context,
+        subjectId: f.human.actor.subjectId,
+        requestId,
+      }),
+    ).toEqual({ ...result, replayed: true });
+    expect(await readSkill(client.db, f.context, saved.skillId)).toBeNull();
+    const after =
+      await shared.admin`SELECT id,questions,response FROM session_human_input_requests WHERE session_id=${f.agent.actor.sessionId} ORDER BY id`;
+    expect(after).toEqual(before);
+  });
+
   test("forward Skill cutover refuses a connected runtime before changing schema", async () => {
     if (!client || !shared) return;
     const f = await fixture("suggest");

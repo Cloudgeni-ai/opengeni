@@ -100,6 +100,11 @@ semantics are settled; final schemas should follow the shared tool conventions.
 | `skill_save` | Lazy | Create a Skill or save specified text-file changes |
 | `skill_checkout` | Lazy | Materialize a Skill when files on disk are needed |
 | `skill_publish` | Lazy | Save an edited sandbox folder through the same write service |
+| `skill_remove` | Lazy | Permanently delete the saved Skill and all registry revisions, subject to the same Learning and authority boundary |
+
+Permanent removal is the explicit exception to restoration/history retention.
+The implemented removal and exact deletion-review contract is documented in
+[`../skills-lifecycle.md`](../skills-lifecycle.md); it does not erase conversations.
 
 Management tools use the canonical tool gateway and normal authorization.
 “Eager reader built into the worker” describes availability to the model, not

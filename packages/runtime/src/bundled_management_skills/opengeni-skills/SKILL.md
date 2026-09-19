@@ -1,6 +1,6 @@
 ---
 name: opengeni-skills
-description: Find, install, create, and edit workspace Skills; understand reading, file changes, Agent learning settings, and optional sandbox checkout.
+description: Find, install, create, edit, and permanently remove Skills; understand reading, file changes, Agent learning settings, and optional sandbox checkout.
 ---
 
 # Managing Skills
@@ -83,6 +83,24 @@ settings or infer an override from “the user asked.” Report the actual recei
 Saved history supports restoration. Upstream updates must preserve workspace
 customizations; report an available update instead of replacing customized
 content silently. Platform-owned built-in Skills are not workspace-editable.
+
+## Permanently remove
+
+Discover `skill_remove` when a Skill and all its stored revisions should be
+permanently deleted. This is irreversible, not an uninstall or recoverable hide.
+Read the exact saved Skill first and supply its UUID, current active revision
+(null for an inactive head), scope version, reason and a fresh operation UUID.
+Reuse that operation UUID and the exact arguments after an uncertain result;
+never change the arguments merely to get past a stale-write error.
+
+The same Skills Learning setting and personal/workspace authority as `skill_save`
+apply. Automatic deletes; Review first retains an explicitly labeled deletion
+proposal in Knowledge > Needs review; Off refuses. Report the actual receipt:
+pending does not mean removed. Built-in, repository and inline session Skills
+cannot be removed through this tool. Another distribution owner's Skill is
+refused until that owner is released; do not bypass this protection. Conversations
+and their historical context remain unchanged. Shared upstream source packages
+are not erased by deleting a workspace's Skill.
 
 Do not encode binary files as text to bypass the text-only boundary. Unsupported
 files and size limits are explicit errors, not permission to drop files silently.

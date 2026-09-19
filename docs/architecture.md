@@ -34,6 +34,9 @@ user; task notes cover temporary tree coordination. Linking never merges users.
 See [product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), and [run lifecycle](run-lifecycle.md).
+Skill removal is a guarded physical deletion of the scoped registry head and
+all revisions, with exact removal approval and Learning enforcement through the
+same Skill lifecycle. It does not rewrite accepted conversation context.
 
 Session `mcpApprovalPolicies` requires session-control authority. Claims freeze
 inherited approvals with catalog floors; policies grant neither capabilities nor credentials.

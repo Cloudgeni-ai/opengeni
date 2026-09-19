@@ -33,6 +33,7 @@ const saveRequest = z
   .strict();
 const revisionRequest = z
   .object({
+    removalOperationId: z.uuid().optional(),
     operationId: z.uuid(),
     revisionId: z.uuid(),
     expectedRevisionId: z.uuid().nullable(),
