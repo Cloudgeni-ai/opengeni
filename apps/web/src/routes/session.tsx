@@ -13,6 +13,7 @@ import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
+import { createFailedSessionRetry } from "@/lib/failed-session-retry";
 import {
   admissionRecheckControl,
   admissionControlNeedsRefresh,
@@ -198,8 +199,6 @@ const SessionCapabilityCard = lazy(async () => ({
     .SessionCapabilityCard,
 }));
 
-const FAILURE_CONTINUATION_MESSAGE =
-  "Continue from the last failure. Check current progress before repeating work.";
 const NativeConnectSetup = lazy(() =>
   import("@/components/capabilities/native-connect-setup").then((module) => ({
     default: module.NativeConnectSetup,
@@ -2060,6 +2059,13 @@ function SessionChatPane(props: {
       : null;
   });
   const composerPolicy = composer.policy;
+  const retryFailedSession = useMemo(
+    () =>
+      createFailedSessionRetry((input) =>
+        context.client.retrySession(props.session.workspaceId, props.session.id, input),
+      ),
+    [context.client, props.session.workspaceId, props.session.id],
+  );
   const composerDraftLoading = composer.draftLoading;
   const setComposerModel = composer.setModel;
   const setComposerReasoningEffort = composer.setReasoningEffort;
@@ -2430,23 +2436,45 @@ function SessionChatPane(props: {
                     failureId: props.failure.failureEventId,
                     composerBlocker: composerSendBlocker(),
                     repositoryError: repositories.error,
-                    onContinue: () =>
-                      composer.hasDraftContent()
-                        ? Promise.resolve(false)
-                        : composer.send(FAILURE_CONTINUATION_MESSAGE),
-                    continuationBlocker: composer.hasDraftContent()
-                      ? "draft"
-                      : failedOptimisticMessageCount > 0
-                        ? "unsent"
-                        : (optimisticMessages ?? []).some(
-                              (message) => !acceptedClientEventIds.has(message.clientEventId),
-                            )
-                          ? "delivery"
-                          : props.session.activeTurnId !== null || props.queue.queue.length > 0
-                            ? "queued"
-                            : composer.sending || composer.draftLoading || !hasComposerPolicy
-                              ? "loading"
-                              : null,
+                    onRetry: async () => {
+                      if (
+                        composer.hasDraftContent() ||
+                        composerSendBlocker() ||
+                        !props.failure?.failureEventId ||
+                        !composerPolicy ||
+                        !workspacePermissions.includes("sessions:control") ||
+                        admissionControl.state === "paused"
+                      )
+                        return false;
+                      try {
+                        return await retryFailedSession(
+                          props.failure.failureEventId,
+                          composerPolicy,
+                        );
+                      } finally {
+                        await Promise.allSettled([props.onReloadSession(), props.queue.refresh()]);
+                      }
+                    },
+                    retryBlocker: !workspacePermissions.includes("sessions:control")
+                      ? "permission"
+                      : admissionControl.state === "paused"
+                        ? "paused"
+                        : composer.hasDraftContent()
+                          ? "draft"
+                          : failedOptimisticMessageCount > 0
+                            ? "unsent"
+                            : (optimisticMessages ?? []).some(
+                                  (message) => !acceptedClientEventIds.has(message.clientEventId),
+                                )
+                              ? "delivery"
+                              : props.session.activeTurnId !== null || props.queue.queue.length > 0
+                                ? "queued"
+                                : composer.sending ||
+                                    composer.draftLoading ||
+                                    !hasComposerPolicy ||
+                                    !props.failure.failureEventId
+                                  ? "loading"
+                                  : null,
                     onChooseModel: () => setModelPickerSession(props.session.id),
                     modelDisabled: composer.sending || composer.draftLoading || !hasComposerPolicy,
                   }}
@@ -2833,7 +2861,7 @@ function SessionChatPane(props: {
                   : props.session.status === "failed"
                     ? props.failure?.safetyRefusal
                       ? "The model provider blocked the previous request."
-                      : "This session failed — send a message to revive it."
+                      : "Send a new message, or use Try again above."
                     : "Send a follow-up…"
             }
             controls={

@@ -93,6 +93,19 @@ describe("session control surface architecture", () => {
     expect(recoveryGate).not.toContain('"workspace:admin"');
   });
 
+  test("failed-session recovery uses an execution control, never a synthetic user message", async () => {
+    const route = await source("routes/session.tsx");
+    expect(route).not.toContain("FAILURE_CONTINUATION_MESSAGE");
+    expect(route).not.toContain("Continue from the last failure");
+    expect(route).toContain("context.client.retrySession(");
+    expect(
+      /retryFailedSession\(\s*props\.failure\.failureEventId,\s*composerPolicy,?\s*\)/u.test(route),
+    ).toBe(true);
+    expect(route).toContain('workspacePermissions.includes("sessions:control")');
+    expect(route).toContain('admissionControl.state === "paused"');
+    expect(route).toContain("context.client.resumeSession(");
+  });
+
   test("routes every markdown sandbox file reference into Files without implicit publication", async () => {
     const route = await source("routes/session.tsx");
     expect(route).toContain("onSandboxFile={props.onOpenSandboxFile}");

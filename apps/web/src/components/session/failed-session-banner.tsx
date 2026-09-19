@@ -121,7 +121,7 @@ export function FailedSessionBanner({
             {failure.detailsTruncated ? "Some error details are shortened. " : null}
             {failure.safetyRefusal
               ? "The conversation history is preserved. Automatic retries are stopped."
-              : "The conversation history is preserved — send a message to revive the session and keep working."}
+              : "Your request and conversation history are preserved. Try again to pick up where execution stopped, or send a new message below."}
           </div>
           {actions ? <FailedSessionActions {...actions} /> : null}
         </div>

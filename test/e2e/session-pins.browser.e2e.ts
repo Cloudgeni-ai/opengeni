@@ -6,6 +6,7 @@ import {
   createDb,
   appendSessionEvents,
   createSession,
+  failSessionWorkBeforeAttemptClaim,
   grantWorkspaceAccess,
   removeWorkspaceMember,
   updateSessionTitle,
@@ -2011,7 +2012,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 120_000);
 
-  test("continues a failed session through normal Send and opens the constrained model picker", async () => {
+  test("retries a failed session without a new user message and opens the constrained model picker", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -2020,36 +2021,25 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     try {
       await page.goto(webBaseUrl);
       const workspaceId = await workspaceFromPage(page);
-      const owner = await createSessionThroughApi(
+      const failed = await createSessionThroughApi(
         page,
         apiBaseUrl,
         workspaceId,
-        "Failure fixture owner",
+        "Failed session actions",
       );
-      const failed = await createTitledSession(dbClient.db, {
-        accountId: owner.accountId,
-        workspaceId,
-        initialMessage: "Failed session actions",
-        resources: [],
-        metadata: {},
-        model: "scripted-model",
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-        createdBy: { kind: "subject", subjectId: "sessionpin-owner" },
+      const [identity] = await shared.admin<Array<{ workflowId: string }>>`
+        select temporal_workflow_id as "workflowId" from sessions
+        where workspace_id = ${workspaceId} and id = ${failed.id}`;
+      if (!identity?.workflowId) throw new Error("Fixture workflow identity missing");
+      const failure = await failSessionWorkBeforeAttemptClaim(dbClient.db, workspaceId, {
+        accountId: failed.accountId,
+        sessionId: failed.id,
+        workflowId: identity.workflowId,
+        trigger: { kind: "next" },
+        error: "Fixture model unavailable before execution",
       });
-      await appendSessionEventsAndUpdateSession(
-        dbClient.db,
-        workspaceId,
-        failed.id,
-        [
-          {
-            type: "session.status.changed",
-            payload: { status: "failed", code: "pre_claim_failure" },
-          },
-        ],
-        { status: "failed" },
-      );
+      expect(failure.action).toBe("failed");
+      expect(failure.turnId).toBeTruthy();
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${failed.id}`);
       const banner = page.getByTestId("failed-session-banner");
       const chooseModel = banner.getByRole("button", { name: "Choose another model", exact: true });
@@ -2059,13 +2049,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await page.getByRole("dialog", { name: "Model and effort", exact: true }).waitFor();
       await page.getByRole("textbox", { name: "Search models or providers" }).waitFor();
       await page.keyboard.press("Escape");
-      const continueButton = banner.getByRole("button", { name: "Continue", exact: true });
-      await waitFor(async () => !(await continueButton.isDisabled()));
+      const retryButton = banner.getByRole("button", { name: "Try again", exact: true });
+      await waitFor(async () => !(await retryButton.isDisabled()));
       let submissions = 0;
+      const submittedBodies: Record<string, unknown>[] = [];
       await page.route(
-        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${failed.id}/composer-draft/submit`,
+        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${failed.id}/retry`,
         async (route) => {
           submissions++;
+          submittedBodies.push(route.request().postDataJSON());
           if (submissions === 1)
             await route.fulfill({
               status: 503,
@@ -2078,33 +2070,25 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const submission = page.waitForResponse(
         (response) =>
           response.request().method() === "POST" &&
-          response.url().includes("/composer-draft/submit"),
+          response.url().endsWith(`/sessions/${failed.id}/retry`),
       );
-      await continueButton.click();
+      await retryButton.click();
       const receipt = await submission;
       expect(receipt.status()).toBe(503);
-      const retry = page.getByRole("button", { name: "Retry", exact: true });
-      await retry.waitFor();
-      expect(
-        await banner.getByRole("button", { name: "Continue requested", exact: true }).isDisabled(),
-      ).toBe(true);
-      await page.setViewportSize({ width: 375, height: 812 });
-      await banner
-        .getByText("Retry or remove the unsent message below before continuing.")
-        .waitFor();
-      expect(await banner.getByRole("button", { name: "Continue", exact: true }).isDisabled()).toBe(
-        true,
-      );
+      await banner.getByRole("alert").waitFor();
+      expect(await banner.getByRole("alert").textContent()).toContain("same request");
+      await waitFor(async () => !(await retryButton.isDisabled()));
       const retryReceipt = page.waitForResponse(
         (response) =>
           response.request().method() === "POST" &&
-          response.url().includes("/composer-draft/submit"),
+          response.url().endsWith(`/sessions/${failed.id}/retry`),
       );
-      await retry.click();
+      await retryButton.click();
       expect((await retryReceipt).ok()).toBe(true);
       expect(submissions).toBe(2);
-      const text = "Continue from the last failure. Check current progress before repeating work.";
-      await page.getByText(text, { exact: true }).waitFor();
+      expect(submittedBodies[1]).toEqual(submittedBodies[0]);
+      expect(submittedBodies[0]).not.toHaveProperty("text");
+      expect(submittedBodies[0]?.model).toBe("scripted-model");
       const evidence = await page.evaluate(
         async ({ apiBaseUrl: fixtureApiUrl, workspaceId: fixtureWorkspaceId, id }) => {
           const response = await fetch(
@@ -2115,12 +2099,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         },
         { apiBaseUrl, workspaceId, id: failed.id },
       );
-      expect(
-        evidence.filter(
-          (event: { type: string; payload: { text?: string } }) =>
-            event.type === "user.message" && event.payload.text === text,
-        ),
-      ).toHaveLength(1);
+      const userMessages = evidence.filter(
+        (event: { type: string }) => event.type === "user.message",
+      );
+      expect(userMessages).toHaveLength(1);
+      expect(userMessages[0]?.payload.text).toBe("Failed session actions");
+      expect(await page.getByText("Continue from the last failure", { exact: false }).count()).toBe(
+        0,
+      );
     } finally {
       await context.close();
     }
