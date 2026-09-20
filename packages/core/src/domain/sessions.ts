@@ -51,6 +51,7 @@ import {
   type GoalSpec,
   type FirstPartyMcpToolName,
   type McpPersonalConnectionDelegation,
+  type McpConnectionAccountBinding,
   type McpConnectionAccountSelection,
   type Permission,
   type PersonalResourceAttachmentIntent,
@@ -182,7 +183,7 @@ import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateSubmittedTimelineAnnotations } from "./timeline-annotations";
 import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
 import {
-  freezePersonalConnectionDelegations,
+  freezeConnectionAccounts,
   personalConnectionDelegationSourceForGrant,
 } from "./personal-connection-delegations";
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
@@ -860,6 +861,7 @@ export async function createAndStartSessionWithOutcome(input: {
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy>;
   sessionMcpServers?: SessionMcpServerMetadata[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  mcpAccountBindings?: McpConnectionAccountBinding[];
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   // The manager session spawning this worker (a worker-signed sessionId claim
@@ -1082,6 +1084,7 @@ export async function createAndStartSessionWithOutcome(input: {
       mcpServers: input.mcpServers ?? [],
       mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
       personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+      mcpAccountBindings: input.mcpAccountBindings ?? [],
       initialPersonalResourceAttachmentIntent:
         input.initialPersonalResourceAttachmentIntent ?? null,
       ...(input.xaiProviderAccountAuthoritySnapshot
@@ -1177,6 +1180,7 @@ export async function createAndStartSessionWithOutcome(input: {
       mcpServers: input.mcpServers ?? [],
       mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
       personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+      mcpAccountBindings: input.mcpAccountBindings ?? [],
       initialPersonalResourceAttachmentIntent:
         input.initialPersonalResourceAttachmentIntent ?? null,
       ...(input.xaiProviderAccountAuthoritySnapshot
@@ -1572,6 +1576,7 @@ type PostUserMessageTurnInput = {
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  mcpAccountBindings?: McpConnectionAccountBinding[];
 
   captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
@@ -1780,6 +1785,7 @@ export async function postUserMessageTurn(
                 ? { recordAgentRunUsage: input.recordAgentRunUsage }
                 : {}),
               personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+              mcpAccountBindings: input.mcpAccountBindings ?? [],
 
               ...(input.captureTurnAuthority
                 ? { captureTurnAuthority: input.captureTurnAuthority }
@@ -2883,8 +2889,9 @@ async function createSessionForRequestInFileScope(
   const atlassianEnabled =
     firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
     (!firstPartyMcpPermissions?.length || firstPartyMcpPermissions.includes("connections:read"));
-  const personalConnectionDelegations = await freezePersonalConnectionDelegations({
+  const { personalConnectionDelegations, mcpAccountBindings } = await freezeConnectionAccounts({
     db,
+    accountId: grant.accountId,
     workspaceId,
     settings: runtimeSettings,
     tools,
@@ -3311,6 +3318,7 @@ async function createSessionForRequestInFileScope(
       mcpApprovalPolicies,
       sessionMcpServers: sessionMcpServers.metadata,
       personalConnectionDelegations,
+      mcpAccountBindings,
       initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
       workspaceCustomModel: isWorkspaceCustomModelId(settings, model),
       retainWorkspaceCustomModel: parentSession !== null && model === inheritedModel,
@@ -3722,8 +3730,9 @@ async function acceptSessionUserMessageInFileScope(
       ),
       existingSession.mcpServers,
     );
-    const personalConnectionDelegations = await freezePersonalConnectionDelegations({
+    const { personalConnectionDelegations, mcpAccountBindings } = await freezeConnectionAccounts({
       db,
+      accountId: grant.accountId,
       workspaceId,
       settings: runtimeSettings,
       tools: existingSession.tools,
@@ -3765,6 +3774,7 @@ async function acceptSessionUserMessageInFileScope(
         turnExecutionPolicy,
         mcpCredentialUpdates,
         personalConnectionDelegations,
+        mcpAccountBindings,
 
         ...(captureLinkedAuthority
           ? {

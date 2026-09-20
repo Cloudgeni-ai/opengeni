@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { McpConnectionAccountSelections } from "../src";
+import { McpConnectionAccountSelections, McpConnectionAccountBinding } from "../src";
 
 test("one connector can attach multiple exact accounts", () => {
   const accounts = [
@@ -31,4 +31,35 @@ test("the same account can be selected for distinct connector surfaces", () => {
       { serverId: "calendar", connectionId },
     ]),
   ).toHaveLength(2);
+});
+
+test("accepted bindings reject a mismatched connection ref or workspace owner", () => {
+  const connectionId = crypto.randomUUID();
+  const binding = {
+    serverId: "account-route",
+    canonicalServerId: "slack",
+    connectionId,
+    originWorkspaceId: crypto.randomUUID(),
+    subjectScope: "workspace",
+    ownerSubjectId: null,
+    accountLabel: "Example workspace",
+    providerDomain: "slack.test",
+    kind: "oauth2",
+    connectionRef: {
+      connectionId,
+      providerDomain: "slack.test",
+      kind: "oauth2",
+      subjectScope: "workspace",
+    },
+  };
+  expect(McpConnectionAccountBinding.safeParse(binding).success).toBe(true);
+  expect(
+    McpConnectionAccountBinding.safeParse({ ...binding, ownerSubjectId: "alice" }).success,
+  ).toBe(false);
+  expect(
+    McpConnectionAccountBinding.safeParse({
+      ...binding,
+      connectionRef: { ...binding.connectionRef, connectionId: crypto.randomUUID() },
+    }).success,
+  ).toBe(false);
 });

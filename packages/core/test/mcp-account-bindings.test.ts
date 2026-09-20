@@ -20,7 +20,7 @@ function connection(subjectId: string | null = "alice"): ConnectionMetadata {
     accountId,
     workspaceId,
     subjectId,
-    authorityId: subjectId ? crypto.randomUUID() : null,
+    ...(subjectId ? { authorityId: crypto.randomUUID() } : {}),
     providerDomain: "slack.example.test",
     kind: "oauth2",
     status: "active",

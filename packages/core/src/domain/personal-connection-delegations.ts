@@ -3,6 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import type {
   AccessGrant,
   ConnectionMetadata,
+  McpConnectionAccountBinding,
   McpConnectionAccountSelection,
   McpPersonalConnectionDelegation,
   McpServerConnectionRef,
@@ -25,6 +26,7 @@ import {
 import {
   getPersonalGitHubRepositorySelectionState,
   getSessionTurnPersonalConnectionDelegations,
+  getSessionTurnMcpAccountBindings,
   getConnectionMetadata,
   getSocialConnection,
   listConnectionsMetadata,
@@ -36,6 +38,10 @@ import {
   type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
 import { personalGitHubRepositoryResources } from "./resources";
+import {
+  mcpAccountBindingsFromVisibleConnections,
+  personalDelegationsForAccountBindings,
+} from "./mcp-account-bindings";
 
 export type PersonalConnectionDelegationSource =
   | {
@@ -788,6 +794,92 @@ export function withFrozenPersonalConnectionDelegations(input: {
       return result;
     }
     return personalAuthorityUnavailable(request);
+  };
+}
+
+/** Freeze all native account routes without conflating workspace ownership
+ * with the exact causal human required for personal connections. */
+export async function freezeConnectionAccounts(
+  input: Parameters<typeof freezePersonalConnectionDelegations>[0] & { accountId: string },
+): Promise<{
+  mcpAccountBindings: McpConnectionAccountBinding[];
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
+}> {
+  const selectedIds = new Set(input.tools.map((tool) => tool.id));
+  const servers = input.settings.mcpServers.filter(
+    (server) =>
+      selectedIds.has(server.id) &&
+      server.connectionRef &&
+      server.connectionRef.authoritySource !== "host",
+  );
+  const serverIds = new Set(servers.map((server) => server.id));
+  let mcpAccountBindings: McpConnectionAccountBinding[];
+  if (input.source.kind === "turn") {
+    if (input.authoritySelections?.length) {
+      throw new ConnectionAccountSelectionError(
+        "Agent-created work inherits the exact parent accounts",
+      );
+    }
+    const inherited = await getSessionTurnMcpAccountBindings(
+      input.db,
+      input.workspaceId,
+      input.source.sessionId,
+      input.source.turnId,
+    );
+    if (inherited.length === 0) {
+      return {
+        mcpAccountBindings: [],
+        personalConnectionDelegations: await freezePersonalConnectionDelegations(input),
+      };
+    }
+    mcpAccountBindings = inherited.filter((binding) => serverIds.has(binding.canonicalServerId));
+  } else {
+    const personal =
+      input.source.kind === "subject" &&
+      (await ownerStillBelongsToWorkspace(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.source.subjectId,
+      }))
+        ? await listOwnConnectionMetadata(input.db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.source.subjectId,
+          })
+        : [];
+    const workspace = await listConnectionsMetadata(input.db, input.workspaceId, null);
+    mcpAccountBindings = mcpAccountBindingsFromVisibleConnections({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.source.kind === "subject" ? input.source.subjectId : null,
+      servers,
+      connections: [
+        ...workspace.filter((connection) => connection.subjectId === null),
+        ...personal,
+      ],
+      selections: input.authoritySelections?.filter((selection) =>
+        serverIds.has(selection.serverId),
+      ),
+    });
+  }
+  // Dedicated first-party publication/repository/social surfaces keep their
+  // existing selection and authority contracts; they are not generic MCP routes.
+  const special = await freezePersonalConnectionDelegations({
+    ...input,
+    settings: {
+      ...input.settings,
+      mcpServers: input.settings.mcpServers.filter((server) => !serverIds.has(server.id)),
+    },
+    authoritySelections: input.authoritySelections?.filter(
+      (selection) => !serverIds.has(selection.serverId),
+    ),
+  });
+  return {
+    mcpAccountBindings,
+    personalConnectionDelegations: [
+      ...personalDelegationsForAccountBindings(mcpAccountBindings),
+      ...special,
+    ],
   };
 }
 

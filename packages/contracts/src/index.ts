@@ -4420,9 +4420,24 @@ export const McpConnectionAccountBinding = z
     accountLabel: z.string().min(1).max(512),
     providerDomain: z.string().min(1).max(2048),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]),
+    connectionRef: McpServerConnectionRef,
+    connectionAuthorityGeneration: z.number().int().positive().optional(),
   })
   .strict()
   .superRefine((binding, context) => {
+    if (
+      binding.connectionRef.authoritySource === "host" ||
+      binding.connectionRef.connectionId !== binding.connectionId ||
+      binding.connectionRef.subjectScope !== binding.subjectScope ||
+      binding.connectionRef.providerDomain !== binding.providerDomain ||
+      binding.connectionRef.kind !== binding.kind
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["connectionRef"],
+        message: "Account reference must match its frozen identity",
+      });
+    }
     if ((binding.subjectScope === "subject") !== (binding.ownerSubjectId !== null)) {
       context.addIssue({
         code: "custom",
@@ -9558,6 +9573,7 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
       .strict()
       .nullable(),
     personalConnectionDelegations: McpPersonalConnectionDelegations,
+    mcpAccountBindings: McpConnectionAccountBindings.default([]),
     personalResourceAuthoritySubjectId: z.string().min(1).nullable(),
     /** One accepted human principal for every resource-bearing scheduled run. */
     causalHumanSubjectId: z.string().min(1).nullable().default(null),
@@ -10648,6 +10664,8 @@ export const ConnectionMetadata = z.object({
   id: z.string().uuid(),
   /** Opaque owner-only handle used to manage this personal connection's grants. */
   authorityId: z.string().uuid().optional(),
+  /** Credential-free generation fence for exact accepted account routing. */
+  connectionAuthorityGeneration: z.number().int().positive().optional(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   subjectId: z.string().nullable(),

@@ -76,6 +76,7 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
         connection.status !== "active" ||
         connection.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase() ||
         (ref.kind && connection.kind !== ref.kind) ||
+        (ref.selectedResources && ref.connectionId !== connection.id) ||
         (ref.resource &&
           (typeof connection.metadata.resource !== "string" ||
             canonicalResource(connection.metadata.resource) !== canonicalResource(ref.resource))) ||
@@ -100,6 +101,16 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
         accountLabel: accountLabel(connection),
         providerDomain: connection.providerDomain,
         kind: connection.kind,
+        connectionRef: {
+          ...ref,
+          connectionId: connection.id,
+          providerDomain: connection.providerDomain,
+          kind: connection.kind,
+          subjectScope: personal ? "subject" : "workspace",
+        },
+        ...(connection.connectionAuthorityGeneration
+          ? { connectionAuthorityGeneration: connection.connectionAuthorityGeneration }
+          : {}),
       });
     }
   }
