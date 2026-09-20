@@ -336,6 +336,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/browser-account-request-observation.browser.e2e.ts": [],
+  "test/e2e/managed-actor-response.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/browser-account-read-diagnostics.test.ts": [],
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/appearance.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],

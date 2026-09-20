@@ -51,6 +51,24 @@ const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
+  test("managed actor response coverage follows web and fixture dependencies", () => {
+    const suite = "test/e2e/managed-actor-response.browser.e2e.ts";
+    for (const path of [
+      suite,
+      "apps/web/src/api.ts",
+      "apps/web/test/managed-actor-response-fixture.ts",
+      "apps/web/test/managed-actor-response.html",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(suite);
+      expect(plan.unitTests, path).not.toContain(suite);
+      expect(plan.integrationTests, path).not.toContain(suite);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(suite);
+  });
+
   test("native report delivery belongs to the required prepared package lane, never unit shards", () => {
     const suite = "apps/api/test/native-report-delivery.test.ts";
     expect(OPT_IN_TESTS[suite]).toContain("required package-contracts gate");
@@ -193,6 +211,7 @@ describe("fail-closed change impact", () => {
       CRYPTO_RANDOM_UUID_E2E,
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
+      "test/e2e/managed-actor-response.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
       PERSONAL_GITHUB_IDENTITY_E2E,
@@ -632,6 +651,7 @@ describe("fail-closed change impact", () => {
       CRYPTO_RANDOM_UUID_E2E,
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
+      "test/e2e/managed-actor-response.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
       PERSONAL_GITHUB_IDENTITY_E2E,
