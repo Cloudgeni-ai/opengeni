@@ -4704,7 +4704,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(blockedPreview.status).toBe("blocked");
     expect(blockedPreview.blockers).toContain("workspace_generation_mismatch");
     expect(blockedPreview.database).toMatchObject({
-      role: "opengeni_app",
+      role: new URL(shared!.appUrl).username,
       roleSuperuser: false,
       roleBypassRls: false,
       transactionReadOnly: true,
@@ -4894,7 +4894,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       await admin.unsafe(
         `create role ${quotedBypassRole} with login nosuperuser bypassrls nocreaterole nocreatedb noreplication inherit password '${roleCredential}'`,
       );
-      await admin.unsafe(`grant opengeni_app to ${quotedBypassRole}`);
+      await admin`grant ${admin(new URL(shared!.appUrl).username)} to ${admin(bypassRole)}`;
       const [bypassPosture] = await admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
         select rolsuper, rolbypassrls from pg_roles where rolname = ${bypassRole}`;
       expect(bypassPosture).toEqual({ rolsuper: false, rolbypassrls: true });
@@ -5007,6 +5007,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
 
     const possibleWriterAttemptId = crypto.randomUUID();
     await admin.begin(async (tx) => {
+      // The attempt-admission trigger runs under the FORCE-RLS owner. Raw
+      // fixture writes need the same tenant and protocol context as setRlsContext.
+      await tx`select set_config('opengeni.account_id', ${ids.accountId}, true),
+        set_config('opengeni.workspace_id', ${ids.workspaceId}, true),
+        set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
       await tx`
         update sessions
         set active_turn_id = ${attempt.turnId}, status = 'running'
