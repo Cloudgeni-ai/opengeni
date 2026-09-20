@@ -56,6 +56,7 @@ describe("OPE534 isolated canary admission", () => {
     { MODAL_TOKEN_SECRET: "" },
     { DOCKER_HOST: "ssh://shared-host" },
     { DOCKER_CONTEXT: "staging" },
+    { OPENGENI_OPE534_NATIVE_POSTGRES: "staging" },
   ])
     test(`rejects ${Object.keys(patch)[0]}`, () => {
       expect(() => canaryConfiguration({ ...env, ...patch })).toThrow("OPE534 canary:");

@@ -25,11 +25,18 @@ export function canaryConfiguration(env: Record<string, string | undefined>) {
     !env.OPENGENI_TEST_POSTGRES_ADMIN_URL && !env.OPENGENI_TEST_POSTGRES_APP_URL,
     "external database overrides are forbidden; use the throwaway shared-PG fixture",
   );
-  requireCanary(
-    (!env.DOCKER_HOST || env.DOCKER_HOST.startsWith("unix://")) &&
-      (!env.DOCKER_CONTEXT || env.DOCKER_CONTEXT === "default"),
-    "the database fixture requires a local default Docker daemon",
-  );
+  if (env.OPENGENI_OPE534_NATIVE_POSTGRES) {
+    requireCanary(
+      env.OPENGENI_OPE534_NATIVE_POSTGRES === "LOCAL_DISPOSABLE_55434",
+      "native database opt-in must name LOCAL_DISPOSABLE_55434",
+    );
+  } else {
+    requireCanary(
+      (!env.DOCKER_HOST || env.DOCKER_HOST.startsWith("unix://")) &&
+        (!env.DOCKER_CONTEXT || env.DOCKER_CONTEXT === "default"),
+      "the database fixture requires a local default Docker daemon",
+    );
+  }
   requireCanary(
     env.MODAL_TOKEN_ID && env.MODAL_TOKEN_SECRET,
     "explicit Modal credentials are required",

@@ -2,8 +2,12 @@
  * OPE534 integration acceptance, deliberately OFF in ordinary test runs.
  *
  * Prerequisites (parent must integrate the prevention fix first):
- * - pinned repository Bun + installed dependencies; Docker for the canonical
- *   fully migrated, uniquely named shared-PG fixture. No external DB override.
+ * - pinned repository Bun + installed dependencies; local Docker for the
+ *   canonical shared-PG fixture, OR the authorized disposable native PG17 with
+ *   pgvector at 127.0.0.1:55434, postgres trust login. Select the latter with
+ *   OPENGENI_OPE534_NATIVE_POSTGRES=LOCAL_DISPOSABLE_55434. Both allocate a unique
+ *   fully migrated database; native also allocates a unique restricted app role.
+ *   No arbitrary external DB override is accepted.
  * - reviewed integrated git HEAD, no tracked modifications; exact anonymous-
  *   pull sandbox image digest built from that candidate (with native supervisor).
  * - pre-provisioned dedicated Modal environment ope534-canary-<unique suffix>;
@@ -39,7 +43,7 @@ import {
   initializeSessionStartAtomically,
   readLease,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing";
 import { createObservability } from "@opengeni/observability";
 import { RoutingSandboxSession } from "@opengeni/runtime";
 import {
@@ -63,6 +67,7 @@ import {
   canaryConfiguration,
   requireCanary,
 } from "./ope534-rotation-canary-evidence";
+import { acquireCanaryDatabase } from "./ope534-rotation-canary-database";
 
 const LIFETIME_SECONDS = 600;
 const ROTATION_LEAD_MS = 180_000;
@@ -73,22 +78,6 @@ test.skipIf(!live)(
   "OPE534: adopted nonTTY server, later writes, two real deadline rotations",
   async () => {
     const config = canaryConfiguration(process.env);
-    let dockerEndpoint: unknown;
-    try {
-      dockerEndpoint = JSON.parse(
-        execFileSync(
-          "docker",
-          ["context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"],
-          { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-        ),
-      );
-    } catch {
-      throw new Error("OPE534 canary: local Docker context is unavailable");
-    }
-    requireCanary(
-      typeof dockerEndpoint === "string" && dockerEndpoint.startsWith("unix://"),
-      "refusing a remote Docker database fixture",
-    );
     requireCanary(
       execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() === config.sourceSha,
       "checkout differs from pinned source",
@@ -100,8 +89,7 @@ test.skipIf(!live)(
       "tracked source is dirty",
     );
     const runId = crypto.randomUUID();
-    const shared = await acquireSharedTestDatabase("ope534_rotation_canary");
-    requireCanary(shared, "Docker/fully migrated isolated database unavailable (not a skip)");
+    const shared = await acquireCanaryDatabase();
     requireCanary(
       new URL(shared.adminUrl).hostname === "127.0.0.1" &&
         new URL(shared.adminUrl).pathname.startsWith("/og_ope534_rotation_canary_"),
@@ -112,6 +100,7 @@ test.skipIf(!live)(
     const admin = shared.admin;
     const settings = testSettings({
       databaseUrl: shared.appUrl,
+      runtimeDatabaseRole: shared.appRole,
       deploymentRevision: config.sourceSha,
       sandboxBackend: "modal",
       sandboxOwnershipEnabled: true,
