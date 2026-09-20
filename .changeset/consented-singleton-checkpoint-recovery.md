@@ -16,3 +16,5 @@ consent receipts reject old inference claims even after disabling consent or lea
 replacement. Only the warning-aware worker declares the scoped protocol.
 Preserve explicit failed-turn Retry after verified recovery or Connected Machine
 selection, and retain consent identity when post-accept status reads lose access.
+Keep fresh migration-before-role-provisioning and later runtime-role provisioning
+safe, with SELECT-only rollout access and owner-only activation.
