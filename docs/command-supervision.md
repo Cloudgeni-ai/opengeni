@@ -51,6 +51,12 @@ The adapter's own terminal check is not the authority: natural completion,
 foreground reads, reconciliation, late callbacks, and old writers must all meet
 the same database gate before releasing the process, parent admission, or holder.
 Immutable supervision identity cannot be stripped to select legacy settlement.
+Legacy idle containment excludes every active supervision-key-bearing command,
+including malformed metadata. Enrollment, capture claims/replacement, publication
+and already-published teardown retries recheck this boundary. The database lease
+guard also fences older control writers; readiness requires that guard before
+new launches. Only normal authenticated terminal settlement or exact typed
+provider loss releases supervised blockers, never observation-error counts.
 
 Exact provider disappearance is a separate typed `lost` transition, not successful
 supervision. A transaction-local original-provider binding and deferred database

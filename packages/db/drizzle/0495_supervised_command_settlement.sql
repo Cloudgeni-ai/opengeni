@@ -24,6 +24,7 @@ DECLARE
   receipt jsonb;
   stream text;
   loss_binding jsonb;
+  capture_lease sandbox_leases%ROWTYPE;
 BEGIN
   IF TG_OP = 'DELETE' THEN
     IF OLD.provider_command ? 'supervision' AND (
@@ -124,6 +125,15 @@ BEGIN
       RAISE EXCEPTION 'Legacy command cannot acquire supervision proof' USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
+  END IF;
+  -- Initial attachment and capture serialize on the lease. A committed legacy
+  -- row cannot be upgraded (above); an in-flight initial attachment must not
+  -- appear after an older worker has already admitted capture/containment.
+  IF TG_OP = 'INSERT' OR NOT (coalesce(OLD.provider_command, '{}'::jsonb) ? 'supervision') THEN
+    SELECT * INTO capture_lease FROM sandbox_leases WHERE id = NEW.lease_id FOR UPDATE;
+    IF capture_lease.archive_capture_id IS NOT NULL OR capture_lease.unobservable_command_drain_ids IS NOT NULL THEN
+      RAISE EXCEPTION 'Supervised launch cannot join checkpoint containment' USING ERRCODE = '55000';
+    END IF;
   END IF;
   IF NOT ((jsonb_typeof(descriptor) = 'object'
     AND NEW.provider_command->>'kind' = 'modal-router-v1'
@@ -337,5 +347,40 @@ CREATE TRIGGER supervised_command_admission_guard BEFORE INSERT OR UPDATE OR DEL
   ON sandbox_workspace_mutation_admissions FOR EACH ROW EXECUTE FUNCTION opengeni_private.supervised_command_blocker_guard();
 CREATE TRIGGER supervised_command_holder_guard BEFORE UPDATE OR DELETE
   ON sandbox_lease_holders FOR EACH ROW EXECUTE FUNCTION opengeni_private.supervised_command_blocker_guard();
+
+-- Old control workers also run the legacy containment path. Refuse its durable
+-- enrollment/capture/publication transitions before provider I/O, not merely
+-- the later process settlement. Typed provider loss may clear a capture and
+-- preserve an older archive; it must not create a fresh checkpoint.
+CREATE FUNCTION opengeni_private.supervised_command_capture_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path FROM CURRENT AS $capture$
+BEGIN
+  IF (
+    NEW.unobservable_command_drain_ids IS NOT NULL AND
+      NEW.unobservable_command_drain_ids IS DISTINCT FROM OLD.unobservable_command_drain_ids
+    OR NEW.archive_capture_id IS NOT NULL AND NEW.archive_capture_id IS DISTINCT FROM OLD.archive_capture_id
+    OR NEW.archive_capture_published_at IS NOT NULL AND
+      NEW.archive_capture_published_at IS DISTINCT FROM OLD.archive_capture_published_at
+    OR NEW.archive_generation IS NOT NULL AND NEW.archive_generation IS DISTINCT FROM OLD.archive_generation
+    OR (NEW.resume_state #> '{sessionState,workspaceArchive}') IS DISTINCT FROM
+       (OLD.resume_state #> '{sessionState,workspaceArchive}')
+    OR (NEW.resume_state #> '{sessionState,workspaceArchiveMeta}') IS DISTINCT FROM
+       (OLD.resume_state #> '{sessionState,workspaceArchiveMeta}')
+    OR (NEW.resume_state #> '{sessionState,workspaceArchiveRef}') IS DISTINCT FROM
+       (OLD.resume_state #> '{sessionState,workspaceArchiveRef}')
+  ) AND EXISTS (
+    SELECT 1 FROM sandbox_retained_processes
+    WHERE lease_id = NEW.id AND state = 'active' AND provider_command ? 'supervision'
+  ) THEN
+    RAISE EXCEPTION 'Supervised command blocks legacy containment and checkpoint publication' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END
+$capture$;
+REVOKE ALL ON FUNCTION opengeni_private.supervised_command_capture_guard() FROM PUBLIC;
+CREATE TRIGGER supervised_command_capture_guard BEFORE UPDATE OF
+  unobservable_command_drain_ids, archive_capture_id, archive_capture_published_at,
+  archive_generation, resume_state ON sandbox_leases
+  FOR EACH ROW EXECUTE FUNCTION opengeni_private.supervised_command_capture_guard();
 
 RESET lock_timeout;

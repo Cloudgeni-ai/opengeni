@@ -54,6 +54,7 @@ import {
   recordRetainedProcessReconciliationProof,
   replaceWorkspaceArchiveCaptureAfterProof,
   readLease,
+  readWorkspaceArchiveCapturePreflight,
   reapExpiredSessionListSnapshots,
   reapStaleLeaseHoldersGlobal,
   requestDueSandboxRotationsGlobal,
@@ -2922,6 +2923,24 @@ async function terminateDrainableBox(
   // lease draining for a later sweep (NEVER terminate a box whose files we
   // could not capture). A persist CAS miss means the box was re-armed and left
   // running, so the cold commit is skipped.
+  // A published capture retry skips persistence. Revalidate legacy containment
+  // even on that path: stale enrollment is not native-supervisor exit proof.
+  // Typed provider absence is independently fenced by the canonical loss commit.
+  if (
+    !providerMissingBeforeCapture &&
+    backend === "modal" &&
+    lease.instanceId &&
+    !(await readWorkspaceArchiveCapturePreflight(db, {
+      accountId,
+      workspaceId: row.workspaceId,
+      sandboxGroupId: row.sandboxGroupId,
+      expectedEpoch: row.leaseEpoch,
+      expectedInstanceId: lease.instanceId,
+      liveness: "draining",
+    }))
+  ) {
+    return false;
+  }
   const termination: ProviderTerminationOutcome | boolean = providerMissingBeforeCapture
     ? { terminated: true, providerMissingBeforeCapture: true }
     : await terminateBox(

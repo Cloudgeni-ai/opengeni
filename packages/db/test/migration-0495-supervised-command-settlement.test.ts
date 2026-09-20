@@ -46,7 +46,11 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture(supervised = true) {
+async function fixture(
+  supervised = true,
+  beforeAttach?: (leaseId: string) => Promise<void>,
+  beforeRetention?: (leaseId: string) => Promise<void>,
+) {
   const session = await createSession(client.db, {
     accountId,
     workspaceId,
@@ -122,8 +126,10 @@ async function fixture(supervised = true) {
   };
   // Exercise the real promotion shape: INSERT first, attach locator in the
   // same transaction before releasing the supervisor's user-code launch.
+  await beforeRetention?.(leaseId);
   await shared.admin.begin(async (tx) => {
     await tx`insert into sandbox_retained_processes ${tx(process)}`;
+    await beforeAttach?.(leaseId);
     await tx`update sandbox_retained_processes set provider_command = ${tx.json(command)} where id = ${processId}`;
   });
   await shared.admin`insert into session_background_commands ${shared.admin({ id: processId, account_id: accountId, workspace_id: workspaceId, session_id: sessionId, provider: "managed", state: "running", retained_process_id: processId })}`;
@@ -186,8 +192,14 @@ async function rejects(query: PromiseLike<unknown>, message?: string) {
   await expect(Promise.resolve(query)).rejects.toThrow(message);
 }
 
-test("readiness requires all four active database gates including deferred loss truth", async () => {
+test("readiness requires all five active database gates including capture and deferred loss truth", async () => {
   expect(await supervisedCommandProtocolReady(client.db)).toBe(true);
+  await shared.admin`alter table sandbox_leases disable trigger supervised_command_capture_guard`;
+  try {
+    expect(await supervisedCommandProtocolReady(client.db)).toBe(false);
+  } finally {
+    await shared.admin`alter table sandbox_leases enable trigger supervised_command_capture_guard`;
+  }
   await shared.admin`alter table sandbox_lease_holders disable trigger supervised_command_holder_guard`;
   try {
     expect(await supervisedCommandProtocolReady(client.db)).toBe(false);
@@ -227,6 +239,21 @@ test("natural terminal observation cannot settle before immutable quiescence", a
   // Retention cleanup remains possible AFTER canonical proof-backed settlement.
   await shared.admin`delete from session_background_commands where id=${f.scope.processId}`;
   await shared.admin`delete from sandbox_retained_processes where id=${f.scope.processId}`;
+});
+
+test("capture winning before initial descriptor attachment fences the supervised launch", async () => {
+  // The retained INSERT is not yet visible to the other connection. An older
+  // capture writer can win before descriptor attachment takes the lease lock;
+  // the attaching transaction must recheck and roll back instead of launching.
+  await expect(
+    fixture(true, async (leaseId) => {
+      await shared.admin`update sandbox_leases set archive_capture_id=${crypto.randomUUID()},
+      archive_capture_operation_id=${crypto.randomUUID()},
+      archive_capture_provider_request_id=${crypto.randomUUID()},archive_capture_attempt=1,
+      archive_capture_generation=workspace_generation,archive_capture_started_at=now(),
+      archive_capture_deadline_at=now()+interval '1 minute' where id=${leaseId}`;
+    }),
+  ).rejects.toThrow("Supervised launch cannot join checkpoint containment");
 });
 
 test("old SQL writers cannot erase identity, proof, parent admission or holder", async () => {
@@ -558,8 +585,7 @@ test("nonzero supervisor exit remains readable but cannot settle even with quies
   );
 });
 
-async function providerLossFixture() {
-  const f = await fixture();
+async function providerLossFixture(withArchive = true) {
   const archive = Buffer.from("older checkpoint").toString("base64");
   const descriptor = {
     version: 1,
@@ -575,10 +601,14 @@ async function providerLossFixture() {
       totalFileBytes: 16,
     },
   };
-  await shared.admin`update sandbox_leases set liveness='warm', refcount=1,
-    workspace_generation=2, archive_generation=1, resume_backend_id='modal',
-    resume_state=${shared.admin.json({ backendId: "modal", sessionState: { providerState: { sandboxId: "sb-test" }, workspaceArchive: archive, workspaceArchiveMeta: descriptor } })}
-    where id=${f.leaseId}`;
+  // This checkpoint predates the active command; do not manufacture a new
+  // archive after supervision has begun (the capture guard must reject that).
+  const f = await fixture(true, undefined, async (leaseId) => {
+    await shared.admin`update sandbox_leases set liveness='warm', refcount=1,
+      workspace_generation=2, archive_generation=${withArchive ? 1 : null}, resume_backend_id='modal',
+      resume_state=${withArchive ? shared.admin.json({ backendId: "modal", sessionState: { providerState: { sandboxId: "sb-test" }, workspaceArchive: archive, workspaceArchiveMeta: descriptor } }) : null}
+      where id=${leaseId}`;
+  });
   const lossInput = {
     accountId,
     workspaceId,
@@ -751,8 +781,7 @@ test("provider loss rechecks identity after waiting on the original process row"
 });
 
 test("typed loss with no checkpoint remains unrecoverable and never fills output proof", async () => {
-  const f = await providerLossFixture();
-  await shared.admin`update sandbox_leases set archive_generation=null, resume_state=null where id=${f.leaseId}`;
+  const f = await providerLossFixture(false);
   const result = await markWarmLeaseInstanceLost(client.db, f.lossInput);
   expect(result.status).toBe("marked");
   if (result.status !== "marked") throw new Error("Unexpected stale provider loss");

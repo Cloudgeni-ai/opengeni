@@ -6726,7 +6726,22 @@ export async function getFilesForSubject(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+      // A service continuation has no human file authority. Its ambient actor
+      // (for example service:agent-turn) must not disagree with the explicit null
+      // passed to the file ACL function, or ordinary shared files disappear.
+      const [previousScope] =
+        input.subjectId === null
+          ? await scopedDb.execute<{ subject: string | null; owner: string | null }>(sql`
+            select current_setting('opengeni.subject_id', true) as subject,
+                   current_setting('opengeni.private_file_owner', true) as owner`)
+          : [];
+      if (input.subjectId === null) {
+        await scopedDb.execute(sql`select
+          set_config('opengeni.subject_id', '', true),
+          set_config('opengeni.private_file_owner', '', true)`);
+      } else {
+        await setSubjectRlsContext(scopedDb, input.subjectId);
+      }
       const subjectIdSql = input.subjectId === null ? sql`NULL::text` : sql`${input.subjectId}`;
       const rows = await scopedDb
         .select()
@@ -6747,6 +6762,16 @@ export async function getFilesForSubject(
             )`,
           ),
         );
+
+      // withRlsContext can be a savepoint on a caller's transaction. Restore
+      // its actor scope so this read cannot change later authorization.
+      // On query failure, savepoint rollback restores scope; do not mask the
+      // original SQLSTATE by issuing SQL in an aborted transaction.
+      if (input.subjectId === null) {
+        await scopedDb.execute(sql`select
+            set_config('opengeni.subject_id', ${previousScope?.subject ?? ""}, true),
+            set_config('opengeni.private_file_owner', ${previousScope?.owner ?? ""}, true)`);
+      }
       return rows.map(mapFile);
     },
   );
@@ -50092,15 +50117,34 @@ export async function enrollUnobservableCommandIdleDrain(
       parent_admission_id: string;
       holder_id: string;
       eligible: boolean;
+      supervised: boolean;
     }>(
       tx,
       sql`
       select process.id, process.parent_admission_id, process.holder_id,
+        (coalesce(process.provider_command, '{}'::jsonb) ? 'supervision') as supervised,
         (process.lease_epoch = ${initial.leaseEpoch}
           and process.provider_instance_id = ${initial.instanceId}
           and process.provider_backend = 'modal' and process.route_target_id is null
-          and process.last_reconcile_outcome in ('process_observation_unavailable',
-            'quarantined_process_observation_unavailable')
+          and (
+            process.last_reconcile_outcome in ('process_observation_unavailable',
+              'quarantined_process_observation_unavailable')
+            or (
+              process.last_reconcile_outcome = 'provider_error'
+              and process.reconcile_attempts >= 5
+              and attempt.quiesced_at is not null
+              and exists (
+                select 1 from session_background_commands command
+                where command.retained_process_id = process.id
+                  and command.workspace_id = process.workspace_id
+                  and command.session_id = process.session_id
+                  and command.provider = 'managed'
+                  and command.state = 'stopping'
+                  and command.cancel_requested_at < now() -
+                    (${input.idleGraceMs}::bigint * interval '1 millisecond')
+              )
+            )
+          )
           and attempt.state = 'closed'
           and greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at), process.started_at) < now() -
             (${input.idleGraceMs}::bigint * interval '1 millisecond')) as eligible
@@ -50134,6 +50178,7 @@ export async function enrollUnobservableCommandIdleDrain(
     const ids = enrolled ?? processes.map((p) => p.id);
     if (
       !ids.length ||
+      processes.some((p) => p.supervised) ||
       (!enrolled && processes.some((p) => !p.eligible)) ||
       processes.some((p) => !ids.includes(p.id))
     )
@@ -53748,6 +53793,18 @@ async function settleRetainedProcessWithAuthority(
   );
 }
 
+/** Legacy containment never substitutes for native-supervisor terminal proof.
+ * Presence, not successful descriptor parsing, is the fail-closed boundary.
+ * Check the whole lease, including stale/already-enrolled process IDs. */
+function noActiveSupervisedProcesses(leaseId: SQL): SQL {
+  return sql`not exists (
+    select 1 from sandbox_retained_processes supervised_process
+    where supervised_process.lease_id = ${leaseId}
+      and supervised_process.state = 'active'
+      and coalesce(supervised_process.provider_command, '{}'::jsonb) ? 'supervision'
+  )`;
+}
+
 /** Read the exact generation a verified capture must later fold. This is a
  * preflight only: persistWarmSnapshot/persistDrainSnapshot repeat the full
  * epoch, provider, liveness, and generation CAS under the archive-fold lock. */
@@ -53775,6 +53832,7 @@ export async function readWorkspaceArchiveCapturePreflight(
         where lease.workspace_id = ${input.workspaceId}
           and lease.sandbox_group_id = ${input.sandboxGroupId}
           and lease.liveness = ${input.liveness}
+          and ${noActiveSupervisedProcesses(sql`lease.id`)}
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
           ${
@@ -54290,6 +54348,10 @@ export async function claimWorkspaceArchiveCapture(
       if (input.liveness === "draining" && row.reaper_hold_active) {
         return { status: "reaper_held" as const };
       }
+      const [supervision] = await scopedDb.execute<{ safe: boolean }>(sql`
+        select ${noActiveSupervisedProcesses(sql`${row.id}::uuid`)} as safe
+      `);
+      if (!supervision?.safe) return { status: "mutation_in_progress" as const };
       if (row.archive_capture_id !== null) {
         return { status: "capture_in_progress" as const };
       }
@@ -54573,6 +54635,7 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
           and lease.archive_capture_id = ${input.priorCaptureId}::uuid
+          and ${noActiveSupervisedProcesses(sql`lease.id`)}
           and (
             lease.archive_capture_operation_id <> ${input.operationId}::uuid
             or lease.archive_capture_attempt < ${input.attempt}
@@ -55515,10 +55578,12 @@ export async function persistDrainSnapshot(
           current_checkpoint_artifact_id: string | null;
           previous_checkpoint_artifact_id: string | null;
           unsettled_mutation: boolean;
+          supervision_safe: boolean;
         }
       >(sql`
         select
           lease.*,
+          ${noActiveSupervisedProcesses(sql`lease.id`)} as supervision_safe,
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
           resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev,
           exists (
@@ -55550,7 +55615,7 @@ export async function persistDrainSnapshot(
         published?.workspaceArchiveRef,
         row?.resume_state,
       );
-      if (!row) {
+      if (!row || !row.supervision_safe) {
         return {
           wrote: false,
           archiveRevision: null,
@@ -55965,6 +56030,7 @@ async function foldWorkspaceArchiveOntoLease(
     where lease.workspace_id = ${input.workspaceId}
       and lease.sandbox_group_id = ${input.sandboxGroupId}
       and ${livenessGuard}
+      and ${noActiveSupervisedProcesses(sql`lease.id`)}
       and lease.lease_epoch = ${currentLeaseEpoch}
       and lease.instance_id is not distinct from ${currentInstanceId}
       and lease.workspace_generation = ${input.expectedWorkspaceGeneration}

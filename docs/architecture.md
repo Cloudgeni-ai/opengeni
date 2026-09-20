@@ -431,17 +431,15 @@ Authority: `packages/core/src/application/sandbox-recovery.ts`; lifecycle:
 Rolling activation defaults off; permanent worker-protocol fencing applies.
 Retry checks effective routes. See [run lifecycle](run-lifecycle.md).
 
-Home-compute policy and epoch-fenced targets persist. Selection proves establishment
-authority; invalid pointers reconcile visibly. Leases/reapers—not viewers—own
-managed sandboxes. Identity precedes setup; capture fences writers. Provider loss
-retires exact instances, never authorizing ambiguous replay. Routing stays lazy;
-raw handles serve setup/capture (`turn-sandbox-access.ts`).
+Home-compute selection proves establishment authority; invalid pointers reconcile
+visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture
+fences writers. Exact-instance loss never authorizes ambiguous replay. Routing stays
+lazy; raw handles serve setup/capture (`turn-sandbox-access.ts`).
 
-Stock Modal non-PTY commands without `runAs` can carry the versioned native
-subreaper supervision protocol. Exact-instance native capability verification
-precedes admission; durable initial retention of the invocation precedes provider
-dispatch. The supervisor starts idle. Only the original launch path releases user
-code; reconstructed observers do not release abandoned reservations.
+Stock Modal non-PTY/no-`runAs` commands support native subreaper supervision.
+Exact-instance capability verification precedes admission; durable invocation
+retention precedes dispatch. The supervisor starts idle. Only original launch
+releases user code; reconstructed observers never release abandoned reservations.
 Invocation-authenticated quiescence
 receipts are persisted before ACK permits supervisor exit. Canonical database
 settlement additionally requires authenticated provider terminal evidence and
@@ -455,8 +453,12 @@ Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotatio
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot admission
 reserves the larger budget plus reaper period, including historical Modal leases
 after backend changes. Drain budgets include dispatch/capture/retry handoff within
-the lifecycle ceiling. Warm-capture reclamation preserves its sole holder until
+the lifecycle ceiling. Warm-capture reclamation and heartbeat cleanup preserve its holder until
 the original deadline despite turn closure: no drain takeover or extended authority.
+
+Legacy stopping-error containment requires owner quiescence and cancellation grace.
+Supervision-key presence—even malformed—blocks enrollment/capture/publication/teardown.
+Observation failure never proves exit; uncancelled running commands stay excluded.
 
 Acquisition/mutation waiters extend once for the first durable capture deadline
 plus handoff grace, capped at one hour. Expired/replacement claims never replenish

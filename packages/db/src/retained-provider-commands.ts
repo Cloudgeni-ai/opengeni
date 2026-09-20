@@ -319,12 +319,13 @@ function supervisionDescriptor(command: SandboxProviderCommand) {
 /** Fail before provider start, not after discovering an unprotected DB at retention. */
 export async function supervisedCommandProtocolReady(db: Database): Promise<boolean> {
   const [row] = await db.execute<{ ready: boolean }>(sql`
-    select count(*) = 4 as ready from pg_catalog.pg_trigger
+    select count(*) = 5 as ready from pg_catalog.pg_trigger
     where (tgrelid, tgname) in (
       ('sandbox_retained_processes'::regclass, 'supervised_command_guard'),
       ('sandbox_retained_processes'::regclass, 'supervised_provider_loss_commit_guard'),
       ('sandbox_workspace_mutation_admissions'::regclass, 'supervised_command_admission_guard'),
-      ('sandbox_lease_holders'::regclass, 'supervised_command_holder_guard')
+      ('sandbox_lease_holders'::regclass, 'supervised_command_holder_guard'),
+      ('sandbox_leases'::regclass, 'supervised_command_capture_guard')
     ) and tgenabled in ('O', 'A') and not tgisinternal
   `);
   return row?.ready === true;
