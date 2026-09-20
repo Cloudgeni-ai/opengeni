@@ -16,6 +16,12 @@ eligible accounts. The web composer keeps these controls inside Connectors and
 blocks an explicit empty selection until an account is attached or the connector
 is disabled.
 
+An exact `connectionRef.connectionId` remains pinned to that account, including
+custom API instances. Multi-account selectors are unpinned; the explicit
+`accountSelection: "all_eligible"` mode cannot be combined with a connection ID,
+host authority, or account-specific selected resources. Existing exact
+configurations are not silently converted to selectors.
+
 Admission resolves credential-free `mcpAccountBindings`. Each binding retains its
 canonical connector ID for policy and a stable account-qualified runtime route
 for execution, alongside its exact native connection reference and readable
@@ -28,7 +34,8 @@ The accepted binding set follows queued work, continuations, child work and
 scheduled occurrences. New empty sets mean no authenticated account routes;
 historical absent/null sets retain the legacy execution path. Scheduled tasks
 save the selected pairs under the task's execution owner and revalidate them
-when an occurrence is accepted. Later workspace participants cannot borrow the
+when an occurrence is accepted. A frozen empty selection stays empty even if an
+account is connected later. Later workspace participants cannot borrow the
 prior sender's personal accounts. Results posted in a shared session remain
 visible to that session's participants.
 
