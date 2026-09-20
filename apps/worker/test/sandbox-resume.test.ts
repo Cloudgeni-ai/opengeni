@@ -1793,6 +1793,11 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         // heartbeat reports holder_gone. Physical capture settlement, when
         // pending, must precede release of the now execution-fenced holder.
         await admin.begin(async (tx) => {
+          // Drain a heartbeat admitted while the attempt was still live before
+          // closing it. Otherwise its statement snapshot may legitimately commit
+          // one final touch after the timestamp baseline below was read.
+          await tx`select id from sandbox_leases where id = ${source!.id} for update`;
+
           await tx`
           update session_turn_attempts set
             state = 'closed', outcome = 'interrupted_recoverable',
