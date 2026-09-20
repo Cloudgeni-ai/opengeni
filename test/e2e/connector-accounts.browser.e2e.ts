@@ -47,6 +47,43 @@ describe("composer connector account controls (local fixture)", () => {
     await Promise.allSettled([browser?.close(), web?.stop()]);
   }, 30_000);
 
+  test("connector controls load on demand and preserve Back while loading", async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    page.setDefaultTimeout(10_000);
+    let release!: () => void;
+    const moduleReady = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let moduleRequests = 0;
+    await page.route(
+      /\/src\/components\/session-connectors-menu-body\.tsx(?:\?|$)/,
+      async (route) => {
+        moduleRequests++;
+        await moduleReady;
+        await route.continue();
+      },
+    );
+    try {
+      await page.goto(`${baseUrl}/test/connector-menu.html`);
+      const trigger = page.getByRole("button", { name: "More composer actions" });
+      await trigger.waitFor();
+      expect(moduleRequests).toBe(0);
+      await trigger.click();
+      await page.getByRole("menuitem", { name: /Connectors/ }).click();
+      await page.getByText("Loading connectors…", { exact: true }).waitFor();
+      expect(moduleRequests).toBe(1);
+      await page.getByRole("button", { name: "Back", exact: true }).click();
+      await page.getByRole("menuitem", { name: /Connectors/ }).waitFor();
+      release();
+      await page.getByRole("menuitem", { name: /Connectors/ }).click();
+      await page.getByRole("menuitem", { name: "Slack account settings" }).waitFor();
+      expect(await page.getByText("Loading connectors…", { exact: true }).count()).toBe(0);
+    } finally {
+      release();
+      await page.close();
+    }
+  }, 45_000);
+
   for (const viewport of [
     { width: 1280, height: 900 },
     { width: 390, height: 844 },

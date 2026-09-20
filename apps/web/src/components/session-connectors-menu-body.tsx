@@ -21,7 +21,7 @@ import {
   ComposerMenuSwitchIndicator,
 } from "@/components/ui/composer-menu";
 import type { SessionToolSelection } from "@/components/pickers";
-import type { McpServerOption } from "@/lib/session-tools";
+import { isComposerConnector, type McpServerOption } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
 
 export type SessionConnectorsMenuProps = {
@@ -42,10 +42,6 @@ export type SessionConnectorsMenuProps = {
   busyId?: string | null;
   accountControls?: ConnectionAccountControls;
 };
-
-export function isComposerConnector(server: Pick<McpServerOption, "id">): boolean {
-  return !["opengeni", "files", "docs"].includes(server.id);
-}
 
 /** Connection availability belongs here; built-in tools remain in workspace settings. */
 export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
