@@ -143,14 +143,69 @@ test("literal wildcards and Unicode offsets survive SQL, codec text and multi-pa
 test("matches crossing plain Unicode and encoded scalar boundaries are not lost", async () => {
   const session = await makeSession();
   const needle = "a🙂BCDEF";
-  for (const [index, prefix] of ["🙂".repeat(8190), "\u0000" + "x".repeat(8189)].entries()) {
+  for (const [index, prefix] of [
+    "🙂".repeat(8190),
+    "\u0000" + "x".repeat(8189),
+    "🙂".repeat(32766),
+    "\u0000" + "x".repeat(32765),
+    "\u0000" + "x".repeat(32766),
+  ].entries()) {
     const text = prefix + needle;
     await insert(session.id, index + 1, "user.message", toPostgresLosslessJson({ text }), {
       codec: 1,
     });
   }
   const result = await collect({ query: needle.toLowerCase(), sessionId: session.id });
-  expect(result.matches.map((m) => m.messageMatchOffset)).toEqual([16380, 8190]);
+  expect(result.matches.map((m) => m.messageMatchOffset)).toEqual([
+    16380, 8190, 65532, 32766, 32767,
+  ]);
+}, 180_000);
+
+test("long reads retain the 32-window budget and stop on between-read cancellation", async () => {
+  const session = await makeSession();
+  await insert(session.id, 1, "user.message", { text: "x".repeat(400_000) });
+  let scalarReads = 0;
+  let cancelOnRead = false;
+  const controller = new AbortController();
+  const wire = postgres(shared.appUrl, {
+    max: 1,
+    debug: (_connection, query) => {
+      if (query.includes("with source as")) {
+        scalarReads++;
+        if (cancelOnRead) controller.abort();
+      }
+    },
+  });
+  const observed = drizzle(wire, { schema });
+  try {
+    const page = await searchSessionMessagesForSubject(
+      observed,
+      workspaceId,
+      { query: "not-present", sessionId: session.id },
+      { subjectId },
+    );
+    expect(page.matches).toHaveLength(0);
+    expect(page.hasMore).toBe(true);
+    expect(scalarReads).toBeGreaterThan(0);
+    expect(scalarReads).toBeLessThanOrEqual(8);
+    const cursor = JSON.parse(Buffer.from(page.nextCursor!, "base64url").toString("utf8"));
+    expect(cursor.position.offset).toBeGreaterThan(0);
+    expect(cursor.position.offset).toBeLessThanOrEqual(32 * 8192);
+    scalarReads = 0;
+    cancelOnRead = true;
+    await expect(
+      searchSessionMessagesForSubject(
+        observed,
+        workspaceId,
+        { query: "not-present", sessionId: session.id },
+        { subjectId },
+        { signal: controller.signal },
+      ),
+    ).rejects.toThrow();
+    expect(scalarReads).toBe(1);
+  } finally {
+    await wire.end();
+  }
 }, 180_000);
 
 test("list scope, member removal, workspace and personally archived boundaries apply before counts", async () => {
@@ -258,7 +313,7 @@ test("every non-overlapping occurrence survives pagination within one message", 
 
 test("all occurrences cross scalar windows without repeat or loss", async () => {
   const session = await makeSession();
-  const text = "\u0000🙂" + ("x".repeat(249) + "abAB").repeat(80);
+  const text = "\u0000🙂" + ("x".repeat(249) + "abAB").repeat(160);
   await insert(session.id, 1, "agent.message.completed", toPostgresLosslessJson({ text }), {
     codec: 1,
   });
@@ -267,7 +322,7 @@ test("all occurrences cross scalar windows without repeat or loss", async () => 
     [...text.matchAll(/ab/giu)].map((m) => m.index),
   );
   expect(result.page.matchedMessageCount).toBe(1);
-  expect(result.page.matchedOccurrenceCount).toBe(160);
+  expect(result.page.matchedOccurrenceCount).toBe(320);
 }, 180_000);
 
 test("canonical completion copies, explicit duplicates, stale events and unclaimed prompts are excluded", async () => {
@@ -361,6 +416,112 @@ test("ordinary no-hit history uses batched scalar SQL rather than per-message re
   }
 }, 180_000);
 
+test("efficiency benchmark covers ordinary, long and multi-session complete traversals", async () => {
+  // Keep performance volumes out of the authority regression workspace: list
+  // scope tests deliberately exercise different recursive authorization plans.
+  const subjectId = `user:search-benchmark-${crypto.randomUUID()}`;
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: crypto.randomUUID(),
+    accountName: "Search benchmark",
+    workspaceExternalSource: "test",
+    workspaceExternalId: crypto.randomUUID(),
+    workspaceName: "Search benchmark",
+    subjectId,
+  });
+  const { workspaceId, accountId } = access.workspaceGrants[0]!;
+  const makeSession = (requestedSessionId: string) =>
+    createSession(client.db, {
+      requestedSessionId,
+      accountId,
+      workspaceId,
+      initialMessage: "benchmark",
+      resources: [],
+      metadata: {},
+      model: "test",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+  const scenarios: { name: string; ids: string[]; count: number }[] = [];
+  let fixtureId = 1;
+  for (const [name, sessionCount, messageCount, text] of [
+    ["ordinary", 1, 1024, "ordinary historical text"],
+    ["long-plain", 1, 1, "🙂ordinary text ".repeat(40_000)],
+    ["long-lossless", 1, 1, "\u0000🙂ordinary text ".repeat(40_000)],
+    ["multi-session", 8, 64, "ordinary historical text"],
+  ] as const) {
+    const ids: string[] = [];
+    for (let i = 0; i < sessionCount; i++) {
+      const session = await makeSession(
+        `10000000-0000-4000-8000-${String(fixtureId++).padStart(12, "0")}`,
+      );
+      ids.push(session.id);
+      const payload = toPostgresLosslessJson({ text });
+      await shared.admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload, payload_codec_version)
+        select ${accountId}, ${workspaceId}, ${session.id}, n, 'user.message', ${shared.admin.json(payload as never)}, 1
+        from generate_series(1, ${messageCount}) n`;
+    }
+    scenarios.push({ name, ids, count: sessionCount * messageCount });
+  }
+  let statements = 0;
+  let messageQueries = 0;
+  const wire = postgres(shared.appUrl, {
+    max: 1,
+    debug: (_connection, query) => {
+      statements++;
+      if (query.includes('from "session_events"')) messageQueries++;
+    },
+  });
+  const observed = drizzle(wire, { schema });
+  try {
+    for (const scenario of scenarios) {
+      const samples = [];
+      for (let run = 0; run < 3; run++) {
+        statements = messageQueries = 0;
+        const started = performance.now();
+        let cursor: string | undefined;
+        let pages = 0;
+        let page: SessionMessageSearchResponse;
+        do {
+          page = await searchSessionMessagesForSubject(
+            observed,
+            workspaceId,
+            { query: "never-present-token", ...(cursor ? { cursor } : {}) },
+            {
+              subjectId,
+              authorizationScope: { kind: "scoped", sessionIds: scenario.ids, rootSessionIds: [] },
+            },
+          );
+          expect(page.matches).toHaveLength(0);
+          expect(page.hasMore).toBe(page.nextCursor !== null);
+          expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(128 * 1024);
+          cursor = page.nextCursor ?? undefined;
+          expect(++pages).toBeLessThan(1000);
+        } while (cursor);
+        expect(page.scannedMessages).toBe(scenario.count);
+        expect(page.countIsExact).toBe(true);
+        if (scenario.name.startsWith("long-")) {
+          // Slow CI may exhaust the time budget before the window budget. Each
+          // extra page needs ordinary authority/identity setup, not more scalar
+          // reads. Guard round trips without imposing a wall-clock threshold.
+          expect(messageQueries - pages).toBeLessThanOrEqual(21);
+          expect(statements).toBeLessThanOrEqual(pages * 15 + 22);
+        }
+        samples.push({
+          pages,
+          messageQueries,
+          statements,
+          ms: Math.round(performance.now() - started),
+        });
+      }
+      console.info(`[session-search efficiency] ${scenario.name}: ${JSON.stringify(samples)}`);
+    }
+  } finally {
+    await wire.end();
+  }
+}, 180_000);
+
 test("private sessions stay owner-only under the real production RLS role", async () => {
   const ownerUserId = `search-owner-${crypto.randomUUID()}`;
   const owner = `user:${ownerUserId}`;
@@ -402,7 +563,8 @@ test("private sessions stay owner-only under the real production RLS role", asyn
     createdByContext: {},
   });
   await shared.admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
-    values (${grant.accountId}, ${grant.workspaceId}, ${session.id}, 1, 'user.message', '{"text":"private-search-token"}'::jsonb)`;
+    values (${grant.accountId}, ${grant.workspaceId}, ${session.id}, 1, 'user.message',
+      jsonb_build_object('text', repeat('x', 40000) || 'private-search-token'))`;
   await transitionSessionVisibility(client.db, {
     workspaceId: grant.workspaceId,
     sessionId: session.id,
@@ -418,6 +580,7 @@ test("private sessions stay owner-only under the real production RLS role", asyn
     { subjectId: owner, personalWorkspaceOwnerException: true },
   );
   expect(ownerPage.matches.map((m) => m.sessionId)).toEqual([session.id]);
+  expect(ownerPage.matches[0]!.messageMatchOffset).toBe(40000);
   for (const request of [
     { query: "private-search-token" },
     { query: "private-search-token", sessionId: session.id },

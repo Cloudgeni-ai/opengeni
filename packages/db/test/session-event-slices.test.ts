@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import type { SharedTestDatabase } from "@opengeni/testing";
+import { acquireSearchTestDatabase } from "./session-message-search-fixture";
 import { bootstrapWorkspace, createDb, createSession, listSessionEventPage } from "../src";
 import { listSessionEventSlices } from "../src/session-event-slices";
 import { LOSSLESS_JSON_STRING_PREFIX, toPostgresLosslessJson } from "../src/lossless-json";
@@ -15,9 +16,7 @@ let accountId: string;
 let sessionId: string;
 let otherSessionId: string;
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("session-event-slices");
-  if (!acquired) throw new Error("PostgreSQL test database unavailable");
-  shared = acquired;
+  shared = await acquireSearchTestDatabase("session-event-slices");
   client = createDb(shared.appUrl, { max: 2 });
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
