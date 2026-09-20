@@ -1509,6 +1509,11 @@ the sweep could adopt a still-running finalizer's snapshot with the longer drain
 budget. This bounded reclamation exception grants no execution or heartbeat
 authority; settlement restores ordinary idle grace, and deadline expiry still
 permits dead-worker capture recovery.
+The worker's holder-liveness loop applies that same bounded physical-retention
+rule when heartbeat authority rejects a closed attempt. It does not refresh the
+closed holder, renew execution authority, or extend the capture deadline; the
+finalizer releases after physical settlement. Epoch replacement and expired
+captures still release promptly.
 Boot validation requires the larger configured capture budget and one reaper
 period to fit strictly inside provider-deadline rotation headroom even when the
 default backend is no longer Modal, because historical Modal leases remain
