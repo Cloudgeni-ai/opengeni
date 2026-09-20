@@ -28290,6 +28290,97 @@ export async function listCodexAccountStatuses(
   });
 }
 
+/** Session-authorized metadata projection. The caller authorizes the session;
+ * its locked active pointer, never a client-supplied turn/source, selects the
+ * accepted pool. Running turns retain their display account while choices for
+ * new work follow current settings. No credential material or Apps grants. */
+export async function getSessionCodexAccounts(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+) {
+  return await withWorkspaceRls(db, workspaceId, async (tx) => {
+    await tx.execute(
+      sql`select pg_advisory_xact_lock_shared(hashtextextended(${`codex-subscription-source:${workspaceId}`}, 0))`,
+    );
+    const [session] = await tx
+      .select()
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .for("share")
+      .limit(1);
+    if (!session) return null;
+    const [turn] = session.activeTurnId
+      ? await tx
+          .select({
+            id: schema.sessionTurns.id,
+            metadata: schema.sessionTurns.metadata,
+            status: schema.sessionTurns.status,
+            credentialId: schema.codexCredentialLeases.credentialId,
+          })
+          .from(schema.sessionTurns)
+          .leftJoin(
+            schema.codexCredentialLeases,
+            and(
+              eq(schema.codexCredentialLeases.workspaceId, schema.sessionTurns.workspaceId),
+              eq(schema.codexCredentialLeases.turnId, schema.sessionTurns.id),
+              sql`${schema.codexCredentialLeases.leasedUntil} > clock_timestamp()`,
+            ),
+          )
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, workspaceId),
+              eq(schema.sessionTurns.accountId, session.accountId),
+              eq(schema.sessionTurns.sessionId, session.id),
+              eq(schema.sessionTurns.id, session.activeTurnId),
+              inArray(schema.sessionTurns.status, [
+                "running",
+                "recovering",
+                "waiting_capacity",
+                "requires_action",
+              ]),
+              sql`${schema.sessionTurns.model} like 'codex/%'`,
+            ),
+          )
+          .limit(1)
+      : [];
+    const accepted = readCodexCredentialPolicySnapshotV1(turn?.metadata);
+    const policy = accepted.kind === "valid" ? accepted.policy : null;
+    const waiting = turn?.status === "waiting_capacity";
+    const currentSelection = turn
+      ? {
+          waiting,
+          credentialId: waiting
+            ? !policy && session.codexPinSource !== "policy"
+              ? session.codexPinnedCredentialId
+              : policy?.pinSource === "manual"
+                ? policy.pinnedCredentialId
+                : policy?.rotationEnabled === false
+                  ? policy.activeCredentialId
+                  : null
+            : turn.credentialId,
+        }
+      : null;
+    const acceptedTurnId = waiting ? turn.id : undefined;
+    const accounts = await listCodexAccountStatuses(tx, workspaceId, acceptedTurnId);
+    const rotation = await getCodexRotationSettings(tx, workspaceId, acceptedTurnId);
+    const currentAccounts =
+      turn && !waiting && currentSelection?.credentialId
+        ? await listCodexAccountStatuses(tx, workspaceId, turn.id)
+        : accounts;
+    return {
+      accounts,
+      rotation,
+      currentSelection,
+      currentAccount:
+        currentAccounts.find((account) => account.id === currentSelection?.credentialId) ?? null,
+      pinnedAccountId:
+        waiting && policy ? policy.pinnedCredentialId : session.codexPinnedCredentialId,
+      lastAccountId: session.codexLastCredentialId,
+    };
+  });
+}
+
 export type CodexAllocatorUpdateResult =
   | {
       kind: "updated" | "unchanged";
@@ -29504,9 +29595,18 @@ export async function upsertWorkspaceModelPolicy(
 export async function getCodexRotationSettings(
   db: Database,
   workspaceId: string,
+  acceptedTurnId?: string,
 ): Promise<CodexRotationSettings | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const source = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, workspaceId);
+    if (acceptedTurnId) {
+      source.effectiveSource = await codexSourceForTurn(
+        scopedDb,
+        workspaceId,
+        acceptedTurnId,
+        source.effectiveSource,
+      );
+    }
     if (source.effectiveSource === "disabled") return null;
     const [row] =
       source.effectiveSource === "organization"
@@ -29529,7 +29629,7 @@ export async function getCodexRotationSettings(
             .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
             .limit(1);
     if (row && source.effectiveSource === "organization") {
-      const accounts = await listCodexAccountStatuses(scopedDb, workspaceId);
+      const accounts = await listCodexAccountStatuses(scopedDb, workspaceId, acceptedTurnId);
       return {
         ...row,
         activeCredentialId: assignedConnectionDefault(row.activeCredentialId, accounts),
@@ -79846,8 +79946,15 @@ export function buildCodexTokenResolver(
     deps = {
       ...deps,
       loadCredential: (targetDb, targetSettings, targetWorkspaceId, targetCredentialId) =>
-        loadCodexCredentialForRun(targetDb, targetSettings, targetWorkspaceId, targetCredentialId, authority),
-      recordRefresh: (targetDb, input) => recordCodexTokenRefresh(targetDb, { ...input, authority }),
+        loadCodexCredentialForRun(
+          targetDb,
+          targetSettings,
+          targetWorkspaceId,
+          targetCredentialId,
+          authority,
+        ),
+      recordRefresh: (targetDb, input) =>
+        recordCodexTokenRefresh(targetDb, { ...input, authority }),
       setStatus: (targetDb, targetWorkspaceId, status, lastError, target) =>
         setCodexCredentialStatus(targetDb, targetWorkspaceId, status, lastError, target, authority),
     };

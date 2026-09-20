@@ -84,7 +84,7 @@ const CODEX_PROVIDER_LABEL = "Codex subscription · no credits";
 // The wire shape for one Codex account (metadata only; never the secret column).
 // P2: fiveHour/weekly ride along, built from the CACHED usage columns (zero
 // provider calls, zero decrypts) so the bars render instantly off this read.
-function codexAccountJson(
+export function codexAccountJson(
   row: CodexAccountStatus,
   options: {
     appsCredentialId?: string | null;

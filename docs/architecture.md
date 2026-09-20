@@ -980,7 +980,8 @@ checks, and token materialization. A content-free guarded capture records legacy
 turns' pre-change source in immutable `codex_turn_source_bindings`; it never
 rewrites history. New work uses the new setting. Connecting accounts preserves
 the selected mode; Automatic prefers connected local accounts. Token loading and
-refresh require the exact live lease; ordinary reads remain current-source-only.
+refresh require the exact live lease. Workspace lists use current pools;
+authorized session pickers use accepted pools for waits and current pools for new work.
 Wakes follow accepted pools even after source changes. Membership, ownership,
 health, token-family CAS, and live-lease disconnect fences remain enforced.
 

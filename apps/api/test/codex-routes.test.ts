@@ -59,6 +59,78 @@ afterEach(() => {
 });
 
 describe("Codex status readiness semantics", () => {
+  test("session account metadata is authorized separately and never accepts a caller-selected turn or source", async () => {
+    const sessionId = crypto.randomUUID();
+    const account = {
+      id: crypto.randomUUID(),
+      source: "workspace",
+      label: "Accepted account",
+      status: "active",
+      isActive: true,
+      primaryUsedPercent: 15,
+      primaryResetAt: null,
+      secondaryUsedPercent: 20,
+      secondaryResetAt: null,
+      allocatorEnabled: true,
+      allocatorVersion: 1,
+      connectedBySubjectId: "secret-owner",
+      credentialEncrypted: "must-not-leak",
+    } as unknown as opengeniDb.CodexAccountStatus;
+    const authority = spyOn(opengeniDb, "getSessionAuthorityProjection").mockResolvedValue(null);
+    const slack = spyOn(opengeniDb, "getSlackInteractionSessionAccessForSession").mockResolvedValue(
+      null,
+    );
+    const projection = spyOn(opengeniDb, "getSessionCodexAccounts").mockResolvedValue({
+      accounts: [account],
+      currentAccount: account,
+      currentSelection: { credentialId: account.id, waiting: true },
+      rotation: {
+        activeCredentialId: account.id,
+        rotationEnabled: true,
+        rotationStrategy: "sharded",
+      },
+      pinnedAccountId: account.id,
+      lastAccountId: null,
+    });
+    restores.push(
+      () => authority.mockRestore(),
+      () => slack.mockRestore(),
+      () => projection.mockRestore(),
+    );
+    const path = `/v1/workspaces/${WS_A}/sessions/${sessionId}/codex-accounts`;
+    const response = await app().request(
+      `${path}?turnId=${crypto.randomUUID()}&source=organization`,
+      {
+        headers: { authorization: await bearer(WS_A, ["workspace:read", "sessions:read"]) },
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(projection).toHaveBeenCalledWith(expect.anything(), WS_A, sessionId);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      accounts: [{ id: account.id, canEnableApps: false, appsDesignated: false }],
+      currentAccount: { id: account.id },
+      currentSelection: { waiting: true },
+    });
+    expect(JSON.stringify(body)).not.toContain("must-not-leak");
+    expect(JSON.stringify(body)).not.toContain("secret-owner");
+    const calls = projection.mock.calls.length;
+    for (const permissions of [["workspace:read"], ["sessions:read"]] as Permission[][]) {
+      expect(
+        (await app().request(path, { headers: { authorization: await bearer(WS_A, permissions) } }))
+          .status,
+      ).toBe(403);
+    }
+    expect(projection.mock.calls.length).toBe(calls);
+    projection.mockResolvedValue(null);
+    expect(
+      (
+        await app().request(path, {
+          headers: { authorization: await bearer(WS_A, ["workspace:read", "sessions:read"]) },
+        })
+      ).status,
+    ).toBe(404);
+  });
   const now = new Date("2026-09-03T12:00:00.000Z");
   const healthy = {
     id: "healthy",

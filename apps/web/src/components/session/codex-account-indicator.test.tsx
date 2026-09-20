@@ -15,14 +15,73 @@ const { OpenGeniProvider } = await import("@opengeni/react");
 const { CodexAccountIndicator } = await import("./codex-account-indicator");
 afterAll(() => GlobalRegistrator.unregister());
 
+test("running accepted account remains labeled while the switcher offers only the new pool", async () => {
+  const client = Object.assign(fakeClient({}), {
+    listSessionCodexAccounts: async () => ({
+      accounts: [
+        { id: "next", label: "New workspace account", status: "active", allocatorEnabled: true },
+      ],
+      currentAccount: {
+        id: "accepted",
+        label: "Accepted organization account",
+        status: "active",
+        allocatorEnabled: true,
+      },
+      currentSelection: { credentialId: "accepted", waiting: false },
+      pinnedAccountId: null,
+      lastAccountId: "accepted",
+      activeAccountId: "next",
+      settings: { rotationEnabled: true, rotationStrategy: "sharded", activeCredentialId: "next" },
+    }),
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
+          <CodexAccountIndicator
+            workspaceId={WORKSPACE_ID}
+            sessionId="running"
+            model="codex/gpt-5.6-sol"
+            events={[]}
+          />
+        </OpenGeniProvider>,
+      ),
+    );
+    const trigger = container.querySelector("button")!;
+    expect(trigger.getAttribute("aria-label")).toContain(
+      "Current account · Accepted organization account",
+    );
+    await act(async () =>
+      trigger.dispatchEvent(
+        new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }),
+      ),
+    );
+    const choices = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map(
+      (row) => row.textContent,
+    );
+    expect(choices.some((choice) => choice?.includes("New workspace account"))).toBe(true);
+    expect(choices.some((choice) => choice?.includes("Accepted organization account"))).toBe(false);
+    expect(document.body.textContent).toContain("Use for next turn");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("shows the blocked account instead of a healthy default and permits repeating Auto", async () => {
   const calls: string[] = [];
   const client = Object.assign(fakeClient({}), {
-    getSession: async () => ({
-      codexPinnedCredentialId: null,
-      codexCurrentSelection: { credentialId: "blocked", waiting: true },
-    }),
-    listCodexAccounts: async () => ({
+    listCodexAccounts: async () => {
+      throw new Error("workspace pool must not drive a session retry picker");
+    },
+    listSessionCodexAccounts: async () => ({
+      pinnedAccountId: null,
+      lastAccountId: null,
+      currentAccount: null,
+      currentSelection: { credentialId: "blocked", waiting: true },
       accounts: [
         {
           id: "blocked",

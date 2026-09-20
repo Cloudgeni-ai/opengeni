@@ -136,6 +136,19 @@ the revised selection. Running attempts retain their lease and use the new
 preference only on a subsequent turn. Selecting the same preference again is
 allowed, including recovery of waits created before this override existed.
 
+`GET /v1/workspaces/:workspaceId/sessions/:sessionId/codex-accounts` authorizes
+the target session plus `sessions:read` and `workspace:read`. The locked session
+pointer selects the active turn and its accepted source, including legacy sidecar
+bindings; clients cannot nominate a turn or source. Retry choices use the accepted
+pool even after switching sources or disabling Codex. Running and idle sessions
+receive current-pool choices for new work, with the running accepted account
+projected separately for its label and cached usage. The response contains no
+tokens, owner subject IDs, or Apps-management grants. Workspace account lists
+remain current-source-only. SDK `listSessionCodexAccounts` and the session-scoped
+React hook consume this projection, refresh on lifecycle events, and clear stale
+metadata if authorization fails; custom hook adapters must implement the method
+instead of falling back to the workspace list.
+
 Stored legacy strategy values are normalized at every worker read to the
 effective `sharded` behavior. The old column values and API input compatibility
 remain for rollback/read compatibility, but `most_remaining`, `round_robin`,

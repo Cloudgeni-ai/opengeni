@@ -24,6 +24,7 @@ import {
   encryptEnvironmentValue,
   ensureCodexRotationSettings,
   getSessionCodexState,
+  getSessionCodexAccounts,
   heartbeatCodexCredentialLease,
   heartbeatCodexCredentialLeaseUntil,
   listCodexAccountStatuses,
@@ -600,6 +601,33 @@ describe("credential allocator atomic Codex credential allocation", () => {
       )?.id,
     ).toBe(organization!.id);
     expect((await acquire(dbA, ws!, await seedTurn(ws!, 2))).credentialId).toBe(local);
+    const fence = await attemptFenceForTurn(turnId);
+    const projection = await getSessionCodexAccounts(dbA, ws!.workspaceId, fence.sessionId);
+    expect(projection?.currentAccount?.id).toBe(organization!.id);
+    expect(projection?.accounts.map((account) => account.id)).toEqual([local]);
+    expect(projection?.currentSelection).toEqual({
+      credentialId: organization!.id,
+      waiting: false,
+    });
+    const [turn] = await admin`select trigger_event_id from session_turns where id = ${turnId}`;
+    expect(
+      (
+        await applySessionTurnSettlement(dbA, ws!.workspaceId, {
+          sessionId: fence.sessionId,
+          turnId,
+          attemptId: fence.attemptId,
+          triggerEventId: turn!.trigger_event_id,
+          turnStatus: "completed",
+          sessionStatus: "idle",
+          activeTurnId: null,
+          events: [{ type: "turn.completed", payload: {} }],
+        })
+      ).action,
+    ).toBe("settled");
+    const settledProjection = await getSessionCodexAccounts(dbA, ws!.workspaceId, fence.sessionId);
+    expect(settledProjection?.currentAccount).toBeNull();
+    expect(settledProjection?.currentSelection).toBeNull();
+    expect(settledProjection?.accounts.map((account) => account.id)).toEqual([local]);
   });
 
   for (const policy of ["sharded", "manual", "rotation_off"] as const) {
@@ -875,10 +903,23 @@ describe("credential allocator atomic Codex credential allocation", () => {
     });
   }
 
-  async function pinnedCapacityWait() {
+  async function pinnedCapacityWait(source: "workspace" | "organization" = "workspace") {
     const [ws] = await freshAccount();
-    const exhausted = await connectCredential(ws!, "exhausted@example.test");
-    const healthy = await connectCredential(ws!, "healthy@example.test");
+    let exhausted: string;
+    let healthy: string;
+    if (source === "workspace") {
+      exhausted = await connectCredential(ws!, "exhausted@example.test");
+      healthy = await connectCredential(ws!, "healthy@example.test");
+    } else {
+      const rows = await admin<{ id: string }[]>`insert into codex_subscription_credentials
+        (account_id, organization_id, authority_scope, credential_encrypted, chatgpt_account_id, status)
+        values (${ws!.accountId}, ${ws!.accountId}, 'organization', 'ciphertext', 'blocked-org', 'active'),
+          (${ws!.accountId}, ${ws!.accountId}, 'organization', 'ciphertext', 'healthy-org', 'active') returning id`;
+      exhausted = rows[0]!.id;
+      healthy = rows[1]!.id;
+      await admin`insert into organization_codex_rotation_settings (account_id, active_credential_id, rotation_enabled)
+        values (${ws!.accountId}, ${exhausted}, true)`;
+    }
     const turnId = await seedTurn(ws!, 1);
     const fence = await attemptFenceForTurn(turnId);
     await withSessionCodexCapacityMutation(
@@ -932,6 +973,48 @@ describe("credential allocator atomic Codex credential allocation", () => {
     });
     if (armed.action !== "waiting") throw new Error("Expected capacity wait");
     return { ws: ws!, turnId, fence, exhausted, healthy, waiter: armed.waiter };
+  }
+
+  for (const source of ["workspace", "organization"] as const) {
+    for (const disabled of [false, true]) {
+      test(`session retry projection retains ${source} pool after ${disabled ? "Disabled" : "opposite pool"} drift`, async () => {
+        if (!available) return;
+        const { ws, fence, turnId, exhausted, healthy } = await pinnedCapacityWait(source);
+        // A source-less accepted policy must use the server-captured sidecar too.
+        await admin`update session_turns set metadata = metadata #- '{codexCredentialPolicySnapshotV1,source}' where id = ${turnId}`;
+        let otherCredential: string;
+        if (source === "organization") {
+          otherCredential = await connectCredential(ws, "new-local");
+        } else {
+          const [row] = await admin<{ id: string }[]>`insert into codex_subscription_credentials
+            (account_id, organization_id, authority_scope, credential_encrypted, chatgpt_account_id, status)
+            values (${ws.accountId}, ${ws.accountId}, 'organization', 'ciphertext', 'new-org', 'active') returning id`;
+          otherCredential = row!.id;
+          await admin`insert into organization_codex_rotation_settings (account_id, active_credential_id, rotation_enabled)
+            values (${ws.accountId}, ${otherCredential}, true)`;
+        }
+        await setWorkspaceCodexSubscriptionMode(dbA, {
+          ...ws,
+          subjectId: null,
+          mode: disabled ? "disabled" : source === "workspace" ? "organization" : "workspace",
+        });
+        const projection = await getSessionCodexAccounts(dbA, ws.workspaceId, fence.sessionId);
+        expect(new Set(projection?.accounts.map((account) => account.id))).toEqual(
+          new Set([exhausted, healthy]),
+        );
+        expect(projection?.currentAccount?.id).toBe(exhausted);
+        expect(projection?.currentSelection).toEqual({ credentialId: exhausted, waiting: true });
+        expect(projection?.pinnedAccountId).toBe(exhausted);
+        expect(projection?.rotation?.rotationEnabled).toBe(true);
+        expect(
+          (await listCodexAccountStatuses(dbA, ws.workspaceId)).map((account) => account.id),
+        ).toEqual(disabled ? [] : [otherCredential]);
+        const [foreign] = await freshAccount();
+        expect(
+          await getSessionCodexAccounts(dbA, foreign!.workspaceId, fence.sessionId),
+        ).toBeNull();
+      });
+    }
   }
 
   for (const selection of [
