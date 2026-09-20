@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { requireCanary } from "./ope534-rotation-canary-evidence";
+import { requireCanary } from "./sandbox-rotation-canary-evidence";
 
 const REPOSITORY = "ghcr.io/cloudgeni-ai/opengeni-sandbox";
 const BASE = "https://ghcr.io/v2/cloudgeni-ai/opengeni-sandbox";
@@ -140,7 +140,7 @@ async function readBounded(
     } catch {
       // Transport errors may contain signed blob URLs. Do not retain them as
       // error causes or expose them in the canary test runner's output.
-      throw new Error("OPE534 canary: canonical registry transport failed");
+      throw new Error("Sandbox rotation canary: canonical registry transport failed");
     }
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       const location = response.headers.get("location");
@@ -151,12 +151,12 @@ async function readBounded(
     }
     if (!response.ok || !response.body) {
       await response.body?.cancel();
-      throw new Error("OPE534 canary: canonical registry object is unavailable");
+      throw new Error("Sandbox rotation canary: canonical registry object is unavailable");
     }
     const declared = response.headers.get("content-length");
     if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > MAX_BYTES)) {
       await response.body.cancel();
-      throw new Error("OPE534 canary: registry object exceeds bounded metadata size");
+      throw new Error("Sandbox rotation canary: registry object exceeds bounded metadata size");
     }
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
@@ -172,28 +172,33 @@ async function readBounded(
       }
     } catch {
       streamFailures.push(
-        new Error("OPE534 canary: registry metadata stream failed or exceeded its bound"),
+        new Error("Sandbox rotation canary: registry metadata stream failed or exceeded its bound"),
       );
     } finally {
       try {
         await reader.cancel();
       } catch {
-        streamFailures.push(new Error("OPE534 canary: registry metadata stream cleanup failed"));
+        streamFailures.push(
+          new Error("Sandbox rotation canary: registry metadata stream cleanup failed"),
+        );
       }
     }
     if (streamFailures.length === 1) throw streamFailures[0];
     if (streamFailures.length > 1) {
-      throw new AggregateError(streamFailures, "OPE534 canary: registry stream and cleanup failed");
+      throw new AggregateError(
+        streamFailures,
+        "Sandbox rotation canary: registry stream and cleanup failed",
+      );
     }
     return Buffer.concat(chunks);
   }
-  throw new Error("OPE534 canary: registry redirect did not resolve");
+  throw new Error("Sandbox rotation canary: registry redirect did not resolve");
 }
 
 function parseRegistryJson(bytes: Buffer): unknown {
   try {
     return JSON.parse(bytes.toString("utf8")) as unknown;
   } catch {
-    throw new Error("OPE534 canary: invalid registry metadata JSON");
+    throw new Error("Sandbox rotation canary: invalid registry metadata JSON");
   }
 }

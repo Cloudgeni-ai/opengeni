@@ -5,7 +5,7 @@ import {
   assertCompletedTurnPreservedSupervision,
   assertSettledCanarySupervision,
   type CanarySupervisionProjection,
-} from "./ope534-rotation-canary-supervision";
+} from "./sandbox-rotation-canary-supervision";
 
 const invocationId = "809b79db-cc2b-4b65-9fa3-89e2f4735665";
 const otherId = "10ee7d7d-f457-4419-89ca-a084034a0e61";
@@ -79,19 +79,21 @@ function router(row: CanarySupervisionProjection): ModalRouterProviderCommand {
   return row.providerCommand;
 }
 
-describe("OPE534 launch readiness", () => {
+describe("Sandbox rotation launch readiness", () => {
   const ready = { enabled: true, databaseReady: true, backend: "modal" };
   test("requires integrated launch flag and actual DB readiness", () => {
     expect(() => assertCanarySupervisionReady(ready)).not.toThrow();
   });
   for (const patch of [{ enabled: false }, { databaseReady: false }, { backend: "docker" }]) {
     test(`rejects ${Object.keys(patch)[0]}`, () => {
-      expect(() => assertCanarySupervisionReady({ ...ready, ...patch })).toThrow("OPE534 canary:");
+      expect(() => assertCanarySupervisionReady({ ...ready, ...patch })).toThrow(
+        "Sandbox rotation canary:",
+      );
     });
   }
 });
 
-describe("OPE534 completed turns preserve adoption", () => {
+describe("Sandbox rotation completed turns preserve adoption", () => {
   test("allows the uncancelled original running command", () => {
     expect(() => assertCompletedTurnPreservedSupervision(original(), running())).not.toThrow();
   });
@@ -151,7 +153,7 @@ describe("OPE534 completed turns preserve adoption", () => {
       const row = running();
       mutate(row);
       expect(() => assertCompletedTurnPreservedSupervision(original(), row)).toThrow(
-        "OPE534 canary:",
+        "Sandbox rotation canary:",
       );
     });
   test("rejects missing projection", () => {
@@ -159,7 +161,7 @@ describe("OPE534 completed turns preserve adoption", () => {
   });
 });
 
-describe("OPE534 invocation-bound dual proof", () => {
+describe("Sandbox rotation invocation-bound dual proof", () => {
   test("accepts leader137 independently of both provider0 streams without leaking control capability", () => {
     const proof = assertSettledCanarySupervision(original(), settled(), rotationAt, deadlineAt);
     expect(proof).toMatchObject({
@@ -362,7 +364,7 @@ describe("OPE534 invocation-bound dual proof", () => {
       const row = settled();
       mutate(row);
       expect(() => assertSettledCanarySupervision(original(), row, rotationAt, deadlineAt)).toThrow(
-        "OPE534 canary:",
+        "Sandbox rotation canary:",
       );
     });
   test("rejects missing projection and invalid rotation clock", () => {

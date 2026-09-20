@@ -4,15 +4,15 @@ import {
   assertSupervisedCanaryCommand,
   canaryConfiguration,
   type RotationEvidence,
-} from "./ope534-rotation-canary-evidence";
+} from "./sandbox-rotation-canary-evidence";
 
 const env = {
-  OPENGENI_OPE534_CANARY: "1",
-  OPENGENI_OPE534_CANARY_AUTHORIZATION: "ISOLATED_MODAL_CANARY_ONLY",
-  OPENGENI_OPE534_SOURCE_SHA: "a".repeat(40),
-  OPENGENI_OPE534_IMAGE_REF: `ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:${"b".repeat(64)}`,
-  OPENGENI_OPE534_NATIVE_POSTGRES: "LOCAL_DISPOSABLE_55434",
-  OPENGENI_OPE534_MODAL_ENVIRONMENT: "ope534-canary-12345678",
+  OPENGENI_SANDBOX_ROTATION_CANARY: "1",
+  OPENGENI_SANDBOX_ROTATION_CANARY_AUTHORIZATION: "ISOLATED_MODAL_CANARY_ONLY",
+  OPENGENI_SANDBOX_ROTATION_SOURCE_SHA: "a".repeat(40),
+  OPENGENI_SANDBOX_ROTATION_IMAGE_REF: `ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:${"b".repeat(64)}`,
+  OPENGENI_SANDBOX_ROTATION_NATIVE_POSTGRES: "LOCAL_DISPOSABLE_55434",
+  OPENGENI_SANDBOX_ROTATION_MODAL_ENVIRONMENT: "sandbox-rotation-canary-12345678",
   MODAL_TOKEN_ID: "test-only",
   MODAL_TOKEN_SECRET: "test-only",
 };
@@ -43,7 +43,7 @@ const valid = (): RotationEvidence => ({
   restoredHashes: { baseline: "a".repeat(64), later: "b".repeat(64) },
 });
 
-describe("OPE534 supervision admission", () => {
+describe("Sandbox rotation supervision admission", () => {
   const invocationId = "809b79db-cc2b-4b65-9fa3-89e2f4735665";
   const supervision = {
     protocol: "native-subreaper-v1",
@@ -80,33 +80,33 @@ describe("OPE534 supervision admission", () => {
     ],
   ] as const)
     test(`rejects ${name}`, () => {
-      expect(() => assertSupervisedCanaryCommand(command)).toThrow("OPE534 canary:");
+      expect(() => assertSupervisedCanaryCommand(command)).toThrow("Sandbox rotation canary:");
     });
 });
 
-describe("OPE534 isolated canary admission", () => {
+describe("Sandbox rotation isolated canary admission", () => {
   test("accepts only explicit isolated immutable configuration", () => {
-    expect(canaryConfiguration(env).sourceSha).toBe(env.OPENGENI_OPE534_SOURCE_SHA);
+    expect(canaryConfiguration(env).sourceSha).toBe(env.OPENGENI_SANDBOX_ROTATION_SOURCE_SHA);
   });
   for (const patch of [
-    { OPENGENI_OPE534_CANARY: "0" },
-    { OPENGENI_OPE534_CANARY_AUTHORIZATION: "" },
-    { OPENGENI_OPE534_SOURCE_SHA: "main" },
-    { OPENGENI_OPE534_IMAGE_REF: "sandbox:latest" },
-    { OPENGENI_OPE534_MODAL_ENVIRONMENT: "staging" },
+    { OPENGENI_SANDBOX_ROTATION_CANARY: "0" },
+    { OPENGENI_SANDBOX_ROTATION_CANARY_AUTHORIZATION: "" },
+    { OPENGENI_SANDBOX_ROTATION_SOURCE_SHA: "main" },
+    { OPENGENI_SANDBOX_ROTATION_IMAGE_REF: "sandbox:latest" },
+    { OPENGENI_SANDBOX_ROTATION_MODAL_ENVIRONMENT: "staging" },
     { OPENGENI_TEST_POSTGRES_ADMIN_URL: "postgres://localhost/shared" },
     { OPENGENI_TEST_POSTGRES_APP_URL: "postgres://localhost/shared" },
     { MODAL_TOKEN_SECRET: "" },
-    { OPENGENI_OPE534_IMAGE_REF: `example.invalid/sandbox@sha256:${"b".repeat(64)}` },
-    { OPENGENI_OPE534_NATIVE_POSTGRES: "" },
-    { OPENGENI_OPE534_NATIVE_POSTGRES: "staging" },
+    { OPENGENI_SANDBOX_ROTATION_IMAGE_REF: `example.invalid/sandbox@sha256:${"b".repeat(64)}` },
+    { OPENGENI_SANDBOX_ROTATION_NATIVE_POSTGRES: "" },
+    { OPENGENI_SANDBOX_ROTATION_NATIVE_POSTGRES: "staging" },
   ])
     test(`rejects ${Object.keys(patch)[0]}`, () => {
-      expect(() => canaryConfiguration({ ...env, ...patch })).toThrow("OPE534 canary:");
+      expect(() => canaryConfiguration({ ...env, ...patch })).toThrow("Sandbox rotation canary:");
     });
 });
 
-describe("OPE534 rotation acceptance", () => {
+describe("Sandbox rotation rotation acceptance", () => {
   test("accepts a timely positively settled and restored rotation", () => {
     expect(() => assertRotationEvidence(valid())).not.toThrow();
   });
@@ -132,6 +132,8 @@ describe("OPE534 rotation acceptance", () => {
   ];
   for (const [name, patch] of cases)
     test(`rejects ${name}`, () => {
-      expect(() => assertRotationEvidence({ ...valid(), ...patch })).toThrow("OPE534 canary:");
+      expect(() => assertRotationEvidence({ ...valid(), ...patch })).toThrow(
+        "Sandbox rotation canary:",
+      );
     });
 });

@@ -599,7 +599,7 @@ describe("retained-process terminal-owner reconciliation", () => {
         expectedInstanceId: instanceId,
         operation,
       });
-      const directory = mkdtempSync(join(tmpdir(), "ope534-launch-crash-"));
+      const directory = mkdtempSync(join(tmpdir(), "sandbox_rotation-launch-crash-"));
       const binary = join(directory, "supervisor");
       const marker = join(directory, "user-code-ran");
       const source = resolve(

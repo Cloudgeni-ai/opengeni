@@ -5,15 +5,15 @@ import { supervisedCommandProtocolReady } from "@opengeni/db/retained-provider-c
 import {
   acquireCanaryDatabase,
   NATIVE_CANARY_DATABASE_OPT_IN,
-} from "./ope534-rotation-canary-database";
-import { withCanaryFixture } from "./ope534-rotation-canary-cleanup";
+} from "./sandbox-rotation-canary-database";
+import { withCanaryFixture } from "./sandbox-rotation-canary-cleanup";
 
 test("canary DB rejects a caller-supplied target before connecting", async () => {
   await expect(
     acquireCanaryDatabase({ OPENGENI_TEST_POSTGRES_ADMIN_URL: "postgres://remote/shared" }),
   ).rejects.toThrow("external database overrides");
   await expect(
-    acquireCanaryDatabase({ OPENGENI_OPE534_NATIVE_POSTGRES: "staging" }),
+    acquireCanaryDatabase({ OPENGENI_SANDBOX_ROTATION_NATIVE_POSTGRES: "staging" }),
   ).rejects.toThrow("LOCAL_DISPOSABLE_55434");
 });
 
@@ -30,19 +30,23 @@ test("canary DB rejects Docker fallback even with ambient role credentials", asy
   await expect(acquireCanaryDatabase({})).rejects.toThrow("LOCAL_DISPOSABLE_55434");
 });
 
-test.skipIf(process.env.OPENGENI_OPE534_NATIVE_POSTGRES !== NATIVE_CANARY_DATABASE_OPT_IN)(
-  "OPE534 native fixture migrates unique DB, restricts app role, and cleans exact targets",
+test.skipIf(
+  process.env.OPENGENI_SANDBOX_ROTATION_NATIVE_POSTGRES !== NATIVE_CANARY_DATABASE_OPT_IN,
+)(
+  "Sandbox rotation native fixture migrates unique DB, restricts app role, and cleans exact targets",
   async () => {
     const { databaseName, appRole } = await withCanaryFixture(
       () =>
-        acquireCanaryDatabase({ OPENGENI_OPE534_NATIVE_POSTGRES: NATIVE_CANARY_DATABASE_OPT_IN }),
+        acquireCanaryDatabase({
+          OPENGENI_SANDBOX_ROTATION_NATIVE_POSTGRES: NATIVE_CANARY_DATABASE_OPT_IN,
+        }),
       async (fixture, defer) => {
         const fixtureDatabaseName = new URL(fixture.adminUrl).pathname.slice(1);
         const app = postgres(fixture.appUrl, { max: 1 });
         defer("fixture test app client", () => app.end());
         const client = createDb(fixture.appUrl);
         defer("readiness test client", () => client.close());
-        expect(fixtureDatabaseName).toMatch(/^og_ope534_rotation_canary_[a-f0-9]{32}$/);
+        expect(fixtureDatabaseName).toMatch(/^og_rotation_canary_[a-f0-9]{32}$/);
         const [identity] = await app`select current_user as login, current_database() as database,
         (select rolsuper or rolbypassrls or rolcreaterole or rolcreatedb from pg_roles where rolname=current_user) as privileged`;
         expect(identity).toMatchObject({

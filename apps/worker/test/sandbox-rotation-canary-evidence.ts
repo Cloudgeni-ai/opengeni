@@ -1,6 +1,6 @@
 /** Pure acceptance checks shared by the opt-in provider harness and cheap unit tests. */
 export function requireCanary(condition: unknown, message: string): asserts condition {
-  if (!condition) throw new Error(`OPE534 canary: ${message}`);
+  if (!condition) throw new Error(`Sandbox rotation canary: ${message}`);
 }
 
 /** Only non-secret descriptor identity may enter canary output. The nonce is a
@@ -46,29 +46,29 @@ export function assertSupervisedCanaryCommand(value: unknown): {
 }
 
 export function canaryConfiguration(env: Record<string, string | undefined>) {
-  requireCanary(env.OPENGENI_OPE534_CANARY === "1", "explicit live opt-in is required");
+  requireCanary(env.OPENGENI_SANDBOX_ROTATION_CANARY === "1", "explicit live opt-in is required");
   requireCanary(
-    env.OPENGENI_OPE534_CANARY_AUTHORIZATION === "ISOLATED_MODAL_CANARY_ONLY",
+    env.OPENGENI_SANDBOX_ROTATION_CANARY_AUTHORIZATION === "ISOLATED_MODAL_CANARY_ONLY",
     "isolated provider authorization is required",
   );
-  const sourceSha = env.OPENGENI_OPE534_SOURCE_SHA ?? "";
-  const image = env.OPENGENI_OPE534_IMAGE_REF ?? "";
-  const environment = env.OPENGENI_OPE534_MODAL_ENVIRONMENT ?? "";
+  const sourceSha = env.OPENGENI_SANDBOX_ROTATION_SOURCE_SHA ?? "";
+  const image = env.OPENGENI_SANDBOX_ROTATION_IMAGE_REF ?? "";
+  const environment = env.OPENGENI_SANDBOX_ROTATION_MODAL_ENVIRONMENT ?? "";
   requireCanary(/^[a-f0-9]{40}$/.test(sourceSha), "pin the integrated source SHA");
   requireCanary(
     /^ghcr\.io\/cloudgeni-ai\/opengeni-sandbox@sha256:[a-f0-9]{64}$/.test(image),
     "pin the canonical GHCR sandbox image digest",
   );
   requireCanary(
-    /^ope534-canary-[a-z0-9-]{8,48}$/.test(environment),
-    "use a pre-provisioned dedicated ope534-canary-* Modal environment",
+    /^sandbox-rotation-canary-[a-z0-9-]{8,48}$/.test(environment),
+    "use a pre-provisioned dedicated sandbox-rotation-canary-* Modal environment",
   );
   requireCanary(
     !env.OPENGENI_TEST_POSTGRES_ADMIN_URL && !env.OPENGENI_TEST_POSTGRES_APP_URL,
     "external database overrides are forbidden; use the isolated native PG17 fixture",
   );
   requireCanary(
-    env.OPENGENI_OPE534_NATIVE_POSTGRES === "LOCAL_DISPOSABLE_55434",
+    env.OPENGENI_SANDBOX_ROTATION_NATIVE_POSTGRES === "LOCAL_DISPOSABLE_55434",
     "native database opt-in must name LOCAL_DISPOSABLE_55434; Docker fallback is disabled",
   );
   requireCanary(

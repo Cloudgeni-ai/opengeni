@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { verifyCanaryImageProvenance } from "./ope534-rotation-canary-provenance";
+import { verifyCanaryImageProvenance } from "./sandbox-rotation-canary-provenance";
 
 const sha = "a".repeat(40);
 const repository = "ghcr.io/cloudgeni-ai/opengeni-sandbox";
@@ -189,8 +189,8 @@ test("preserves sanitized stream and cleanup failures together", async () => {
   expect(failure).toBeInstanceOf(AggregateError);
   const errors = (failure as AggregateError).errors as Error[];
   expect(errors.map((error) => error.message)).toEqual([
-    "OPE534 canary: registry metadata stream failed or exceeded its bound",
-    "OPE534 canary: registry metadata stream cleanup failed",
+    "Sandbox rotation canary: registry metadata stream failed or exceeded its bound",
+    "Sandbox rotation canary: registry metadata stream cleanup failed",
   ]);
   expect(String(failure)).not.toContain("secret-cleanup-detail");
 });

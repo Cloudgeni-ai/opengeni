@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { runCanaryCleanupStages, withCanaryFixture } from "./ope534-rotation-canary-cleanup";
+import { runCanaryCleanupStages, withCanaryFixture } from "./sandbox-rotation-canary-cleanup";
 
 test("fixture release covers initialization failure before any resource registration", async () => {
   const original = new Error("settings initialization failed");

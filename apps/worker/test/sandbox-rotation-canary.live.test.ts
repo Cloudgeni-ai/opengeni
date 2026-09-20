@@ -1,10 +1,10 @@
 /**
- * OPE534 integration acceptance, deliberately OFF in ordinary test runs.
+ * Sandbox rotation integration acceptance, deliberately OFF in ordinary test runs.
  *
  * Prerequisites (parent must integrate the prevention fix first):
  * - pinned repository Bun + installed dependencies; authorized disposable PG17
  *   with pgvector at 127.0.0.1:55434, postgres trust login. Select it with
- *   OPENGENI_OPE534_NATIVE_POSTGRES=LOCAL_DISPOSABLE_55434. The fixture allocates
+ *   OPENGENI_SANDBOX_ROTATION_NATIVE_POSTGRES=LOCAL_DISPOSABLE_55434. The fixture allocates
  *   a unique migrated database and restricted app role. Docker fallback and
  *   arbitrary external DB overrides are forbidden.
  * - integrated supervision readiness migration and compatible readers deployed
@@ -15,17 +15,17 @@
  *   native supervisor). Before allocation, verify the immutable OCI config's
  *   source/revision labels through the index/manifest/config digest chain. This
  *   proves embedded source identity, not signed build attestation.
- * - pre-provisioned dedicated Modal environment ope534-canary-<unique suffix>;
+ * - pre-provisioned dedicated Modal environment sandbox-rotation-canary-<unique suffix>;
  *   MODAL_TOKEN_ID/MODAL_TOKEN_SECRET authorized for it. Never staging/main.
  *
  * Run only after explicit billable-canary authorization, from the checkout root:
- * OPENGENI_OPE534_CANARY=1
- * OPENGENI_OPE534_CANARY_AUTHORIZATION=ISOLATED_MODAL_CANARY_ONLY
- * OPENGENI_OPE534_SOURCE_SHA=<integrated 40-character HEAD>
- * OPENGENI_OPE534_IMAGE_REF=ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:<digest>
- * OPENGENI_OPE534_MODAL_ENVIRONMENT=ope534-canary-<unique suffix>
- * OPENGENI_OPE534_NATIVE_POSTGRES=LOCAL_DISPOSABLE_55434
- * bun test apps/worker/test/ope534-rotation-canary.live.test.ts
+ * OPENGENI_SANDBOX_ROTATION_CANARY=1
+ * OPENGENI_SANDBOX_ROTATION_CANARY_AUTHORIZATION=ISOLATED_MODAL_CANARY_ONLY
+ * OPENGENI_SANDBOX_ROTATION_SOURCE_SHA=<integrated 40-character HEAD>
+ * OPENGENI_SANDBOX_ROTATION_IMAGE_REF=ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:<digest>
+ * OPENGENI_SANDBOX_ROTATION_MODAL_ENVIRONMENT=sandbox-rotation-canary-<unique suffix>
+ * OPENGENI_SANDBOX_ROTATION_NATIVE_POSTGRES=LOCAL_DISPOSABLE_55434
+ * bun test apps/worker/test/sandbox-rotation-canary.live.test.ts
  *
  * This exercises canonical route/adoption/settlement/resume and composite reaper
  * APIs; it does not run inference, Temporal, or an HTTP frontend. Only fixture
@@ -74,24 +74,24 @@ import {
   assertSupervisedCanaryCommand,
   canaryConfiguration,
   requireCanary,
-} from "./ope534-rotation-canary-evidence";
-import { acquireCanaryDatabase } from "./ope534-rotation-canary-database";
-import { runCanaryCleanupStages, withCanaryFixture } from "./ope534-rotation-canary-cleanup";
-import { verifyCanaryImageProvenance } from "./ope534-rotation-canary-provenance";
+} from "./sandbox-rotation-canary-evidence";
+import { acquireCanaryDatabase } from "./sandbox-rotation-canary-database";
+import { runCanaryCleanupStages, withCanaryFixture } from "./sandbox-rotation-canary-cleanup";
+import { verifyCanaryImageProvenance } from "./sandbox-rotation-canary-provenance";
 import {
   assertCanarySupervisionReady,
   assertCompletedTurnPreservedSupervision,
   assertSettledCanarySupervision,
   type CanarySupervisionProjection,
-} from "./ope534-rotation-canary-supervision";
+} from "./sandbox-rotation-canary-supervision";
 
 const LIFETIME_SECONDS = 600;
 const ROTATION_LEAD_MS = 180_000;
 const REAPER_MS = 5_000;
-const live = process.env.OPENGENI_OPE534_CANARY === "1";
+const live = process.env.OPENGENI_SANDBOX_ROTATION_CANARY === "1";
 
 test.skipIf(!live)(
-  "OPE534: adopted nonTTY server, later writes, two real deadline rotations",
+  "Sandbox rotation: adopted nonTTY server, later writes, two real deadline rotations",
   async () => {
     const config = canaryConfiguration(process.env);
     requireCanary(
@@ -110,7 +110,7 @@ test.skipIf(!live)(
     const markerHashes = await withCanaryFixture(acquireCanaryDatabase, async (shared, defer) => {
       requireCanary(
         new URL(shared.adminUrl).hostname === "127.0.0.1" &&
-          new URL(shared.adminUrl).pathname.startsWith("/og_ope534_rotation_canary_"),
+          new URL(shared.adminUrl).pathname.startsWith("/og_sandbox_rotation_rotation_canary_"),
         "unexpected database attribution",
       );
       const client = createDb(shared.appUrl);
@@ -124,7 +124,7 @@ test.skipIf(!live)(
           deploymentRevision: config.sourceSha,
           sandboxBackend: "modal",
           sandboxOwnershipEnabled: true,
-          modalAppName: `ope534-canary-${runId}`,
+          modalAppName: `sandbox-rotation-canary-${runId}`,
           modalEnvironment: config.environment,
           modalTokenId: process.env.MODAL_TOKEN_ID!,
           modalTokenSecret: process.env.MODAL_TOKEN_SECRET!,
@@ -151,7 +151,9 @@ test.skipIf(!live)(
         databaseReady: await supervisedCommandProtocolReady(db),
         backend: settings.sandboxBackend,
       });
-      const observability = createObservability(settings, { component: "ope534-isolated-canary" });
+      const observability = createObservability(settings, {
+        component: "sandbox_rotation-isolated-canary",
+      });
       const services = { db, settings, observability, objectStorage: null };
       const activities = createSandboxLeaseActivities(
         async (): Promise<ActivityServices> => ({
@@ -219,17 +221,17 @@ test.skipIf(!live)(
       try {
         const [account] = await admin<
           { id: string }[]
-        >`insert into managed_accounts(name) values (${`ope534-${runId}`}) returning id`;
+        >`insert into managed_accounts(name) values (${`sandbox_rotation-${runId}`}) returning id`;
         const [workspace] = await admin<
           { id: string }[]
-        >`insert into workspaces(account_id,name) values (${account!.id},${`ope534-${runId}`}) returning id`;
+        >`insert into workspaces(account_id,name) values (${account!.id},${`sandbox_rotation-${runId}`}) returning id`;
         workspaceId = workspace!.id;
         const accountId = account!.id;
         await admin`insert into workspace_inference_controls(workspace_id,account_id) values (${workspaceId},${accountId})`;
         const session = await createSession(db, {
           accountId,
           workspaceId,
-          initialMessage: "OPE534 isolated acceptance",
+          initialMessage: "Sandbox rotation isolated acceptance",
           resources: [],
           metadata: {},
           model: "scripted-model",
@@ -380,7 +382,7 @@ test.skipIf(!live)(
         async function writeMarker(route: RoutingSandboxSession, name: string) {
           const value = `${runId}:${name}`;
           // All interpolated values are internally generated UUIDs/fixed labels.
-          const path = `/workspace/ope534-${name}`;
+          const path = `/workspace/sandbox_rotation-${name}`;
           await command(route, `printf '%s' '${value}' > '${path}'`);
           hashes[path] = createHash("sha256").update(value).digest("hex");
         }
@@ -494,7 +496,7 @@ test.skipIf(!live)(
             if (Date.now() >= nextProgressAt) {
               console.info(
                 JSON.stringify({
-                  kind: "ope534.awaiting-rotation",
+                  kind: "sandbox_rotation.awaiting-rotation",
                   runId,
                   cycle,
                   instanceId: before.instanceId,
@@ -576,7 +578,7 @@ test.skipIf(!live)(
           evidence.push(receipt);
           console.info(
             JSON.stringify({
-              kind: "ope534.rotation",
+              kind: "sandbox_rotation.rotation",
               runId,
               sourceSha: config.sourceSha,
               image: config.image,
@@ -607,7 +609,7 @@ test.skipIf(!live)(
               await admin`select id,state,lease_epoch,provider_instance_id,reconcile_proof_outcome,last_reconcile_outcome,settlement_reason,settled_at from sandbox_retained_processes where workspace_id=${workspaceId}`;
             console.error(
               JSON.stringify({
-                kind: "ope534.failed",
+                kind: "sandbox_rotation.failed",
                 runId,
                 sourceSha: config.sourceSha,
                 leases,
@@ -615,7 +617,9 @@ test.skipIf(!live)(
               }),
             );
           } catch {
-            console.error(JSON.stringify({ kind: "ope534.diagnostics-unavailable", runId }));
+            console.error(
+              JSON.stringify({ kind: "sandbox_rotation.diagnostics-unavailable", runId }),
+            );
           }
         }
         throw error;
@@ -624,7 +628,7 @@ test.skipIf(!live)(
     });
     console.info(
       JSON.stringify({
-        kind: "ope534.accepted",
+        kind: "sandbox_rotation.accepted",
         runId,
         sourceSha: config.sourceSha,
         image: config.image,

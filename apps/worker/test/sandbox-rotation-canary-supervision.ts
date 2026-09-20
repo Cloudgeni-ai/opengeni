@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { CommandSupervisionReceipt, ModalRouterProviderCommand } from "@opengeni/contracts";
 import type { sandboxRetainedProcesses, sessionBackgroundCommands } from "@opengeni/db/schema";
-import { requireCanary } from "./ope534-rotation-canary-evidence";
+import { requireCanary } from "./sandbox-rotation-canary-evidence";
 
 /** The exact 0496 projection, not an adapter-generated terminal assertion. */
 export type CanarySupervisionProjection = Pick<
