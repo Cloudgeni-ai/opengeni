@@ -247,7 +247,9 @@ END $binding_path$;
 -- attribution and revocation behavior in the installed resolver.
 DO $resolver$
 DECLARE definition text; anchor text := E'  IF reason IS NULL THEN\n    SELECT authority_snapshot.* INTO snapshot';
-  insertion text := $gate$
+  insertion text;
+BEGIN
+  insertion := $gate$
   -- 0492 exact accepted account gate, inside the canonical lifecycle locks.
   IF reason IS NULL THEN
     SELECT value INTO exact_binding FROM jsonb_array_elements(turn_row.mcp_account_bindings)
@@ -298,15 +300,15 @@ DECLARE definition text; anchor text := E'  IF reason IS NULL THEN\n    SELECT a
       reason := 'accepted_account_binding_required';
     END IF;
   END IF;
-$gate$;
-BEGIN
+  IF reason IS NULL THEN
+    SELECT authority_snapshot.* INTO snapshot$gate$;
   definition := pg_get_functiondef('resolve_accepted_connection_use(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,uuid,text,text,text,text)'::regprocedure);
   IF (length(definition)-length(replace(definition,anchor,'')))/length(anchor) <> 1
     OR strpos(definition,'  scheduled_run_id uuid;') = 0 THEN
     RAISE EXCEPTION '0492 connection resolver prerequisite drift' USING ERRCODE = '55000';
   END IF;
   definition := replace(definition,'  scheduled_run_id uuid;',E'  scheduled_run_id uuid;\n  exact_binding jsonb;');
-  EXECUTE replace(definition,anchor,insertion || anchor);
+  EXECUTE replace(definition,anchor,insertion);
 END $resolver$;
 
 -- Changing RETURNS TABLE requires recreation. Preserve the installed body and
