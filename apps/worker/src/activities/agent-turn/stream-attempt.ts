@@ -224,7 +224,7 @@ export type TurnStreamAttemptDeps = {
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
   turnExecutionPolicy: TurnExecutionPolicyV1;
-  turn: { executionGeneration: number; model: string };
+  turn: { executionGeneration: number; model: string; source?: string };
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>;
   humanInputResume: Awaited<ReturnType<typeof getHumanInputResumeForEvent>>;
   attachPendingUpdatesAfterOpenSuffix: () => Promise<boolean>;
@@ -1749,6 +1749,7 @@ export async function runTurnStreamAttempt(
     return claimedResult({ status: "cancelled" });
   }
   if (
+    turn.source !== "compaction" &&
     generateSessionTitleInParallel &&
     runtime.generateSessionTitle &&
     !runtimeCancellationSignal.aborted
@@ -1920,6 +1921,27 @@ export async function runTurnStreamAttempt(
         await finishParallelSessionTitle();
         const deferredSteer = await settleDeferredSteerAfterCompaction();
         if (deferredSteer) return deferredSteer;
+        if (turn.source === "compaction") {
+          const settled = await eventing.settle!({
+            events: [
+              {
+                type: "turn.completed",
+                payload: {
+                  maintenance: "context_compaction",
+                  result: compacted ? "compacted" : "already_applied",
+                },
+              },
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "completed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          });
+          if (!settled) return claimedResult({ status: "cancelled" });
+          control.turnMetricOutcome = "completed";
+          control.activityStatus = "idle";
+          return claimedResult({ status: "idle" });
+        }
         // Codex parity: compaction remains inside the same logical turn and
         // the same activity. Rebuild the model-visible history from the
         // durable replacement and continue the sampling loop; do not create
