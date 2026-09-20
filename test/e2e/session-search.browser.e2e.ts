@@ -838,6 +838,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       const retry = dialog.getByRole("button", { name: "Retry search", exact: true });
       await retry.waitFor();
       expect(await row.count()).toBe(1);
+      await page.screenshot({ path: `${artifactDir}/session-search-transient-warning.png` });
       const beforeTitles = titleReads;
       const beforeMessages = messageReads;
       await retry.click();
@@ -855,6 +856,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       ).toBe(0);
       expect(await dialog.innerText()).not.toContain("resiliencequartz title");
       expect(await dialog.innerText()).not.toContain("injected failure");
+      await page.screenshot({ path: `${artifactDir}/session-search-access-denied.png` });
     } finally {
       await context.close();
     }
