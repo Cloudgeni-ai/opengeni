@@ -158,14 +158,27 @@ export function personalConnectionDelegationSourceForGrant(
   return { kind: "subject", subjectId: grant.subjectId, accountId: grant.accountId };
 }
 
-/** Account-picker inventory, never an execution grant or credential response. */
+/** Account-picker inventory: shared workspace accounts and this sender's own
+ * personal accounts. Visibility is never an execution grant or a credential
+ * response; every selected connection is validated again at admission/use. */
 export async function listOwnConnectionAccountsForGrant(
   db: Database,
   grant: AccessGrant,
 ): Promise<ConnectionMetadata[]> {
   const source = personalConnectionDelegationSourceForGrant(grant);
-  if (source.kind !== "subject") return [];
-  return listOwnConnectionMetadata(db, { ...source, workspaceId: grant.workspaceId });
+  const workspace = (await listConnectionsMetadata(db, grant.workspaceId, null)).filter(
+    (connection) =>
+      connection.subjectId === null &&
+      connection.workspaceId === grant.workspaceId &&
+      connection.accountId === grant.accountId &&
+      connection.status === "active",
+  );
+  if (source.kind !== "subject") return workspace;
+  const personal = await listOwnConnectionMetadata(db, {
+    ...source,
+    workspaceId: grant.workspaceId,
+  });
+  return [...workspace, ...personal];
 }
 
 async function listOwnConnectionMetadata(

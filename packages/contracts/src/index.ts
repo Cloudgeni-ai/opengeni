@@ -4407,6 +4407,52 @@ export const McpPersonalConnectionSummary = z
   .strict();
 export type McpPersonalConnectionSummary = z.infer<typeof McpPersonalConnectionSummary>;
 
+/** Internal, server-resolved account route frozen with accepted work. It is
+ * not a public credential grant and must never be accepted from a caller. */
+export const McpConnectionAccountBinding = z
+  .object({
+    serverId: z.string().min(1).max(256),
+    canonicalServerId: z.string().min(1).max(256),
+    connectionId: z.string().uuid(),
+    originWorkspaceId: z.string().uuid(),
+    subjectScope: z.enum(["workspace", "subject"]),
+    ownerSubjectId: z.string().min(1).max(512).nullable(),
+    accountLabel: z.string().min(1).max(512),
+    providerDomain: z.string().min(1).max(2048),
+    kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]),
+  })
+  .strict()
+  .superRefine((binding, context) => {
+    if ((binding.subjectScope === "subject") !== (binding.ownerSubjectId !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["ownerSubjectId"],
+        message: "Only personal account bindings retain an owner",
+      });
+    }
+  });
+export type McpConnectionAccountBinding = z.infer<typeof McpConnectionAccountBinding>;
+
+export const McpConnectionAccountBindings = z
+  .array(McpConnectionAccountBinding)
+  .max(128)
+  .superRefine((bindings, context) => {
+    const routes = new Set<string>();
+    const accounts = new Set<string>();
+    bindings.forEach((binding, index) => {
+      const account = JSON.stringify([binding.canonicalServerId, binding.connectionId]);
+      if (routes.has(binding.serverId) || accounts.has(account)) {
+        context.addIssue({
+          code: "custom",
+          path: [index],
+          message: "Account bindings require unique routes and connector-account pairs",
+        });
+      }
+      routes.add(binding.serverId);
+      accounts.add(account);
+    });
+  });
+
 /**
  * Account choice only. The authenticated sender supplies authority; selecting
  * an account never delegates it to another participant or conversation.
@@ -4425,14 +4471,15 @@ export const McpConnectionAccountSelections = z
   .superRefine((selections, context) => {
     const seen = new Set<string>();
     for (const [index, selection] of selections.entries()) {
-      if (seen.has(selection.serverId)) {
+      const key = JSON.stringify([selection.serverId, selection.connectionId]);
+      if (seen.has(key)) {
         context.addIssue({
           code: "custom",
-          message: "connection authority selections must be unique by serverId",
+          message: "connection account selections must be unique by serverId and connectionId",
           path: [index, "serverId"],
         });
       }
-      seen.add(selection.serverId);
+      seen.add(key);
     }
   });
 
