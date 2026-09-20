@@ -1989,6 +1989,7 @@ export async function inspectRuntimeDatabasePosture(
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
               'organization_usage_read_capabilities',
+              'modal_inventory_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE}
             )
         `),
@@ -3624,6 +3625,30 @@ export function evaluateRuntimeDatabasePosture(
   const organizationUsageCapability = posture.privateTables.find(
     (table) => table.name === "organization_usage_read_capabilities",
   );
+  const modalInventoryCapability = posture.privateTables.find(
+    (table) => table.name === "modal_inventory_read_capabilities",
+  );
+  if (modalInventoryCapability) {
+    const capability = modalInventoryCapability;
+    const inventory = posture.privateRoutines.find(
+      (routine) => routine.name === "list_live_modal_sandbox_leases()",
+    );
+    if (
+      capability.owner === expectedRole ||
+      capability.owner !== tableByName.get("sandbox_leases")?.owner ||
+      capability.select ||
+      capability.insert ||
+      capability.update ||
+      capability.delete ||
+      !inventory?.execute ||
+      !inventory.securityDefiner ||
+      inventory.publicExecute ||
+      inventory.owner !== capability.owner ||
+      !inventory.configuration?.includes("search_path=pg_catalog")
+    ) {
+      violations.push("Modal inventory capability has unsafe owner, ACL or runtime privileges");
+    }
+  }
   if (organizationUsageCapability) {
     const capability = organizationUsageCapability;
     if (

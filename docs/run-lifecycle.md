@@ -1582,6 +1582,16 @@ rule when heartbeat authority rejects a closed attempt. It does not refresh the
 closed holder, renew execution authority, or extend the capture deadline; the
 finalizer releases after physical settlement. Epoch replacement and expired
 captures still release promptly.
+Migration 0497 repairs the global Modal orphan inventory for non-bypass migration
+owners. Its private backend-PID/transaction read capability opens only inside the
+inventory function, preserves cross-tenant warming/warm/draining attribution,
+and closes before rows return. Direct runtime table reads remain tenant-scoped;
+runtime cannot mint capabilities or gain DML through this repair. Fresh orphan
+revalidation still protects matching instances and warming attributions whose
+instance is not yet known; inventory read errors skip provider termination.
+The append-only migration is rolling and atomic with an unchanged SQL signature.
+Provision roles after migrating; never weaken RLS or use a broad owner bypass as
+a fallback for an incomplete inventory.
 Boot validation requires the larger configured capture budget and one reaper
 period to fit strictly inside provider-deadline rotation headroom even when the
 default backend is no longer Modal, because historical Modal leases remain
