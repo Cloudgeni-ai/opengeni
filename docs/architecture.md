@@ -655,6 +655,11 @@ may embed API/core/worker packages, but the same domain and persistence
 boundaries still apply.
 
 Console appearance: `apps/web/src/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
+The managed signed-out entry uses `apps/web/src/components/signed-out-page.tsx` for the
+theme-aware introduction and scrollable layout. `context.tsx` composes the existing managed
+form or browser-account panel inside it; provider availability, invitations, and isolated
+account authentication remain owned by those existing flows. Public reset/account-auth
+routes and deployment-key authentication do not use this entry layout.
 Workspace management route classification lives in `apps/web/src/lib/workspace-management-location.ts`. The workspace route loads `components/settings/workspace-settings-shell.tsx` lazily only for management destinations, so session navigation does not import the settings interface.
 
 ---

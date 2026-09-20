@@ -41,6 +41,7 @@ export function ManagedAuthPanel(props: {
       : (allowedModes[0] ?? "signin"),
   );
   const emailVerificationRequired = props.emailVerificationRequired ?? true;
+  const Heading = props.presentation === "embedded" ? "h2" : "h1";
   const [invitationDismissed, setInvitationDismissed] = useState(false);
   const invitation = invitationDismissed ? null : (props.invitation ?? null);
   const [name, setName] = useState("");
@@ -229,9 +230,9 @@ export function ManagedAuthPanel(props: {
             <UserIcon className="size-4" />
           </span>
           <div>
-            <h1 className="text-base font-semibold">
+            <Heading className="text-base font-semibold">
               {resetMode ? "Reset password" : mode === "signup" ? "Create account" : "Sign in"}
-            </h1>
+            </Heading>
             <p className="text-sm text-fg-subtle">
               {resetMode
                 ? "Enter your email to receive a password-reset link."
