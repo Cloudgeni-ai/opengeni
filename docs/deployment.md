@@ -1369,6 +1369,16 @@ database logins and independently selected health ports (defaults `9465` and
 sandbox backends, are written to `.env.runtime`, not `.env`. Set
 `OPENGENI_CATALOG_IMPORT_ENABLED=false` to omit the catalog import.
 
+Artifact sidecars parse role-specific settings, not the API/agent runtime's full
+configuration. Both retain environment/revision, telemetry and database-schema
+settings. The outbox additionally consumes NATS settings (a configured control
+user and password must be supplied together); the materializer consumes and
+validates object-storage settings. Their dedicated database credentials remain
+mandatory and never fall back to the application login. Sharing a ConfigMap that
+selects managed access or a remote sandbox does not require sharing API signing,
+email or sandbox-provider secrets with either sidecar. API and ordinary worker
+authentication and provider validation are unchanged.
+
 Native dependencies remain running after `Ctrl-C`, matching Compose's warm
 restart behavior. `bun run dev:down` stops only the infrastructure recorded for
 this worktree. `bun run dev:clean -- --yes` also removes its PostgreSQL/object

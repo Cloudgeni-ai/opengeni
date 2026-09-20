@@ -1325,6 +1325,124 @@ const SettingsSchema = z.object({
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
+
+// Independently supervised artifact services are not API/agent runtimes. Parse
+// only their actual capabilities, using the same field schemas as getSettings.
+const ArtifactServiceSettingsSchema = SettingsSchema.pick({
+  serviceName: true,
+  environment: true,
+  deploymentRevision: true,
+  dbSchema: true,
+  rlsStrategy: true,
+  observabilityStructuredLogs: true,
+  observabilityMetricsEnabled: true,
+  observabilityOtlpEndpoint: true,
+  observabilityOtlpHeaders: true,
+});
+const ArtifactOutboxSettingsSchema = ArtifactServiceSettingsSchema.extend({
+  natsUrl: SettingsSchema.shape.natsUrl,
+  selfhostedNatsControlUser: SettingsSchema.shape.selfhostedNatsControlUser,
+  selfhostedNatsControlPassword: SettingsSchema.shape.selfhostedNatsControlPassword,
+});
+const ObjectStorageSettingsSchema = SettingsSchema.pick({
+  objectStorageBackend: true,
+  objectStorageEndpoint: true,
+  objectStorageInternalEndpoint: true,
+  objectStorageSandboxEndpoint: true,
+  objectStorageBucket: true,
+  objectStorageRegion: true,
+  objectStorageAccessKeyId: true,
+  objectStorageSecretAccessKey: true,
+  objectStorageForcePathStyle: true,
+  objectStorageAzureConnectionString: true,
+  objectStorageAzureAccountName: true,
+  objectStorageAzureAccountKey: true,
+  objectStorageAzureEndpoint: true,
+  objectStorageGcsProjectId: true,
+  objectStorageGcsCredentialsJson: true,
+  objectStorageGcsKeyFilename: true,
+  objectStorageGcsApiEndpoint: true,
+});
+const ArtifactMaterializerSettingsSchema = ArtifactServiceSettingsSchema.extend(
+  ObjectStorageSettingsSchema.shape,
+);
+export type ArtifactOutboxSettings = z.infer<typeof ArtifactOutboxSettingsSchema>;
+export type ObjectStorageSettings = z.infer<typeof ObjectStorageSettingsSchema>;
+export type ArtifactMaterializerSettings = z.infer<typeof ArtifactMaterializerSettingsSchema>;
+
+function artifactServiceEnvironment(source: NodeJS.ProcessEnv) {
+  const optional = (name: string) => optionalEnvironmentValue(name, source);
+  return {
+    serviceName: optional("OPENGENI_SERVICE_NAME"),
+    environment: optional("OPENGENI_ENVIRONMENT"),
+    deploymentRevision:
+      optional("OPENGENI_DEPLOYMENT_REVISION") ??
+      optional("SOURCE_VERSION") ??
+      optional("GITHUB_SHA"),
+    dbSchema: optional("OPENGENI_DB_SCHEMA"),
+    rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
+    observabilityStructuredLogs: optional("OPENGENI_OBSERVABILITY_STRUCTURED_LOGS"),
+    observabilityMetricsEnabled: optional("OPENGENI_OBSERVABILITY_METRICS_ENABLED"),
+    observabilityOtlpEndpoint:
+      optional("OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT") ?? optional("OTEL_EXPORTER_OTLP_ENDPOINT"),
+    observabilityOtlpHeaders:
+      optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
+  };
+}
+
+export function getArtifactOutboxSettings(
+  source: NodeJS.ProcessEnv = process.env,
+): ArtifactOutboxSettings {
+  const settings = ArtifactOutboxSettingsSchema.parse({
+    ...artifactServiceEnvironment(source),
+    natsUrl: optionalEnvironmentValue("OPENGENI_NATS_URL", source),
+    selfhostedNatsControlUser: optionalEnvironmentValue(
+      "OPENGENI_SELFHOSTED_NATS_CONTROL_USER",
+      source,
+    ),
+    selfhostedNatsControlPassword: optionalEnvironmentValue(
+      "OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD",
+      source,
+    ),
+  });
+  dbSearchPath(settings);
+  if (
+    Boolean(settings.selfhostedNatsControlUser) !== Boolean(settings.selfhostedNatsControlPassword)
+  ) {
+    throw new Error("Artifact outbox NATS control user and password must be configured together");
+  }
+  return settings;
+}
+
+export function getArtifactMaterializerSettings(
+  source: NodeJS.ProcessEnv = process.env,
+): ArtifactMaterializerSettings {
+  const optional = (name: string) => optionalEnvironmentValue(name, source);
+  const settings = ArtifactMaterializerSettingsSchema.parse({
+    ...artifactServiceEnvironment(source),
+    objectStorageEndpoint: optional("OPENGENI_OBJECT_STORAGE_ENDPOINT"),
+    objectStorageInternalEndpoint: optional("OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT"),
+    objectStorageSandboxEndpoint: optional("OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT"),
+    objectStorageBackend: optional("OPENGENI_OBJECT_STORAGE_BACKEND"),
+    objectStorageBucket: optional("OPENGENI_OBJECT_STORAGE_BUCKET"),
+    objectStorageRegion: optional("OPENGENI_OBJECT_STORAGE_REGION"),
+    objectStorageAccessKeyId: optional("OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID"),
+    objectStorageSecretAccessKey: optional("OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY"),
+    objectStorageForcePathStyle: optional("OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE"),
+    objectStorageAzureConnectionString: optional("OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING"),
+    objectStorageAzureAccountName: optional("OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME"),
+    objectStorageAzureAccountKey: optional("OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY"),
+    objectStorageAzureEndpoint: optional("OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT"),
+    objectStorageGcsProjectId: optional("OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID"),
+    objectStorageGcsCredentialsJson: optional("OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON"),
+    objectStorageGcsKeyFilename: optional("OPENGENI_OBJECT_STORAGE_GCS_KEY_FILENAME"),
+    objectStorageGcsApiEndpoint: optional("OPENGENI_OBJECT_STORAGE_GCS_API_ENDPOINT"),
+  });
+  dbSearchPath(settings);
+  validateObjectStorageSettings(settings);
+  return settings;
+}
+
 export type McpServerConfig = Settings["mcpServers"][number];
 
 export type GoogleDriveProviderRetryOptions = {
@@ -6700,105 +6818,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       );
     }
   }
-  if (
-    settings.objectStorageBackend === "s3-compatible" ||
-    settings.objectStorageBackend === "aws-s3"
-  ) {
-    if (
-      Boolean(settings.objectStorageAccessKeyId) !== Boolean(settings.objectStorageSecretAccessKey)
-    ) {
-      throw new Error(
-        "OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID and OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY must both be set or both omitted",
-      );
-    }
-    if (
-      settings.objectStorageBackend === "s3-compatible" &&
-      (settings.objectStorageEndpoint ||
-        settings.objectStorageInternalEndpoint ||
-        settings.objectStorageSandboxEndpoint) &&
-      (!settings.objectStorageAccessKeyId || !settings.objectStorageSecretAccessKey)
-    ) {
-      throw new Error(
-        "S3-compatible object storage endpoints require OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID and OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY",
-      );
-    }
-    if (
-      settings.objectStorageAzureConnectionString ||
-      settings.objectStorageAzureAccountName ||
-      settings.objectStorageAzureAccountKey ||
-      settings.objectStorageAzureEndpoint
-    ) {
-      throw new Error(
-        "S3 object storage uses OPENGENI_OBJECT_STORAGE_* S3 settings, not OPENGENI_OBJECT_STORAGE_AZURE_* settings",
-      );
-    }
-    if (
-      settings.objectStorageGcsProjectId ||
-      settings.objectStorageGcsCredentialsJson ||
-      settings.objectStorageGcsKeyFilename ||
-      settings.objectStorageGcsApiEndpoint
-    ) {
-      throw new Error(
-        "S3 object storage uses OPENGENI_OBJECT_STORAGE_* S3 settings, not OPENGENI_OBJECT_STORAGE_GCS_* settings",
-      );
-    }
-  } else if (settings.objectStorageBackend === "azure-blob") {
-    if (
-      settings.objectStorageEndpoint ||
-      settings.objectStorageInternalEndpoint ||
-      settings.objectStorageSandboxEndpoint ||
-      settings.objectStorageAccessKeyId ||
-      settings.objectStorageSecretAccessKey
-    ) {
-      throw new Error(
-        "Azure Blob storage uses OPENGENI_OBJECT_STORAGE_AZURE_* settings, not S3-compatible object storage settings",
-      );
-    }
-    if (
-      settings.objectStorageGcsProjectId ||
-      settings.objectStorageGcsCredentialsJson ||
-      settings.objectStorageGcsKeyFilename ||
-      settings.objectStorageGcsApiEndpoint
-    ) {
-      throw new Error(
-        "Azure Blob storage uses OPENGENI_OBJECT_STORAGE_AZURE_* settings, not OPENGENI_OBJECT_STORAGE_GCS_* settings",
-      );
-    }
-    const hasConnectionString = Boolean(settings.objectStorageAzureConnectionString);
-    const hasSharedKey =
-      Boolean(settings.objectStorageAzureAccountName) &&
-      Boolean(settings.objectStorageAzureAccountKey);
-    if (!hasConnectionString && !hasSharedKey) {
-      throw new Error(
-        "Azure Blob storage requires OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING or OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME plus OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY",
-      );
-    }
-  } else {
-    if (
-      settings.objectStorageEndpoint ||
-      settings.objectStorageInternalEndpoint ||
-      settings.objectStorageSandboxEndpoint ||
-      settings.objectStorageAccessKeyId ||
-      settings.objectStorageSecretAccessKey
-    ) {
-      throw new Error(
-        "GCS object storage uses OPENGENI_OBJECT_STORAGE_GCS_* settings, not S3-compatible object storage settings",
-      );
-    }
-    if (
-      settings.objectStorageAzureConnectionString ||
-      settings.objectStorageAzureAccountName ||
-      settings.objectStorageAzureAccountKey ||
-      settings.objectStorageAzureEndpoint
-    ) {
-      throw new Error(
-        "GCS object storage uses OPENGENI_OBJECT_STORAGE_GCS_* settings, not OPENGENI_OBJECT_STORAGE_AZURE_* settings",
-      );
-    }
-    if (settings.objectStorageGcsCredentialsJson) {
-      parseGcsCredentialsJson(settings.objectStorageGcsCredentialsJson);
-    }
-  }
+  validateObjectStorageSettings(settings);
   if (settings.documentChunkOverlap >= settings.documentChunkSize) {
     throw new Error(
       "OPENGENI_DOCUMENT_CHUNK_OVERLAP must be smaller than OPENGENI_DOCUMENT_CHUNK_SIZE",
@@ -7183,6 +7203,108 @@ export function resolveNatsCalloutConfig(settings: Settings): NatsCalloutConfig 
   return { accountSeed, accountName, user, password };
 }
 
+function validateObjectStorageSettings(settings: ObjectStorageSettings): void {
+  if (
+    settings.objectStorageBackend === "s3-compatible" ||
+    settings.objectStorageBackend === "aws-s3"
+  ) {
+    if (
+      Boolean(settings.objectStorageAccessKeyId) !== Boolean(settings.objectStorageSecretAccessKey)
+    ) {
+      throw new Error(
+        "OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID and OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY must both be set or both omitted",
+      );
+    }
+    if (
+      settings.objectStorageBackend === "s3-compatible" &&
+      (settings.objectStorageEndpoint ||
+        settings.objectStorageInternalEndpoint ||
+        settings.objectStorageSandboxEndpoint) &&
+      (!settings.objectStorageAccessKeyId || !settings.objectStorageSecretAccessKey)
+    ) {
+      throw new Error(
+        "S3-compatible object storage endpoints require OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID and OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY",
+      );
+    }
+    if (
+      settings.objectStorageAzureConnectionString ||
+      settings.objectStorageAzureAccountName ||
+      settings.objectStorageAzureAccountKey ||
+      settings.objectStorageAzureEndpoint
+    ) {
+      throw new Error(
+        "S3 object storage uses OPENGENI_OBJECT_STORAGE_* S3 settings, not OPENGENI_OBJECT_STORAGE_AZURE_* settings",
+      );
+    }
+    if (
+      settings.objectStorageGcsProjectId ||
+      settings.objectStorageGcsCredentialsJson ||
+      settings.objectStorageGcsKeyFilename ||
+      settings.objectStorageGcsApiEndpoint
+    ) {
+      throw new Error(
+        "S3 object storage uses OPENGENI_OBJECT_STORAGE_* S3 settings, not OPENGENI_OBJECT_STORAGE_GCS_* settings",
+      );
+    }
+  } else if (settings.objectStorageBackend === "azure-blob") {
+    if (
+      settings.objectStorageEndpoint ||
+      settings.objectStorageInternalEndpoint ||
+      settings.objectStorageSandboxEndpoint ||
+      settings.objectStorageAccessKeyId ||
+      settings.objectStorageSecretAccessKey
+    ) {
+      throw new Error(
+        "Azure Blob storage uses OPENGENI_OBJECT_STORAGE_AZURE_* settings, not S3-compatible object storage settings",
+      );
+    }
+    if (
+      settings.objectStorageGcsProjectId ||
+      settings.objectStorageGcsCredentialsJson ||
+      settings.objectStorageGcsKeyFilename ||
+      settings.objectStorageGcsApiEndpoint
+    ) {
+      throw new Error(
+        "Azure Blob storage uses OPENGENI_OBJECT_STORAGE_AZURE_* settings, not OPENGENI_OBJECT_STORAGE_GCS_* settings",
+      );
+    }
+    const hasConnectionString = Boolean(settings.objectStorageAzureConnectionString);
+    const hasSharedKey =
+      Boolean(settings.objectStorageAzureAccountName) &&
+      Boolean(settings.objectStorageAzureAccountKey);
+    if (!hasConnectionString && !hasSharedKey) {
+      throw new Error(
+        "Azure Blob storage requires OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING or OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME plus OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY",
+      );
+    }
+  } else {
+    if (
+      settings.objectStorageEndpoint ||
+      settings.objectStorageInternalEndpoint ||
+      settings.objectStorageSandboxEndpoint ||
+      settings.objectStorageAccessKeyId ||
+      settings.objectStorageSecretAccessKey
+    ) {
+      throw new Error(
+        "GCS object storage uses OPENGENI_OBJECT_STORAGE_GCS_* settings, not S3-compatible object storage settings",
+      );
+    }
+    if (
+      settings.objectStorageAzureConnectionString ||
+      settings.objectStorageAzureAccountName ||
+      settings.objectStorageAzureAccountKey ||
+      settings.objectStorageAzureEndpoint
+    ) {
+      throw new Error(
+        "GCS object storage uses OPENGENI_OBJECT_STORAGE_GCS_* settings, not OPENGENI_OBJECT_STORAGE_AZURE_* settings",
+      );
+    }
+    if (settings.objectStorageGcsCredentialsJson) {
+      parseGcsCredentialsJson(settings.objectStorageGcsCredentialsJson);
+    }
+  }
+}
+
 /**
  * The PRIVILEGED control-plane NATS login (api/worker). Present only when BOTH a
  * user and password are set; otherwise null and the bus connects anonymously (local
@@ -7194,7 +7316,9 @@ export interface NatsControlPlaneAuth {
   password: string;
 }
 
-export function resolveNatsControlPlaneAuth(settings: Settings): NatsControlPlaneAuth | null {
+export function resolveNatsControlPlaneAuth(
+  settings: Pick<Settings, "selfhostedNatsControlUser" | "selfhostedNatsControlPassword">,
+): NatsControlPlaneAuth | null {
   const user = settings.selfhostedNatsControlUser?.trim();
   const password = settings.selfhostedNatsControlPassword?.trim();
   if (!user || !password) {
