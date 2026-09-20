@@ -234,8 +234,6 @@ type RequestTerminalOutcome = "completed" | "failed" | "timed_out";
 type SemanticTerminalState = {
   phase: "completed" | "failed" | null;
   meaningfulOutput?: boolean;
-  /** Non-streaming callers must parse the complete SSE body before settling. */
-  deferTransportTerminal: boolean;
 };
 
 type CodexSseEvent = {
@@ -535,12 +533,9 @@ async function observedResponse(
         if (chunk.done) {
           terminal = true;
           clearTimers();
-          if (semanticTerminal && semanticTerminal.phase === null) {
-            if (!semanticTerminal.deferTransportTerminal) {
-              markSemanticTerminal(semanticTerminal, "failed");
-            }
-          }
-          if (!semanticTerminal?.deferTransportTerminal || semanticTerminal.phase !== null) {
+          // The SSE parser owns EOF classification: it may still have a final
+          // terminal block buffered without a blank separator.
+          if (!semanticTerminal || semanticTerminal.phase !== null) {
             await emitRequestEvent(audit, {
               phase: semanticTerminal?.phase ?? (res.ok ? "completed" : "failed"),
               ...semanticCompletionEvidence(semanticTerminal),
@@ -775,7 +770,6 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       });
       const semanticTerminal: SemanticTerminalState = {
         phase: null,
-        deferTransportTerminal: !callerWantsStream,
       };
       try {
         await ctx.beforeProviderDispatch?.();
@@ -861,10 +855,23 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         return buffered;
       }
       if (callerWantsStream) {
-        res = validateCodexStream(res, (phase, meaningfulOutput) => {
-          markSemanticTerminal(semanticTerminal, phase);
-          semanticTerminal.meaningfulOutput = meaningfulOutput === true;
-        });
+        res = validateCodexStream(
+          res,
+          (phase, meaningfulOutput) => {
+            markSemanticTerminal(semanticTerminal, phase);
+            semanticTerminal.meaningfulOutput = meaningfulOutput === true;
+          },
+          async () => {
+            const upstreamRequestId = providerRequestId(res.headers);
+            await emitRequestEvent(audit, {
+              phase: semanticTerminal.phase ?? "failed",
+              ...semanticCompletionEvidence(semanticTerminal),
+              responseObserved: true,
+              status: res.status,
+              ...(upstreamRequestId ? { providerRequestId: upstreamRequestId } : {}),
+            });
+          },
+        );
       } else {
         res = await sseToJsonResponse(res, audit, semanticTerminal);
       }
@@ -1391,6 +1398,7 @@ function codexSseFailureError(
 function validateCodexStream(
   res: Response,
   onSemanticTerminal?: (phase: "completed" | "failed", meaningfulOutput?: boolean) => void,
+  onParsedEof?: () => Promise<void>,
 ): Response {
   if (!res.body) {
     onSemanticTerminal?.("failed");
@@ -1442,26 +1450,34 @@ function validateCodexStream(
       buffer += decoder.decode(chunk, { stream: true });
       emitCompleteBlocks(controller, false);
     },
-    flush(controller) {
-      buffer += decoder.decode();
-      emitCompleteBlocks(controller, true);
-      if (buffer.length > 0) {
-        successfulTerminalSeen ||= inspectCodexSseBlock(
-          buffer,
-          res,
-          observeTerminal,
-          observeOutput,
-        );
-        controller.enqueue(encoder.encode(buffer));
-        buffer = "";
-      }
-      if (!successfulTerminalSeen) {
-        throw codexSseFailureError(
-          res,
-          null,
-          "invalid_sse_terminal",
-          "The Codex response stream ended without a terminal response",
-        );
+    async flush(controller) {
+      try {
+        buffer += decoder.decode();
+        emitCompleteBlocks(controller, true);
+        if (buffer.length > 0) {
+          successfulTerminalSeen ||= inspectCodexSseBlock(
+            buffer,
+            res,
+            observeTerminal,
+            observeOutput,
+          );
+          controller.enqueue(encoder.encode(buffer));
+          buffer = "";
+        }
+        if (!successfulTerminalSeen) {
+          observeTerminal("failed");
+          throw codexSseFailureError(
+            res,
+            null,
+            "invalid_sse_terminal",
+            "The Codex response stream ended without a terminal response",
+          );
+        }
+      } finally {
+        // Raw transport EOF can precede parsing a final block without a blank
+        // separator. Settle only after that parse; the audit fence deduplicates
+        // an earlier terminal already observed from a complete block.
+        await onParsedEof?.();
       }
     },
   });

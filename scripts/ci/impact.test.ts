@@ -992,6 +992,22 @@ describe("workflow fail-closed contracts", () => {
     expect(sourceContracts).not.toContain("--plan impact-plan.json");
   });
 
+  test("CI runs the compact session-search header regression with real database evidence", () => {
+    const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+    const step = ci.slice(
+      ci.indexOf("      - name: Compact session-search header browser acceptance"),
+      ci.indexOf("      - name: Queue surface browser acceptance"),
+    );
+    expect(step).toContain("matrix.lane == 'interaction'");
+    expect(step).toContain('OPENGENI_REQUIRE_REAL_DB: "1"');
+    expect(step).toContain(
+      "--test-name-pattern 'desktop expanded header keeps icon-only search inline'",
+    );
+    expect(step).toContain("./test/e2e/session-search.browser.e2e.ts");
+    expect(ci).toContain("name: session-search-header-evidence");
+    expect(ci).toContain("path: /tmp/session-search-header-evidence");
+  });
+
   test("CI retains exact aggregate names and every current release/image lane", () => {
     const ci = readFileSync(".github/workflows/ci.yml", "utf8");
     expect(ci).toContain("name: Typecheck and unit tests");

@@ -27,6 +27,40 @@ export type SessionEventSlicePage = SessionEventPage & {
 const WINDOW = 8192;
 const STRUCTURED_BYTES = 1024 * 1024;
 
+type SliceIdentity = Pick<
+  SessionEvent,
+  "id" | "sequence" | "type" | "turnId" | "turnAssociation" | "duplicateOfEventId"
+>;
+
+/** Internal search projection, NOT authorization. The scanner has selected this
+ * exact identity under its subject RLS/list filters and still holds that same
+ * transaction and tenancy/membership fences. Reuse them rather than creating
+ * two nested scopes and rediscovering the identity for every scalar window.
+ * The scalar query still checks the exact workspace/session/event and RLS.
+ * Keep the codec/window implementation shared with the conversation reader.
+ */
+export async function readSessionMessageSliceInScope(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  identity: SliceIdentity,
+  offset: number,
+  windows = 1,
+): Promise<SessionEventSlice | undefined> {
+  if (!Number.isInteger(windows) || windows < 1 || windows > 4)
+    throw new Error("Invalid search scalar window budget");
+  const page = await listSessionEventSlicesInternal(
+    db,
+    workspaceId,
+    sessionId,
+    { sourceSequence: identity.sequence, sourceOffset: offset, view: "conversation" },
+    undefined,
+    identity,
+    WINDOW * windows,
+  );
+  return page.slices?.[identity.sequence];
+}
+
 /** Bounded transfer over retained scalar truth. JSONB extraction/detoasting still
  * costs PostgreSQL work proportional to the individual source value, not history.
  * This is a read projection, not authorization: the MCP caller must authorize the
@@ -38,6 +72,18 @@ export async function listSessionEventSlices(
   sessionId: string,
   options: SessionEventSliceOptions,
   legacyRead?: (options: ListSessionEventPageOptions) => Promise<SessionEventPage>,
+): Promise<SessionEventSlicePage> {
+  return listSessionEventSlicesInternal(db, workspaceId, sessionId, options, legacyRead);
+}
+
+async function listSessionEventSlicesInternal(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  options: SessionEventSliceOptions,
+  legacyRead?: (options: ListSessionEventPageOptions) => Promise<SessionEventPage>,
+  selectedIdentity?: SliceIdentity,
+  scalarWindow = WINDOW,
 ): Promise<SessionEventSlicePage> {
   // Finish an already-issued UTF-16 cursor using its original bounded reader.
   // New messages use source slices; no cursor offset is silently reinterpreted.
@@ -79,27 +125,29 @@ export async function listSessionEventSlices(
     predicates.push(notInArray(schema.sessionEvents.type, filters.excludeTypes));
   // Unlike audit `none` mode, this identity query does not compute a payload
   // projection merely to report its size. Only the selected scalar is extracted.
-  const identities = await withWorkspaceRls(db, workspaceId, (tx) =>
-    tx
-      .select({
-        id: schema.sessionEvents.id,
-        sequence: schema.sessionEvents.sequence,
-        type: sql<string>`case when octet_length(${schema.sessionEvents.type}) <= 256 then ${schema.sessionEvents.type} else 'session.event.envelope_omitted' end`,
-        turnId: schema.sessionEvents.turnId,
-        turnAssociation: sql<
-          string | null
-        >`case when ${schema.sessionEvents.turnAssociation} is null then null when ${schema.sessionEvents.turnAssociation} = 'current' then 'current' else 'late_rejected' end`,
-        duplicateOfEventId: schema.sessionEvents.duplicateOfEventId,
-      })
-      .from(schema.sessionEvents)
-      .where(and(...predicates))
-      .orderBy(
-        direction === "before"
-          ? desc(schema.sessionEvents.sequence)
-          : asc(schema.sessionEvents.sequence),
-      )
-      .limit(limit + 1),
-  );
+  const identities = selectedIdentity
+    ? [selectedIdentity]
+    : await withWorkspaceRls(db, workspaceId, (tx) =>
+        tx
+          .select({
+            id: schema.sessionEvents.id,
+            sequence: schema.sessionEvents.sequence,
+            type: sql<string>`case when octet_length(${schema.sessionEvents.type}) <= 256 then ${schema.sessionEvents.type} else 'session.event.envelope_omitted' end`,
+            turnId: schema.sessionEvents.turnId,
+            turnAssociation: sql<
+              string | null
+            >`case when ${schema.sessionEvents.turnAssociation} is null then null when ${schema.sessionEvents.turnAssociation} = 'current' then 'current' else 'late_rejected' end`,
+            duplicateOfEventId: schema.sessionEvents.duplicateOfEventId,
+          })
+          .from(schema.sessionEvents)
+          .where(and(...predicates))
+          .orderBy(
+            direction === "before"
+              ? desc(schema.sessionEvents.sequence)
+              : asc(schema.sessionEvents.sequence),
+          )
+          .limit(limit + 1),
+      );
   const ordered = identities.slice(0, limit).map(
     (identity) =>
       ({
@@ -124,7 +172,7 @@ export async function listSessionEventSlices(
   const slices: Record<number, SessionEventSlice> = {};
   const events: SessionEvent[] = [];
   let consumed = 0;
-  await withWorkspaceRls(db, workspaceId, async (tx) => {
+  const readScalars = async (tx: Database) => {
     for (const event of ordered) {
       consumed++;
       if (
@@ -217,8 +265,8 @@ export async function listSessionEventSlices(
           case when tagged then (length(encoded) / 4 * 3 - case when right(encoded, 2) = '==' then 2 when right(encoded, 1) = '=' then 1 else 0 end) / 2
           else length(raw) end else 0 end as total,
         case when kind = 'string' then
-          case when tagged then substring(encoded from ${Math.min(group * 8 + 1, 2_147_483_647)}::integer for ${Math.ceil((WINDOW + 6) / 3) * 8}::integer)
-          else substring(raw from ${Math.min(start + 1, 2_147_483_647)}::integer for ${WINDOW}::integer) end else null end as window,
+          case when tagged then substring(encoded from ${Math.min(group * 8 + 1, 2_147_483_647)}::integer for ${Math.ceil((scalarWindow + 6) / 3) * 8}::integer)
+          else substring(raw from ${Math.min(start + 1, 2_147_483_647)}::integer for ${scalarWindow}::integer) end else null end as window,
         case when kind <> 'string' and structured_bytes <= ${STRUCTURED_BYTES} then value else null end as structured,
         coalesce(kind <> 'string' and structured_bytes > ${STRUCTURED_BYTES}, false) as omitted
       from validated`,
@@ -254,7 +302,7 @@ export async function listSessionEventSlices(
           /[\uDC00-\uDFFF]/.test(text[local] ?? "")
         )
           throw new Error("Invalid message continuation offset: splits a surrogate pair");
-        text = text.slice(local, local + WINDOW);
+        text = text.slice(local, local + scalarWindow);
         if (start + text.length < row.total && /[\uD800-\uDBFF]/.test(text.at(-1)!))
           text = text.slice(0, -1);
       }
@@ -291,7 +339,9 @@ export async function listSessionEventSlices(
       )
         break;
     }
-  });
+  };
+  if (selectedIdentity) await readScalars(db);
+  else await withWorkspaceRls(db, workspaceId, readScalars);
   // Preserve scan advancement even when every identity was excluded above.
   return {
     ...page,
