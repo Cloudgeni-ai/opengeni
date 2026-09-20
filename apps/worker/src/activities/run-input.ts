@@ -546,8 +546,14 @@ export async function turnInput(
       options,
     );
   }
-  if (trigger.type === "system.update.delivered") {
-    if (updates.length === 0) {
+  // Maintenance has no user message or delivered-update batch. It still needs
+  // the ordinary history/projection path so SDK preparation can capture the
+  // same model request prefix before the queued compaction stops inference.
+  if (
+    trigger.type === "system.update.delivered" ||
+    trigger.type === "session.context.compaction.requested"
+  ) {
+    if (trigger.type === "system.update.delivered" && updates.length === 0) {
       throw new Error("Internal update inference has no delivered updates");
     }
     return await messageInput(
