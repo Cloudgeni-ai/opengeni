@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { createObservability } from "@opengeni/observability";
+import { describe, expect, spyOn, test } from "bun:test";
+import { createObservability, withTraceContext } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
 import {
   initializeContextCompactionMetrics,
@@ -306,6 +306,48 @@ describe("turn startup phase diagnostics", () => {
     expect(metrics).not.toContain("sessionId");
     expect(metrics).not.toContain("turnId");
     expect(metrics).not.toContain("credentialId");
+  });
+
+  test("exposes a trace-only claim lookup before the execution root ends", async () => {
+    const observability = worker();
+    const root = observability.startSpan("worker.run_agent_segment");
+    const spans = spyOn(observability, "startSpan");
+    const correlationId = "turn_0123456789abcdef0123456789abcdef";
+    try {
+      withTraceContext(root, () =>
+        recordTurnStartupPhase(observability, {
+          phase: "claim_and_policy",
+          provider: "codex-subscription",
+          backend: "modal",
+          outcome: "completed",
+          durationSeconds: 0.5,
+          executionCorrelationId: correlationId,
+        }),
+      );
+      expect(spans.mock.calls[0]?.[1]).toMatchObject({ correlationId });
+      expect(spans.mock.results[0]?.value.traceId).toBe(root.traceId);
+      for (const [phase, key] of [
+        ["claim_and_policy", "raw-session-id"],
+        ["tool_preparation", correlationId],
+      ] as const) {
+        recordTurnStartupPhase(observability, {
+          phase,
+          provider: "codex-subscription",
+          backend: "modal",
+          outcome: "completed",
+          durationSeconds: 0.1,
+          executionCorrelationId: key,
+        });
+        expect(spans.mock.calls.at(-1)?.[1]).not.toHaveProperty("correlationId");
+      }
+      const metrics = await observability.prometheusMetrics();
+      expect(metrics).not.toContain(correlationId);
+      expect(metrics).not.toContain("correlationId");
+      expect(metrics).not.toContain("raw-session-id");
+    } finally {
+      spans.mockRestore();
+      root.end();
+    }
   });
 
   test("separates lazy request preparation from the durable request-start audit", async () => {

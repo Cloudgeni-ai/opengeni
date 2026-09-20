@@ -2583,6 +2583,10 @@ also carries `traceId` and `spanId`. Query the trace store by that correlation
 attribute, or follow the log's trace ID. Each recovered execution attempt has
 its own key. Raw IDs are not exported, and this key is never a metric label.
 The start log records an execution invocation, not a successful turn claim.
+The existing completed `worker.prepare.claim_and_policy` span also carries the
+validated opaque key. Once exported, it makes an active execution searchable
+without waiting for its root to end. Claims that have not completed and export
+latency remain explicit limits; this does not enable ordinary stdout retention.
 Missing traces may reflect sampling or retention; the durable session timeline
 remains authoritative. This linkage does not retroactively identify old traces.
 

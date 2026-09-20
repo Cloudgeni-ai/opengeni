@@ -24,7 +24,7 @@ Temporal coordinates execution; NATS transports reconstructible events.
 Control plane: identity, tenancy, sessions, human intervention, goals,
 recovery, compute, files, artifacts, usage, and observability. The API authorizes
 clients and bounded browser access to storage, sandboxes, relays, Codex WebRTC,
-and Gateway realtime WebSockets. Workers run agents in sandboxes or Connected Machines.
+and Gateway realtime WebSockets. Workers execute in sandboxes or Connected Machines.
 
 External users require live membership. `asUser()` supplies canonical
 identity; an end-user label does not. Private/shared visibility differs from
