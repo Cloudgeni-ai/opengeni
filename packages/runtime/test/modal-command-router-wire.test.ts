@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   ModalCommandRouterWire,
+  ModalCommandStartRejectedError,
   modalRouterWire,
 } from "../src/sandbox/providers/modal-command-router-wire";
 
@@ -69,7 +70,11 @@ beforeAll(async () => {
       start(call: any, callback: any) {
         startCalls++;
         expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
-        callback({ code: status.UNAVAILABLE, details: "ambiguous start" });
+        callback({
+          code: call.request.execId === "rejected" ? status.NOT_FOUND : status.UNAVAILABLE,
+          details:
+            call.request.execId === "rejected" ? "executable unavailable" : "ambiguous start",
+        });
       },
       read(call: any) {
         expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
@@ -123,6 +128,24 @@ function wire() {
   return new ModalCommandRouterWire({ url: endpoint, jwt: "test-token" }, certificate);
 }
 const identity = (execId = "normal") => ({ taskId: "task-test", execId });
+
+test("authenticated Start rejection is typed separately from transport uncertainty", async () => {
+  const client = wire();
+  try {
+    await expect(
+      client.start({ ...identity("rejected"), commandArgs: ["missing"], workdir: "/tmp", env: {} }),
+    ).rejects.toBeInstanceOf(ModalCommandStartRejectedError);
+    try {
+      await client.start({ ...identity(), commandArgs: ["true"], workdir: "/tmp", env: {} });
+      throw new Error("Expected ambiguous failure");
+    } catch (error) {
+      expect(error).not.toBeInstanceOf(ModalCommandStartRejectedError);
+      expect((error as { code: number }).code).toBe(status.UNAVAILABLE);
+    }
+  } finally {
+    client.close();
+  }
+});
 
 test("TLS byte-offset reads replay exactly, including a new transport", async () => {
   const first = wire(),

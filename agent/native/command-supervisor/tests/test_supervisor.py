@@ -17,6 +17,12 @@ FIXTURE = str(BUILD / "fixture")
 
 
 class SupervisorTests(unittest.TestCase):
+    def test_capabilities_checks_kernel_without_launching_children(self):
+        result = subprocess.run([BINARY, "capabilities"], capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "native-subreaper-v1")
+        self.assertEqual(result.stderr, "")
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="og-supervisor-")
         self.root = Path(self.directory.name)
@@ -228,6 +234,10 @@ class SupervisorTests(unittest.TestCase):
     def test_unsupported_primitives_fail_before_user_code(self):
         for mode in ["deny-pidfd", "deny-send", "deny-wait", "deny-subreaper"]:
             with self.subTest(mode=mode):
+                capability = subprocess.run([FIXTURE, mode, BINARY, "capabilities"],
+                                            capture_output=True, timeout=3)
+                self.assertEqual(capability.returncode, 125)
+                self.assertEqual(capability.stdout, b"")
                 result = subprocess.run([FIXTURE, mode, BINARY, "launch", *self.flags(),
                                          "--", "/bin/sh", "-c", f"touch {self.marker}"],
                                         capture_output=True, timeout=3)

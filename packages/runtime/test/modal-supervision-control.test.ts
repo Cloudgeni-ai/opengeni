@@ -1,7 +1,15 @@
 import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { ModalCommandControl } from "../src/sandbox/providers/modal-command-control";
-import { withCommandSupervisionReady } from "../src/sandbox/provider-command-session";
+import {
+  withCommandSupervisionReady as withReady,
+  withSupervisedLaunchReservation,
+} from "../src/sandbox/provider-command-session";
+import { ModalCommandStartRejectedError } from "../src/sandbox/providers/modal-command-router-wire";
+
+function withCommandSupervisionReady<T>(ready: boolean, fn: () => T): T {
+  return withSupervisedLaunchReservation({ reserve: async () => {} }, () => withReady(ready, fn));
+}
 import type {
   ModalCommandRouterWire,
   ModalRouterStart,
@@ -9,7 +17,8 @@ import type {
 
 function fixture() {
   const starts: ModalRouterStart[] = [];
-  let failStart = false;
+  let failStart: unknown = null;
+  let exitCode = 0;
   let response = "";
   const control = ModalCommandControl.forSandbox(
     {
@@ -31,24 +40,27 @@ function fixture() {
       return run({
         start: async (args: ModalRouterStart) => {
           starts.push(args);
-          if (failStart) throw new Error("ambiguous start");
+          if (failStart) throw failStart;
         },
         read: async (_id: unknown, stream: string) => {
           expect(stream).toBe("stdout");
           return { bytes: Buffer.from(response), eof: true };
         },
-        poll: async () => 0,
+        poll: async () => exitCode,
       } as unknown as ModalCommandRouterWire);
     },
   });
   return {
     control,
     starts,
-    failStart: () => {
-      failStart = true;
+    failStart: (error: unknown = new Error("ambiguous start")) => {
+      failStart = error;
     },
     response: (text: string) => {
       response = text;
+    },
+    exit: (code: number) => {
+      exitCode = code;
     },
   };
 }
@@ -86,6 +98,50 @@ test("only readiness-gated nonPTY commands without runAs get an idle supervisor"
       )
     ).supervision,
   ).toBeUndefined();
+});
+
+test("supervised launch cannot dispatch without committed reservation", async () => {
+  const f = fixture();
+  await expect(withReady(true, () => f.control.start({ cmd: "never" }))).rejects.toThrow(
+    "pre-dispatch reservation",
+  );
+  expect(f.starts).toHaveLength(0);
+  await expect(
+    withSupervisedLaunchReservation(
+      {
+        reserve: async () => {
+          expect(f.starts).toHaveLength(0);
+          throw new Error("DB commit failed");
+        },
+      },
+      () => withReady(true, () => f.control.start({ cmd: "never" })),
+    ),
+  ).rejects.toThrow("DB commit failed");
+  expect(f.starts).toHaveLength(0);
+});
+
+test("authenticated definite start rejection is not converted into running", async () => {
+  const f = fixture();
+  f.failStart(new ModalCommandStartRejectedError(5, new Error("missing executable")));
+  await expect(
+    withCommandSupervisionReady(true, () => f.control.start({ cmd: "never" })),
+  ).rejects.toBeInstanceOf(ModalCommandStartRejectedError);
+  expect(f.starts).toHaveLength(1);
+});
+
+test("exact-instance capability requires native kernel probe, protocol and terminal zero", async () => {
+  const f = fixture();
+  f.response("native-subreaper-v1");
+  await f.control.verifySupervisionCapability();
+  expect(f.starts[0]!.commandArgs).toEqual([
+    "/usr/local/bin/opengeni-command-supervisor",
+    "capabilities",
+  ]);
+  f.exit(127);
+  await expect(f.control.verifySupervisionCapability()).rejects.toThrow("lacks compatible");
+  f.exit(0);
+  f.response("other-version");
+  await expect(f.control.verifySupervisionCapability()).rejects.toThrow("lacks compatible");
 });
 
 test("ambiguous supervised start retains exactly its client-chosen idle invocation without replay", async () => {

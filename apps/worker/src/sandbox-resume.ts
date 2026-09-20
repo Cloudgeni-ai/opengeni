@@ -1849,6 +1849,7 @@ export async function resumeBoxForTurn(
         sandboxGroupId: ids.sandboxGroupId,
         expectedEpoch: leaseEpoch,
         expectedInstanceId: live.instanceId,
+        expectedBackend: ids.backend,
       });
       if (marked.status === "marked") {
         await services.onSandboxLost?.({

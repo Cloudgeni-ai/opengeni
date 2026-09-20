@@ -186,13 +186,19 @@ async function rejects(query: PromiseLike<unknown>, message?: string) {
   await expect(Promise.resolve(query)).rejects.toThrow(message);
 }
 
-test("readiness requires all three active database gates", async () => {
+test("readiness requires all four active database gates including deferred loss truth", async () => {
   expect(await supervisedCommandProtocolReady(client.db)).toBe(true);
   await shared.admin`alter table sandbox_lease_holders disable trigger supervised_command_holder_guard`;
   try {
     expect(await supervisedCommandProtocolReady(client.db)).toBe(false);
   } finally {
     await shared.admin`alter table sandbox_lease_holders enable trigger supervised_command_holder_guard`;
+  }
+  await shared.admin`alter table sandbox_retained_processes disable trigger supervised_provider_loss_commit_guard`;
+  try {
+    expect(await supervisedCommandProtocolReady(client.db)).toBe(false);
+  } finally {
+    await shared.admin`alter table sandbox_retained_processes enable trigger supervised_provider_loss_commit_guard`;
   }
 });
 

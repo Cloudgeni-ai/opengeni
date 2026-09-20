@@ -11,13 +11,17 @@ import type { ProviderCommandOutput } from "../provider-command-session";
 import {
   admittedCommandSupervisionReady,
   markPendingCommandSupervised,
+  reserveSupervisedLaunch,
 } from "../provider-command-session";
 import {
   ModalCommandControl as LegacyControl,
   commandControlPlane,
   decodePage,
 } from "./modal-legacy-command-control";
-import { ModalCommandRouterWire } from "./modal-command-router-wire";
+import {
+  ModalCommandRouterWire,
+  ModalCommandStartRejectedError,
+} from "./modal-command-router-wire";
 
 export { modalCommandAbortMiddleware } from "./modal-legacy-command-control";
 export type ModalProviderCommand = SandboxProviderCommand;
@@ -190,6 +194,19 @@ export class ModalCommandControl {
         "--",
         ...commandArgs,
       ];
+    const command: ModalRouterProviderCommand = {
+      kind: "modal-router-v1",
+      sandboxId,
+      taskId,
+      execId,
+      ...(args.tty ? { pty: true } : {}),
+      ...(supervision ? { supervision } : {}),
+      streams: {
+        stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+        stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+      },
+    };
+    if (supervision) await reserveSupervisedLaunch(command);
     try {
       await this.withRouter(taskId, signal, (router) =>
         router.start(
@@ -219,20 +236,51 @@ export class ModalCommandControl {
       // A client-chosen router id remains the only possible invocation. The
       // supervisor is idle, so an ambiguous launch never ran user code. Retain
       // the descriptor and reconcile that id; do not replay the start.
-      if (!supervision) throw error;
+      if (!supervision || error instanceof ModalCommandStartRejectedError) throw error;
     }
-    return {
-      kind: "modal-router-v1",
-      sandboxId,
-      taskId: task.taskId,
-      execId,
-      ...(args.tty ? { pty: true } : {}),
-      ...(supervision ? { supervision } : {}),
-      streams: {
-        stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
-        stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
-      },
-    };
+    return command;
+  }
+
+  /** Read-only, authenticated control execution on this exact instance. Never
+   * inferred from a fleet image selector or user command stdout. No cache: warm
+   * instances and route/task replacement must each pass before admission. */
+  async verifySupervisionCapability(): Promise<{ sandboxId: string; taskId: string }> {
+    const sandboxId = this.sandboxId;
+    const signal = AbortSignal.timeout(5_000);
+    const task = await this.client.sandboxGetTaskId({ sandboxId }, { signal });
+    if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
+    await this.withRouter(task.taskId, signal, async (router) => {
+      const identity = { taskId: task.taskId!, execId: randomUUID() };
+      await router.start(
+        {
+          ...identity,
+          commandArgs: ["/usr/local/bin/opengeni-command-supervisor", "capabilities"],
+          workdir: "/tmp",
+          env: {},
+        },
+        signal,
+      );
+      let offset = 0;
+      let output = "";
+      let eof = false;
+      let exit: number | null = null;
+      while (!eof || exit === null) {
+        signal.throwIfAborted();
+        const page = await router.read(identity, "stdout", offset, 250, signal);
+        offset += page.bytes.length;
+        if (offset > 128) throw new Error("Modal supervision capability response exceeds bound");
+        output += page.bytes.toString("utf8");
+        eof = page.eof;
+        exit = await router.poll(identity, signal);
+      }
+      if (exit !== 0 || output !== "native-subreaper-v1")
+        throw new Error(
+          "Exact Modal instance lacks compatible native supervision; command not admitted",
+        );
+    });
+    if (sandboxId !== this.sandboxId)
+      throw new Error("Modal instance changed during supervision capability verification");
+    return { sandboxId, taskId: task.taskId };
   }
 
   /** Separate authenticated provider execution of the installed control helper.

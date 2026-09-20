@@ -1,5 +1,10 @@
 # Native command supervisor
 
+`opengeni-command-supervisor capabilities` runs the same kernel-prerequisite
+initialization as launch, creates no child or socket, prints exactly
+`native-subreaper-v1`, and exits zero only on success. The control plane runs this
+bounded check on the exact warm instance before admitting a supervised command.
+
 Linux-only, single-threaded subreaper for the stock non-PTY sandbox image.
 The image's existing `computer-native-build` stage cross-compiles and verifies
 this libc-only executable; no Rust workspace dependency is added.
