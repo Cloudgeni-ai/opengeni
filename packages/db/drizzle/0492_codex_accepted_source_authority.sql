@@ -62,21 +62,80 @@ CREATE TABLE codex_turn_source_bindings (
 ALTER TABLE codex_turn_source_bindings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE codex_turn_source_bindings FORCE ROW LEVEL SECURITY;
 CREATE POLICY workspace_isolation ON codex_turn_source_bindings
-  USING (opengeni_private.workspace_rls_visible(account_id, workspace_id))
-  WITH CHECK (opengeni_private.workspace_rls_visible(account_id, workspace_id));
+  FOR SELECT USING (opengeni_private.workspace_rls_visible(account_id, workspace_id));
+REVOKE ALL ON codex_turn_source_bindings FROM PUBLIC;
 
 DO $accepted_codex_source$
 DECLARE
   data_schema text := current_schema();
   definition text;
   patched text;
+  role_name text;
 BEGIN
+  -- Even accidental runtime INSERT grants cannot forge a receipt. Only the
+  -- migration-owner definer may insert; no role receives UPDATE/DELETE policies.
+  EXECUTE format('CREATE POLICY capture_insert ON %I.codex_turn_source_bindings '
+    'FOR INSERT WITH CHECK (current_user = %L AND '
+    'opengeni_private.workspace_rls_visible(account_id, workspace_id))', data_schema, current_user);
+  FOR role_name IN
+    SELECT DISTINCT role_row.rolname FROM pg_class relation
+    CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault('r', relation.relowner))) privilege
+    JOIN pg_roles role_row ON role_row.oid = privilege.grantee
+    WHERE relation.oid = 'codex_turn_source_bindings'::regclass
+      AND privilege.grantee <> relation.relowner
+  LOOP
+    EXECUTE format('REVOKE ALL ON %I.codex_turn_source_bindings FROM %I', data_schema, role_name);
+  END LOOP;
   EXECUTE format($ddl$
+    CREATE FUNCTION %1$I.capture_legacy_codex_turn_sources(
+      p_account_id uuid, p_workspace_id uuid
+    ) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, %1$I, pg_temp
+    AS $function$
+    DECLARE
+      accepted_source text;
+      previous_subject text := current_setting('opengeni.subject_id', true);
+    BEGIN
+      IF p_account_id IS NULL OR p_workspace_id IS NULL
+        OR p_account_id IS DISTINCT FROM opengeni_private.current_account_id()
+        OR p_workspace_id IS DISTINCT FROM opengeni_private.current_workspace_id()
+      THEN
+        RAISE EXCEPTION 'Codex source capture requires the exact workspace scope'
+          USING ERRCODE = '42501';
+      END IF;
+      -- Use the same lock as admission, allocation, and every source mutation.
+      -- Callers cannot choose a source, turn, or subject, even on conflict.
+      PERFORM pg_advisory_xact_lock(hashtextextended(
+        'codex-subscription-source:' || p_workspace_id::text, 0));
+      accepted_source := %1$I.resolve_workspace_codex_subscription_source(
+        p_account_id, p_workspace_id);
+      -- Only this fixed, content-free statement may see other actors' turns.
+      -- Never substitute an arbitrary subject or expose session content.
+      PERFORM set_config('opengeni.subject_id', '', true);
+      INSERT INTO %1$I.codex_turn_source_bindings (turn_id, account_id, workspace_id, source)
+      SELECT turn.id, turn.account_id, turn.workspace_id, accepted_source
+      FROM %1$I.session_turns turn
+      JOIN %1$I.sessions session ON session.id = turn.session_id
+        AND session.account_id = turn.account_id AND session.workspace_id = turn.workspace_id
+      WHERE turn.account_id = p_account_id AND turn.workspace_id = p_workspace_id
+        AND turn.model LIKE 'codex/%%'
+        AND turn.status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+        AND turn.metadata #>> '{codexCredentialPolicySnapshotV1,source}' IS NULL
+      ON CONFLICT (turn_id) DO NOTHING;
+      PERFORM set_config('opengeni.subject_id', coalesce(previous_subject, ''), true);
+    EXCEPTION WHEN OTHERS THEN
+      PERFORM set_config('opengeni.subject_id', coalesce(previous_subject, ''), true);
+      RAISE;
+    END
+    $function$;
+    REVOKE ALL ON FUNCTION %1$I.capture_legacy_codex_turn_sources(uuid,uuid) FROM PUBLIC;
+
     CREATE OR REPLACE FUNCTION opengeni_private.codex_credential_serves_turn(
       p_account_id uuid, p_workspace_id uuid, p_credential_id uuid, p_turn_id uuid
     ) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path = pg_catalog, %1$I
+    SET search_path = pg_catalog, %1$I, pg_temp
     AS $function$
     DECLARE accepted_source text;
     BEGIN
@@ -92,6 +151,7 @@ BEGIN
         AND binding.account_id = turn.account_id AND binding.workspace_id = turn.workspace_id
       WHERE turn.id = p_turn_id AND turn.account_id = p_account_id
         AND turn.workspace_id = p_workspace_id
+        AND turn.model LIKE 'codex/%%'
         AND turn.status IN ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity');
       IF NOT FOUND THEN RETURN false; END IF;
       -- Before the first cutover a legacy policy can still use current source.
@@ -117,7 +177,7 @@ BEGIN
 
     CREATE OR REPLACE FUNCTION opengeni_private.enforce_codex_lease_source()
     RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path = pg_catalog, %1$I
+    SET search_path = pg_catalog, %1$I, pg_temp
     AS $function$
     BEGIN
       IF NOT opengeni_private.codex_credential_serves_turn(
@@ -140,6 +200,12 @@ BEGIN
     RAISE EXCEPTION '0492 organization lease count prerequisite drift';
   END IF;
   EXECUTE patched;
+  -- Pin every authority lookup in this helper chain, including pre-0492
+  -- definitions. An omitted pg_temp is implicitly searched before real tables.
+  EXECUTE format('ALTER FUNCTION %I.resolve_workspace_codex_subscription_source(uuid,uuid) SET search_path = pg_catalog, %I, pg_temp', data_schema, data_schema);
+  EXECUTE format('ALTER FUNCTION opengeni_private.codex_credential_serves_workspace(uuid,uuid,uuid) SET search_path = pg_catalog, %I, pg_temp', data_schema);
+  EXECUTE format('ALTER FUNCTION opengeni_private.codex_organization_live_lease_count(uuid,uuid,uuid) SET search_path = pg_catalog, %I, pg_temp', data_schema);
+  EXECUTE format('ALTER FUNCTION opengeni_private.enforce_codex_credential_workspace() SET search_path = pg_catalog, %I, pg_temp', data_schema);
 
   SELECT pg_get_functiondef('opengeni_private.enforce_codex_credential_workspace()'::regprocedure)
     INTO definition;
@@ -150,12 +216,31 @@ BEGIN
     RAISE EXCEPTION '0492 session credential guard prerequisite drift';
   END IF;
   EXECUTE patched;
+  FOR role_name IN
+    SELECT DISTINCT role_row.rolname FROM pg_proc routine
+    CROSS JOIN LATERAL aclexplode(coalesce(routine.proacl, acldefault('f', routine.proowner))) privilege
+    JOIN pg_roles role_row ON role_row.oid = privilege.grantee
+    WHERE routine.oid = 'capture_legacy_codex_turn_sources(uuid,uuid)'::regprocedure
+      AND privilege.grantee <> routine.proowner
+  LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.capture_legacy_codex_turn_sources(uuid,uuid) FROM %I', data_schema, role_name);
+  END LOOP;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    EXECUTE format('GRANT SELECT, INSERT ON %I.codex_turn_source_bindings TO opengeni_app', data_schema);
+    EXECUTE format('REVOKE ALL ON %I.codex_turn_source_bindings FROM opengeni_app', data_schema);
+    EXECUTE format('GRANT SELECT ON %I.codex_turn_source_bindings TO opengeni_app', data_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.capture_legacy_codex_turn_sources(uuid,uuid) TO opengeni_app', data_schema);
     GRANT EXECUTE ON FUNCTION opengeni_private.codex_credential_serves_turn(uuid,uuid,uuid,uuid) TO opengeni_app;
   END IF;
 END
 $accepted_codex_source$;
+
+-- Retargeting an existing lease changes the accepted authority just as surely
+-- as changing its credential; validate both paths at the database boundary.
+DROP TRIGGER codex_credential_leases_source_guard ON codex_credential_leases;
+CREATE TRIGGER codex_credential_leases_source_guard
+BEFORE INSERT OR UPDATE OF account_id, workspace_id, credential_id, turn_id
+ON codex_credential_leases
+FOR EACH ROW EXECUTE FUNCTION opengeni_private.enforce_codex_lease_source();
 
 SELECT pg_temp.assert_codex_source_runtime_drain();
 DROP FUNCTION pg_temp.assert_codex_source_runtime_drain();

@@ -125,6 +125,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_organization_administration_overview(uuid, text)",
   "get_workspace_kind(uuid, uuid)",
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
+  "capture_legacy_codex_turn_sources(uuid, uuid)",
   "list_organization_workspace_ids(uuid)",
   "list_organization_codex_workspace_ids(uuid)",
   "organization_workspace_command(jsonb)",
@@ -1291,6 +1292,7 @@ export const RUNTIME_FULL_DML_TABLES = [
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = [
+  "codex_turn_source_bindings",
   "company_profile_activation_events",
   "company_profile_heads",
   "company_profile_snapshots",
@@ -1328,7 +1330,6 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 export const RUNTIME_READ_INSERT_TABLES = [
   "browser_revision_components",
   "browser_revisions",
-  "codex_turn_source_bindings",
   "company_profile_revisions",
   "editable_artifact_blob_refs",
   "editable_artifact_idempotency_receipts",

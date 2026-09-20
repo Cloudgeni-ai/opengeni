@@ -22613,16 +22613,11 @@ export class CodexSubscriptionSourceChangeBlockedError extends Error {
 async function captureLegacyCodexTurnSources(
   scopedDb: Database,
   workspaceId: string,
-  source: EffectiveCodexSubscriptionSource,
 ): Promise<void> {
   await scopedDb.execute(sql`
-    insert into codex_turn_source_bindings (turn_id, account_id, workspace_id, source)
-    select id, account_id, workspace_id, ${source}
-    from session_turns
-    where workspace_id = ${workspaceId} and model like 'codex/%'
-      and status in ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
-      and metadata #>> '{codexCredentialPolicySnapshotV1,source}' is null
-    on conflict (turn_id) do nothing
+    select capture_legacy_codex_turn_sources(
+      opengeni_private.current_account_id(), ${workspaceId}::uuid
+    )
   `);
 }
 
@@ -22700,8 +22695,7 @@ async function captureOrganizationCodexSubscriptionSources(
 ): Promise<void> {
   for (const workspaceId of workspaceIds) {
     await setRlsContext(scopedDb, { accountId, workspaceId });
-    const source = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, workspaceId);
-    await captureLegacyCodexTurnSources(scopedDb, workspaceId, source.effectiveSource);
+    await captureLegacyCodexTurnSources(scopedDb, workspaceId);
   }
   await setRlsContext(scopedDb, { accountId, workspaceId: null });
 }
@@ -22713,7 +22707,7 @@ export async function setWorkspaceCodexSubscriptionModeInTransaction(
     workspaceId: string;
     subjectId: string | null;
     mode: WorkspaceCodexSubscriptionMode;
-    /** Effective source captured under the source lock before caller-owned credential writes. */
+    /** Compatibility hint only; database capture derives authority before credential writes. */
     effectiveSourceBeforeMutation?: EffectiveCodexSubscriptionSource;
   },
 ): Promise<WorkspaceCodexSubscriptionSource> {
@@ -22722,9 +22716,7 @@ export async function setWorkspaceCodexSubscriptionModeInTransaction(
   if (current.accountId !== input.accountId) {
     throw new Error("Codex source account does not match the workspace account");
   }
-  const effectiveSourceBeforeMutation =
-    input.effectiveSourceBeforeMutation ?? current.effectiveSource;
-  await captureLegacyCodexTurnSources(scopedDb, input.workspaceId, effectiveSourceBeforeMutation);
+  await captureLegacyCodexTurnSources(scopedDb, input.workspaceId);
   let next = current;
   if (current.mode !== input.mode) {
     await scopedDb
@@ -23930,7 +23922,7 @@ export async function setCodexCredentialStatusById(
 ): Promise<boolean> {
   const mutation = await withCodexCapacityMutation(
     db,
-    { workspaceId, reason: "credential_status_changed" },
+    { workspaceId, reason: "credential_status_changed", mutationSource: "effective" },
     async (scopedDb) => {
       const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
       if (!pool.condition) return { result: false, changed: false };
@@ -25265,6 +25257,7 @@ async function lockExistingCodexRotationSettingsForCapacity(
   tx: Database,
   workspaceId: string,
   turnId?: string,
+  mutationSource?: "workspace" | "organization",
 ): Promise<{
   accountId: string;
   source: EffectiveCodexSubscriptionSource;
@@ -25281,6 +25274,8 @@ async function lockExistingCodexRotationSettingsForCapacity(
       turnId,
       source.effectiveSource,
     );
+  } else if (mutationSource) {
+    source.effectiveSource = mutationSource;
   }
   const rows =
     source.effectiveSource === "organization"
@@ -25809,6 +25804,8 @@ export async function getCodexCapacityWaitForSession(
 
 type CodexCapacityMutationInput = {
   acceptedTurnId?: string | undefined;
+  /** Local management writes do not follow the live source preference. */
+  mutationSource?: "workspace" | "organization" | "effective";
   workspaceId: string;
   reason: string;
   policyHash?: string | null;
@@ -25925,26 +25922,34 @@ async function mutateCodexCapacityInTransaction<T, TDatabase extends Database>(
   mutate: (tx: TDatabase) => Promise<{ result: T; changed: boolean }>,
 ): Promise<CodexCapacityMutationResult<T>> {
   await lockWorkspaceCodexSubscriptionSource(tx, input.workspaceId);
-  const sourceBefore = await getWorkspaceCodexSubscriptionSourceScoped(tx, input.workspaceId);
-  await captureLegacyCodexTurnSources(tx, input.workspaceId, sourceBefore.effectiveSource);
-  const rotation = await lockExistingCodexRotationSettingsForCapacity(
+  await captureLegacyCodexTurnSources(tx, input.workspaceId);
+  const current = await getWorkspaceCodexSubscriptionSourceScoped(tx, input.workspaceId);
+  const mutationSource = input.acceptedTurnId
+    ? await codexSourceForTurn(tx, input.workspaceId, input.acceptedTurnId, current.effectiveSource)
+    : input.mutationSource === "effective"
+      ? current.effectiveSource
+      : (input.mutationSource ?? "workspace");
+  await lockExistingCodexRotationSettingsForCapacity(
     tx,
     input.workspaceId,
     input.acceptedTurnId,
+    input.mutationSource === "effective" ? undefined : (input.mutationSource ?? "workspace"),
   );
   const mutation = await mutate(tx);
   if (!mutation.changed) {
     return { result: mutation.result, wakeTargets: [] };
   }
   const wakeTargets =
-    rotation?.source === "organization"
-      ? await wakeOrganizationCodexCapacityWaitersInTransaction(tx, {
-          accountId: rotation.accountId,
-          reason: input.reason,
-          ...(input.policyHash !== undefined ? { policyHash: input.policyHash } : {}),
-          restoreWorkspaceId: input.workspaceId,
-        })
-      : await wakeCodexCapacityWaitersInWorkspaceInTransaction(tx, input);
+    mutationSource === "disabled"
+      ? []
+      : mutationSource === "organization"
+        ? await wakeOrganizationCodexCapacityWaitersInTransaction(tx, {
+            accountId: current.accountId,
+            reason: input.reason,
+            ...(input.policyHash !== undefined ? { policyHash: input.policyHash } : {}),
+            restoreWorkspaceId: input.workspaceId,
+          })
+        : await wakeCodexCapacityWaitersInWorkspaceInTransaction(tx, input, "workspace");
   return {
     result: mutation.result,
     wakeTargets,
@@ -25953,8 +25958,9 @@ async function mutateCodexCapacityInTransaction<T, TDatabase extends Database>(
 
 /**
  * Same-transaction capacity-mutation/outbox seam for eligibility and
- * membership/default changes. The allocator rotation row is always the
- * first lock. Mutations report whether capacity truth changed; only then are
+ * membership/default changes. Local management writes target the workspace
+ * pool; runtime writers opt into the effective/accepted pool. The source lock
+ * precedes that pool's rotation row. Mutations report whether capacity truth changed; only then are
  * matching waiter wake revisions advanced and returned for best-effort signal.
  */
 export async function withCodexCapacityMutation<T>(
@@ -29222,11 +29228,126 @@ export async function recordCodexAccountUsageWithWakeTargets(
   snapshot: CodexAccountUsageSnapshot,
   authority?: CodexAcceptedCredentialAuthority,
 ): Promise<CodexCapacityMutationResult<boolean>> {
-  return await withCodexCapacityMutation(
+  return mutateCodexAccountUsage(db, workspaceId, credentialId, snapshot, authority);
+}
+
+export type CodexFinalizationUsageAuthority = CodexAcceptedLeaseAuthority & {
+  sessionId: string;
+  attemptId: string;
+  executionGeneration: number;
+  credentialVersion: number;
+};
+
+/** Write-only cleanup authority: never usable by a token/decrypt accessor. */
+export async function recordCodexAccountUsageForFinalization(
+  db: Database,
+  workspaceId: string,
+  credentialId: string,
+  snapshot: CodexAccountUsageSnapshot,
+  authority: CodexFinalizationUsageAuthority,
+): Promise<CodexCapacityMutationResult<boolean>> {
+  return mutateCodexAccountUsage(db, workspaceId, credentialId, snapshot, authority, authority);
+}
+
+async function codexFinalizationUsageCondition(
+  tx: Database,
+  workspaceId: string,
+  credentialId: string,
+  snapshot: CodexAccountUsageSnapshot,
+  authority: CodexFinalizationUsageAuthority,
+): Promise<SQL | null> {
+  // The normal fence supplies canonical control/workspace/session/turn/attempt
+  // locks. Only this metadata writer admits its exact successfully settled owner.
+  const fence = await lockTurnAttemptWriteFenceTx(tx, { ...authority, workspaceId });
+  const { session, turn, attempt } = fence;
+  if (!session || !turn || !attempt || !snapshot.checkedAt) return null;
+  let authoritySnapshot;
+  try {
+    authoritySnapshot = assertSessionAuthoritySnapshot({
+      attemptId: authority.attemptId,
+      ...attempt,
+    });
+  } catch {
+    return null;
+  }
+  const terminalOwner =
+    ["completed", "failed"].includes(turn.status) &&
+    turn.activeAttemptId === null &&
+    turn.executionGeneration === authority.executionGeneration &&
+    turn.sessionId === authority.sessionId &&
+    turn.accountId === session.accountId &&
+    attempt.accountId === session.accountId &&
+    attempt.sessionId === session.id &&
+    attempt.turnId === turn.id &&
+    attempt.executionGeneration === authority.executionGeneration &&
+    attempt.state === "closed" &&
+    attempt.outcome === turn.status &&
+    attempt.closedAt !== null &&
+    snapshot.checkedAt <= attempt.closedAt &&
+    snapshot.checkedAt >= attempt.startedAt &&
+    session.status !== "cancelled" &&
+    sessionAuthoritySnapshotMatchesSession(authoritySnapshot, session) &&
+    (fence.allowed || (fence.reason !== "workspace_paused" && fence.reason !== "session_paused"));
+  if (!fence.allowed && !terminalOwner) return null;
+  const [interruption] = await tx
+    .select({ id: schema.sessionAttemptInterruptions.id })
+    .from(schema.sessionAttemptInterruptions)
+    .where(
+      and(
+        eq(schema.sessionAttemptInterruptions.workspaceId, workspaceId),
+        eq(schema.sessionAttemptInterruptions.attemptId, authority.attemptId),
+        inArray(schema.sessionAttemptInterruptions.state, ["pending", "delivered", "acknowledged"]),
+      ),
+    )
+    .limit(1);
+  if (interruption) return null;
+  const leases = await tx.execute(sql`
+    select turn_id from codex_credential_leases
+    where account_id = ${session.accountId} and workspace_id = ${workspaceId}
+      and turn_id = ${authority.turnId} and credential_id = ${credentialId}
+      and holder_id = ${authority.holderId} and generation = ${authority.generation}
+      and leased_until > clock_timestamp()
+    for update
+  `);
+  if (!leases.length) return null;
+  const source = await codexSourceForTurn(tx, workspaceId, turn.id, "disabled");
+  if (source === "disabled") return null;
+  return and(
+    codexCredentialPoolCondition({ accountId: session.accountId, workspaceId, source }),
+    eq(schema.codexSubscriptionCredentials.version, authority.credentialVersion),
+    eq(schema.codexSubscriptionCredentials.status, "active"),
+    // Old cleanup must not replace a fresher poll/header snapshot.
+    sql`(${schema.codexSubscriptionCredentials.usageCheckedAt} is null or
+      ${schema.codexSubscriptionCredentials.usageCheckedAt} <= ${snapshot.checkedAt.toISOString()}::timestamptz)`,
+  )!;
+}
+
+async function mutateCodexAccountUsage(
+  db: Database,
+  workspaceId: string,
+  credentialId: string,
+  snapshot: CodexAccountUsageSnapshot,
+  authority?: CodexAcceptedCredentialAuthority,
+  finalizationAuthority?: CodexFinalizationUsageAuthority,
+): Promise<CodexCapacityMutationResult<boolean>> {
+  return await withSessionCodexCapacityMutation(
     db,
-    { workspaceId, reason: "codex_usage_refreshed", acceptedTurnId: authority?.turnId },
+    {
+      workspaceId,
+      reason: "codex_usage_refreshed",
+      acceptedTurnId: authority?.turnId,
+      mutationSource: "effective",
+    },
     async (tx) => {
-      const condition = await codexCredentialUseCondition(tx, workspaceId, authority);
+      const condition = finalizationAuthority
+        ? await codexFinalizationUsageCondition(
+            tx,
+            workspaceId,
+            credentialId,
+            snapshot,
+            finalizationAuthority,
+          )
+        : await codexCredentialUseCondition(tx, workspaceId, authority);
       if (!condition) return { result: false, changed: false };
       const [previous] = await tx
         .select({
@@ -29554,6 +29675,7 @@ export async function setCodexCredentialExhaustedWithWakeTargets(
     {
       workspaceId,
       reason: until === null ? "codex_cooldown_cleared" : "codex_cooldown_changed",
+      mutationSource: "effective",
     },
     async (tx) => {
       const pool = await effectiveCodexCredentialPoolCondition(tx, workspaceId);
@@ -29756,135 +29878,197 @@ export async function switchSessionCodexAccount(
   db: Database,
   input: { workspaceId: string; sessionId: string; credentialId: string | null; subjectId: string },
 ) {
-  return await withSessionCodexCapacityMutation<{
-    changed: boolean;
-    appliedTo: "waiting_turn" | "next_turn";
-    events: SessionEvent[];
-  }>(
-    db,
-    { workspaceId: input.workspaceId, reason: "codex_manual_session_pin_changed" },
-    async (tx) => {
-      const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
-      const changed = await setSessionCodexPinInTransaction(
-        tx,
-        input.workspaceId,
-        input.sessionId,
-        input.credentialId,
-      );
-      const events: SessionEvent[] = [];
-      let appliedTo: "waiting_turn" | "next_turn" = "next_turn";
-      if (!changed) return { result: { changed, appliedTo, events }, changed };
-      const locks = await lockSessionEventWriteRows(tx, {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
+    await lockWorkspaceCodexSubscriptionSource(scopedDb, input.workspaceId);
+    await captureLegacyCodexTurnSources(scopedDb, input.workspaceId);
+    const [observed] = await scopedDb
+      .select()
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .limit(1);
+    const acceptedTurnId =
+      observed?.status === "waiting_capacity" ? (observed.activeTurnId ?? undefined) : undefined;
+    return await mutateCodexCapacityInTransaction<
+      {
+        changed: boolean;
+        appliedTo: "waiting_turn" | "next_turn";
+        events: SessionEvent[];
+      },
+      SessionActivityDatabase
+    >(
+      scopedDb,
+      {
         workspaceId: input.workspaceId,
-        controlLock: "none",
-        sessionIds: [input.sessionId],
-      });
-      const session = locks.sessions[0];
-      if (!session) throw new Error("Codex account switch lost its locked session");
-      if (session.status === "waiting_capacity" && session.activeTurnId) {
-        const [turn] = await tx
-          .select()
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              eq(schema.sessionTurns.id, session.activeTurnId),
-            ),
-          )
-          .for("update");
-        const [waiter] = await tx
-          .select()
-          .from(schema.codexCapacityWaiters)
-          .where(
-            and(
-              eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
-              eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
-              eq(schema.codexCapacityWaiters.status, "waiting"),
-            ),
-          )
-          .for("update");
-        if (
-          turn?.status === "waiting_capacity" &&
-          turn.activeAttemptId === null &&
-          waiter &&
-          waiter.blockedTurnId === turn.id &&
-          waiter.blockedTurnGeneration === turn.executionGeneration
-        ) {
-          const accepted = readCodexCredentialPolicySnapshotV1(turn.metadata);
-          if (accepted.kind === "valid") {
-            // Never use an explicit pin override to cross the accepted authority/pool boundary.
-            if (
-              !rotation ||
-              (accepted.policy.source && accepted.policy.source !== rotation.source)
-            ) {
-              throw new Error("Cannot switch a waiting Codex turn across credential sources");
-            }
-            const policy = {
-              ...accepted.policy,
-              pinnedCredentialId: input.credentialId,
-              pinSource: input.credentialId === null ? null : ("manual" as const),
-              // Auto explicitly requests the current defaults within the SAME accepted pool.
-              ...(input.credentialId === null
-                ? {
-                    activeCredentialId: rotation.activeCredentialId,
-                    rotationEnabled: rotation.rotationEnabled,
-                    rotationStrategy: rotation.rotationStrategy,
-                    lastCredentialId: null,
-                  }
-                : {}),
-            };
-            await tx
-              .update(schema.sessionTurns)
-              .set({
-                metadata: metadataWithCodexCredentialPolicySnapshotV1(turn.metadata, policy),
-                version: turn.version + 1,
-                updatedAt: new Date(),
-              })
-              .where(eq(schema.sessionTurns.id, turn.id));
-          }
-          appliedTo = "waiting_turn";
-        }
-      }
-      const inserted = await tx
-        .insert(schema.sessionEvents)
-        .values(
-          withLosslessContentWriteVersion(
-            [
-              {
-                accountId: session.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                sequence: session.lastSequence + 1,
-                type: "codex.account.selection.changed",
-                payload: {
-                  credentialId: input.credentialId,
-                  appliedTo,
-                  turnId: appliedTo === "waiting_turn" ? session.activeTurnId : null,
-                  subjectId: input.subjectId,
-                },
-                // This is a user control receipt, not output from a running attempt.
-                occurredAt: new Date(),
-              },
-            ],
-            "payload",
-            "payloadCodecVersion",
-          ),
-        )
-        .returning();
-      await tx
-        .update(schema.sessions)
-        .set({ lastSequence: session.lastSequence + 1 })
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, input.workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-          ),
+        reason: "codex_manual_session_pin_changed",
+        acceptedTurnId,
+        mutationSource: "effective",
+      },
+      async (tx) => {
+        const rotation = await lockExistingCodexRotationSettingsForCapacity(
+          tx,
+          input.workspaceId,
+          acceptedTurnId,
         );
-      events.push(...inserted.map(mapEvent));
-      return { result: { changed, appliedTo, events }, changed };
-    },
-  );
+        const events: SessionEvent[] = [];
+        let appliedTo: "waiting_turn" | "next_turn" = "next_turn";
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "none",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        // The source advisory serializes allocation, but settlement can still move
+        // the session. Never apply a choice validated for a different boundary.
+        if (
+          !session ||
+          session.status !== observed?.status ||
+          session.activeTurnId !== observed?.activeTurnId
+        ) {
+          return { result: { changed: false, appliedTo, events }, changed: false };
+        }
+        if (input.credentialId !== null) {
+          if (!rotation || rotation.source === "disabled")
+            return { result: { changed: false, appliedTo, events }, changed: false };
+          const [credential] = await tx
+            .select({ id: schema.codexSubscriptionCredentials.id })
+            .from(schema.codexSubscriptionCredentials)
+            .where(
+              and(
+                eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+                codexCredentialPoolCondition({
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  source: rotation.source,
+                }),
+              ),
+            )
+            .limit(1);
+          if (!credential) return { result: { changed: false, appliedTo, events }, changed: false };
+        }
+        if (session.status === "waiting_capacity" && session.activeTurnId) {
+          const [turn] = await tx
+            .select()
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                eq(schema.sessionTurns.id, session.activeTurnId),
+              ),
+            )
+            .for("update");
+          const [waiter] = await tx
+            .select()
+            .from(schema.codexCapacityWaiters)
+            .where(
+              and(
+                eq(schema.codexCapacityWaiters.workspaceId, input.workspaceId),
+                eq(schema.codexCapacityWaiters.sessionId, input.sessionId),
+                eq(schema.codexCapacityWaiters.status, "waiting"),
+              ),
+            )
+            .for("update");
+          if (
+            turn?.status === "waiting_capacity" &&
+            turn.activeAttemptId === null &&
+            waiter &&
+            waiter.blockedTurnId === turn.id &&
+            waiter.blockedTurnGeneration === turn.executionGeneration
+          ) {
+            const accepted = readCodexCredentialPolicySnapshotV1(turn.metadata);
+            if (accepted.kind === "valid") {
+              // Never use an explicit pin override to cross the accepted authority/pool boundary.
+              if (
+                !rotation ||
+                (accepted.policy.source && accepted.policy.source !== rotation.source)
+              ) {
+                throw new Error("Cannot switch a waiting Codex turn across credential sources");
+              }
+              const policy = {
+                ...accepted.policy,
+                source: rotation.source,
+                pinnedCredentialId: input.credentialId,
+                pinSource: input.credentialId === null ? null : ("manual" as const),
+                // Auto explicitly requests the current defaults within the SAME accepted pool.
+                ...(input.credentialId === null
+                  ? {
+                      activeCredentialId: rotation.activeCredentialId,
+                      rotationEnabled: rotation.rotationEnabled,
+                      rotationStrategy: rotation.rotationStrategy,
+                      lastCredentialId: null,
+                    }
+                  : {}),
+              };
+              await tx
+                .update(schema.sessionTurns)
+                .set({
+                  metadata: metadataWithCodexCredentialPolicySnapshotV1(turn.metadata, policy),
+                  version: turn.version + 1,
+                  updatedAt: new Date(),
+                })
+                .where(eq(schema.sessionTurns.id, turn.id));
+            }
+            appliedTo = "waiting_turn";
+          }
+        }
+        await tx
+          .update(schema.sessions)
+          .set({
+            codexPinnedCredentialId: input.credentialId,
+            codexPinSource: input.credentialId === null ? null : "manual",
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        const inserted = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              [
+                {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: session.lastSequence + 1,
+                  type: "codex.account.selection.changed",
+                  payload: {
+                    credentialId: input.credentialId,
+                    appliedTo,
+                    turnId: appliedTo === "waiting_turn" ? session.activeTurnId : null,
+                    subjectId: input.subjectId,
+                  },
+                  // This is a user control receipt, not output from a running attempt.
+                  occurredAt: new Date(),
+                },
+              ],
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: session.lastSequence + 1 })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        events.push(...inserted.map(mapEvent));
+        return { result: { changed: true, appliedTo, events }, changed: true };
+      },
+    );
+  });
 }
 
 export async function setSessionCodexPin(
@@ -79661,11 +79845,11 @@ export function buildCodexTokenResolver(
   if (authority) {
     deps = {
       ...deps,
-      loadCredential: (db, settings, workspaceId, credentialId) =>
-        loadCodexCredentialForRun(db, settings, workspaceId, credentialId, authority),
-      recordRefresh: (db, input) => recordCodexTokenRefresh(db, { ...input, authority }),
-      setStatus: (db, workspaceId, status, lastError, target) =>
-        setCodexCredentialStatus(db, workspaceId, status, lastError, target, authority),
+      loadCredential: (targetDb, targetSettings, targetWorkspaceId, targetCredentialId) =>
+        loadCodexCredentialForRun(targetDb, targetSettings, targetWorkspaceId, targetCredentialId, authority),
+      recordRefresh: (targetDb, input) => recordCodexTokenRefresh(targetDb, { ...input, authority }),
+      setStatus: (targetDb, targetWorkspaceId, status, lastError, target) =>
+        setCodexCredentialStatus(targetDb, targetWorkspaceId, status, lastError, target, authority),
     };
   }
   return buildCodexTokenResolverCore(db, settings, workspaceId, credentialId, deps);

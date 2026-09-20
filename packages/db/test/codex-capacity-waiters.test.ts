@@ -33,6 +33,7 @@ import {
   registerPendingSessionToolCall,
   setCodexCredentialExhausted,
   setSessionCodexPinInTransaction,
+  setWorkspaceCodexSubscriptionMode,
   submitHumanPromptInTransaction,
   updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
@@ -832,14 +833,22 @@ describe("durable Codex capacity waits", () => {
     const ws = await freshWorkspace();
     const credentialId = await connectCredential(ws, true);
     const scenario = await seedScenario(ws);
-    await admin`
-      insert into codex_credential_leases (
-        account_id, workspace_id, credential_id, turn_id,
-        holder_id, generation, leased_until
-      ) values (
-        ${scenario.accountId}, ${scenario.workspaceId}, ${credentialId}, ${scenario.turnId},
-        'current-holder', 4, now() + interval '5 minutes'
-      )`;
+    // Lease source authority requires the same tenant context as a real allocation.
+    await withSessionActivityRlsContext(
+      dbA,
+      { accountId: scenario.accountId, workspaceId: scenario.workspaceId },
+      async (tx) => {
+        await tx.execute(sql`
+          insert into codex_credential_leases (
+            account_id, workspace_id, credential_id, turn_id,
+            holder_id, generation, leased_until
+          ) values (
+            ${scenario.accountId}, ${scenario.workspaceId}, ${credentialId}, ${scenario.turnId},
+            'current-holder', 4, now() + interval '5 minutes'
+          )
+        `);
+      },
+    );
     const input = {
       accountId: scenario.accountId,
       workspaceId: scenario.workspaceId,
@@ -965,6 +974,60 @@ describe("durable Codex capacity waits", () => {
       turn_status: "waiting_capacity",
       active_turn_id: scenario.turnId,
     });
+  });
+
+  test("local reconnect across source drift immediately wakes only accepted workspace waiters", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const local = await connectCredential(ws, true);
+    await admin`update codex_subscription_credentials set status = 'error' where id = ${local}`;
+    const workspaceScenario = await seedScenario(ws);
+    const workspaceWait = await arm(workspaceScenario);
+    expect(workspaceWait.action).toBe("waiting");
+    const [organization] = await admin<{ id: string }[]>`insert into codex_subscription_credentials
+      (account_id, organization_id, authority_scope, credential_encrypted, chatgpt_account_id, status)
+      values (${ws.accountId}, ${ws.accountId}, 'organization', 'ciphertext', 'org-reconnect', 'error') returning id`;
+    await admin`insert into organization_codex_rotation_settings (account_id, active_credential_id, rotation_enabled)
+      values (${ws.accountId}, ${organization!.id}, true)`;
+    await setWorkspaceCodexSubscriptionMode(dbA, { ...ws, subjectId: null, mode: "organization" });
+    const organizationScenario = await seedScenario(ws);
+    const organizationWait = await arm(organizationScenario);
+    if (workspaceWait.action !== "waiting" || organizationWait.action !== "waiting")
+      throw new Error("expected waits");
+    const [localRow] =
+      await admin`select chatgpt_account_id from codex_subscription_credentials where id = ${local}`;
+    const mutation = await withCodexCapacityMutation(
+      dbA,
+      { workspaceId: ws.workspaceId, reason: "codex_credential_connected" },
+      async (tx) => {
+        const result = await upsertCodexSubscriptionCredential(tx, {
+          ...ws,
+          credentialEncrypted: "reconnected",
+          chatgptAccountId: localRow!.chatgpt_account_id,
+          scopes: null,
+          planType: "pro",
+          isFedramp: false,
+          expiresAt: null,
+          lastRefreshAt: new Date(),
+        });
+        return { result, changed: true };
+      },
+    );
+    expect(mutation.wakeTargets.map((target) => target.waiterId)).toEqual([
+      workspaceWait.waiter.id,
+    ]);
+    expect(
+      (await getCodexCapacityWaitForSession(dbA, ws.workspaceId, organizationScenario.sessionId))
+        ?.wakeRevision,
+    ).toBe(organizationWait.waiter.wakeRevision);
+    // Changing the preference back must not broaden a local mutation to org waits either.
+    await setWorkspaceCodexSubscriptionMode(dbA, { ...ws, subjectId: null, mode: "workspace" });
+    const again = await withCodexCapacityMutation(
+      dbA,
+      { workspaceId: ws.workspaceId, reason: "local_capacity_changed" },
+      async () => ({ result: true, changed: true }),
+    );
+    expect(again.wakeTargets.map((target) => target.waiterId)).toEqual([workspaceWait.waiter.id]);
   });
 
   test("one capacity mutation wakes and concurrent evaluators resume and claim once", async () => {
@@ -1148,7 +1211,11 @@ describe("durable Codex capacity waits", () => {
 
     const mutation = await withCodexCapacityMutation(
       dbA,
-      { workspaceId: workspaces[0]!.workspaceId, reason: "organization_capacity_restored" },
+      {
+        workspaceId: workspaces[0]!.workspaceId,
+        reason: "organization_capacity_restored",
+        mutationSource: "organization",
+      },
       async (tx) => {
         const updated = await tx
           .update(schema.codexSubscriptionCredentials)

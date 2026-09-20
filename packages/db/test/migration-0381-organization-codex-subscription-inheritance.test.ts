@@ -120,10 +120,10 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       /setWorkspaceCodexSubscriptionMode[\s\S]*?lockWorkspaceCodexSubscriptionSource[\s\S]*?captureLegacyCodexTurnSources/u,
     );
     expect(dbIndexSource).toMatch(
-      /captureLegacyCodexTurnSources[\s\S]*?codex_turn_source_bindings[\s\S]*?waiting_capacity[\s\S]*?on conflict \(turn_id\) do nothing/u,
+      /captureLegacyCodexTurnSources[\s\S]*?select capture_legacy_codex_turn_sources\([\s\S]*?opengeni_private\.current_account_id\(\)/u,
     );
     expect(dbIndexSource).toMatch(
-      /mutateCodexCapacityInTransaction[\s\S]*?sourceBefore[\s\S]*?captureLegacyCodexTurnSources[\s\S]*?await mutate/u,
+      /mutateCodexCapacityInTransaction[\s\S]*?lockWorkspaceCodexSubscriptionSource[\s\S]*?captureLegacyCodexTurnSources[\s\S]*?await mutate/u,
     );
     expect(dbIndexSource).toMatch(
       /lockOrganizationCodexSubscriptionSources[\s\S]*?list_organization_codex_workspace_ids[\s\S]*?lockWorkspaceCodexSubscriptionSource/u,
