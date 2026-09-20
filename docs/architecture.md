@@ -34,19 +34,15 @@ user; task notes cover temporary tree coordination. Linking never merges users.
 See [product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), and [run lifecycle](run-lifecycle.md).
-Skill removal is a guarded physical deletion of the scoped registry head and
-all revisions, with exact removal approval and Learning enforcement through the
-same Skill lifecycle. It does not rewrite accepted conversation context.
+Skill removal physically deletes the scoped registry head and all revisions,
+requiring exact removal approval and Learning enforcement through the Skill
+lifecycle. Accepted conversation context remains unchanged.
 
 Session `mcpApprovalPolicies` requires session-control authority. Claims freeze
 inherited approvals with catalog floors; policies grant neither capabilities nor credentials.
 
-Native MCP accounts are frozen separately from connector policy. Admission builds
-`mcpAccountBindings` in `packages/core/src/domain/mcp-account-bindings.ts`; each
-account retains its canonical connector identity and an account-qualified runtime
-route. Personal bindings remain sender-owned, while workspace bindings have no
-personal owner. Empty accepted sets never fall back to current defaults. See
-[`remote-mcp-credentials.md`](remote-mcp-credentials.md) for attachment semantics.
+Account isolation: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
+[`remote-mcp-credentials.md`](remote-mcp-credentials.md).
 
 ---
 
