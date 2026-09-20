@@ -2505,6 +2505,11 @@ The start log records an execution invocation, not a successful turn claim.
 Missing traces may reflect sampling or retention; the durable session timeline
 remains authoritative. This linkage does not retroactively identify old traces.
 
+Codex EOF classification waits for the SSE parser's final buffered block, including
+a valid terminal without a trailing blank separator. Raw transport EOF is not
+itself a failed response. Missing or failed semantic terminals remain failures;
+the per-attempt audit fence still permits exactly one terminal outcome.
+
 Native diagnostic observers run before the existing awaited
 `agent.model.request` durable audit callback and cannot block or change it.
 Durable append/publish fencing and ordering therefore remain the source of audit
