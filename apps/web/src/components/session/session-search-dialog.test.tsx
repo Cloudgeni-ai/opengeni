@@ -11,6 +11,7 @@ registerDom();
 let titleReads = 0;
 let messageReads = 0;
 let failure = 503;
+let messageGate: Promise<void> | null = null;
 const queries: string[] = [];
 const client = {
   listSessionPage: async (_workspace: string, options: { search: string; signal: AbortSignal }) => {
@@ -25,6 +26,7 @@ const client = {
   },
   searchSessionMessages: async () => {
     messageReads++;
+    if (messageGate) await messageGate;
     if (failure === 200)
       return {
         matches: [],
@@ -100,7 +102,21 @@ test("draft undo preserves title results; retries isolate failures and denial cl
     expect(document.querySelectorAll("[data-search-result]").length).toBe(0);
     expect(document.body.textContent).not.toContain("needle title");
     failure = 200;
+    let releaseMessages!: () => void;
+    messageGate = new Promise<void>((resolve) => {
+      releaseMessages = resolve;
+    });
     await clickRetry();
+    await flush(20);
+    // The healthy title read has returned, but live message authorization has
+    // not: neither that title nor the old selected preview may be exposed.
+    expect(document.querySelectorAll("[data-search-result]").length).toBe(0);
+    expect(document.body.textContent).not.toContain("needle title");
+    expect(document.querySelector('[aria-label="Conversation preview"]')).toBeNull();
+    await act(async () => {
+      messageGate = null;
+      releaseMessages();
+    });
     await flush(20);
     expect(document.querySelectorAll("[data-search-result]").length).toBe(1);
     await type("");

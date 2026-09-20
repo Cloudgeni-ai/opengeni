@@ -9,8 +9,8 @@ import {
 } from "@opengeni/db";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import type { SessionMessageSearchResponse } from "../../packages/sdk/src/session-message-search";
+import { acquireSearchTestDatabase } from "../../packages/db/test/session-message-search-fixture";
 import {
-  acquireSharedTestDatabase,
   freePort,
   MemoryEventBus,
   runCommand,
@@ -79,11 +79,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       );
     }
 
-    const acquired = await acquireSharedTestDatabase("session-search-browser");
-    if (!acquired) {
-      throw new Error("session search browser E2E requires real PostgreSQL; no skip is allowed");
-    }
-    shared = acquired;
+    shared = await acquireSearchTestDatabase("session-search-browser");
     const appRole = decodeURIComponent(new URL(shared.appUrl).username);
     const [posture] = await shared.admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
       select rolsuper, rolbypassrls from pg_roles where rolname = ${appRole}`;
