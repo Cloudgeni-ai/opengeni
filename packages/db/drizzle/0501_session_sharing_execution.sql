@@ -200,7 +200,7 @@ CREATE OR REPLACE FUNCTION transition_session_visibility(p_account_id uuid, p_wo
  RETURNS TABLE(operation_id uuid, event_id uuid, event_sequence integer, visibility text, authority_epoch integer, owner_organization_membership_id uuid, changed boolean, replay boolean, interrupted_attempt_count integer, cancelled_turn_count integer, cancelled_update_count integer, paused_goal_count integer, revoked_grant_count integer)
  LANGUAGE plpgsql
  SECURITY DEFINER
- SET search_path TO pg_catalog
+ SET search_path FROM CURRENT
 AS $function$
 DECLARE
   actor_membership organization_memberships%ROWTYPE;
@@ -425,7 +425,7 @@ CREATE OR REPLACE FUNCTION assert_session_attempt_personal_machine(p_account_id 
  RETURNS boolean
  LANGUAGE plpgsql
  SECURITY DEFINER
- SET search_path TO pg_catalog
+ SET search_path FROM CURRENT
 AS $function$
 DECLARE
   authorization_row session_attempt_connected_machine_authorizations%ROWTYPE;
