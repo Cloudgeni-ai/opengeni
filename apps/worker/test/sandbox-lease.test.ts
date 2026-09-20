@@ -3543,7 +3543,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         await admin`update sandbox_retained_processes set last_reconcile_outcome = 'provider_error',
           reconcile_attempts = 5 where id = ${processId}`;
         await admin`update session_background_commands set state = 'stopping',
-          cancel_requested_at = now() - interval '2 minutes' where id = ${processId}`;
+          cancel_requested_at = now() - interval '2 minutes', cancel_requested_by = 'test:stop-request'
+          where id = ${processId}`;
       }
       expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
       await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'turn'`;
@@ -3594,10 +3595,12 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         await admin`update sandbox_retained_processes set reconcile_attempts = 4 where id = ${processId}`;
         expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
         await admin`update sandbox_retained_processes set reconcile_attempts = 5 where id = ${processId}`;
-        await admin`update session_background_commands set state = 'running', cancel_requested_at = null
+        await admin`update session_background_commands set state = 'running', cancel_requested_at = null,
+          cancel_requested_by = null
           where id = ${processId}`;
         expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
-        await admin`update session_background_commands set state = 'stopping', cancel_requested_at = now()
+        await admin`update session_background_commands set state = 'stopping', cancel_requested_at = now(),
+          cancel_requested_by = 'test:stop-request'
           where id = ${processId}`;
         expect(
           await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 60_000 }),
