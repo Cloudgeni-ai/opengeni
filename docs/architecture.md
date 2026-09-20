@@ -1476,6 +1476,7 @@ verified receipts, and no blind replay.
 
 Canonical: `packages/runtime/src/sandbox/`,
 `apps/worker/src/activities/sandbox-lease.ts`,
+`apps/worker/src/sandbox-snapshot-diagnostics.ts` (shared redacted warm/drain failure classification),
 [`connected-machines.md`](connected-machines.md), [`rigs.md`](rigs.md), and
 [`deployment.md`](deployment.md).
 

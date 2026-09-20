@@ -611,6 +611,8 @@ describe("observability", () => {
       obs.warn("snapshot failed", {
         errorClass: "SnapshotOperationError",
         errorCode: "snapshot_operation_failed",
+        origin: "worker-lifecycle",
+        causeName: "SandboxProviderCaptureTimeoutError",
         providerErrorName: "ClientError",
         providerGrpcCode: 4,
         providerHttpStatus: 504,
@@ -623,6 +625,7 @@ describe("observability", () => {
       });
       obs.warn("snapshot failed", {
         errorClass: "SnapshotOperationError",
+        causeName: sentinel,
         providerErrorName: sentinel,
         providerGrpcCode: 100,
         providerHttpStatus: NaN,
@@ -635,6 +638,8 @@ describe("observability", () => {
       console.warn = originalWarn;
     }
     expect(JSON.parse(observed[0]!)).toMatchObject({
+      origin: "worker-lifecycle",
+      causeName: "SandboxProviderCaptureTimeoutError",
       providerErrorName: "ClientError",
       providerGrpcCode: 4,
       providerHttpStatus: 504,
@@ -645,6 +650,7 @@ describe("observability", () => {
     expect(observed.join(" ")).not.toContain(sentinel);
     expect(observed.join(" ")).not.toContain("0ffbda8c-11c6-49dc-b636-b15a58163753");
     for (const key of [
+      "causeName",
       "providerErrorName",
       "providerGrpcCode",
       "providerHttpStatus",

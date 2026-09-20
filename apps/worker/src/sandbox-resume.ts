@@ -87,6 +87,8 @@ import {
   type ObjectStorage,
 } from "@opengeni/storage";
 import { sandboxLeaseTelemetryKey, type Observability } from "@opengeni/observability";
+import { safeSnapshotError } from "./sandbox-snapshot-diagnostics";
+export { safeSnapshotError } from "./sandbox-snapshot-diagnostics";
 import { parseWorkspaceArchiveObjectRef } from "@opengeni/contracts";
 import {
   persistWorkspaceArchiveCandidate,
@@ -365,100 +367,6 @@ class SnapshotTimeoutError extends Error {
     super(`workspace snapshot timed out after ${timeoutMs}ms`);
     this.name = "SnapshotTimeoutError";
   }
-}
-
-type SafeSnapshotError = {
-  errorClass: "SnapshotOperationError";
-  errorCode: "snapshot_operation_failed";
-  status?: number;
-  origin: "sandbox-resume";
-  causeName?: string;
-  integrityCode?: string;
-  providerErrorName?: string;
-  providerGrpcCode?: number;
-  providerHttpStatus?: number;
-  providerRetryable?: boolean;
-};
-
-export function safeSnapshotError(error: unknown): SafeSnapshotError {
-  const fields: SafeSnapshotError = {
-    errorClass: "SnapshotOperationError",
-    errorCode: "snapshot_operation_failed",
-    origin: "sandbox-resume",
-  };
-  try {
-    if (error && typeof error === "object") {
-      const candidate = error as {
-        name?: unknown;
-        code?: unknown;
-        status?: unknown;
-        statusCode?: unknown;
-      };
-      if (
-        typeof candidate.name === "string" &&
-        /^[A-Z][A-Za-z0-9]{2,62}Error$/u.test(candidate.name)
-      ) {
-        fields.causeName = candidate.name;
-      }
-      if (typeof candidate.code === "string" && /^[a-z0-9_]{1,64}$/u.test(candidate.code)) {
-        fields.integrityCode = candidate.code;
-      }
-      const rawStatus = candidate.status ?? candidate.statusCode;
-      const status = Number(rawStatus);
-      if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
-    }
-  } catch {
-    // Public diagnostics are best-effort and must never replace the exact
-    // internal snapshot failure.
-  }
-  // Agents Extensions wraps the provider exception in SandboxProviderError
-  // and copies its structured classification into details (not Error.cause).
-  // Never project the free-form cause, request IDs, payloads or message. Keep
-  // reads independent: a hostile getter must not hide other safe fields.
-  const read = (value: unknown, key: string): unknown => {
-    try {
-      return value && typeof value === "object" ? Reflect.get(value, key) : undefined;
-    } catch {
-      return undefined;
-    }
-  };
-  const details = read(error, "details");
-  const providerName = read(details, "errorName");
-  if (
-    typeof providerName === "string" &&
-    [
-      "ClientError",
-      "TimeoutError",
-      "ConnectionError",
-      "AuthError",
-      "NotFoundError",
-      "InvalidError",
-      "RemoteError",
-      "AbortError",
-    ].includes(providerName)
-  ) {
-    fields.providerErrorName = providerName;
-  }
-  const grpcCode = read(details, "errorCode");
-  if (
-    providerName === "ClientError" &&
-    typeof grpcCode === "number" &&
-    Number.isInteger(grpcCode) &&
-    grpcCode >= 0 &&
-    grpcCode <= 16
-  ) {
-    fields.providerGrpcCode = grpcCode;
-  }
-  for (const key of ["status", "httpStatus", "responseStatus"]) {
-    const status = read(details, key);
-    if (typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599) {
-      fields.providerHttpStatus = status;
-      break;
-    }
-  }
-  const retryable = read(error, "retryable");
-  if (typeof retryable === "boolean") fields.providerRetryable = retryable;
-  return fields;
 }
 
 export async function waitForWarmSnapshot(
