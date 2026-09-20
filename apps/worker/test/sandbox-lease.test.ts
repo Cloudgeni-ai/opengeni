@@ -1985,6 +1985,97 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
   }, 60_000);
 
+  test("(1b-capture-cadence) failed captures retain durable periodic cadence without holding admission", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 14,
+      expiresInMs: 600_000,
+      instanceId: "box-capture-cadence",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-capture-cadence" } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+    const identity = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 14,
+      expectedInstanceId: "box-capture-cadence",
+    };
+    const input = {
+      ...identity,
+      liveness: "warm" as const,
+      captureTimeoutMs: 60_000,
+      minIntervalMs: 900_000,
+      warmAttempt: {
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+      },
+    };
+    const captureId = crypto.randomUUID();
+    expect(await claimWorkspaceArchiveCapture(db, { ...input, captureId })).toMatchObject({
+      status: "claimed",
+    });
+    // Provider failure: release the exact claim without publishing an archive.
+    expect(await releaseWorkspaceArchiveCapture(db, { ...identity, captureId })).toBe(true);
+    const [record] =
+      await admin`select archive_capture_last_attempt_at, archive_capture_id, archive_generation from sandbox_leases where id=${leaseId}`;
+    expect(record?.archive_capture_last_attempt_at).not.toBeNull();
+    expect(record?.archive_capture_id).toBeNull();
+    expect(record?.archive_generation).toBeNull();
+    expect(
+      await claimWorkspaceArchiveCapture(db, { ...input, captureId: crypto.randomUUID() }),
+    ).toEqual({ status: "throttled" });
+    // This decision lives in PostgreSQL, not a worker-local retry timer. Neither
+    // throttling nor a stale release may re-establish a capture lock or clock.
+    expect(
+      await releaseWorkspaceArchiveCapture(db, { ...identity, captureId: crypto.randomUUID() }),
+    ).toBe(false);
+    const [afterStale] =
+      await admin`select archive_capture_last_attempt_at, archive_capture_id from sandbox_leases where id=${leaseId}`;
+    expect(afterStale?.archive_capture_last_attempt_at).toEqual(
+      record?.archive_capture_last_attempt_at,
+    );
+    expect(afterStale?.archive_capture_id).toBeNull();
+    // Forced recovery bypasses cadence, never an active capture owner.
+    const forcedId = crypto.randomUUID();
+    expect(
+      await claimWorkspaceArchiveCapture(db, { ...input, minIntervalMs: 0, captureId: forcedId }),
+    ).toMatchObject({ status: "claimed" });
+    expect(
+      await claimWorkspaceArchiveCapture(db, {
+        ...input,
+        minIntervalMs: 0,
+        captureId: crypto.randomUUID(),
+      }),
+    ).toEqual({ status: "capture_in_progress" });
+    expect(await releaseWorkspaceArchiveCapture(db, { ...identity, captureId: forcedId })).toBe(
+      true,
+    );
+    // Advance only this throwaway fixture clock; a new periodic owner can run.
+    await admin`update sandbox_leases set archive_capture_last_attempt_at=now()-interval '16 minutes' where id=${leaseId}`;
+    const nextId = crypto.randomUUID();
+    expect(await claimWorkspaceArchiveCapture(db, { ...input, captureId: nextId })).toMatchObject({
+      status: "claimed",
+    });
+    expect(await releaseWorkspaceArchiveCapture(db, { ...identity, captureId: nextId })).toBe(true);
+    expect(
+      await claimWorkspaceArchiveCapture(db, { ...input, captureId: crypto.randomUUID() }),
+    ).toEqual({ status: "throttled" });
+  }, 180_000);
+
   test("(1b-capture-gate) provider capture durably fences holders and mutations until exact publication", async () => {
     if (!available) return;
     const ids = await freshWorkspace();

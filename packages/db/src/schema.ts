@@ -9394,6 +9394,11 @@ export const sandboxLeases = pgTable(
     // can recover immediately without pretending it resumes one provider RPC.
     archiveCaptureTakeoverSafe: boolean("archive_capture_takeover_safe").notNull().default(false),
     archiveCaptureAttempt: integer("archive_capture_attempt"),
+    // Periodic capture cadence survives a failed claim's release and worker
+    // restarts. This is not evidence that a recovery archive was published.
+    archiveCaptureLastAttemptAt: timestamp("archive_capture_last_attempt_at", {
+      withTimezone: true,
+    }),
     archiveCaptureGeneration: integer("archive_capture_generation"),
     archiveCaptureStartedAt: timestamp("archive_capture_started_at", {
       withTimezone: true,
