@@ -1151,6 +1151,11 @@ function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] 
           category: "configured",
           tags: ["mcp", ...(server.allowedTools?.length ? ["limited-tools"] : [])],
           endpointUrl: server.url,
+          authKind:
+            server.connectionRef?.authoritySource !== "host" &&
+            server.connectionRef?.kind === "oauth2"
+              ? "oauth2"
+              : null,
           // Deployment-managed personal selectors need the same account picker
           // as installed connectors. Fixed bindings remain server-resolved.
           connectionRef:
@@ -1595,11 +1600,17 @@ export function applyCapabilityEnablement(
   }
   const activeInstallation = installation?.status === "active";
   const enabled = !!activeInstallation && capabilityInstallationRuntimeReady(item, installation);
+  const connectionRef =
+    enabled && installation ? installationConnectionRef(installation.config) : null;
   return {
     ...item,
+    // Older custom entries recorded the native credential kind on the
+    // installation only. Project it without guessing from a URL or overwriting
+    // an explicit catalog authentication contract.
+    authKind: item.authKind ?? (connectionRef?.kind === "oauth2" ? "oauth2" : null),
     enabled,
     enabledReason: enabled ? "enabled" : null,
-    connectionRef: enabled && installation ? installationConnectionRef(installation.config) : null,
+    connectionRef,
   };
 }
 

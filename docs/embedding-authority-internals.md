@@ -2,6 +2,15 @@
 
 Companion to [the architecture map](architecture.md), [product integration](product-integration.md) and [remote MCP credentials](remote-mcp-credentials.md). Code and current tests own exact behavior.
 
+Connector discovery resolves account-qualified execution tool IDs through the
+current turn's accepted bindings. An enabled connector is not proof of a usable
+account. Missing tools with an accepted account, or historical work lacking an
+account snapshot, report execution unavailability rather than inventing a need
+to reconnect. Actual credential failures retain their native recovery notices.
+Custom native OAuth installations supply omitted catalog authentication metadata
+from their stored connection kind; host-managed references never become native
+OAuth recovery targets.
+
 `packages/connect` owns the framework-neutral setup controller and its
 transport contract. It keeps durable attempt state distinct from browser
 navigation and from credential submission; backend adapters own admission
