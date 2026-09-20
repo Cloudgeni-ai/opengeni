@@ -8,6 +8,8 @@ const CODES = [
   "db_deadlock",
   "db_serialization_failure",
   "db_failure",
+  "retained_process_fenced",
+  "retained_process_proof_failed",
 ] as const;
 const STAGES = [
   "startup",
@@ -17,6 +19,7 @@ const STAGES = [
   "preclaim",
   "session_attempts.claim",
   "failure_settlement",
+  "sandbox_retained_processes.proof",
 ] as const;
 const RETRIES = ["not_retryable", "exhausted", "unknown"] as const;
 // Reviewed schema names, never a syntactic allowlist for arbitrary driver strings.
@@ -26,6 +29,9 @@ const CONSTRAINTS = new Set([
   "session_events_payload_bytes_check",
   "session_events_type_bytes_check",
   "session_events_duplicate_classification_check",
+  "sandbox_retained_processes_reconcile_proof_check",
+  "sandbox_retained_processes_reconcile_claim_check",
+  "sandbox_retained_processes_settlement_check",
 ]);
 const ERROR_NAMES = new Set([
   "Error",
@@ -35,6 +41,7 @@ const ERROR_NAMES = new Set([
   "PostgresError",
   "DrizzleQueryError",
   "SessionEventPersistenceError",
+  "SandboxWorkspaceMutationFencedError",
 ]);
 
 // Human-reviewed code locations, not a regex permission to publish any path.
@@ -46,6 +53,7 @@ export const DIAGNOSTIC_SOURCE_FILES = [
   "apps/worker/src/activities/agent-turn/run.ts",
   "apps/worker/src/activities/agent-turn/claim.ts",
   "apps/worker/src/activities/agent-turn/failure-settlement.ts",
+  "apps/worker/src/activities/sandbox-lease.ts",
   "apps/worker/dist/process/index.js",
   "packages/db/src/index.ts",
   "packages/db/src/persistence-errors.ts",
@@ -85,6 +93,7 @@ export type FailureDiagnosticInput = {
   error: unknown;
   attemptId?: string;
   sessionId?: string;
+  processId?: string;
   turnId?: string;
   attempts?: number;
   sqlState?: string | null;
@@ -172,6 +181,7 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
         : "unknown",
     attemptId: uuid(input.attemptId),
     sessionId: uuid(input.sessionId),
+    processId: uuid(input.processId),
     turnId: uuid(input.turnId),
     attempts:
       Number.isSafeInteger(input.attempts) && input.attempts! >= 0 && input.attempts! <= 1_000_000
