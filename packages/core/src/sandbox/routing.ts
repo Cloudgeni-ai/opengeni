@@ -16,6 +16,7 @@ import { appendSessionCommandOutput } from "@opengeni/db/session-command-output"
 import {
   createProviderCommandRetainer,
   retainedProviderCommandPersistence,
+  supervisedCommandProtocolReady,
 } from "@opengeni/db/retained-provider-commands";
 import {
   advanceWorkspaceGenerationForDirectRequest,
@@ -532,6 +533,8 @@ export function wrapChannelABoxWithRouting(
   });
 
   const proxy = new RoutingSandboxSession({
+    providerSupervisionReady: async () =>
+      settings.modalCommandSupervisionEnabled && (await supervisedCommandProtocolReady(db)),
     providerCommandHandle: (value) =>
       value && typeof value === "object"
         ? (value as PersistableMutationAdmission).admission?.workspaceGeneration

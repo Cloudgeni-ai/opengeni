@@ -30,6 +30,7 @@
 import type { ExposedPortEndpoint } from "../stream-port";
 import {
   withProviderCommandHandle,
+  withCommandSupervisionReady,
   type ProviderCommandPersistence,
   type ProviderCommandSession,
 } from "../provider-command-session";
@@ -177,6 +178,7 @@ export type RoutingRetainedProcessTerminalProof =
 
 export interface RoutingSandboxSessionDeps {
   providerCommandHandle?: (admission: unknown) => number | undefined;
+  providerSupervisionReady?: () => Promise<boolean>;
   providerCommandPersistence?: (process: RoutingRetainedProcess) => ProviderCommandPersistence;
   /**
    * The DEFAULT backend resolved at construction time (the same shape `resolve()`
@@ -1280,6 +1282,24 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const record = this.retainedProcess(providerSessionId);
+    if (
+      !modelVisible &&
+      args &&
+      typeof args === "object" &&
+      (args as { chars?: unknown }).chars === "\u0003" &&
+      record.process.providerCommand?.kind === "modal-router-v1" &&
+      record.process.providerCommand.supervision
+    ) {
+      await this.ensureParentPromotion(record);
+      if (
+        !(await record.backend.session.cancelSupervisedCommand?.(
+          providerSessionId,
+          "explicit_stop",
+        ))
+      )
+        throw new Error("Supervised command cancellation is unavailable");
+      args = { ...args, chars: "" };
+    }
     await this.captureRetainedOutput(record);
     const priorTerminal = await this.flushPendingProcessMutation(record);
     if (priorTerminal !== null) {
@@ -1514,12 +1534,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         let providerWaitMs = 0;
         let providerOutcome: RoutingSandboxPhaseOutcome = "failed";
         try {
+          const supervisionReady =
+            op === "exec" || op === "execCommand"
+              ? ((await this.deps.providerSupervisionReady?.()) ?? false)
+              : false;
           result = await this.invokeProviderOperation(
             op,
             backend,
             () =>
               withProviderCommandHandle(this.deps.providerCommandHandle?.(admission), () =>
-                fn(backend.session, backend),
+                withCommandSupervisionReady(supervisionReady, () => fn(backend.session, backend)),
               ),
             (observation) => {
               providerWaitMs += Math.max(0, observation.durationMs);
@@ -1697,6 +1721,17 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       // let process-aware methods use the copied backend identity.
       if (retainedRecord) {
         await this.captureRetainedOutput(retainedRecord, result);
+        try {
+          await backend.session.releaseSupervisedCommand?.(
+            retainedRecord.process.providerSessionId,
+          );
+        } catch (cause) {
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            "Supervisor release is unresolved after durable retention; the exact command remains tracked and was not replayed",
+            { cause, retainedProcess: retainedRecord.process },
+          );
+        }
         return result;
       }
 
@@ -2000,6 +2035,23 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     return await this.dispatchProcessControl(args);
   }
 
+  async cancelSupervisedCommand(
+    providerSessionId: number,
+    reason: "provider_deadline" | "explicit_stop",
+  ): Promise<boolean> {
+    const record = this.retainedProcesses.get(providerSessionId);
+    if (
+      !record ||
+      record.process.providerCommand?.kind !== "modal-router-v1" ||
+      !record.process.providerCommand.supervision
+    )
+      return false;
+    await this.ensureParentPromotion(record);
+    if (!record.backend.session.cancelSupervisedCommand)
+      throw new Error("Supervised command control is unavailable");
+    return await record.backend.session.cancelSupervisedCommand(providerSessionId, reason);
+  }
+
   /** Empty-input eager reads belong to the model's foreground wait, while
    * cancellation/drain reads use the non-observing control method above. */
   async writeStdinForProcessRead(args: unknown): Promise<string> {
@@ -2018,6 +2070,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const exactProviderSessionId = positiveProviderSessionId(providerSessionId);
     if (exactProviderSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const record = this.retainedProcess(exactProviderSessionId);
+    if (
+      record.process.providerCommand?.kind === "modal-router-v1" &&
+      record.process.providerCommand.supervision
+    )
+      throw new Error(
+        "Legacy process helpers are unavailable for a supervised command; use its native control protocol",
+      );
     const priorTerminal = await this.flushPendingProcessMutation(record);
     if (priorTerminal !== null) return priorTerminal;
     if (record.pendingTerminal) {

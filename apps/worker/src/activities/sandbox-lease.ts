@@ -1519,6 +1519,38 @@ async function reconcileTerminalRetainedProcesses(
           }
         } else {
           try {
+            const commandPersistence = retainedProviderCommandPersistence(
+              db,
+              {
+                accountId: process.accountId,
+                workspaceId: process.workspaceId,
+                sessionId: process.sessionId,
+                processId: process.id,
+              },
+              bus
+                ? (events) => bus.publish(process.workspaceId, process.sessionId, events)
+                : undefined,
+            );
+            const command = await commandPersistence.load();
+            const supervised = command?.kind === "modal-router-v1" && Boolean(command.supervision);
+            const supervisionMetric = (outcome: string) =>
+              observability.incrementCounter({
+                name: "opengeni_command_supervision_total",
+                help: "Native retained command supervision reconciliation outcomes.",
+                labels: { outcome },
+              });
+            if (
+              supervised &&
+              (lease!.rotationReason === "provider_deadline" ||
+                claim.ownerState === "background_stopping")
+            ) {
+              await commandPersistence.requestCancellation(
+                lease!.rotationReason === "provider_deadline"
+                  ? "provider_deadline"
+                  : "explicit_stop",
+              );
+              supervisionMetric("cancellation_intent");
+            }
             observation = await probe(
               settings,
               lease!,
@@ -1545,19 +1577,21 @@ async function reconcileTerminalRetainedProcesses(
                     .publish(process.workspaceId, process.sessionId, events)
                     .catch(() => undefined);
               },
-              retainedProviderCommandPersistence(
-                db,
-                {
-                  accountId: process.accountId,
-                  workspaceId: process.workspaceId,
-                  sessionId: process.sessionId,
-                  processId: process.id,
-                },
-                bus
-                  ? (events) => bus.publish(process.workspaceId, process.sessionId, events)
-                  : undefined,
-              ),
+              commandPersistence,
             );
+            if (supervised) {
+              supervisionMetric(
+                (await commandPersistence.loadSupervisionReceipt())
+                  ? "proof_retained"
+                  : "proof_missing",
+              );
+              if (observation.status === "deferred")
+                supervisionMetric(
+                  observation.reason === "provider_running"
+                    ? "checkpoint_blocked"
+                    : "provider_failure",
+                );
+            }
           } catch (error) {
             observability.warn("sandbox reaper: retained-process provider probe failed", {
               processId: process.id,
@@ -1989,10 +2023,17 @@ export async function probeRetainedProcessAtProvider(
 
   let result: unknown;
   try {
+    const supervisedCancelled =
+      mode === "cancel" || lease.rotationReason === "provider_deadline"
+        ? ((await session.cancelSupervisedCommand?.(
+            process.providerSessionId,
+            lease.rotationReason === "provider_deadline" ? "provider_deadline" : "explicit_stop",
+          )) ?? false)
+        : false;
     result = await withRetainedProcessProbeTimeout(
       session.writeStdin({
         sessionId: process.providerSessionId,
-        chars: mode === "cancel" ? "\u0003" : "",
+        chars: mode === "cancel" && !supervisedCancelled ? "\u0003" : "",
         yieldTimeMs: 1_000,
         maxOutputTokens: 2_000,
       }),
@@ -2021,7 +2062,10 @@ export async function probeRetainedProcessAtProvider(
   if (
     observation.status === "deferred" &&
     observation.reason === "provider_running" &&
-    lease.rotationRequestedAt !== null
+    lease.rotationRequestedAt !== null &&
+    !(await providerPersistence
+      ?.load()
+      .then((command) => command?.kind === "modal-router-v1" && command.supervision))
   ) {
     // A background PTY cannot outlive the finite provider box. Interrupt only
     // this exact durable provider session after rotation admission is fenced;

@@ -435,6 +435,17 @@ viewers—own managed sandboxes. Identity precedes setup; capture fences writers
 Provider loss retires only matching instances, never authorizing ambiguous replay.
 Execution retains lazy routing; raw handles serve setup/capture (`turn-sandbox-access.ts`).
 
+Stock Modal non-PTY commands without `runAs` can carry the versioned native
+subreaper supervision protocol. The supervisor starts idle; durable initial
+retention precedes release of user code. Invocation-authenticated quiescence
+receipts are persisted before ACK permits supervisor exit. Canonical database
+settlement additionally requires authenticated provider terminal evidence and
+atomic output capture, on natural completion as well as cancellation. Deadline
+cancellation intent is monotonic across reconciliation claims and fences new
+stdin; already admitted writes remain blockers until settled. Provider loss,
+missing proof, and descriptor-free legacy commands never become successful
+supervision. See [command supervision](command-supervision.md).
+
 Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot admission
 reserves the larger budget plus reaper period, including historical Modal leases

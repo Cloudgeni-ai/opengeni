@@ -797,6 +797,9 @@ const SettingsSchema = z.object({
   dockerWorkspaceBaseDir: z.string().min(1).optional(),
   modalAppName: z.string().default("opengeni-sandbox"),
   modalImageRef: z.string().optional(),
+  // Activate only after descriptor-aware readers, DB fences and the exact
+  // native image have passed the supervised-command rollout canary.
+  modalCommandSupervisionEnabled: EnvBoolean.default(false),
   // Provider-native immutable Modal image ID for the exact logical
   // `modalImageRef`. When set, the runtime uses ModalImageSelector.fromId and
   // never asks Modal to parse or import the registry ref. The logical ref is
@@ -3129,6 +3132,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     dockerWorkspaceBaseDir: optional("OPENGENI_DOCKER_WORKSPACE_BASE_DIR"),
     modalAppName: optional("OPENGENI_MODAL_APP_NAME"),
     modalImageRef: optional("OPENGENI_MODAL_IMAGE_REF") ?? DEFAULT_MODAL_IMAGE_REF,
+    modalCommandSupervisionEnabled: optional("OPENGENI_MODAL_COMMAND_SUPERVISION_ENABLED"),
     modalImageId: optional("OPENGENI_MODAL_IMAGE_ID"),
     modalImageRegistrySecret: optional("OPENGENI_MODAL_IMAGE_REGISTRY_SECRET"),
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),

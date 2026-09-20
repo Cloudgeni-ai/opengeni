@@ -18,6 +18,7 @@ import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/confi
 import {
   createProviderCommandRetainer,
   retainedProviderCommandPersistence,
+  supervisedCommandProtocolReady,
 } from "@opengeni/db/retained-provider-commands";
 import {
   adoptConnectedMachineSessionBackgroundCommand,
@@ -1031,6 +1032,8 @@ export function wrapTurnBoxWithRouting(
     ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
     ...(services.onSandboxCaptureWait ? { onCaptureWait: services.onSandboxCaptureWait } : {}),
     providerCommandHandle: admittedCommandHandle,
+    providerSupervisionReady: async () =>
+      settings.modalCommandSupervisionEnabled && (await supervisedCommandProtocolReady(db)),
     ...(ids.workspaceMutationFence
       ? {
           providerCommandPersistence: (process: RoutingRetainedProcess) =>
@@ -1289,6 +1292,8 @@ export function wrapLazyTurnBoxWithRouting(
     ...(services.onSandboxCaptureWait ? { onCaptureWait: services.onSandboxCaptureWait } : {}),
     ...(args.onFirstOperation ? { onFirstOperation: args.onFirstOperation } : {}),
     providerCommandHandle: admittedCommandHandle,
+    providerSupervisionReady: async () =>
+      settings.modalCommandSupervisionEnabled && (await supervisedCommandProtocolReady(db)),
     ...(ids.workspaceMutationFence
       ? {
           providerCommandPersistence: (process: RoutingRetainedProcess) =>

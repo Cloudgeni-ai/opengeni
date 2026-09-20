@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { truncateOutput } from "@openai/agents-core/sandbox/internal";
 import type { ChannelASession } from "../channel-a";
 import { ModalProcessObservationUnavailableError } from "../errors";
@@ -24,6 +25,10 @@ function sameExecution(a: ModalProviderCommand, b: ModalProviderCommand): boolea
     a.sandboxId === b.sandboxId &&
     a.taskId === b.taskId &&
     a.execId === b.execId &&
+    isDeepStrictEqual(
+      "supervision" in a ? a.supervision : undefined,
+      "supervision" in b ? b.supervision : undefined,
+    ) &&
     Boolean(a.pty) === Boolean(b.pty)
   );
 }
@@ -37,7 +42,8 @@ export function installModalCommandSession(
     writeStdin?: ChannelASession["writeStdin"];
     verifyMaterializedPath?: (path: string, workdir: string) => Promise<void>;
   },
-  control: Pick<ModalCommandControl, "start" | "read" | "readProbe" | "write">,
+  control: Pick<ModalCommandControl, "start" | "read" | "readProbe" | "write"> &
+    Partial<Pick<ModalCommandControl, "supervisionControl">>,
 ): void {
   markTypedExecHandleLoss(session);
   const originalExec = session.execCommand?.bind(session);
@@ -54,6 +60,33 @@ export function installModalCommandSession(
   let nextSetupHandle = MAX_PROVIDER_COMMAND_HANDLE + 1;
   const receipts = new Map<string, { handle: number; page: ProviderCommandOutput }>();
   const atomicallyCaptured = new WeakSet<ProviderCommandOutput>();
+
+  const supervise = async (entry: Entry): Promise<void> => {
+    if (entry.command.kind !== "modal-router-v1" || !entry.command.supervision) return;
+    const persistence = entry.persistence;
+    if (
+      !persistence?.recordSupervisionReceipt ||
+      !persistence.loadSupervisionReceipt ||
+      !persistence.cancellationRequested ||
+      !control.supervisionControl
+    )
+      throw new Error("Supervised command requires durable control persistence");
+    let receipt = await persistence.loadSupervisionReceipt();
+    if (!receipt) {
+      const action = (await persistence.cancellationRequested()) ? "cancel" : "release";
+      const observation = await control.supervisionControl(entry.command, action);
+      receipt = observation.receipt ?? null;
+      if (receipt) await persistence.recordSupervisionReceipt(receipt);
+    }
+    if (receipt) {
+      // Lost ACK responses are safe to retry. A dead control socket is not
+      // terminal proof: the subsequent authenticated provider read still must
+      // prove exit and commit every output byte.
+      await control
+        .supervisionControl(entry.command, "ack", receipt.receiptId)
+        .catch(() => undefined);
+    }
+  };
 
   const captureRouterPage = async (entry: Entry, page: ProviderCommandOutput): Promise<boolean> => {
     if (
@@ -129,6 +162,9 @@ export function installModalCommandSession(
       if (!retained || !sameExecution(entry.command, retained))
         throw new Error("Original Modal command identity is unavailable");
       entry.command = retained;
+      // Output observation stays available when control/proof persistence is
+      // unavailable. Terminal exposure below remains fenced by durable proof.
+      await supervise(entry).catch(() => undefined);
     }
     let page = await control.read(entry.command, yieldTimeMs, signal);
     if (entry.persistence && page.command.kind === "modal-router-v1") {
@@ -143,6 +179,12 @@ export function installModalCommandSession(
         if (attempt < 2) page = await control.read(entry.command, yieldTimeMs, signal);
       }
       if (!captured) throw new Error("Modal command output cursor changed during bounded capture");
+    }
+    if (page.command.kind === "modal-router-v1" && page.command.supervision) {
+      const receipt = await entry.persistence?.loadSupervisionReceipt?.();
+      // The supervisor exits 0 after ACK; that is provider terminal evidence,
+      // not the original shell result. Retain both without conflating them.
+      page = { ...page, exitCode: receipt && page.exitCode === 0 ? receipt.leaderExitCode : null };
     }
     // The receipt is generated here, not parsed from command output. Its only
     // purpose is correlating this return value with a trusted in-memory page.
@@ -169,6 +211,11 @@ export function installModalCommandSession(
     try {
       const entry = { command: await control.start(args, cancellation.signal) };
       entries.set(handle, entry);
+      if (entry.command.kind === "modal-router-v1" && entry.command.supervision) {
+        // The launch cannot run user code until the routing layer commits
+        // initial retention and calls releaseSupervisedCommand.
+        return formatPage(handle, { command: entry.command, chunks: [], exitCode: null });
+      }
       try {
         return await read(
           handle,
@@ -205,6 +252,25 @@ export function installModalCommandSession(
     const entry = entries.get(handle);
     return entry ? structuredClone(entry.command) : null;
   };
+  session.releaseSupervisedCommand = async (handle) => {
+    const entry = entries.get(handle);
+    if (!entry || entry.command.kind !== "modal-router-v1" || !entry.command.supervision) return;
+    const retained = await entry.persistence?.load();
+    if (!retained || !sameExecution(entry.command, retained))
+      throw new Error("Supervisor release requires committed initial retention");
+    entry.command = retained;
+    await supervise(entry);
+  };
+  session.cancelSupervisedCommand = async (handle, reason) => {
+    const entry = entries.get(handle);
+    if (!entry || entry.command.kind !== "modal-router-v1" || !entry.command.supervision)
+      return false;
+    if (!entry.persistence?.requestCancellation)
+      throw new Error("Supervisor cancellation requires durable intent");
+    await entry.persistence.requestCancellation(reason);
+    await supervise(entry);
+    return true;
+  };
   session.bindProviderCommand = (handle, command, persistence) => {
     if (!Number.isSafeInteger(handle) || handle <= 0 || handle > MAX_PROVIDER_COMMAND_HANDLE)
       throw new Error("Invalid retained Modal command handle");
@@ -218,6 +284,16 @@ export function installModalCommandSession(
   session.captureCommandOutput = async (result) => {
     const receipt = receipts.get(result);
     if (!receipt || receipt.page.command.kind !== "modal-router-v1") return false;
+    if (
+      receipt.page.command.supervision &&
+      !receipt.page.expected &&
+      receipt.page.exitCode === null &&
+      receipt.page.chunks.length === 0
+    ) {
+      // Idle-launch receipt carries identity only; there are no bytes to ACK.
+      receipts.delete(result);
+      return true;
+    }
     if (atomicallyCaptured.has(receipt.page)) {
       receipts.delete(result);
       return true;
