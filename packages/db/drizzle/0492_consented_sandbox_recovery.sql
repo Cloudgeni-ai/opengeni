@@ -1,10 +1,11 @@
--- deployment-mode: maintenance
--- Old workers cannot inject the mandatory filesystem-discontinuity warning.
--- Drain every old API/control/turn worker and never restart a pre-0492 image.
+-- deployment-mode: rolling
+-- Consent stays DB-disabled until an operator verifies compatible immutable
+-- API/control/turn images and templates. The permanent claim guard rejects
+-- returning old workers for affected sessions even after consent is disabled.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
-DO $drain$
+DO $roles$
 DECLARE roles jsonb := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
 BEGIN
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' THEN
@@ -15,12 +16,43 @@ BEGIN
       OR btrim(item #>> '{}') = '' OR item #>> '{}' <> btrim(item #>> '{}')
       OR octet_length(item #>> '{}') > 63
   ) THEN RAISE EXCEPTION '0492 invalid application roles' USING ERRCODE = '55000'; END IF;
-  IF EXISTS (SELECT 1 FROM pg_stat_activity a JOIN jsonb_array_elements_text(roles) r ON r = a.usename
-    WHERE a.datname = current_database() AND a.pid <> pg_backend_pid()) THEN
-    RAISE EXCEPTION '0492 requires stopped application sessions' USING ERRCODE = '55000';
-  END IF;
 END
-$drain$;
+$roles$;
+
+-- Operator-owned release activation, never an API/UI or environment flag.
+-- Runtime roles may inspect this one non-secret row but cannot activate it.
+CREATE TABLE opengeni_private.sandbox_recovery_rollout (
+  singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+  consent_enabled boolean NOT NULL DEFAULT false,
+  release_evidence text,
+  CHECK (NOT consent_enabled OR nullif(btrim(release_evidence), '') IS NOT NULL)
+);
+INSERT INTO opengeni_private.sandbox_recovery_rollout (singleton) VALUES (true);
+REVOKE ALL ON opengeni_private.sandbox_recovery_rollout FROM PUBLIC;
+DO $activation_acl$
+DECLARE grantee_name text;
+BEGIN
+  FOR grantee_name IN
+    SELECT DISTINCT role.rolname FROM pg_class relation
+    CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault('r', relation.relowner))) acl
+    JOIN pg_roles role ON role.oid = acl.grantee
+    WHERE relation.oid = 'opengeni_private.sandbox_recovery_rollout'::regclass
+      AND acl.grantee <> relation.relowner
+  LOOP
+    EXECUTE format('REVOKE ALL ON opengeni_private.sandbox_recovery_rollout FROM %I', grantee_name);
+  END LOOP;
+END
+$activation_acl$;
+DO $read_grants$
+DECLARE runtime_role text;
+BEGIN
+  FOR runtime_role IN SELECT jsonb_array_elements_text(
+    current_setting('opengeni.migration_application_roles')::jsonb)
+  LOOP
+    EXECUTE format('GRANT SELECT ON opengeni_private.sandbox_recovery_rollout TO %I', runtime_role);
+  END LOOP;
+END
+$read_grants$;
 
 ALTER TABLE sandbox_leases ADD COLUMN public_recovery jsonb;
 ALTER TABLE sandbox_leases ADD CONSTRAINT sandbox_public_recovery_shape CHECK (
@@ -67,6 +99,12 @@ CREATE TRIGGER public_sandbox_recovery_session_guard
 CREATE FUNCTION guard_public_sandbox_recovery_lease() RETURNS trigger
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 BEGIN
+  IF NEW.public_recovery->>'status' = 'accepted'
+    AND (OLD.public_recovery->>'status' IS DISTINCT FROM 'accepted'
+      OR NEW.public_recovery->>'operationId' IS DISTINCT FROM OLD.public_recovery->>'operationId')
+    AND NOT coalesce((SELECT consent_enabled FROM opengeni_private.sandbox_recovery_rollout WHERE singleton), false) THEN
+    RAISE EXCEPTION 'public checkpoint consent is not activated' USING ERRCODE = '55000';
+  END IF;
   IF OLD.public_recovery->>'status' = 'accepted' THEN
     IF NEW.current_checkpoint_artifact_id IS DISTINCT FROM OLD.current_checkpoint_artifact_id
       OR NEW.workspace_generation IS DISTINCT FROM OLD.workspace_generation
@@ -85,6 +123,85 @@ REVOKE ALL ON FUNCTION guard_public_sandbox_recovery_lease() FROM PUBLIC;
 CREATE TRIGGER public_sandbox_recovery_lease_guard BEFORE UPDATE ON sandbox_leases
   FOR EACH ROW EXECUTE FUNCTION guard_public_sandbox_recovery_lease();
 
+-- Finalized consent is the monotonic affected-session marker, independent of
+-- lease lifetime, provider success/failure, history compaction and activation.
+-- Only the actual FK cascade from deleting its owning session may remove it.
+CREATE FUNCTION guard_sandbox_recovery_consent_receipt() RETURNS trigger
+LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
+DECLARE prior_subject text;
+  prior_account text;
+  prior_workspace text;
+  parent_exists boolean;
+BEGIN
+  IF TG_OP <> 'INSERT' AND OLD.action = 'sandbox.recovery.consent' AND OLD.result ? 'operationId' THEN
+    IF TG_OP = 'DELETE' THEN
+      -- Same tenant scope, neutral actor: an RLS-hidden private session must
+      -- never look deleted. Its FK cascade sees the actual parent row gone.
+      prior_subject := coalesce(current_setting('opengeni.subject_id', true), '');
+      prior_account := coalesce(current_setting('opengeni.account_id', true), '');
+      prior_workspace := coalesce(current_setting('opengeni.workspace_id', true), '');
+      PERFORM set_config('opengeni.subject_id', '', true);
+      PERFORM set_config('opengeni.account_id', OLD.account_id::text, true);
+      PERFORM set_config('opengeni.workspace_id', OLD.workspace_id::text, true);
+      SELECT EXISTS (SELECT 1 FROM sessions WHERE id = OLD.target_session_id
+        AND account_id = OLD.account_id AND workspace_id = OLD.workspace_id) INTO parent_exists;
+      PERFORM set_config('opengeni.subject_id', prior_subject, true);
+      PERFORM set_config('opengeni.account_id', prior_account, true);
+      PERFORM set_config('opengeni.workspace_id', prior_workspace, true);
+      IF parent_exists THEN
+        RAISE EXCEPTION 'checkpoint consent warning receipt is permanent for this session' USING ERRCODE = '55000';
+      END IF;
+      RETURN OLD;
+    END IF;
+    IF NEW IS DISTINCT FROM OLD THEN
+      RAISE EXCEPTION 'checkpoint consent warning receipt is immutable' USING ERRCODE = '55000';
+    END IF;
+  END IF;
+  IF TG_OP <> 'DELETE' AND NEW.action = 'sandbox.recovery.consent'
+    AND NEW.result ? 'operationId' AND (TG_OP = 'INSERT' OR NOT (OLD.result ? 'operationId'))
+    AND NOT coalesce((SELECT consent_enabled FROM opengeni_private.sandbox_recovery_rollout WHERE singleton), false) THEN
+    RAISE EXCEPTION 'public checkpoint consent is not activated' USING ERRCODE = '55000';
+  END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION guard_sandbox_recovery_consent_receipt() FROM PUBLIC;
+CREATE TRIGGER sandbox_recovery_consent_receipt_guard
+  BEFORE INSERT OR UPDATE OR DELETE ON session_command_receipts
+  FOR EACH ROW EXECUTE FUNCTION guard_sandbox_recovery_consent_receipt();
+
+-- Canonical claims always INSERT, including exact-attempt ON CONFLICT replay.
+-- BEFORE INSERT runs before conflict handling, so returning old workers cannot
+-- reattach to a compatible worker's already-admitted attempt without warning.
+CREATE FUNCTION guard_sandbox_recovery_warning_claim() RETURNS trigger
+LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
+DECLARE prior_subject text := coalesce(current_setting('opengeni.subject_id', true), '');
+  prior_account text := coalesce(current_setting('opengeni.account_id', true), '');
+  prior_workspace text := coalesce(current_setting('opengeni.workspace_id', true), '');
+  warning_required boolean;
+BEGIN
+  -- Read the authoritative requirement, not an actor-filtered receipt list.
+  -- The ordinary attempt RLS/admission guards still authorize the INSERT.
+  PERFORM set_config('opengeni.subject_id', '', true);
+  PERFORM set_config('opengeni.account_id', NEW.account_id::text, true);
+  PERFORM set_config('opengeni.workspace_id', NEW.workspace_id::text, true);
+  SELECT EXISTS (SELECT 1 FROM session_command_receipts receipt
+    WHERE receipt.account_id = NEW.account_id AND receipt.workspace_id = NEW.workspace_id
+      AND receipt.target_session_id = NEW.session_id
+      AND receipt.action = 'sandbox.recovery.consent' AND receipt.result ? 'operationId') INTO warning_required;
+  PERFORM set_config('opengeni.subject_id', prior_subject, true);
+  PERFORM set_config('opengeni.account_id', prior_account, true);
+  PERFORM set_config('opengeni.workspace_id', prior_workspace, true);
+  IF warning_required AND current_setting('opengeni.filesystem_discontinuity_protocol_v1', true) IS DISTINCT FROM '1' THEN
+    RAISE EXCEPTION 'session requires filesystem discontinuity warning protocol v1'
+      USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION guard_sandbox_recovery_warning_claim() FROM PUBLIC;
+CREATE TRIGGER sandbox_recovery_warning_claim_guard BEFORE INSERT ON session_turn_attempts
+  FOR EACH ROW EXECUTE FUNCTION guard_sandbox_recovery_warning_claim();
+
 -- Explicit pg_temp last: an application-created temporary table must not
 -- shadow the authoritative lease in an invoker trigger.
 DO $paths$
@@ -92,5 +209,7 @@ DECLARE target_schema text := current_schema();
 BEGIN
   EXECUTE format('ALTER FUNCTION %I.guard_public_sandbox_recovery_session() SET search_path TO pg_catalog, %I, pg_temp', target_schema, target_schema);
   EXECUTE format('ALTER FUNCTION %I.guard_public_sandbox_recovery_lease() SET search_path TO pg_catalog, %I, pg_temp', target_schema, target_schema);
+  EXECUTE format('ALTER FUNCTION %I.guard_sandbox_recovery_consent_receipt() SET search_path TO pg_catalog, %I, pg_temp', target_schema, target_schema);
+  EXECUTE format('ALTER FUNCTION %I.guard_sandbox_recovery_warning_claim() SET search_path TO pg_catalog, %I, pg_temp', target_schema, target_schema);
 END
 $paths$;

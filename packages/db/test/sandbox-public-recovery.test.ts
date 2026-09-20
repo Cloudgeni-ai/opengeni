@@ -11,6 +11,9 @@ import {
   consentPublicSandboxRecovery,
   createDb,
   createSession,
+  claimSessionWorkForAttempt,
+  submitHumanPromptInTransaction,
+  withWorkspaceRls,
   failWarmingToCold,
   getSandboxRecoveryDiscontinuity,
   markSandboxRestoreVerifying,
@@ -23,6 +26,15 @@ import {
   mutateSessionControlInTransaction,
 } from "../src/index";
 import type { SandboxRecoveryRequest } from "@opengeni/contracts";
+import { nestedPostgresSqlState } from "../src/persistence-errors";
+
+async function rejectsWithSqlState(operation: PromiseLike<unknown>, code = "55000") {
+  const error = await Promise.resolve(operation).then(
+    () => null,
+    (failure: unknown) => failure,
+  );
+  expect(nestedPostgresSqlState(error)).toBe(code);
+}
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -31,6 +43,11 @@ beforeAll(async () => {
   if (!acquired) throw new Error("Real PostgreSQL required");
   shared = acquired;
   client = createDb(shared.appUrl);
+  expect(
+    (await shared.admin`select consent_enabled from opengeni_private.sandbox_recovery_rollout`)[0]!
+      .consent_enabled,
+  ).toBe(false);
+  await shared.admin`update opengeni_private.sandbox_recovery_rollout set consent_enabled = true, release_evidence = 'isolated test fixture, not live activation'`;
 }, 180_000);
 afterAll(async () => {
   await client?.close();
@@ -133,6 +150,300 @@ async function fixture() {
 }
 
 describe("explicit singleton checkpoint recovery", () => {
+  test("activation defaults off, app role cannot activate, and disabled DB rejects consent writes", async () => {
+    const f = await fixture();
+    const [role] = await client.db.execute<{ rolsuper: boolean; rolbypassrls: boolean }>(
+      sql`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`,
+    );
+    expect(role).toMatchObject({ rolsuper: false, rolbypassrls: false });
+    await rejectsWithSqlState(
+      client.db.execute(
+        sql`update opengeni_private.sandbox_recovery_rollout set consent_enabled = true`,
+      ),
+      "42501",
+    );
+    await shared.admin`update opengeni_private.sandbox_recovery_rollout set consent_enabled = false`;
+    try {
+      expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
+        status: "blocked",
+        reason: "recovery_not_enabled",
+      });
+      await expect(f.consent()).rejects.toThrow("eligibility changed");
+      await rejectsWithSqlState(
+        withWorkspaceRls(client.db, f.workspaceId, (tx) =>
+          tx.execute(
+            sql`update sandbox_leases set public_recovery = ${JSON.stringify({ version: 1, status: "accepted", sessionId: f.session.id, subjectId: f.subjectId, operationId: f.request.operationId, selection: f.request.selection })}::jsonb where id = ${f.leaseId}`,
+          ),
+        ),
+      );
+      expect(
+        await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id),
+      ).toBeNull();
+      await rejectsWithSqlState(
+        withWorkspaceRls(client.db, f.workspaceId, (tx) =>
+          tx.execute(sql`
+        insert into session_command_receipts(account_id, workspace_id, actor_type, actor_subject_id,
+          action, target_session_id, operation_key, canonical_request_hash, result)
+        values(${f.accountId}, ${f.workspaceId}, 'human', ${f.subjectId}, 'sandbox.recovery.consent',
+          ${f.session.id}, ${crypto.randomUUID()}, 'disabled-direct-write', ${JSON.stringify({ operationId: f.request.operationId })}::jsonb)`),
+        ),
+      );
+    } finally {
+      await shared.admin`update opengeni_private.sandbox_recovery_rollout set consent_enabled = true`;
+    }
+  });
+
+  async function enqueue(f: Awaited<ReturnType<typeof fixture>>) {
+    return withWorkspaceSubjectSessionActivityRls(client.db, f.workspaceId, f.subjectId, (tx) =>
+      submitHumanPromptInTransaction(tx, {
+        ...f.scope,
+        sessionId: f.session.id,
+        actor: { type: "human", subjectId: f.subjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "Inspect current files; do not replay earlier commands",
+        resources: [],
+        reasoningEffortFallback: "medium",
+        source: "user",
+      }),
+    );
+  }
+  function claimInput(f: Awaited<ReturnType<typeof fixture>>) {
+    return {
+      sessionId: f.session.id,
+      workflowId: `session-${f.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" as const },
+    };
+  }
+  test("old workers cannot claim or ON CONFLICT reattach; compatible claims do not leak their stamp", async () => {
+    const f = await fixture();
+    await f.consent();
+    await enqueue(f);
+    const input = claimInput(f);
+    const before =
+      await shared.admin`select status, active_turn_id from sessions where id = ${f.session.id}`;
+    await rejectsWithSqlState(claimSessionWorkForAttempt(client.db, f.workspaceId, input));
+    await rejectsWithSqlState(
+      claimSessionWorkForAttempt(client.db, f.workspaceId, {
+        ...input,
+        filesystemDiscontinuityProtocol: 2 as 1,
+      }),
+    );
+    expect(
+      (
+        await shared.admin`select count(*)::int as count from session_turn_attempts where session_id = ${f.session.id}`
+      )[0]!.count,
+    ).toBe(0);
+    expect(
+      Array.from(
+        await shared.admin`select status, active_turn_id from sessions where id = ${f.session.id}`,
+      ),
+    ).toEqual(Array.from(before));
+    await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      f.workspaceId,
+      f.subjectId,
+      async (tx) => {
+        expect(
+          await claimSessionWorkForAttempt(tx, f.workspaceId, {
+            ...input,
+            filesystemDiscontinuityProtocol: 1,
+          }),
+        ).toMatchObject({ action: "claimed" });
+        const [stamp] = await tx.execute<{ value: string }>(
+          sql`select coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v1', true), '') as value`,
+        );
+        expect(stamp!.value).toBe("");
+        // An absent capability cannot inherit a nested compatible claim.
+        await rejectsWithSqlState(claimSessionWorkForAttempt(tx, f.workspaceId, input));
+      },
+    );
+    await rejectsWithSqlState(claimSessionWorkForAttempt(client.db, f.workspaceId, input));
+    expect(
+      await claimSessionWorkForAttempt(client.db, f.workspaceId, {
+        ...input,
+        filesystemDiscontinuityProtocol: 1,
+      }),
+    ).toMatchObject({ action: "claimed" });
+    const ordinary = await fixture();
+    await enqueue(ordinary);
+    expect(
+      await claimSessionWorkForAttempt(client.db, ordinary.workspaceId, claimInput(ordinary)),
+    ).toMatchObject({ action: "claimed" });
+  });
+
+  test("single-connection pool reuse and a returning worker cannot retain the declaration", async () => {
+    const f = await fixture();
+    await f.consent();
+    await enqueue(f);
+    const input = claimInput(f);
+    const pooled = createDb(shared.appUrl, { max: 1 });
+    try {
+      expect(
+        await claimSessionWorkForAttempt(pooled.db, f.workspaceId, {
+          ...input,
+          filesystemDiscontinuityProtocol: 1,
+        }),
+      ).toMatchObject({ action: "claimed" });
+      const [stamp] = await pooled.db.execute<{ value: string }>(
+        sql`select coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v1', true), '') as value`,
+      );
+      expect(stamp!.value).toBe("");
+      await rejectsWithSqlState(claimSessionWorkForAttempt(pooled.db, f.workspaceId, input));
+    } finally {
+      await pooled.close();
+    }
+    const returned = createDb(shared.appUrl, { max: 1 });
+    try {
+      await rejectsWithSqlState(claimSessionWorkForAttempt(returned.db, f.workspaceId, input));
+    } finally {
+      await returned.close();
+    }
+  });
+
+  test("consent requirement survives disable and lease deletion; receipt identity cannot be erased", async () => {
+    const f = await fixture();
+    await f.consent();
+    await shared.admin`update opengeni_private.sandbox_recovery_rollout set consent_enabled = false`;
+    try {
+      expect((await f.consent()).outcome).toBe("replayed");
+      expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
+        status: "consent_accepted",
+      });
+      for (const assignment of [
+        sql`action = 'renamed'`,
+        sql`result = '{}'::jsonb`,
+        sql`target_session_id = null`,
+      ]) {
+        await rejectsWithSqlState(
+          withWorkspaceRls(client.db, f.workspaceId, (tx) =>
+            tx.execute(
+              sql`update session_command_receipts set ${assignment} where target_session_id = ${f.session.id} and action = 'sandbox.recovery.consent'`,
+            ),
+          ),
+        );
+      }
+      await rejectsWithSqlState(
+        withWorkspaceRls(client.db, f.workspaceId, (tx) =>
+          tx.execute(
+            sql`delete from session_command_receipts where target_session_id = ${f.session.id}`,
+          ),
+        ),
+      );
+      await shared.admin`delete from sandbox_leases where id = ${f.leaseId}`;
+      expect(
+        await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id),
+      ).toContain(f.request.selection.capturedAt);
+      await enqueue(f);
+      await rejectsWithSqlState(
+        claimSessionWorkForAttempt(client.db, f.workspaceId, claimInput(f)),
+      );
+    } finally {
+      await shared.admin`update opengeni_private.sandbox_recovery_rollout set consent_enabled = true`;
+    }
+  });
+
+  test("actual session deletion cascades its receipt instead of orphaning the warning", async () => {
+    const f = await fixture();
+    await f.consent();
+    await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      f.workspaceId,
+      f.subjectId,
+      async (tx) => {
+        await tx.execute(sql`delete from sessions where id = ${f.session.id}`);
+      },
+    );
+    expect(
+      (
+        await shared.admin`select count(*)::int as count from session_command_receipts where target_session_id = ${f.session.id}`
+      )[0]!.count,
+    ).toBe(0);
+  });
+
+  test("an actor-hidden parent cannot masquerade as a deleted parent for receipt removal", async () => {
+    const f = await fixture();
+    await f.consent();
+    const ownerId = crypto.randomUUID();
+    const ownerSubject = `user:hidden-${ownerId}`;
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`insert into organization_memberships(id,account_id,subject_id,status) values(${ownerId},${f.accountId},${ownerSubject},'suspended')`;
+      await tx`update sessions set visibility = 'user_private', owner_organization_membership_id = ${ownerId}, owner_subject_id = ${ownerSubject} where id = ${f.session.id}`;
+    });
+    expect(
+      await withWorkspaceSubjectRls(client.db, f.workspaceId, f.subjectId, (tx) =>
+        tx.execute(sql`select id from sessions where id = ${f.session.id}`),
+      ),
+    ).toHaveLength(0);
+    const deleted = await withWorkspaceSubjectRls(client.db, f.workspaceId, f.subjectId, (tx) =>
+      tx.execute(
+        sql`delete from session_command_receipts where target_session_id = ${f.session.id} returning id`,
+      ),
+    );
+    expect(deleted).toHaveLength(0);
+    expect(
+      (
+        await shared.admin`select count(*)::int as count from session_command_receipts where target_session_id = ${f.session.id}`
+      )[0]!.count,
+    ).toBe(1);
+  });
+
+  test("consent cannot pass an already-admitted claim; a later old claim cannot pass consent", async () => {
+    const admitted = await fixture();
+    await enqueue(admitted);
+    const claimReady = Promise.withResolvers<void>();
+    const releaseClaim = Promise.withResolvers<void>();
+    const oldClaim = withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      admitted.workspaceId,
+      admitted.subjectId,
+      async (tx) => {
+        expect(
+          await claimSessionWorkForAttempt(tx, admitted.workspaceId, claimInput(admitted)),
+        ).toMatchObject({ action: "claimed" });
+        claimReady.resolve();
+        await releaseClaim.promise;
+      },
+    );
+    await claimReady.promise;
+    const deniedConsent = admitted.consent().then(
+      () => false,
+      () => true,
+    );
+    releaseClaim.resolve();
+    await oldClaim;
+    expect(await deniedConsent).toBe(true);
+    expect(
+      await getSandboxRecoveryDiscontinuity(client.db, admitted.workspaceId, admitted.session.id),
+    ).toBeNull();
+
+    const consented = await fixture();
+    const consentReady = Promise.withResolvers<void>();
+    const releaseConsent = Promise.withResolvers<void>();
+    const consent = withWorkspaceRls(client.db, consented.workspaceId, async (tx) => {
+      await consentPublicSandboxRecovery(tx, { ...consented, request: consented.request });
+      consentReady.resolve();
+      await releaseConsent.promise;
+    });
+    await consentReady.promise;
+    const laterClaim = enqueue(consented).then(() =>
+      claimSessionWorkForAttempt(client.db, consented.workspaceId, claimInput(consented)),
+    );
+    const rejected = rejectsWithSqlState(laterClaim);
+    releaseConsent.resolve();
+    await consent;
+    await rejected;
+    expect(
+      (
+        await shared.admin`select count(*)::int as count from session_turn_attempts where session_id = ${consented.session.id}`
+      )[0]!.count,
+    ).toBe(0);
+  });
+
   test("a fresh Modal session without a blocked lease does not suppress ordinary failure remedies", async () => {
     const f = await fixture();
     const fresh = await f.create();
@@ -377,18 +688,23 @@ describe("explicit singleton checkpoint recovery", () => {
       leaseTtlMs: 60_000,
       rematerialization: { id, verifiedRevision: f.request.selection.revision },
     };
-    expect(await commitWarmingToWarm(client.db, completion)).toMatchObject({ committed: true });
-    expect(await readLease(client.db, f.workspaceId, f.session.sandboxGroupId)).toMatchObject({
-      workspaceGeneration: 44,
-      archiveGeneration: 10,
-      archiveComplete: false,
-    });
-    expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({ status: "restored" });
-    expect(await commitWarmingToWarm(client.db, completion)).toMatchObject({
-      committed: false,
-      reason: "stale_epoch",
-    });
-    expect((await f.consent()).outcome).toBe("replayed");
+    await shared.admin`update opengeni_private.sandbox_recovery_rollout set consent_enabled = false`;
+    try {
+      expect(await commitWarmingToWarm(client.db, completion)).toMatchObject({ committed: true });
+      expect(await readLease(client.db, f.workspaceId, f.session.sandboxGroupId)).toMatchObject({
+        workspaceGeneration: 44,
+        archiveGeneration: 10,
+        archiveComplete: false,
+      });
+      expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({ status: "restored" });
+      expect(await commitWarmingToWarm(client.db, completion)).toMatchObject({
+        committed: false,
+        reason: "stale_epoch",
+      });
+      expect((await f.consent()).outcome).toBe("replayed");
+    } finally {
+      await shared.admin`update opengeni_private.sandbox_recovery_rollout set consent_enabled = true`;
+    }
   });
 
   test("failed restoration remains blocked, preserves provenance, and cannot silently re-elect", async () => {

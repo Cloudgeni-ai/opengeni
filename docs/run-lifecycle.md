@@ -1537,11 +1537,19 @@ not claim restore success. Failed/stale public restores and a later loss after
 verified recovery remain explicit blockers requiring operator review; this slice
 does not introduce an abandon/reset or automatic re-consent operation.
 
-Migration `0492_consented_sandbox_recovery.sql` is maintenance-only: stop all old
-API/control/turn processes, supply the complete runtime login list, migrate and
-start only matching code. Old workers cannot produce the mandatory warning, so
-pre-0492 rollback/restart is unsupported. No cancellation/reaper protocol changes
-are included in this recovery slice.
+Migration `0492_consented_sandbox_recovery.sql` is additive with DB-default-off
+consent. Activation is owner-only and follows verified immutable API/control/turn
+images and worker templates; see [deployment](deployment.md). Disabling new consent
+does not interrupt accepted restoration or exact receipt replay. Finalized consent
+receipts are immutable, survive lease churn and permanently require protocol v1
+at every attempt INSERT, including `ON CONFLICT` reattachment. Ordinary, recovery,
+approval, compaction and continuation claims all use that boundary. Only the
+warning-aware worker module opts in, transaction-locally and without leaking its
+stamp to later nested claims. Upgrading the DB library alone does not opt in.
+Old workers fail closed for affected sessions; rollback after consent requires
+compatible workers. Pause/Cancel and settlement remain available. This public gate
+does not retrofit operator historical recovery that has no public consent receipt.
+No cancellation/reaper protocol changes are included.
 
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected sandbox environment/base

@@ -603,7 +603,7 @@ describe("release schema contract", () => {
       deploymentMode: supervisedCommandSettlement
         ? "rolling"
         : consentedRecovery
-          ? "maintenance"
+          ? "rolling"
           : warmCaptureHolderReclamation || periodicCaptureAttemptCadence
             ? "rolling"
             : modalCommandByteOffsets ||
