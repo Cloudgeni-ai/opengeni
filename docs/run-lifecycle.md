@@ -1772,6 +1772,14 @@ lost, never successful; a real exit arriving during drain retains its exit code.
 Failed checkpoints retain the provider and command holders for retry. Filesystem
 snapshots preserve neither running processes nor application transaction state.
 
+The same containment path covers an explicitly stopping managed command after
+at least five provider-error observations. Its cancellation request and owner
+quiescence must both predate idle grace; an absent quiescence receipt is not
+accepted for this path. Provider errors alone never enroll a running command.
+All sandbox-group activity, other-holder and child-admission exclusions remain
+in force, and only verified provider termination settles an unknown result as
+lost. A failed checkpoint leaves the provider and holders intact for retry.
+
 Historical containment cannot reconstruct an execution ID the old adapter never
 retained. A command whose owner cannot recover its terminal receipt remains a visible capture blocker;
 operators must reconcile the exact command/provider identity rather than replay
