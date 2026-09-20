@@ -574,12 +574,17 @@ test("delivered causal carriers can be claimed after workspace revocation withou
         ["background_command_result", null],
         ["goal_continuation", null],
         ["goal_continuation", scheduledRun],
+        ["agent_message", null],
       ]) {
         const successor = crypto.randomUUID();
         const successorAttempt = crypto.randomUUID();
         const updateId = crypto.randomUUID();
         const lineage =
-          kind === "child_terminal_result" ? { parentTurnId: turn } : { causalTurnId: turn };
+          kind === "agent_message"
+            ? { callerTurnId: turn, callerSessionId: session }
+            : kind === "child_terminal_result"
+              ? { parentTurnId: turn }
+              : { causalTurnId: turn };
         // The receipt travels through an outbox and pending update unchanged.
         const outboxId = crypto.randomUUID();
         await db.query(
@@ -618,7 +623,7 @@ test("delivered causal carriers can be claimed after workspace revocation withou
           db.query(
             `INSERT INTO session_turns(id,account_id,workspace_id,session_id,active_attempt_id,execution_generation,status,
           source,initiator_kind,initiator_subject_id,initiating_human_subject_id,mcp_account_bindings,scheduled_task_run_id)
-          VALUES ($1,$2,$3,$4,$5,1,'running',$6,'service','internal-update','sender',$7::jsonb,$8)`,
+          VALUES ($1,$2,$3,$4,$5,1,'running',$6,'service','internal-update',$9,$7::jsonb,$8)`,
             [
               successor,
               account,
@@ -628,6 +633,7 @@ test("delivered causal carriers can be claimed after workspace revocation withou
               kind === "goal_continuation" ? "goal" : "system",
               JSON.stringify([binding]),
               scheduledTaskRunId,
+              kind === "agent_message" ? null : "sender",
             ],
           );
         // Pending input alone is not a claim or inherited authority.
@@ -646,6 +652,15 @@ test("delivered causal carriers can be claimed after workspace revocation withou
             ])
           ).rows[0]!.mcp_account_bindings,
         ).toEqual([binding]);
+        if (kind === "agent_message") {
+          expect(
+            (
+              await db.query("SELECT initiating_human_subject_id FROM session_turns WHERE id=$1", [
+                successor,
+              ])
+            ).rows[0]!.initiating_human_subject_id,
+          ).toBeNull();
+        }
         await db.query(
           "INSERT INTO session_turn_attempts VALUES ($1,$2,$3,$4,$5,1,'running',NULL,NULL,'shared',1,NULL)",
           [successorAttempt, account, workspace, session, successor],
@@ -793,15 +808,24 @@ test("continuation inheritance rejects forged, mismatched and mixed receipt prov
       "changed-receipt",
       "mixed-batch",
       "human-admission",
+      "message-wrong-human",
+      "message-subject-initiator",
+      "message-personal-delegation",
+      "message-carrier-personal-delegation",
+      "message-wrong-origin",
     ]) {
       const successor = crypto.randomUUID();
       const copied =
         variant === "changed-receipt"
           ? [{ ...binding, accountLabel: "Changed after acceptance" }]
           : [binding];
+      const isMessage = variant.startsWith("message-");
       const lineage =
-        variant === "wrong-session"
-          ? { callerTurnId: turn, callerSessionId: crypto.randomUUID() }
+        variant === "wrong-session" || isMessage
+          ? {
+              callerTurnId: variant === "message-wrong-origin" ? crypto.randomUUID() : turn,
+              callerSessionId: variant === "wrong-session" ? crypto.randomUUID() : session,
+            }
           : { causalTurnId: variant === "missing-origin" ? crypto.randomUUID() : turn };
       await db.query(
         `INSERT INTO session_system_updates(account_id,workspace_id,session_id,kind,lineage,state,delivered_turn_id,mcp_account_bindings)
@@ -810,12 +834,21 @@ test("continuation inheritance rejects forged, mismatched and mixed receipt prov
           account,
           workspace,
           session,
-          variant === "wrong-session" ? "agent_message" : "background_command_result",
+          variant === "wrong-session" || isMessage ? "agent_message" : "background_command_result",
           JSON.stringify(lineage),
           variant === "wrong-target" ? crypto.randomUUID() : successor,
           JSON.stringify(copied),
         ],
       );
+      if (variant === "message-carrier-personal-delegation") {
+        await db.query(
+          "UPDATE session_system_updates SET personal_connection_delegations=$2::jsonb WHERE delivered_turn_id=$1",
+          [
+            successor,
+            JSON.stringify([{ connectionType: "github_personal", ownerSubjectId: "sender" }]),
+          ],
+        );
+      }
       if (variant === "mixed-batch") {
         await db.query(
           `INSERT INTO session_system_updates(account_id,workspace_id,session_id,kind,lineage,state,delivered_turn_id,mcp_account_bindings)
@@ -826,16 +859,26 @@ test("continuation inheritance rejects forged, mismatched and mixed receipt prov
       await expect(
         db.query(
           `INSERT INTO session_turns(id,account_id,workspace_id,session_id,status,source,initiator_kind,initiator_subject_id,
-        initiating_human_subject_id,mcp_account_bindings)
-        VALUES ($1,$2,$3,$4,'running',$5,'service','internal-update',$6,$7::jsonb)`,
+        initiating_human_subject_id,mcp_account_bindings,personal_connection_delegations)
+        VALUES ($1,$2,$3,$4,'running',$5,$8,'internal-update',$6,$7::jsonb,$9::jsonb)`,
           [
             successor,
             account,
             workspace,
             session,
             variant === "human-admission" ? "user" : "system",
-            variant === "wrong-human" ? "teammate" : "sender",
+            variant === "wrong-human" || variant === "message-wrong-human"
+              ? "teammate"
+              : isMessage
+                ? null
+                : "sender",
             JSON.stringify(copied),
+            variant === "message-subject-initiator" ? "subject" : "service",
+            JSON.stringify(
+              variant === "message-personal-delegation"
+                ? [{ connectionType: "github_personal", ownerSubjectId: "sender" }]
+                : [],
+            ),
           ],
         ),
       ).rejects.toThrow("identity changed");

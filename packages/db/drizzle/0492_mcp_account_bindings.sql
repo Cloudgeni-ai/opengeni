@@ -178,10 +178,23 @@ BEGIN
           AND update_value.delivered_turn_id = NEW.id
           AND update_value.mcp_account_bindings IS NOT DISTINCT FROM bindings
           AND origin.mcp_account_bindings IS NOT DISTINCT FROM bindings
-          AND coalesce(origin.initiating_human_subject_id,
+          AND (coalesce(origin.initiating_human_subject_id,
             CASE WHEN origin.initiator_kind = 'subject' THEN origin.initiator_subject_id END)
             IS NOT DISTINCT FROM coalesce(NEW.initiating_human_subject_id,
               CASE WHEN NEW.initiator_kind = 'subject' THEN NEW.initiator_subject_id END)
+            OR (
+              -- Ordinary workspace-only agent messages execute as a service,
+              -- not as the origin's human. Preserve that absence of personal
+              -- authority without stranding delivery of the exact receipt.
+              update_value.kind = 'agent_message'
+              AND NEW.initiator_kind = 'service'
+              AND NEW.initiating_human_subject_id IS NULL
+              AND origin.personal_connection_delegations = '[]'::jsonb
+              AND update_value.personal_connection_delegations = '[]'::jsonb
+              AND delegations = '[]'::jsonb
+              AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(bindings) selected
+                WHERE selected ->> 'subjectScope' IS DISTINCT FROM 'workspace')
+            ))
       ) AND NOT EXISTS (
         SELECT 1 FROM session_system_updates update_value
         WHERE update_value.account_id = NEW.account_id
