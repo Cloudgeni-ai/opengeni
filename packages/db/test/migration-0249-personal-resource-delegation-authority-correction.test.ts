@@ -7,6 +7,13 @@ import { createDb, createSession, nestedPostgresSqlState } from "../src";
 import { migrate } from "../src/migrate";
 import { embeddingMigrationTail } from "./embedding-migration-tail";
 
+// This fixture deliberately replays 0249 over already-installed 0306 routines
+// to exercise the old resolver. It is not a linear upgrade through 0306;
+// leave the later exact-body sharing cutover outside this synthetic history.
+// Real ordered upgrades through that cutover are covered by the owner replay tests.
+const legacyFixtureTail = embeddingMigrationTail.filter(
+  (name) => name !== "0501_session_sharing_execution.sql",
+);
 const migrationName = "0249_personal_resource_delegation_authority_correction.sql";
 const commonAuthorityMigrationName = "0253_common_user_resource_authority_lifecycle.sql";
 // 0483 source-asserts the guard installed by withheld 0253; replay them together.
@@ -243,7 +250,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           (${scheduledProducerMaterializationMigrationName}),
           (${scheduledInheritedToolAdmissionMigrationName})
       `;
-      await sql`insert into schema_migrations (name) select unnest(${embeddingMigrationTail}::text[])`;
+      await sql`insert into schema_migrations (name) select unnest(${[...legacyFixtureTail, "0501_session_sharing_execution.sql"]}::text[])`;
       await migrate(databaseUrl);
       // Current session adapters select the complete sessions row while this
       // fixture intentionally withholds 0402. Supply only its later columns
@@ -259,7 +266,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
       `;
       await sql`
         delete from schema_migrations
-        where name = any(${embeddingMigrationTail}::text[]) or name in (
+        where name = any(${legacyFixtureTail}::text[]) or name in (
           ${migrationName},
           ${commonAuthorityMigrationName},
           ${typedAdmissionMigrationName},
@@ -320,7 +327,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
       const receipts = await sql<Array<{ name: string }>>`
         select name
         from schema_migrations
-        where name = any(${embeddingMigrationTail}::text[]) or name in (
+        where name = any(${legacyFixtureTail}::text[]) or name in (
           ${migrationName},
           ${commonAuthorityMigrationName},
           ${connectionAuthorityMigrationName},
@@ -363,7 +370,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         scheduledSessionTargetIndexMigrationName,
         scheduledProducerMaterializationMigrationName,
         scheduledInheritedToolAdmissionMigrationName,
-        ...embeddingMigrationTail,
+        ...legacyFixtureTail,
       ]);
       expect(await countWorkspaceMemberships(sql, ids)).toBe(0);
       await insertAttempt(sql, ids, ids.attemptId);

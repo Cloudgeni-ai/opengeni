@@ -59,6 +59,8 @@ const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   "packages/db/drizzle/0487_skill_catalog_message_forks.sql",
   // Copies only accepted session attachment grants at the existing fork boundary.
   "packages/db/drizzle/0499_session_attachment_access.sql",
+  // Changes audience without revoking accepted execution; same owner-only boundary.
+  "packages/db/drizzle/0501_session_sharing_execution.sql",
   "packages/db/src/session-tenancy.ts",
   "packages/db/src/provision-roles.ts",
   "packages/db/src/runtime-posture.ts",

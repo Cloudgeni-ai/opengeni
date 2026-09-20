@@ -4451,6 +4451,8 @@ export const sessions = pgTable(
       .notNull()
       .default("workspace_shared"),
     authorityEpoch: integer("authority_epoch").notNull().default(1),
+    // Old accepted epochs remain valid across sharing, never across revocation.
+    executionAuthorityEpoch: integer("execution_authority_epoch").notNull().default(1),
     // Agent-access scope (migration 0427). Declares how far a live attempt on
     // this session may reach across the workspace and how far peers may reach
     // into it. 'workspace' is the pre-0426 behaviour; 'user' limits reach to

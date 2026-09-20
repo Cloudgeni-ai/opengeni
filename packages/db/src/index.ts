@@ -18409,8 +18409,10 @@ async function validateScheduledTargetExecutionAtClaim(
     }),
   );
   return target.sessionId !== input.session.id ||
-    target.visibility !== input.session.visibility ||
-    target.authorityEpoch !== input.session.authorityEpoch ||
+    (target.visibility !== input.session.visibility &&
+      !(target.visibility === "user_private" && input.session.visibility === "workspace_shared")) ||
+    target.authorityEpoch < input.session.executionAuthorityEpoch ||
+    target.authorityEpoch > input.session.authorityEpoch ||
     stableJson(target.firstPartyMcpTools) !== stableJson(input.session.firstPartyMcpTools) ||
     stableJson(target.firstPartyMcpPermissions) !==
       stableJson(input.session.firstPartyMcpPermissions ?? null) ||
@@ -51809,8 +51811,13 @@ async function lockWorkspaceMutationAuthorityTx(
     humanSubjectId: processAuthority.initiatingHumanSubjectId,
   });
   if (
-    processAuthority.authorityEpoch !== session.authorityEpoch ||
-    processAuthority.authorityVisibility !== session.visibility
+    processAuthority.authorityEpoch < session.executionAuthorityEpoch ||
+    processAuthority.authorityEpoch > session.authorityEpoch ||
+    (processAuthority.authorityVisibility !== session.visibility &&
+      !(
+        processAuthority.authorityVisibility === "user_private" &&
+        session.visibility === "workspace_shared"
+      ))
   ) {
     throw new SandboxWorkspaceMutationFencedError(
       "authority_revoked",
@@ -68250,8 +68257,13 @@ export async function claimSessionWorkForAttempt(
               );
               if (
                 targetPolicy.sessionId !== sessionId ||
-                targetPolicy.visibility !== session.visibility ||
-                targetPolicy.authorityEpoch !== session.authorityEpoch ||
+                (targetPolicy.visibility !== session.visibility &&
+                  !(
+                    targetPolicy.visibility === "user_private" &&
+                    session.visibility === "workspace_shared"
+                  )) ||
+                targetPolicy.authorityEpoch < session.executionAuthorityEpoch ||
+                targetPolicy.authorityEpoch > session.authorityEpoch ||
                 stableJson(targetPolicy.firstPartyMcpTools) !==
                   stableJson(session.firstPartyMcpTools) ||
                 stableJson(targetPolicy.firstPartyMcpPermissions) !==

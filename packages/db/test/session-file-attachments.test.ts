@@ -15,12 +15,17 @@ import {
   initializeSessionStartAtomically,
   claimSessionWorkForAttempt,
   applySessionTurnSettlement,
+  getSessionTurnForAttempt,
+  requestSessionTurnRecovery,
+  markSessionAttemptQuiesced,
+  resolveAcceptedConnectionUse,
   ensureManagedAccessForUser,
   transitionSessionVisibility,
   forkSessionContent,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
+import { seedSenderConnections } from "./sender-connection-fixture";
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
 beforeAll(async () => {
@@ -33,7 +38,7 @@ afterAll(async () => {
   await client?.close();
   await shared?.release();
 }, 60_000);
-async function fixture(managed = false) {
+async function fixture(managed = false, startPrivate = false) {
   const id = crypto.randomUUID();
   const access = managed
     ? await ensureManagedAccessForUser(client.db, {
@@ -87,6 +92,15 @@ async function fixture(managed = false) {
     latencyMode: "standard",
     sandboxBackend: "none",
   });
+  if (startPrivate)
+    await transitionSessionVisibility(client.db, {
+      workspaceId: scope.workspaceId,
+      sessionId: session.id,
+      actorSubjectId: grant.subjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: crypto.randomUUID(),
+    });
   const start = await initializeSessionStartAtomically(client.db, {
     ...scope,
     sessionId: session.id,
@@ -577,4 +591,262 @@ test("migration backfills only original uploads proven by accepted human message
   const [policy] =
     await shared.admin`select relforcerowsecurity from pg_class where oid='files'::regclass`;
   expect(policy!.relforcerowsecurity).toBe(true);
+});
+
+for (const running of [false, true])
+  test(`sharing preserves a ${running ? "running" : "queued"} accepted human turn and its attachment`, async () => {
+    const f = await fixture(true, true);
+    await withSessionRlsActorContext(f.owner, f.accept);
+    const attemptId = crypto.randomUUID();
+    const claimWork = () =>
+      claimSessionWorkForAttempt(client.db, f.scope.workspaceId, {
+        sessionId: f.session.id,
+        workflowId: "session-" + f.session.id,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+    const before = running ? await claimWork() : null;
+    if (running && before?.action !== "claimed") throw new Error("missing running turn");
+    const changed = await transitionSessionVisibility(client.db, {
+      workspaceId: f.scope.workspaceId,
+      sessionId: f.session.id,
+      actorSubjectId: f.grant.subjectId,
+      targetVisibility: "workspace_shared",
+      expectedAuthorityEpoch: 2,
+      operationKey: crypto.randomUUID(),
+    });
+    expect(changed.authorityEpoch).toBe(3);
+    expect(changed.revokedGrantCount).toBe(0);
+    const claim = before ?? (await claimWork());
+    if (claim.action !== "claimed") throw new Error("missing accepted turn");
+    expect(claim.turn.id).toBe(f.turn.id);
+    const retained = await getSessionTurnForAttempt(
+      client.db,
+      f.scope.workspaceId,
+      f.session.id,
+      attemptId,
+    );
+    expect(retained).not.toBeNull();
+    expect(claim.turn.initiatingHumanSubjectId).toBe(f.grant.subjectId);
+    expect(await f.read("user:viewer", f.session.id, 3)).toHaveLength(1);
+    await expect(f.read("user:viewer", f.session.id, 2)).rejects.toThrow();
+    // The running worker captured epoch 2 before sharing. Its exact live
+    // attempt can still read its own attachments; browser claims cannot.
+    const files = await withSessionRlsActorContext({ subjectId: "service:agent-turn" }, () =>
+      withWorkspaceRls(client.db, f.scope.workspaceId, (tx) =>
+        readSessionFileAttachments(tx, {
+          ...f.scope,
+          fileIds: [f.file.id],
+          access: {
+            sessionId: f.session.id,
+            authorityEpoch: running ? 2 : 3,
+            actor: {
+              kind: "agent_attempt",
+              subjectId: "service:agent-turn",
+              callerSessionId: f.session.id,
+              turnId: claim.turn.id,
+              attemptId,
+              executionGeneration: claim.turn.executionGeneration,
+            },
+          },
+        }),
+      ),
+    );
+    expect(files.map((file) => file.id)).toEqual([f.file.id]);
+    await applySessionTurnSettlement(client.db, f.scope.workspaceId, {
+      sessionId: f.session.id,
+      turnId: claim.turn.id,
+      triggerEventId: claim.turn.triggerEventId,
+      attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+  });
+
+test("sharing retains the exact personal connection receipt; live revocation still denies it", async () => {
+  const f = await fixture(true, true);
+  const initialAttempt = crypto.randomUUID();
+  const workflowRunId = crypto.randomUUID();
+  let dispatchId = crypto.randomUUID();
+  const claimWork = (attemptId: string) =>
+    claimSessionWorkForAttempt(client.db, f.scope.workspaceId, {
+      sessionId: f.session.id,
+      workflowId: `session-${f.session.id}`,
+      workflowRunId,
+      attemptId,
+      dispatchId: (dispatchId = crypto.randomUUID()),
+      trigger: { kind: "next" },
+    });
+  const initial = await claimWork(initialAttempt);
+  if (initial.action !== "claimed") throw new Error("initial not claimed");
+  await applySessionTurnSettlement(client.db, f.scope.workspaceId, {
+    sessionId: f.session.id,
+    turnId: initial.turn.id,
+    triggerEventId: initial.turn.triggerEventId,
+    attemptId: initialAttempt,
+    turnStatus: "completed",
+    sessionStatus: "idle",
+    activeTurnId: null,
+    events: [],
+  });
+  const selection = {
+    serverId: "mail",
+    connectionId: crypto.randomUUID(),
+    originWorkspaceId: f.scope.workspaceId,
+    ownerSubjectId: f.grant.subjectId,
+    providerDomain: "mail.example.test",
+    kind: "oauth2" as const,
+    connectionType: "mcp" as const,
+  };
+  await seedSenderConnections(shared.admin, f.scope, [selection]);
+  await withWorkspaceSubjectSessionActivityRls(
+    client.db,
+    f.scope.workspaceId,
+    f.grant.subjectId,
+    (tx) =>
+      submitHumanPromptInTransaction(tx, {
+        ...f.scope,
+        sessionId: f.session.id,
+        subjectId: f.grant.subjectId,
+        actor: { type: "human", subjectId: f.grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "Use my selected account",
+        resources: [],
+        reasoningEffortFallback: "low",
+        source: "user",
+        personalConnectionDelegations: [selection],
+      }),
+  );
+  let attemptId = crypto.randomUUID();
+  let claim = await claimWork(attemptId);
+  if (claim.action !== "claimed") throw new Error("personal turn not claimed");
+  const use = () => {
+    if (claim.action !== "claimed") throw new Error("no current attempt");
+    return resolveAcceptedConnectionUse(client.db, {
+      ...f.scope,
+      sessionId: f.session.id,
+      turnId: claim.turn.id,
+      attemptId,
+      executionGeneration: claim.turn.executionGeneration,
+      physicalRequestId: crypto.randomUUID(),
+      usePhase: "credential_resolution",
+      serverId: "mail",
+      connectionId: selection.connectionId,
+      providerDomain: selection.providerDomain,
+      connectionKind: "oauth2",
+      subjectScope: "subject",
+      ownerSubjectId: f.grant.subjectId,
+    });
+  };
+  expect(await use()).toMatchObject({ status: "authorized" });
+  const before =
+    await shared.admin`select canonical_snapshot,snapshot_digest from turn_connection_authority_snapshots where turn_id=${claim.turn.id}`;
+  await transitionSessionVisibility(client.db, {
+    workspaceId: f.scope.workspaceId,
+    sessionId: f.session.id,
+    actorSubjectId: f.grant.subjectId,
+    targetVisibility: "workspace_shared",
+    expectedAuthorityEpoch: 2,
+    operationKey: crypto.randomUUID(),
+  });
+  expect(await use()).toMatchObject({ status: "authorized" });
+  const after =
+    await shared.admin`select canonical_snapshot,snapshot_digest from turn_connection_authority_snapshots where turn_id=${claim.turn.id}`;
+  expect([...after]).toEqual([...before]);
+  const originalTurnId = claim.turn.id;
+  expect(
+    await requestSessionTurnRecovery(client.db, f.scope.workspaceId, {
+      sessionId: f.session.id,
+      turnId: claim.turn.id,
+      triggerEventId: claim.turn.triggerEventId,
+      attemptId,
+      reason: "worker_shutdown",
+    }),
+  ).toMatchObject({ action: "recovering" });
+  await markSessionAttemptQuiesced(client.db, {
+    ...f.scope,
+    sessionId: f.session.id,
+    attemptId,
+    temporalWorkflowId: `session-${f.session.id}`,
+    temporalWorkflowRunId: workflowRunId,
+    temporalActivityId: dispatchId,
+  });
+  attemptId = crypto.randomUUID();
+  claim = await claimWork(attemptId);
+  if (claim.action !== "claimed") throw new Error("shared continuation not claimed");
+  expect(claim.turn.id).toBe(originalTurnId);
+  expect(claim.turn.initiatingHumanSubjectId).toBe(f.grant.subjectId);
+  expect(await use()).toMatchObject({ status: "authorized" });
+  await shared.admin`update connections set status='revoked' where id=${selection.connectionId}`;
+  expect(await use()).toMatchObject({ status: "denied" });
+});
+
+test("sharing preserves execution floor but privatization revokes it and direct writes cannot reset it", async () => {
+  const f = await fixture(true, true);
+  const initial =
+    await shared.admin`select authority_epoch,execution_authority_epoch from sessions where id=${f.session.id}`;
+  expect(initial[0]).toMatchObject({ authority_epoch: 2, execution_authority_epoch: 2 });
+  await expect(
+    (async () => {
+      await shared.admin`update sessions set execution_authority_epoch=1 where id=${f.session.id}`;
+    })(),
+  ).rejects.toThrow("execution authority floor is lifecycle-owned");
+  await transitionSessionVisibility(client.db, {
+    workspaceId: f.scope.workspaceId,
+    sessionId: f.session.id,
+    actorSubjectId: f.grant.subjectId,
+    targetVisibility: "workspace_shared",
+    expectedAuthorityEpoch: 2,
+    operationKey: crypto.randomUUID(),
+  });
+  const sharedRow =
+    await shared.admin`select authority_epoch,execution_authority_epoch from sessions where id=${f.session.id}`;
+  expect(sharedRow[0]).toMatchObject({ authority_epoch: 3, execution_authority_epoch: 2 });
+  // Making private remains rejected while accepted work is queued.
+  await expect(
+    transitionSessionVisibility(client.db, {
+      workspaceId: f.scope.workspaceId,
+      sessionId: f.session.id,
+      actorSubjectId: f.grant.subjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 3,
+      operationKey: crypto.randomUUID(),
+    }),
+  ).rejects.toThrow();
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(client.db, f.scope.workspaceId, {
+    sessionId: f.session.id,
+    workflowId: `session-${f.session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error("missing turn");
+  await applySessionTurnSettlement(client.db, f.scope.workspaceId, {
+    sessionId: f.session.id,
+    turnId: claim.turn.id,
+    triggerEventId: claim.turn.triggerEventId,
+    attemptId,
+    turnStatus: "completed",
+    sessionStatus: "idle",
+    activeTurnId: null,
+    events: [],
+  });
+  await transitionSessionVisibility(client.db, {
+    workspaceId: f.scope.workspaceId,
+    sessionId: f.session.id,
+    actorSubjectId: f.grant.subjectId,
+    targetVisibility: "user_private",
+    expectedAuthorityEpoch: 3,
+    operationKey: crypto.randomUUID(),
+  });
+  const privateRow =
+    await shared.admin`select authority_epoch,execution_authority_epoch from sessions where id=${f.session.id}`;
+  expect(privateRow[0]).toMatchObject({ authority_epoch: 4, execution_authority_epoch: 4 });
 });

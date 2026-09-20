@@ -73,6 +73,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       add column end_user_source text,
       add column end_user_id text,
       add column memory_scope text not null default 'workspace',
+      add column execution_authority_epoch integer not null default 1,
       add column initial_mcp_account_bindings jsonb`;
     // Current session/claim adapters project 0494 receipts. Keep historical
     // NULL semantics and install no account-binding runtime guards here: this
@@ -286,6 +287,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       drop column end_user_source,
       drop column end_user_id,
       drop column memory_scope,
+      drop column execution_authority_epoch,
       drop column initial_mcp_account_bindings`;
     await admin`alter table session_turns drop column mcp_account_bindings`;
     await admin`alter table session_system_updates drop column mcp_account_bindings`;
