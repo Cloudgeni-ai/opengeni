@@ -43,6 +43,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
       - name: Compile and exercise native protocol and failure cases
+        timeout-minutes: 5
         run: make -C native/command-supervisor test CFLAGS='-O2 -g'
 
   # The workspace publishes Rust 1.82 as its minimum. Resolve from the committed
