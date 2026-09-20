@@ -9,7 +9,7 @@ test("only explicit model availability evidence suggests another model", () => {
     "The 'example' model does not exist.",
     "Fixture model unavailable before execution",
   ]) {
-    expect(failedSessionCopy({ ...summary, reason })).toEqual({
+    expect(failedSessionCopy({ ...summary, reason }, false, false, true)).toEqual({
       reason: "This model isn’t available. Choose another below.",
       unavailableModel: true,
     });
@@ -22,6 +22,11 @@ test("only explicit model availability evidence suggests another model", () => {
   ]) {
     expect(failedSessionCopy({ ...summary, reason })).toEqual({ reason, unavailableModel: false });
   }
+});
+test("unusable picker does not receive unavailable-model guidance", () => {
+  expect(failedSessionCopy({ ...summary, reason: "The model is not supported." }).reason).toBe(
+    "This model isn’t available.",
+  );
 });
 test("long recorded errors are bounded without inventing a recovery diagnosis", () => {
   const result = failedSessionCopy({ ...summary, reason: "Connection interrupted. ".repeat(100) });

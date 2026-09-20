@@ -14,6 +14,7 @@ export function FailedSessionBanner({
   canBuyCredits = false,
   canConnectModel = false,
   modelChanged = false,
+  canChooseModel = false,
   actions,
 }: {
   failure: SessionFailureSummary;
@@ -22,9 +23,15 @@ export function FailedSessionBanner({
   canBuyCredits?: boolean;
   canConnectModel?: boolean;
   modelChanged?: boolean;
+  canChooseModel?: boolean;
   actions?: ComponentProps<typeof FailedSessionActions>;
 }) {
-  const { reason, unavailableModel } = failedSessionCopy(failure, creditExhausted, modelChanged);
+  const { reason, unavailableModel } = failedSessionCopy(
+    failure,
+    creditExhausted,
+    modelChanged,
+    canChooseModel,
+  );
   return (
     <div className="mx-auto mb-2 w-full max-w-3xl px-4 pt-4 sm:px-6">
       <div

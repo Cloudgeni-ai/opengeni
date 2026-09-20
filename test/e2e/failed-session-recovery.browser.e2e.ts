@@ -135,6 +135,11 @@ for (const unsupported of [true, false]) {
         expect(await banner.getByRole("button").count()).toBe(1);
         expect(await request.textContent()).toBe("Review the implementation and verify the tests.");
         expect(retries).toHaveLength(0);
+        if (evidenceDir)
+          await page.screenshot({
+            path: `${evidenceDir}/supported-model-selected-desktop.png`,
+            fullPage: true,
+          });
         await retry.click();
         await banner.getByRole("button", { name: "Check retry", exact: true }).waitFor();
         expect(retries[0]).toMatchObject({ model: "supported-model", failureEventId: failureId });
@@ -185,11 +190,34 @@ test("a failure without a retained logical turn never offers Retry", async () =>
   }
 }, 60_000);
 
+test("permission-disabled model picker never receives recovery guidance", async () => {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+  try {
+    await installApi(page, true, [], true, false);
+    await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
+    const banner = page.getByTestId("failed-session-banner");
+    await banner.waitFor();
+    const picker = page.getByRole("button", { name: "Model and effort", exact: true });
+    await picker.waitFor();
+    expect(await picker.isDisabled()).toBe(true);
+    expect(await banner.textContent()).toBe("This model isn’t available.");
+    expect(await banner.getByRole("button").count()).toBe(0);
+    if (evidenceDir)
+      await page.screenshot({
+        path: `${evidenceDir}/permission-disabled-desktop.png`,
+        fullPage: true,
+      });
+  } finally {
+    await page.close();
+  }
+}, 60_000);
+
 async function installApi(
   page: Page,
   unsupported: boolean,
   retries: unknown[],
   retainedTurn = true,
+  canControl = true,
 ) {
   const workspace = {
     id: workspaceId,
@@ -334,7 +362,7 @@ async function installApi(
               "workspace:admin",
               "sessions:read",
               "sessions:write",
-              "sessions:control",
+              ...(canControl ? ["sessions:control"] : []),
               "files:read",
               "capabilities:read",
               "connections:read",
@@ -370,17 +398,19 @@ async function installApi(
       });
     if (path.endsWith("/goal")) return json({ message: "No goal" }, 404);
     if (path.endsWith("/composer-draft"))
-      return json({
-        revision: 0,
-        text: "",
-        resources: [],
-        model: session.model,
-        reasoningEffort: "low",
-        latencyMode: "standard",
-        sourceTurnId: null,
-        sourceTurnVersion: null,
-        updatedAt: null,
-      });
+      return !canControl
+        ? json({ error: "Permission denied" }, 403)
+        : json({
+            revision: 0,
+            text: "",
+            resources: [],
+            model: session.model,
+            reasoningEffort: "low",
+            latencyMode: "standard",
+            sourceTurnId: null,
+            sourceTurnVersion: null,
+            updatedAt: null,
+          });
     if (path.endsWith("/lineage")) return json({ ancestors: [], children: [], truncated: false });
     if (path.endsWith("/human-input-requests")) return json({ requests: [] });
     if (path.endsWith("/background-commands")) return json({ commands: [] });

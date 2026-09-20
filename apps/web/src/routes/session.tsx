@@ -1541,11 +1541,6 @@ function SessionChatPane(props: {
     () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
     [context.client, props.session.workspaceId],
   );
-  const failureFallback = props.failure ? (
-    <div role="alert" className="mx-auto my-2 w-full max-w-3xl px-4 text-sm text-fg-muted sm:px-6">
-      {failedSessionCopy(props.failure, props.creditExhausted).reason}
-    </div>
-  ) : null;
   const terminal = isTerminalSessionStatus(props.session.status);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
@@ -2070,6 +2065,21 @@ function SessionChatPane(props: {
   const setComposerReasoningEffort = composer.setReasoningEffort;
   const setComposerLatencyMode = composer.setLatencyMode;
   const hasComposerPolicy = composerPolicy !== null;
+  const modelPickerDisabled =
+    composer.sending || composer.draftLoading || !hasComposerPolicy || Boolean(pendingRetryInput);
+  const canChooseRecoveryModel = !modelPickerDisabled;
+  const failureFallback = props.failure ? (
+    <div role="alert" className="mx-auto my-2 w-full max-w-3xl px-4 text-sm text-fg-muted sm:px-6">
+      {
+        failedSessionCopy(
+          props.failure,
+          props.creditExhausted,
+          Boolean(composerPolicy && composerPolicy.model !== props.session.model),
+          canChooseRecoveryModel,
+        ).reason
+      }
+    </div>
+  ) : null;
   const model = composerPolicy?.model ?? props.session.model;
   const reasoningEffort = composerPolicy?.reasoningEffort ?? props.session.reasoningEffort;
   const latencyMode = composerPolicy?.latencyMode ?? props.session.latencyMode;
@@ -2431,6 +2441,7 @@ function SessionChatPane(props: {
                           <LazyFailedSessionBanner
                             key={props.session.id}
                             failure={props.failure}
+                            canChooseModel={canChooseRecoveryModel}
                             modelChanged={Boolean(
                               composerPolicy && composerPolicy.model !== props.session.model,
                             )}
@@ -2879,12 +2890,7 @@ function SessionChatPane(props: {
                   model={model}
                   effort={reasoningEffort}
                   latencyMode={latencyMode}
-                  disabled={
-                    composer.sending ||
-                    composer.draftLoading ||
-                    !hasComposerPolicy ||
-                    Boolean(pendingRetryInput)
-                  }
+                  disabled={modelPickerDisabled}
                   loading={modelCatalog.loading || composer.draftLoading}
                   error={modelCatalog.error ?? composerPolicyError}
                   sessionKey={props.session.id}

@@ -5,6 +5,7 @@ export function failedSessionCopy(
   failure: SessionFailureSummary,
   creditExhausted = false,
   modelChanged = false,
+  canChooseModel = false,
 ) {
   const recorded = failure.reason?.replace(/\s+/g, " ").trim();
   // Require an explicit claim about the model itself, not e.g. its connection
@@ -20,7 +21,9 @@ export function failedSessionCopy(
       : unavailableModel
         ? modelChanged
           ? "The previous model isn’t available."
-          : "This model isn’t available. Choose another below."
+          : canChooseModel
+            ? "This model isn’t available. Choose another below."
+            : "This model isn’t available."
         : recorded
           ? recorded.length > 160
             ? `${recorded.slice(0, 157)}…`

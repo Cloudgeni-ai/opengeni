@@ -241,8 +241,17 @@ test("unsupported model directs to existing picker; a changed model permits reco
     ...failure,
     reason: "The model `example` is not supported with this account.",
   };
-  const container = await render(<FailedSessionBanner failure={unavailable} actions={actions} />);
+  const container = await render(
+    <FailedSessionBanner failure={unavailable} actions={actions} canChooseModel />,
+  );
   expect(container.textContent).toBe("This model isn’t available. Choose another below.");
+  expect(container.querySelector("button")).toBeNull();
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner failure={unavailable} actions={actions} canChooseModel={false} />,
+    ),
+  );
+  expect(container.textContent).toBe("This model isn’t available.");
   expect(container.querySelector("button")).toBeNull();
   await act(async () =>
     root!.render(<FailedSessionBanner failure={unavailable} actions={actions} modelChanged />),
