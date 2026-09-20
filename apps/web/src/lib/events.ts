@@ -1,7 +1,7 @@
 import { buildTimeline, presentFailure, type TimelineItem } from "@opengeni/react";
 
 import type { Session, SessionEvent, SessionStatus } from "@/types";
-import { isStructuralSandboxFailure } from "./sandbox-recovery";
+import { isStructuralSandboxFailure } from "./sandbox-failure";
 
 // Only "cancelled" is terminal for the console: a FAILED session is revivable
 // by sending it a new message (the API transitions failed -> queued and

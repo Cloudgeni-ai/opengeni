@@ -3,10 +3,10 @@ import type { SandboxRecoveryProjection, SandboxRecoverySelection } from "@openg
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
   createSandboxRecoveryController,
-  isStructuralSandboxFailure,
   sameRecoverySelection,
   type SandboxRecoveryRequest,
 } from "./sandbox-recovery";
+import { isStructuralSandboxFailure } from "./sandbox-failure";
 
 const selection: SandboxRecoverySelection = {
   version: 1,
