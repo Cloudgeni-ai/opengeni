@@ -128,13 +128,6 @@ export default function SessionSearchDialog(props: {
     debounceMs: 0,
     enabled: props.open && !!previewSelection,
   });
-  const selectedIdentity = `${identity}:${previewSelection?.sessionId ?? ""}`;
-  // Re-selecting after access recovery can briefly expose the hook's previous
-  // snapshot before its revalidation effect runs. Treat that transition as
-  // pending, never as retained content or a newly observed denial.
-  const previousSelectedIdentity = useRef(selectedIdentity);
-  const selectionChanged = previousSelectedIdentity.current !== selectedIdentity;
-  previousSelectedIdentity.current = selectedIdentity;
   useEffect(() => {
     setTitleCursor(undefined);
     setSelectedId(null);
@@ -291,7 +284,7 @@ export default function SessionSearchDialog(props: {
               {search.loading ? (
                 <span className="text-xs text-fg-muted" role="status">
                   Searching saved history
-                  {search.scanned ? ` · ${search.scanned} messages checked` : "…"}
+                  {search.scanned ? ` · ${search.scanned} messages visited` : "…"}
                 </span>
               ) : search.page?.hasMore ? (
                 <span className="text-xs text-fg-muted">More history available</span>
@@ -316,17 +309,7 @@ export default function SessionSearchDialog(props: {
                 enabled={props.open}
                 onOpen={onOpen}
                 onBack={() => setMobilePreview(false)}
-                search={
-                  selectionChanged
-                    ? {
-                        ...selectedSearch,
-                        page: null,
-                        loading: true,
-                        error: null,
-                        accessDenied: false,
-                      }
-                    : selectedSearch
-                }
+                search={selectedSearch}
                 index={previewIndex}
                 setIndex={setPreviewIndex}
                 scrollPosition={previewScroll}

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
-import { act, type ComponentType } from "react";
+import { act, StrictMode, type ComponentType } from "react";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
   registerDom,
@@ -11,6 +11,7 @@ registerDom();
 let titleReads = 0;
 let messageReads = 0;
 let failure = 503;
+let selectedFailure: number | null = null;
 let messageGate: Promise<void> | null = null;
 const queries: string[] = [];
 const client = {
@@ -24,10 +25,11 @@ const client = {
       nextCursor: null,
     };
   },
-  searchSessionMessages: async () => {
+  searchSessionMessages: async (_workspace: string, options: { sessionId?: string }) => {
     messageReads++;
     if (messageGate) await messageGate;
-    if (failure === 200)
+    const status = options.sessionId ? (selectedFailure ?? failure) : failure;
+    if (status === 200)
       return {
         matches: [],
         hasMore: false,
@@ -35,7 +37,7 @@ const client = {
         matchedOccurrenceCount: 0,
         countIsExact: true,
       };
-    throw new OpenGeniApiError(failure, "private diagnostics");
+    throw new OpenGeniApiError(status, "private diagnostics");
   },
   listEvents: async () => [],
 };
@@ -53,8 +55,12 @@ beforeAll(async () => {
 });
 afterAll(() => mock.restore());
 
-test("draft undo preserves title results; retries isolate failures and denial clears all sources", async () => {
-  const view = await renderComponent(<Dialog workspaceId="w" open onOpenChange={() => {}} />);
+test("StrictMode draft undo preserves results; isolated retries recover safely after denial", async () => {
+  const view = await renderComponent(
+    <StrictMode>
+      <Dialog workspaceId="w" open onOpenChange={() => {}} />
+    </StrictMode>,
+  );
   const input = document.querySelector<HTMLInputElement>(
     'input[aria-label="Search session titles and messages"]',
   )!;
@@ -117,6 +123,19 @@ test("draft undo preserves title results; retries isolate failures and denial cl
       messageGate = null;
       releaseMessages();
     });
+    await flush(20);
+    expect(document.querySelectorAll("[data-search-result]").length).toBe(1);
+    // A denial originating only in the selected preview must also recover.
+    // StrictMode must not revive its previous denial on the second render.
+    selectedFailure = 403;
+    await type("needle again");
+    await flush(280);
+    await flush(20);
+    await flush(20);
+    expect(document.querySelectorAll("[data-search-result]").length).toBe(0);
+    selectedFailure = 200;
+    await clickRetry();
+    await flush(20);
     await flush(20);
     expect(document.querySelectorAll("[data-search-result]").length).toBe(1);
     await type("");
