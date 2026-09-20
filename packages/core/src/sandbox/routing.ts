@@ -601,6 +601,7 @@ export function wrapChannelABoxWithRouting(
               sandboxGroupId: homeLease.sandboxGroupId,
               expectedEpoch: homeLease.leaseEpoch,
               expectedInstanceId: homeLease.instanceId,
+              expectedBackend: homeLease.backend,
               diagnostic: "provider_not_found_during_routed_operation",
             });
             if (marked.status === "marked" && bus) {

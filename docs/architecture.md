@@ -431,8 +431,11 @@ never licensing ambiguous replay. Agent execution keeps the lazy routing wrapper
 provisioning; raw handles serve lifecycle setup/capture (`turn-sandbox-access.ts`).
 
 Stock Modal non-PTY commands without `runAs` can carry the versioned native
-subreaper supervision protocol. The supervisor starts idle; durable initial
-retention precedes release of user code. Invocation-authenticated quiescence
+subreaper supervision protocol. Exact-instance native capability verification
+precedes admission; durable initial retention of the invocation precedes provider
+dispatch. The supervisor starts idle. Only the original launch path releases user
+code; reconstructed observers do not release abandoned reservations.
+Invocation-authenticated quiescence
 receipts are persisted before ACK permits supervisor exit. Canonical database
 settlement additionally requires authenticated provider terminal evidence and
 atomic output capture, on natural completion as well as cancellation. Deadline

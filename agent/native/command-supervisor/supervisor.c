@@ -340,6 +340,13 @@ static int launch(const struct options *o) {
 }
 
 int main(int argc, char **argv) {
+    /* Bounded capability check: exercise the same kernel prerequisites as
+     * launch, but create no socket, child or persistent supervisor. */
+    if (argc == 2 && !strcmp(argv[1], "capabilities")) {
+        initialize();
+        printf("%s", PROTOCOL);
+        return 0;
+    }
     struct options o = parse(argc, argv);
     return o.launch ? launch(&o) : control(&o);
 }
