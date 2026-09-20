@@ -1054,6 +1054,7 @@ export function SessionChrome({
                 <button
                   type="button"
                   aria-label="Session activity"
+                  aria-describedby={commandsCount > 0 ? `${panelId}-commands-count` : undefined}
                   title={activityOpen ? "Close activity" : "Inbox, agents and commands"}
                   aria-controls={panelId}
                   aria-expanded={activityOpen}
@@ -1062,9 +1063,11 @@ export function SessionChrome({
                     setActive(
                       activityOpen
                         ? null
-                        : (signals.find((signal) =>
-                            ["incoming", "agents", "commands"].includes(signal.id),
-                          )?.id ?? null),
+                        : commandsCount > 0 && hasCommandsPanel
+                          ? "commands"
+                          : (signals.find((signal) =>
+                              ["incoming", "agents", "commands"].includes(signal.id),
+                            )?.id ?? null),
                     );
                   }}
                   className={cn(
@@ -1076,6 +1079,17 @@ export function SessionChrome({
                 >
                   <ActivityIcon className="size-3.5" />
                   <span className="sr-only">Activity</span>
+                  {commandsCount > 0 ? (
+                    <>
+                      <span
+                        aria-hidden="true"
+                        className="size-1.5 shrink-0 animate-og-pulse rounded-full bg-og-fg-muted motion-reduce:animate-none"
+                      />
+                      <span id={`${panelId}-commands-count`}>
+                        {commandsCount} command{commandsCount === 1 ? "" : "s"}
+                      </span>
+                    </>
+                  ) : null}
                   {incoming.length > 0 ? (
                     <span className="size-1.5 rounded-full bg-og-accent" />
                   ) : null}

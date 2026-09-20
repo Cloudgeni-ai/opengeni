@@ -42,7 +42,7 @@ function hasActiveEffectiveControl(session: Session): boolean {
 }
 
 function isEffectivelyRunning(session: Session): boolean {
-  if (session.backgroundCommandActivity) return true;
+  // Background commands have their own chat indicator, not agent working status.
   return (
     hasActiveEffectiveControl(session) &&
     (isRunningStatus(session.status) || Boolean(sessionInputWait(session)))
@@ -233,11 +233,10 @@ function ownRailStatusCounts(
     // result) acknowledges the failure together with the unread frontier.
     failed: session.status === "failed" && session.unread ? 1 : 0,
     active:
-      session.backgroundCommandActivity ||
-      (hasActiveEffectiveControl(session) &&
-        (session.status === "running" ||
-          session.status === "recovering" ||
-          Boolean(sessionInputWait(session))))
+      hasActiveEffectiveControl(session) &&
+      (session.status === "running" ||
+        session.status === "recovering" ||
+        Boolean(sessionInputWait(session)))
         ? 1
         : 0,
     queued:
