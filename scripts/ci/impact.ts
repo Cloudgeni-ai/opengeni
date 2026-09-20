@@ -256,6 +256,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/react",
     "@opengeni/testing",
   ],
+  "test/e2e/connector-accounts.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
   "test/e2e/compact-session-view.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/queue-surface.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/user-message-disclosure.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
