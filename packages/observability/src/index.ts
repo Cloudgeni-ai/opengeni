@@ -1565,6 +1565,14 @@ function projectPublicChannelADiagnosticAttributes(attributes: Attributes): Attr
 function projectSnapshotDiagnosticAttributes(attributes: Attributes): Attributes {
   if (attributes.errorClass !== "SnapshotOperationError") return {};
   const projected: Attributes = {};
+  const causeName = attributes.causeName;
+  if (
+    typeof causeName === "string" &&
+    ["SnapshotTimeoutError", "SandboxProviderCaptureTimeoutError", "SandboxProviderError"].includes(
+      causeName,
+    )
+  )
+    projected.causeName = causeName;
   const name = attributes.providerErrorName;
   if (
     typeof name === "string" &&

@@ -1519,6 +1519,14 @@ repeated failed drain attempts starve a caller. Budget expiry returns the typed
 capture fence; it grants no takeover, teardown, or writer admission authority.
 Explicit zero-wait probes preserve their immediate fenced result.
 
+Warm and drain capture failures share the bounded classifier in
+`apps/worker/src/sandbox-snapshot-diagnostics.ts`. Structured diagnostics retain
+an opaque lease key, epoch, closed provider error class/status, and the distinction
+between an application capture deadline and a wrapped provider failure. Raw
+provider messages, payloads and request IDs remain excluded. Logging failures
+cannot replace the original capture failure or prevent exact-claim cleanup;
+classification does not change retryability or grant teardown authority.
+
 A rejected drain capture releases only its exact unpublished claim. This also
 applies when the provider promise rejects after the local timeout: that detached
 path cannot enter teardown, and release wakes waiters so they can re-arm the
