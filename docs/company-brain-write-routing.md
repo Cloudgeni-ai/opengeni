@@ -9,7 +9,7 @@ reviewed-claim and evidence-to-behavior authoring routes are retired.
 | Source text, facts, decisions, requirements, incidents and outcomes | Knowledge entries and immutable revisions | Search published entries; explicitly inspect pending proposals before updating the same entry with `knowledge_save` |
 | Related information about a customer, product or system | Knowledge collections and relationships | Reuse collections across sources; membership does not copy content or grant access |
 | Short unconditional rules | Workspace instruction revisions and active heads | Compose only the active rules; author through `instruction_policy_save` |
-| Reusable conditional procedures | Native Skill folders and revisions | Load relevant published Skills; author through the Skill lifecycle |
+| Reusable procedures and context-specific or personal behavioral preferences | Native Skill folders and revisions | The prompt index advertises applicability; read relevant published instructions with `skill_read` and author through the Skill lifecycle |
 | Organization identity and mission | Company profile | Separate organization-owner policy and lifecycle |
 | Temporary coordination in a session tree | Task notes | Explicit read/save/replace; no automatic prompt composition |
 
@@ -19,6 +19,33 @@ agent, and Off refuses agent authoring. A pending Knowledge entry is readable
 with `view: "needs_review"` but is not accepted fact or instruction authority.
 Evidence does not grant permission to change behavior. Human review publishes
 through the destination's own lifecycle.
+
+## Behavior is not a Knowledge fact
+
+Choose the destination before retaining content, including requests to "remember
+this" or apply it "for future sessions." An instruction such as "Keep replies
+concise; expand when asked" belongs in workspace instructions within the intended
+scope, or in an applicable Skill for a context-specific or personal preference.
+Rephrasing it as "the user prefers concise replies" does not make Knowledge the
+correct destination. Knowledge is retrieved on demand and does not supply
+standing behavior. Do not duplicate the rule in Knowledge or promote a behavioral
+task note into Knowledge.
+
+Preserve the requested owner and scope. An authorized personal Skill is available
+for personal behavior in a personal authoring context; a shared task must not
+silently turn one person's preference into a workspace-wide rule. Explain an
+unavailable scope. Do not change destinations to bypass review, Off, size limits
+or missing tools. Split a mixed rule/procedure into a short instruction and a
+Skill, with a clear Skill description stating when to read its full instructions.
+Only that descriptor, not the full Skill body, enters the prompt index.
+
+The unconditional CORE in `packages/runtime/src/index.ts` owns this routing and
+instruction-edit safety guidance. Empty governance and customized personas must
+not remove it. Tool descriptions and the bundled `opengeni-skills` guide reinforce
+the same distinction. Report the actual destination and lifecycle receipt:
+active, pending review, or not saved. A Knowledge save is not a promise of future
+behavior. No content classifier, automatic data migration or retrieval change is
+part of this guidance.
 
 Preserve exact source references and uncertainty. Reuse the entry ID and current
 version when correcting a finding. A reviewed source revision must be reconciled
