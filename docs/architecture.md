@@ -101,7 +101,8 @@ ordered, exactly-once history.
 wait authority and immutable same-turn deadlines. Command results remain durable;
 alone, they wake only explicit waits. Notices cannot block other inbox input.
 Different causal turns may coalesce only with equivalent human/execution authority,
-preserving lineage. See [`run-lifecycle.md`](run-lifecycle.md).
+preserving lineage. Agent messages and Steer inherit the exact admitted sender
+turn's human independently of connection selections. See [`run-lifecycle.md`](run-lifecycle.md).
 
 `runAgentTurn` is non-retryable by default: model/tool/sandbox/Git/connector/cloud
 operations have external effects. Recovery is explicit and attempt-fenced.

@@ -503,6 +503,14 @@ snapshot; runtime never substitutes the session creator, current browser user,
 worker identity, or another member's account. See
 [`supergrok-subscription.md`](supergrok-subscription.md).
 
+Ordinary agent messages, like Steer, inherit initiating-human identity from the
+exact admitted sender turn. Empty personal-connection selections or workspace
+provider scope do not erase that identity. Different sender attempts own separate
+causal batches; malformed historical message lineage cannot borrow another
+update's human. Genuine service-only source turns remain service-only. This
+preserves identity without expanding accepted connection selections or replacing
+the receiving session's tool configuration.
+
 The same accepted logical-turn boundary governs prompt policy and structured
 preferences. After claim, the owning attempt installs immutable instruction-
 policy and preference-descriptor snapshots reconstructed from lifecycle events
