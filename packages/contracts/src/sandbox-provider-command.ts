@@ -40,6 +40,22 @@ const ModalByteCursor = z
     message: "A terminal output cursor must have reached EOF",
   });
 
+export const CommandSupervisionDescriptor = z.object({
+  protocol: z.literal("native-subreaper-v1"),
+  invocationId: z.string().uuid(),
+  nonce: z.string().regex(/^[a-f0-9]{64}$/u),
+  controlPath: z.string().regex(/^\/tmp\/opengeni-supervision\/[a-f0-9-]{36}\.sock$/u),
+}).strict();
+export type CommandSupervisionDescriptor = z.infer<typeof CommandSupervisionDescriptor>;
+
+export const CommandSupervisionReceipt = z.object({
+  protocol: z.literal("native-subreaper-v1"),
+  invocationId: z.string().uuid(),
+  receiptId: z.string().uuid(),
+  leaderExitCode: z.number().int(),
+}).strict();
+export type CommandSupervisionReceipt = z.infer<typeof CommandSupervisionReceipt>;
+
 export const ModalRouterProviderCommand = z
   .object({
     kind: z.literal("modal-router-v1"),
@@ -47,6 +63,7 @@ export const ModalRouterProviderCommand = z
     taskId: z.string().min(1).max(200),
     execId: z.string().uuid(),
     pty: z.boolean().optional(),
+    supervision: CommandSupervisionDescriptor.optional(),
     streams: z.object({ stdout: ModalByteCursor, stderr: ModalByteCursor }).strict(),
   })
   .strict();
