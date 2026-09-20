@@ -65,10 +65,12 @@ export function TerminalSessionArchive(props: { session: Session; eventCount: nu
 /** Attachment previews/chips + repository chips + markdown body inside the user bubble. */
 export function UserMessageBody({
   workspaceId,
+  sessionId,
   item,
   searchTarget,
 }: {
   workspaceId: string;
+  sessionId?: string | undefined;
   item: UserMessageItem;
   searchTarget?: TimelineSearchTarget | null | undefined;
 }) {
@@ -96,7 +98,11 @@ export function UserMessageBody({
             </>
           }
         >
-          <MessageResourceAttachments workspaceId={workspaceId} resources={item.resources} />
+          <MessageResourceAttachments
+            sessionId={sessionId}
+            workspaceId={workspaceId}
+            resources={item.resources}
+          />
         </Suspense>
       ) : (
         repositoryChips

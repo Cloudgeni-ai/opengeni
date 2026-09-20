@@ -2351,6 +2351,7 @@ function SessionChatPane(props: {
       if (item.kind === "user-message") {
         return (
           <UserMessageBody
+            sessionId={props.session.id}
             workspaceId={props.session.workspaceId}
             item={item}
             searchTarget={renderContext.searchTarget}
@@ -2370,7 +2371,13 @@ function SessionChatPane(props: {
         </div>
       );
     },
-    [props.onOpenSandboxFile, props.session.workspaceId, renderInteractiveBlock, renderImage],
+    [
+      props.onOpenSandboxFile,
+      props.session.id,
+      props.session.workspaceId,
+      renderInteractiveBlock,
+      renderImage,
+    ],
   );
 
   const failureRecovery =

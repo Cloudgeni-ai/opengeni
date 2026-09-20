@@ -2094,6 +2094,11 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.organization_usage_summary(uuid,timestamptz,timestamptz,text,uuid,boolean) FROM PUBLIC;
     END IF;
+    IF to_regclass('opengeni_private.session_file_attachments') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.session_file_attachments, opengeni_private.session_file_read_capabilities FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.session_file_attachments, opengeni_private.session_file_read_capabilities FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.session_file_read_allowed(uuid,uuid,uuid), opengeni_private.accept_session_file_attachments(uuid,uuid,uuid,uuid,text,uuid[]), opengeni_private.read_session_file_attachments(uuid,uuid,uuid,integer,uuid[],jsonb) FROM PUBLIC;
+    END IF;
     IF to_regclass('opengeni_private.sandbox_file_publications') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.sandbox_file_publications FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.sandbox_file_publications FROM PUBLIC;

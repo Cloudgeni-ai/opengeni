@@ -1,3 +1,4 @@
+import { getSessionAuthorityProjection } from "@opengeni/db";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
   assertModelConnectionAllowsTurn,
@@ -436,8 +437,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           executionGeneration: attempt.executionGeneration,
         },
       });
+      const attachmentAuthority = await getSessionAuthorityProjection(
+        db,
+        input.workspaceId,
+        input.sessionId,
+      );
+      if (!attachmentAuthority) throw new Error("Session attachment authority unavailable");
       return await withSessionRlsActorContext(
         {
+          sessionAttachmentReadAccess: {
+            sessionId: input.sessionId,
+            authorityEpoch: attachmentAuthority.authorityEpoch,
+            actor: {
+              kind: "agent_attempt",
+              subjectId: "service:agent-turn",
+              callerSessionId: input.sessionId,
+              turnId: attempt.turnId,
+              attemptId: input.attemptId,
+              executionGeneration: attempt.executionGeneration,
+            },
+          },
           subjectId: "service:agent-turn",
           initiatingHumanSubjectId: fileAuthoritySubjectId,
           privateFileOwnerSubjectId:

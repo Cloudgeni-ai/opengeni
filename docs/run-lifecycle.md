@@ -2691,3 +2691,9 @@ Service turns without a human file subject read shared attachments under an expl
 null subject, clearing inherited private-file authority for that lookup. The reader
 restores the caller’s scope afterward; private and Drive-protected files still
 require their independent authority.
+
+
+Accepted private session uploads additionally use session-specific read grants,
+including for service continuations. Realtime and ordinary human admission share
+that transaction boundary. Original owner and provider ACLs remain separate;
+see [Session attachments](session-attachments.md).

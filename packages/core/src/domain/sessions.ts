@@ -1,3 +1,4 @@
+import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
 import {
   getSessionEvent,
@@ -2624,20 +2625,20 @@ async function createSessionForRequestInFileScope(
       message: "object storage is not configured",
     });
   }
+  const attachmentOwnerContext = authorization
+    ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
+    : grant.principalKind === "agent_attempt"
+      ? await fileOwnerContextForAgent({ db }, grant, "sessions:create")
+      : undefined;
+  const attachmentOwner =
+    attachmentOwnerContext?.privateFileOwnerSubjectId === grant.subjectId ? grant.subjectId : null;
   await validateFileResources(
     db,
     grant.accountId,
     workspaceId,
     personalResourceSubjectId ?? grant.subjectId,
     resources,
-    (authorization || grant.principalKind === "agent_attempt") &&
-      (effectiveVisibility === "user_private" ||
-        sessionScope.memoryScope === "user" ||
-        workspace.kind === "personal")
-      ? authorization
-        ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
-        : await fileOwnerContextForAgent({ db }, grant, "sessions:create")
-      : undefined,
+    attachmentOwnerContext,
   );
   // Every selected Variable Set is independently authorized. Scope does not
   // affect precedence: explicit order is low-to-high and later sets win name
@@ -3279,7 +3280,7 @@ async function createSessionForRequestInFileScope(
       metadata: creationMetadata ?? {},
       ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
 
-      ...(captureLinkedAuthority
+      ...(payload.startMode !== "realtime"
         ? {
             captureInitialTurnAuthority: async (
               tx: Database,
@@ -3287,6 +3288,15 @@ async function createSessionForRequestInFileScope(
               turnId: string,
             ) => {
               await captureLinkedAuthority?.(tx, sessionId, turnId);
+              if (attachmentOwner)
+                await acceptSessionFileAttachments(tx, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  sessionId,
+                  turnId,
+                  subjectId: attachmentOwner,
+                  resources,
+                });
             },
           }
         : {}),
@@ -3681,21 +3691,18 @@ async function acceptSessionUserMessageInFileScope(
         message: "object storage is not configured",
       });
     }
+    const attachmentOwnerContext = input.authorization
+      ? await fileOwnerContextForAccess({ db }, input.authorization, "sessions:control")
+      : grant.principalKind === "agent_attempt"
+        ? await fileOwnerContextForAgent({ db }, grant, "sessions:control")
+        : undefined;
     await validateFileResources(
       db,
       grant.accountId,
       workspaceId,
       grant.subjectId,
       requestedResources,
-      (input.authorization || grant.principalKind === "agent_attempt") &&
-        ((await getSessionAuthorityProjection(db, workspaceId, sessionId))?.visibility ===
-          "user_private" ||
-          existingSession.memoryScope === "user" ||
-          (await requireWorkspace(db, workspaceId)).kind === "personal")
-        ? input.authorization
-          ? await fileOwnerContextForAccess({ db }, input.authorization, "sessions:control")
-          : await fileOwnerContextForAgent({ db }, grant, "sessions:control")
-        : undefined,
+      attachmentOwnerContext,
     );
     await validateGitHubRepositorySelection(db, workspaceId, [
       ...existingSession.resources,
@@ -3778,9 +3785,8 @@ async function acceptSessionUserMessageInFileScope(
 
         ...(captureLinkedAuthority
           ? {
-              captureTurnAuthority: async (tx: Database, turnId: string) => {
-                await captureLinkedAuthority?.(tx, sessionId, turnId);
-              },
+              captureTurnAuthority: (tx: Database, turnId: string) =>
+                captureLinkedAuthority(tx, sessionId, turnId),
             }
           : {}),
         ...(input.personalResourceAttachment

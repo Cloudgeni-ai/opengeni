@@ -265,6 +265,85 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 60_000);
 
+  test("attachment history sends session authority for metadata and signed image URLs", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const session = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Attachment history proof",
+      );
+      const fileId = crypto.randomUUID();
+      const seen: string[] = [];
+      const svg =
+        '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="teal"/></svg>';
+      await page.route("**/files/**", async (route) => {
+        const url = new URL(route.request().url());
+        seen.push(url.pathname + url.search);
+        if (url.searchParams.get("sessionId") !== session.id || !url.pathname.includes(fileId)) {
+          await route.fulfill({ status: 404, json: { message: "session authority missing" } });
+          return;
+        }
+        await route.fulfill({
+          json: url.pathname.endsWith("/download-url")
+            ? {
+                url: "data:image/svg+xml," + encodeURIComponent(svg),
+                expiresAt: new Date(Date.now() + 60000).toISOString(),
+              }
+            : {
+                id: fileId,
+                workspaceId,
+                scope: "personal",
+                status: "ready",
+                filename: "session-only.svg",
+                safeFilename: "session-only.svg",
+                contentType: "image/svg+xml",
+                sizeBytes: svg.length,
+                sha256: null,
+                bucket: "private",
+                objectKey: fileId,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              },
+        });
+      });
+      await appendSessionEvents(dbClient.db, workspaceId, session.id, [
+        {
+          type: "user.message",
+          payload: { text: "Shared attachment", resources: [{ kind: "file", fileId }] },
+        },
+      ]);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${session.id}`);
+      await page.getByRole("img", { name: "session-only.svg" }).waitFor();
+      expect(
+        await page
+          .getByRole("img", { name: "session-only.svg" })
+          .evaluate(
+            (image) =>
+              (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0,
+          ),
+      ).toBe(true);
+      expect(seen).toContain(
+        `/v1/workspaces/${workspaceId}/files/${fileId}?sessionId=${session.id}`,
+      );
+      expect(seen).toContain(
+        `/v1/workspaces/${workspaceId}/files/${fileId}/download-url?sessionId=${session.id}`,
+      );
+      expect(errors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 60000);
+
   test("keeps the selected session grouping after a page refresh", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },

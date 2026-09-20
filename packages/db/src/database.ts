@@ -1,3 +1,4 @@
+import type { SessionAttachmentReadAccess } from "./session-file-attachments";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { eq, sql, type SQL } from "drizzle-orm";
 import type { PgDatabase, PgTransactionConfig } from "drizzle-orm/pg-core";
@@ -53,6 +54,8 @@ export type RlsContext = {
 };
 
 export type SessionRlsActorContext = {
+  /** Server-authorized session attachment scope; never taken from request JSON. */
+  sessionAttachmentReadAccess?: SessionAttachmentReadAccess;
   subjectId: string;
   /** Host-verified personal file ownership, never a request-supplied subject. */
   privateFileOwnerSubjectId?: string | null;
@@ -60,6 +63,9 @@ export type SessionRlsActorContext = {
 };
 
 const sessionRlsActorContext = new AsyncLocalStorage<SessionRlsActorContext>();
+export function currentSessionAttachmentReadAccess(): SessionAttachmentReadAccess | undefined {
+  return sessionRlsActorContext.getStore()?.sessionAttachmentReadAccess;
+}
 
 export async function withSessionRlsActorContext<T>(
   actor: SessionRlsActorContext,

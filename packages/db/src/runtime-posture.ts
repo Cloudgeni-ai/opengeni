@@ -1997,6 +1997,8 @@ export async function inspectRuntimeDatabasePosture(
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
               'organization_usage_read_capabilities',
+              'session_file_attachments',
+              'session_file_read_capabilities',
               'modal_inventory_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE}
             )
@@ -3627,6 +3629,56 @@ export function evaluateRuntimeDatabasePosture(
       ) {
         violations.push(`sandbox file publication capability ${name} is missing or unsafe`);
       }
+    }
+  }
+
+  for (const name of ["session_file_attachments", "session_file_read_capabilities"]) {
+    const table = posture.privateTables.find((candidate) => candidate.name === name);
+    if (!table) {
+      if (!options.protectedTables)
+        violations.push(`session attachment relation ${name} is missing`);
+      continue;
+    }
+    if (
+      table.owner === expectedRole ||
+      table.owner !== tableByName.get("files")?.owner ||
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete
+    )
+      violations.push(`session attachment relation ${name} has unsafe authority`);
+    if (
+      name === "session_file_attachments" &&
+      (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1)
+    )
+      violations.push("session attachment grants lack FORCE-RLS isolation");
+    const routines =
+      name === "session_file_attachments"
+        ? [
+            "accept_session_file_attachments(uuid, uuid, uuid, uuid, text, uuid[])",
+            "read_session_file_attachments(uuid, uuid, uuid, integer, uuid[], jsonb)",
+          ]
+        : ["session_file_read_allowed(uuid, uuid, uuid)"];
+    for (const signature of routines) {
+      const routine = posture.privateRoutines.find((candidate) => candidate.name === signature);
+      const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+      const paths =
+        name === "session_file_read_capabilities"
+          ? ["search_path=pg_catalog, pg_temp"]
+          : [
+              `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+              `search_path=pg_catalog, ${targetSchema}, pg_temp`,
+            ];
+      if (
+        !routine ||
+        !routine.execute ||
+        routine.publicExecute ||
+        !routine.securityDefiner ||
+        routine.owner !== table.owner ||
+        !routine.configuration?.some((value) => paths.includes(value))
+      )
+        violations.push(`session attachment capability ${signature} is missing or unsafe`);
     }
   }
 

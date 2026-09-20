@@ -1,3 +1,10 @@
+import { currentSessionAttachmentReadAccess } from "./database";
+import { readSessionFileAttachments } from "./session-file-attachments";
+export {
+  acceptSessionFileAttachments,
+  readSessionFileAttachments,
+  type SessionAttachmentReadAccess,
+} from "./session-file-attachments";
 import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
   SKILL_CATALOG_CONTEXT_PREFIX,
@@ -6568,6 +6575,12 @@ export async function requireFileForSubject(
     fileId: string;
   },
 ): Promise<FileAsset> {
+  if (currentSessionAttachmentReadAccess()) {
+    const file = (await getFilesForSubject(db, { ...input, fileIds: [input.fileId] }))[0];
+    if (!file) throw new Error(`File not found: ${input.fileId}`);
+    return file;
+  }
+
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -6783,7 +6796,17 @@ export async function getFilesForSubject(
             set_config('opengeni.subject_id', ${previousScope?.subject ?? ""}, true),
             set_config('opengeni.private_file_owner', ${previousScope?.owner ?? ""}, true)`);
       }
-      return rows.map(mapFile);
+      const ordinary = rows.map(mapFile);
+      const access = currentSessionAttachmentReadAccess();
+      if (!access) return ordinary;
+      const missing = ids.filter((id) => !ordinary.some((file) => file.id === id));
+      const shared = await readSessionFileAttachments(scopedDb, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        fileIds: missing,
+        access,
+      });
+      return [...ordinary, ...shared];
     },
   );
 }
@@ -33840,6 +33863,7 @@ export type SessionAccessProjection = {
 };
 
 export type SessionAuthorityProjection = SessionAccessProjection & {
+  authorityEpoch: number;
   visibility: "user_private" | "workspace_shared";
   ownerSubjectId: string | null;
 };
@@ -33881,6 +33905,7 @@ export async function getSessionAuthorityProjection(
         sessionId: schema.sessions.id,
         rootSessionId: schema.sessions.rootSessionId,
         visibility: schema.sessions.visibility,
+        authorityEpoch: schema.sessions.authorityEpoch,
         ownerSubjectId: schema.sessions.ownerSubjectId,
         agentAccess: schema.sessions.agentAccess,
         scopeSubjectId: schema.sessions.scopeSubjectId,
@@ -33892,6 +33917,7 @@ export async function getSessionAuthorityProjection(
     if (!row) return null;
     return {
       sessionId: row.sessionId,
+      authorityEpoch: row.authorityEpoch,
       rootSessionId: row.rootSessionId,
       visibility: row.visibility as SessionAuthorityProjection["visibility"],
       ownerSubjectId: row.ownerSubjectId ?? null,
@@ -64925,6 +64951,7 @@ export async function initializeSessionStartAtomically(
                         ...input.createdEventPayload,
                         status: deferredStatus,
                         createdBy: creator.initiator,
+                        ...(session.resources.length ? { resources: session.resources } : {}),
                       },
                     },
                     ...(appliedInitialAutomaticTitle
