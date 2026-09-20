@@ -102,7 +102,7 @@ export async function observeCapabilityResume(
     hashAuthority: (cookie: string | null) => string | null;
   },
 ): Promise<{ finish: () => Promise<CapabilityResumeEvidence>; dispose: () => Promise<void> }> {
-  const key = `__capabilityResume_${crypto.randomUUID().replaceAll("-", "")}`;
+  const observerKey = `__capabilityResume_${crypto.randomUUID().replaceAll("-", "")}`;
   const reads = new Map<Request, CapabilityResumeRead>();
   const authorities: Promise<void>[] = [];
   const requestListener = (request: Request) => {
@@ -154,7 +154,7 @@ export async function observeCapabilityResume(
     const read = reads.get(request);
     if (read) read.failed = true;
   };
-  const openedAt = await page.evaluate((key) => {
+  const observationOpenedAt = await page.evaluate((key) => {
     const openedAt = Date.now();
     let hiddenAt: number | null = null;
     const resumes: Array<{ hiddenAt: number; visibleAt: number }> = [];
@@ -184,7 +184,7 @@ export async function observeCapabilityResume(
     window.addEventListener("pageshow", pageshow);
     (window as unknown as Record<string, unknown>)[key] = state;
     return openedAt;
-  }, key);
+  }, observerKey);
   page.on("request", requestListener);
   page.on("response", responseListener);
   page.on("requestfinished", finishedListener);
@@ -202,7 +202,7 @@ export async function observeCapabilityResume(
         const state = (window as unknown as Record<string, { stop: () => void }>)[key];
         state?.stop();
         delete (window as unknown as Record<string, unknown>)[key];
-      }, key)
+      }, observerKey)
       .catch(() => {});
   };
   return {
@@ -236,7 +236,7 @@ export async function observeCapabilityResume(
             resumes: state?.resumes ?? [],
             closedAt: Date.now(),
           };
-        }, key)
+        }, observerKey)
         .catch(() => ({
           sameDocument: false,
           ambiguousVisibility: true,
@@ -247,7 +247,11 @@ export async function observeCapabilityResume(
       // No awaited work after the final browser seal. Later console errors
       // remain in the ordinary strict ledger, not in this earned allowance.
       detach();
-      return { ...snapshot, openedAt, reads: [...reads.values()].map((read) => ({ ...read })) };
+      return {
+        ...snapshot,
+        openedAt: observationOpenedAt,
+        reads: [...reads.values()].map((read) => ({ ...read })),
+      };
     },
   };
 }
