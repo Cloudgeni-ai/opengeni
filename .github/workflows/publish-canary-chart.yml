@@ -1,0 +1,127 @@
+name: Publish canary chart
+
+# Chart-only publication. No runtime/image qualification or stable promotion.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact lowercase 40-character protected-main chart source SHA.
+        required: true
+        type: string
+
+concurrency:
+  group: publish-canary-chart
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Admit exact protected-main source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]
+          [[ "$GITHUB_REPOSITORY" == "Cloudgeni-ai/opengeni" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/publish-canary-chart.yml@refs/heads/main" ]]
+
+      - name: Check out admitted source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify checkout
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: .bun-version
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+        with:
+          version: v3.16.4
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Install frozen dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Package exact chart
+        id: chart
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          version="$(bun -e '
+            import { workflowCanarySequence } from "./scripts/publish-canary";
+            const chart = Bun.YAML.parse(await Bun.file("deploy/helm/opengeni/Chart.yaml").text());
+            if (chart.name !== "opengeni" || !/^\d+\.\d+\.\d+$/.test(chart.version)) throw Error("Invalid chart identity");
+            const sequence = workflowCanarySequence(process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT);
+            if (sequence <= 0) throw Error("Workflow identity required");
+            console.log(`${chart.version}-canary.${sequence}`);
+          ')"
+          bun scripts/package-release-chart.ts --chart deploy/helm/opengeni \
+            --output ".release/opengeni-${version}.tgz" --version "$version" \
+            --app-version "canary-sha-${SOURCE_SHA}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate publishing authority
+        uses: ./.github/actions/public-oci-login
+        with:
+          oci-prefix: ghcr.io/cloudgeni-ai
+          auth: github
+          github-username: ${{ github.actor }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Reconcile or publish and verify bytes
+        env:
+          VERSION: ${{ steps.chart.outputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          reference="ghcr.io/cloudgeni-ai/charts/opengeni/opengeni:${VERSION}"
+          archive=".release/opengeni-${VERSION}.tgz"
+          before="$(bun scripts/resolve-optional-oci-manifest.ts "$reference")"
+          if [ -z "$before" ]; then
+            helm push "$archive" oci://ghcr.io/cloudgeni-ai/charts/opengeni
+          fi
+          mkdir .release/chart-readback
+          helm pull oci://ghcr.io/cloudgeni-ai/charts/opengeni/opengeni \
+            --version "$VERSION" --destination .release/chart-readback
+          cmp "$archive" ".release/chart-readback/opengeni-${VERSION}.tgz"
+          digest="$(bun scripts/resolve-optional-oci-manifest.ts "$reference")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [ -z "$before" ] || [ "$before" = "$digest" ]
+          bytes_sha="$(sha256sum "$archive" | cut -d ' ' -f1)"
+          jq -n --arg sourceSha "$SOURCE_SHA" --arg version "$VERSION" \
+            --arg reference "$reference" --arg digest "$digest" --arg bytesSha256 "$bytes_sha" \
+            --arg runId "$GITHUB_RUN_ID" --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            '{schemaVersion:1,scope:"chart-only",sourceSha:$sourceSha,version:$version,reference:$reference,digest:$digest,bytesSha256:$bytesSha256,runId:$runId,runAttempt:$runAttempt}' \
+            > .release/canary-chart.json
+
+      - name: Retain verified chart receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: canary-chart-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: |
+            .release/canary-chart.json
+            .release/opengeni-*.tgz
+          if-no-files-found: error
+
+      - name: Clear registry credentials
+        if: always()
+        run: |
+          helm registry logout ghcr.io || true
+          docker logout ghcr.io || true

@@ -2043,6 +2043,15 @@ and migration images are pinned.
 
 ## Helm
 
+For chart changes that need testing before a stable distribution release, manually
+dispatch `publish-canary-chart.yml` from protected `main`, supplying that exact
+40-character `source_sha`. It publishes only a run-scoped prerelease chart and
+retains the source SHA, archive hash and verified OCI digest in its receipt.
+It does not publish packages or images, qualify runtime behavior, deploy a cluster,
+or move stable tags. Consumers must separately select and verify immutable runtime
+images and package compatibility. Use the returned chart version and digest;
+do not infer successful publication from the source merge or a workflow dispatch.
+
 Released OpenGeni charts are published as public OCI artifacts. The immutable
 release BOM is authoritative for the chart reference and manifest digest. For
 release installs, use that `chart.reference` and pin the chart version
