@@ -1671,7 +1671,7 @@ describe("durable active-goal wake", () => {
     ).toMatchObject({ state: "running", reason: "goal_turn_running" });
   });
 
-  test("keeps coalesced machine context inside the canonical user-role continuation", async () => {
+  test("keeps unrelated agent-message authority out of the canonical goal continuation", async () => {
     const ctx = await runningGoalFixture();
     await settleIdle(ctx);
     expect((await materialize(ctx)).action).toBe("continue");
@@ -1711,8 +1711,13 @@ describe("durable active-goal wake", () => {
         and turn_id = ${claimed.turn.id}`;
     expect(history?.item).toMatchObject({ type: "message", role: "user" });
     const input = JSON.stringify(history?.item);
-    expect(input).toContain("[Application context attached to this user message]");
-    expect(input).toContain("New execution evidence");
+    expect(input).not.toContain("New execution evidence");
+    const pending = await listOutstandingSessionSystemUpdates(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    expect(pending.map((update) => update.id)).toContain(contextUpdate.update.id);
     expect(input).toContain("continue Finish the durable wake proof (1)");
     expect(input).not.toContain("goal_continuation");
   });
