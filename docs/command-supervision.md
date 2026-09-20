@@ -80,6 +80,10 @@ as launch without creating a child or control socket, then returns the protocol.
 The checked sandbox/task identity must equal the subsequently reserved command.
 Missing/old helpers, unavailable primitives, nonzero exit and malformed responses
 reject the call before admission; there is no silent legacy fallback.
+Classified sandbox disappearance during preflight uses the same exact-backend
+loss transition and stale-route invalidation as an ordinary provider operation,
+without admitting or replaying user work. A missing helper alone is not proof
+that the sandbox disappeared.
 Roll out the descriptor-aware readers and database fences before activating
 launches with that flag. Keep the exact tested stock image and native executable together with
 the runtime; no PGID fallback is permitted if the executable is missing. Any
