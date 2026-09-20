@@ -52,6 +52,7 @@ import {
   type RoutingRetainedProcess,
   type RoutingRetainedProcessTerminalProof,
   type RoutingSandboxOperationObserver,
+  type RoutingSandboxCaptureWaitObserver,
   type SelfhostedRelayConfig,
   type SelfhostedConnectionBinding,
   type SelfhostedOpStreamDeps,
@@ -116,6 +117,7 @@ export type ChannelARoutingServices = {
   settings: Settings;
   bus?: EventBus;
   onSandboxOperation?: RoutingSandboxOperationObserver;
+  onSandboxCaptureWait?: RoutingSandboxCaptureWaitObserver;
   waitSignal?: AbortSignal;
 };
 
@@ -580,6 +582,7 @@ export function wrapChannelABoxWithRouting(
     },
     resolveActiveBackend: resolver,
     ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
+    ...(services.onSandboxCaptureWait ? { onCaptureWait: services.onSandboxCaptureWait } : {}),
     ...(beforeMutation ? { beforeMutation } : {}),
     ...(afterMutation ? { afterMutation } : {}),
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),

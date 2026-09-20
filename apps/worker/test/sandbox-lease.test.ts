@@ -2514,8 +2514,22 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       sandboxSnapshotIntervalMs: 1,
       sandboxSnapshotTimeoutMs: 25,
     });
+    const captureMeasurements: Array<{
+      backend: string;
+      outcome: string;
+      durationSeconds: number;
+    }> = [];
     const capture = maybePersistWarmWorkspaceSnapshot(
-      { db, settings },
+      {
+        db,
+        settings,
+        sandboxMetrics: {
+          onWorkspaceCapture: (measurement) => {
+            captureMeasurements.push(measurement);
+            throw new Error("metrics must not affect capture settlement");
+          },
+        },
+      },
       {
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
@@ -2565,12 +2579,16 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
     await Bun.sleep(0);
     expect(capturePhysicallySettled).toBe(false);
+    expect(captureMeasurements).toHaveLength(0);
     expect(providerReadCalls).toBe(0);
     expect(providerCommandCalls).toBe(0);
 
     finishPersist?.(new TextEncoder().encode("tar-test-archive"));
     await capture.settled;
     expect(capturePhysicallySettled).toBe(true);
+    expect(captureMeasurements).toHaveLength(1);
+    expect(captureMeasurements[0]).toMatchObject({ backend: "modal", outcome: "completed" });
+    expect(captureMeasurements[0]!.durationSeconds).toBeGreaterThanOrEqual(0.075);
     expect(await read).toBe("read-after-capture");
     expect(providerReadCalls).toBe(1);
     const admission = await command;

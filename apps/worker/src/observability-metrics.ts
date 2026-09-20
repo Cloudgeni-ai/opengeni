@@ -177,6 +177,20 @@ export function runtimeMetricsHooksForObservability(
         labels: { outcome, port: String(port) },
       });
     },
+    onWorkspaceCapture: ({ backend, outcome, durationSeconds }) => {
+      if (!Number.isFinite(durationSeconds) || durationSeconds < 0) return;
+      const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+      completedOperationSpan(observability, "worker.workspace_capture", durationSeconds, {
+        backend: safeBackend,
+        outcome,
+      });
+      observability.observeHistogram({
+        name: "opengeni_workspace_capture_duration_seconds",
+        help: "Physical warm workspace capture and publication duration, including late settlement after caller timeout.",
+        labels: { backend: safeBackend, outcome },
+        value: durationSeconds,
+      });
+    },
     onWorkspaceArchiveObject: ({ outcome, backend }) => {
       observability.incrementCounter({
         name: "opengeni_workspace_archive_object_total",

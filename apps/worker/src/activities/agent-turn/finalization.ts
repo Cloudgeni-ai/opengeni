@@ -33,6 +33,7 @@ import {
   makeMachineOpObserver,
   recordSessionEventAppendPhase,
   turnLifecycleMetricsFor,
+  runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
 import {
   maybePersistWarmWorkspaceSnapshot,
@@ -654,7 +655,12 @@ async function finalizeTurnAttemptSteps(
         settledTurnId
       ) {
         const snapshot = maybePersistWarmWorkspaceSnapshot(
-          { db, settings, objectStorage },
+          {
+            db,
+            settings,
+            objectStorage,
+            sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+          },
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,

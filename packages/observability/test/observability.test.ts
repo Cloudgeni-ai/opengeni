@@ -9,6 +9,7 @@ import {
   parseHeaders,
   recordTenancyCompatibilityLaneUse,
   sandboxOperationMetricObserver,
+  sandboxCaptureWaitMetricObserver,
   TENANCY_COMPATIBILITY_LANES,
   workspaceInsightsMetricObserver,
 } from "../src";
@@ -208,6 +209,53 @@ describe("observability", () => {
     expect(metrics).not.toContain("sb-user-controlled-provider-id");
     expect(metrics).not.toContain("/private/path");
     expect(metrics).toContain("opengeni_sandbox_operation_duration_seconds_bucket");
+  });
+
+  test("capture waits have distinct bounded metrics and never inflate provider call counts", async () => {
+    const exported: unknown[] = [];
+    const obs = createObservability(settings, {
+      component: "worker",
+      now: () => 1,
+      exporter: async (_url, body) => {
+        exported.push(body);
+      },
+    });
+    const observe = sandboxCaptureWaitMetricObserver(obs);
+    observe({
+      backend: "modal",
+      op: "exec",
+      outcome: "ok",
+      durationMs: 54_600,
+      captureWaitStage: "admission",
+    });
+    observe({
+      backend: "private-provider",
+      op: "/private/path",
+      outcome: "failed",
+      durationMs: 200,
+      captureWaitStage: "provider",
+    });
+    observe({
+      backend: "modal",
+      op: "exec",
+      outcome: "ok",
+      durationMs: NaN,
+      captureWaitStage: "admission",
+    });
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toContain("opengeni_sandbox_capture_wait_duration_seconds");
+    expect(metrics).toContain('stage="admission"');
+    expect(metrics).toContain('stage="provider"');
+    expect(metrics).toContain('outcome="failed"');
+    expect(metrics).not.toContain("private-provider");
+    expect(metrics).not.toContain("/private/path");
+    expect(metrics).not.toContain("opengeni_sandbox_operations_total");
+    expect(metrics).not.toContain("NaN");
+    await obs.flush();
+    expect(JSON.stringify(exported)).toContain("sandbox.capture_wait.admission");
+    expect(JSON.stringify(exported)).toContain("sandbox.capture_wait.provider");
+    expect(JSON.stringify(exported)).not.toContain("private-provider");
+    expect(JSON.stringify(exported)).not.toContain("/private/path");
   });
 
   test("recognizes every public sandbox backend without collapsing it", async () => {

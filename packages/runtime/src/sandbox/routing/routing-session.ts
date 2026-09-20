@@ -216,6 +216,8 @@ export interface RoutingSandboxSessionDeps {
    * diagnostic only: callback failures are isolated and can never change the
    * provider result or durable mutation-settlement ordering. */
   onOperation?: RoutingSandboxOperationObserver;
+  /** Capture gates are not physical provider calls; observe every wait separately. */
+  onCaptureWait?: RoutingSandboxCaptureWaitObserver;
   /** Observe the first complete routed operation and only the subphases that
    * actually ran. Child durations are exclusive; capture waits are removed
    * from their enclosing admission/provider spans. */
@@ -313,6 +315,14 @@ export type RoutingSandboxOperationObservation = {
 export type RoutingSandboxOperationObserver = (
   observation: RoutingSandboxOperationObservation,
 ) => void;
+
+export type RoutingSandboxCaptureWaitObserver = (observation: {
+  backend: string;
+  op: string;
+  outcome: "ok" | "failed";
+  durationMs: number;
+  captureWaitStage: "admission" | "provider";
+}) => void;
 
 export type RoutingSandboxPhaseOutcome = "completed" | "failed";
 
@@ -1477,19 +1487,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           admission = await this.deps.beforeMutation({
             op,
             backend,
-            ...(firstOperationTiming
-              ? {
-                  onCaptureWait: (observation: RoutingSandboxWaitObservation) => {
-                    admissionWaitMs += Math.max(0, observation.durationMs);
-                    recordFirstOperationPhase(
-                      firstOperationTiming,
-                      "snapshotWait",
-                      observation.durationMs,
-                      observation.outcome,
-                    );
-                  },
-                }
-              : {}),
+            onCaptureWait: (observation: RoutingSandboxWaitObservation) => {
+              admissionWaitMs += Math.max(0, observation.durationMs);
+              recordFirstOperationPhase(
+                firstOperationTiming,
+                "snapshotWait",
+                observation.durationMs,
+                observation.outcome,
+              );
+              this.observeCaptureWait(op, backend, "admission", observation);
+            },
           });
           admissionOutcome = "completed";
         } finally {
@@ -1514,17 +1521,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
               withProviderCommandHandle(this.deps.providerCommandHandle?.(admission), () =>
                 fn(backend.session, backend),
               ),
-            firstOperationTiming
-              ? (observation) => {
-                  providerWaitMs += Math.max(0, observation.durationMs);
-                  recordFirstOperationPhase(
-                    firstOperationTiming,
-                    "snapshotWait",
-                    observation.durationMs,
-                    observation.outcome,
-                  );
-                }
-              : undefined,
+            (observation) => {
+              providerWaitMs += Math.max(0, observation.durationMs);
+              recordFirstOperationPhase(
+                firstOperationTiming,
+                "snapshotWait",
+                observation.durationMs,
+                observation.outcome,
+              );
+              this.observeCaptureWait(op, backend, "provider", observation);
+            },
           );
           providerOutcome = "completed";
         } finally {
@@ -1731,6 +1737,25 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     // Exhausted retries against a relentless swap-storm: surface the fence so the
     // caller (turn) backs off — never loop forever.
     throw lastError ?? new Error(`routing op "${op}" exhausted fence retries`);
+  }
+
+  private observeCaptureWait(
+    op: string,
+    backend: ResolvedActiveBackend,
+    captureWaitStage: "admission" | "provider",
+    observation: RoutingSandboxWaitObservation,
+  ): void {
+    try {
+      this.deps.onCaptureWait?.({
+        backend: backend.kind,
+        op,
+        outcome: observation.outcome === "completed" ? "ok" : "failed",
+        durationMs: observation.durationMs,
+        captureWaitStage,
+      });
+    } catch {
+      // Capture admission and provider execution never depend on telemetry.
+    }
   }
 
   private async invokeProviderOperation<T>(

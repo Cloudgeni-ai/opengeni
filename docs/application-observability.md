@@ -20,6 +20,25 @@ under the physical attempt. Completed duration measurements are siblings, not
 claims that one completed operation caused another. Existing first-startup
 phase deduplication is unchanged; model-call and MCP timing are per invocation.
 
+Workspace capture admission is measured on every routed operation, including
+operations after startup. `opengeni_sandbox_capture_wait_duration_seconds`
+separates durable admission and provider capture gates using closed `stage`
+labels. The matching `sandbox.capture_wait.admission` and
+`sandbox.capture_wait.provider` spans carry only bounded backend/outcome values.
+Wait observations do not increment physical provider-operation counters.
+`opengeni_workspace_capture_duration_seconds` and `worker.workspace_capture`
+measure physical warm capture/publication through gate cleanup, including late
+settlement after the initiating caller times out. Capture/publication failure or
+fenced publication is not reported as successful. Collector deployments must
+retain these exact names to preserve attribution.
+
+Consistent workspace capture intentionally fences new writing operations; a
+shell command is conservatively a potential writer even when its text looks
+read-only. Capture waits must not be removed by bypassing that fence or by
+disabling recovery snapshots. Compare gate wait and physical capture duration
+before changing capture strategy; filesystem and directory-only persistence
+have different recovery semantics.
+
 API Send, Steer and composer-submit emit `api.turn.admitted` only after successful
 non-replayed admission. This real anchor span links to the HTTP request. Its
 identity uses SHA-256 of `opengeni:accepted-event-trace:v1\0` plus the lowercase
