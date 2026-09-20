@@ -37,17 +37,17 @@ test.skipIf(process.env.OPENGENI_OPE534_NATIVE_POSTGRES !== NATIVE_CANARY_DATABA
       () =>
         acquireCanaryDatabase({ OPENGENI_OPE534_NATIVE_POSTGRES: NATIVE_CANARY_DATABASE_OPT_IN }),
       async (fixture, defer) => {
-        const databaseName = new URL(fixture.adminUrl).pathname.slice(1);
+        const fixtureDatabaseName = new URL(fixture.adminUrl).pathname.slice(1);
         const app = postgres(fixture.appUrl, { max: 1 });
         defer("fixture test app client", () => app.end());
         const client = createDb(fixture.appUrl);
         defer("readiness test client", () => client.close());
-        expect(databaseName).toMatch(/^og_ope534_rotation_canary_[a-f0-9]{32}$/);
+        expect(fixtureDatabaseName).toMatch(/^og_ope534_rotation_canary_[a-f0-9]{32}$/);
         const [identity] = await app`select current_user as login, current_database() as database,
         (select rolsuper or rolbypassrls or rolcreaterole or rolcreatedb from pg_roles where rolname=current_user) as privileged`;
         expect(identity).toMatchObject({
           login: fixture.appRole,
-          database: databaseName,
+          database: fixtureDatabaseName,
           privileged: false,
         });
         const [schema] = await fixture.admin`select count(*)::int as count from schema_migrations`;
@@ -70,7 +70,7 @@ test.skipIf(process.env.OPENGENI_OPE534_NATIVE_POSTGRES !== NATIVE_CANARY_DATABA
           await fixture.admin`alter table sandbox_lease_holders enable trigger supervised_command_holder_guard`;
         }
         expect(await supervisedCommandProtocolReady(client.db)).toBe(true);
-        return { databaseName, appRole: fixture.appRole };
+        return { databaseName: fixtureDatabaseName, appRole: fixture.appRole };
       },
     );
     const root = postgres("postgres://postgres@127.0.0.1:55434/postgres", { max: 1 });

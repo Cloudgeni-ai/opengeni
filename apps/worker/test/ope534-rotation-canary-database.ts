@@ -107,7 +107,14 @@ export async function acquireCanaryDatabase(
     try {
       await release();
     } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], "Canary DB initialization/cleanup failed");
+      const failure = new AggregateError(
+        [error, cleanupError],
+        "Canary DB initialization/cleanup failed",
+        {
+          cause: cleanupError,
+        },
+      );
+      throw failure;
     }
     throw error;
   }

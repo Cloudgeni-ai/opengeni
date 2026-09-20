@@ -167,3 +167,30 @@ test("bounds streamed metadata without a content-length header", async () => {
   );
   expect(cancelled).toBe(true);
 });
+
+test("preserves sanitized stream and cleanup failures together", async () => {
+  const f = fixture();
+  const request = async (url: string, init?: RequestInit) => {
+    if (url.includes("/token?")) return f.request(url, init);
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(1048577));
+        },
+        cancel() {
+          throw new Error("secret-cleanup-detail");
+        },
+      }),
+    );
+  };
+  const failure = await verifyCanaryImageProvenance(sha, f.image, request).catch(
+    (error: unknown) => error,
+  );
+  expect(failure).toBeInstanceOf(AggregateError);
+  const errors = (failure as AggregateError).errors as Error[];
+  expect(errors.map((error) => error.message)).toEqual([
+    "OPE534 canary: registry metadata stream failed or exceeded its bound",
+    "OPE534 canary: registry metadata stream cleanup failed",
+  ]);
+  expect(String(failure)).not.toContain("secret-cleanup-detail");
+});

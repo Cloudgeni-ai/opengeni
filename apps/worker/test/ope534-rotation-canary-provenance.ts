@@ -161,6 +161,7 @@ async function readBounded(
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
     let size = 0;
+    const streamFailures: Error[] = [];
     try {
       for (;;) {
         const part = await reader.read();
@@ -170,13 +171,19 @@ async function readBounded(
         chunks.push(part.value);
       }
     } catch {
-      throw new Error("OPE534 canary: registry metadata stream failed or exceeded its bound");
+      streamFailures.push(
+        new Error("OPE534 canary: registry metadata stream failed or exceeded its bound"),
+      );
     } finally {
       try {
         await reader.cancel();
       } catch {
-        throw new Error("OPE534 canary: registry metadata stream cleanup failed");
+        streamFailures.push(new Error("OPE534 canary: registry metadata stream cleanup failed"));
       }
+    }
+    if (streamFailures.length === 1) throw streamFailures[0];
+    if (streamFailures.length > 1) {
+      throw new AggregateError(streamFailures, "OPE534 canary: registry stream and cleanup failed");
     }
     return Buffer.concat(chunks);
   }
