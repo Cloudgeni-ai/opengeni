@@ -41,6 +41,9 @@ Accepted conversation context remains unchanged.
 Session `mcpApprovalPolicies` requires session-control authority. Claims freeze
 inherited approvals with catalog floors; policies grant neither capabilities nor credentials.
 
+Account isolation: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
+[`remote-mcp-credentials.md`](remote-mcp-credentials.md).
+
 ---
 
 ## 3. Core invariants

@@ -390,7 +390,7 @@ describe("incident telemetry dispatch preflight", () => {
     const preflight = dispatchSource.indexOf("incidentTelemetryPreflightDeclaration(");
     expect(preflight).toBeGreaterThan(0);
     for (const downstream of [
-      "freezePersonalConnectionDelegations(",
+      "freezeConnectionAccounts(",
       "getScheduledTaskXaiProviderAccountAuthoritySnapshot(",
       "agentRunAdmissionDenial(",
       "createScheduledTaskRun(",

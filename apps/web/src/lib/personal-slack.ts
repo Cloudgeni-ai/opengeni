@@ -4,8 +4,53 @@ import {
 } from "@opengeni/contracts";
 
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
+import type { ConnectAttempt } from "@opengeni/connect";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 const PERSONAL_SLACK_PROVIDER_DOMAIN = "slack.com";
+
+/** A newly connected stock Slack account makes its catalog tools selectable.
+ * Reconnect never rewrites an already enabled (possibly exact-pinned) binding. */
+export async function enableNewSlackAccountTools(
+  client: {
+    enableCapability(
+      ...args: Parameters<OpenGeniBrowserClient["enableCapability"]>
+    ): Promise<{ status: string }>;
+  },
+  workspaceId: string,
+  item: CapabilityCatalogItem | null,
+  attempt: ConnectAttempt,
+): Promise<void> {
+  if (
+    !item ||
+    item.enabled ||
+    item.connectionRef?.connectionId !== undefined ||
+    !item.runtime.available ||
+    !item.actions.includes("connect") ||
+    personalSlackCapability([item]) !== item ||
+    attempt.workspaceId !== workspaceId ||
+    attempt.providerId !== "slack-personal" ||
+    attempt.state !== "complete" ||
+    !attempt.credentialsCommitted ||
+    !attempt.account ||
+    attempt.account.providerId !== attempt.providerId ||
+    attempt.account.ownership !== attempt.ownership ||
+    attempt.account.status !== "connected"
+  )
+    return;
+  const installation = await client.enableCapability(workspaceId, item.id, {
+    onlyIfUninstalled: true,
+    connectionRef: {
+      providerDomain: PERSONAL_SLACK_PROVIDER_DOMAIN,
+      kind: "oauth2",
+      subjectScope: attempt.ownership === "personal" ? "subject" : "workspace",
+      accountSelection: "all_eligible",
+    },
+  });
+  if (installation.status !== "active") {
+    throw new Error("The account is connected, but the existing Slack tools remain disabled.");
+  }
+}
 
 export type PersonalSlackAccountState =
   | { state: "unverified" }

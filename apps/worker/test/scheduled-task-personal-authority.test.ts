@@ -9,15 +9,20 @@ import {
   SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
   TurnExecutionPolicyV1,
+  CreateScheduledTaskRequest,
+  UpdateScheduledTaskRequest,
   type McpPersonalConnectionDelegation,
 } from "@opengeni/contracts";
 import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import {
   captureScheduledTaskRestoreState,
   defaultSessionMcpServerIds,
+  mcpAccountRouteId,
   resolveSessionToolPolicy,
   settingsWithEnabledCapabilityMcpServers,
   syncUpdatedScheduledTask,
+  createValidatedScheduledTask,
+  validatedScheduledTaskUpdate,
 } from "@opengeni/core";
 import {
   appendSessionEvents,
@@ -68,6 +73,9 @@ beforeAll(async () => {
   shared = await acquireSharedTestDatabase("worker-scheduled-personal-authority");
   if (!shared) {
     available = false;
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+      throw new Error("Scheduled task authority verification requires PostgreSQL");
+    }
     console.warn("[worker-scheduled-personal-authority] PostgreSQL unavailable, skipping");
     return;
   }
@@ -307,6 +315,130 @@ async function claimedCommonVariableSetRun(
 }
 
 describe("scheduled task personal MCP authority", () => {
+  test("validated create and material update freeze an empty set; explicit replacement stays exact through dispatch", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const mcpServers = [
+      {
+        id: "scheduled-common",
+        url: "https://scheduled-common.example.com/mcp",
+        cacheToolsList: false,
+        connectionRef: {
+          providerDomain: "scheduled-common.example.com",
+          kind: "oauth2" as const,
+          accountSelection: "all_eligible" as const,
+        },
+      },
+    ];
+    const settings = testSettings({ sandboxBackend: "none", mcpServers });
+    const grant = {
+      ...workspace,
+      principalKind: "human_session" as const,
+      permissions: ["admin" as const],
+    };
+    const task = await createValidatedScheduledTask({
+      settings,
+      db: client.db,
+      objectStorage: null,
+      grant,
+      toolsProvided: true,
+      payload: CreateScheduledTaskRequest.parse({
+        name: "frozen empty",
+        schedule: { type: "manual" },
+        agentConfig: {
+          prompt: "check connections",
+          tools: [{ kind: "mcp", id: "scheduled-common" }],
+        },
+      }),
+    });
+    expect(task.agentConfig).toMatchObject({
+      connectionAccounts: [],
+      connectionAccountsFrozen: true,
+    });
+    const first = await commonConnectionDelegationFixture(workspace);
+    const second = await commonConnectionDelegationFixture(workspace);
+    const update = await validatedScheduledTaskUpdate({
+      settings,
+      db: client.db,
+      objectStorage: null,
+      grant,
+      existing: task,
+      payload: UpdateScheduledTaskRequest.parse({
+        agentConfig: { ...task.agentConfig, prompt: "edited instructions" },
+      }),
+      toolsProvided: true,
+    });
+    expect(update.agentConfig).toMatchObject({
+      connectionAccounts: [],
+      connectionAccountsFrozen: true,
+    });
+    await updateScheduledTask(client.db, workspace.workspaceId, task.id, update);
+    const scheduler = activities({ mcpServers });
+    const dispatch = () =>
+      scheduler.dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: crypto.randomUUID(),
+      });
+    const emptyRun = await dispatch();
+    expect(emptyRun.action).toBe("start");
+    const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    const emptyAccepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: workspace.workspaceId,
+      runId: runs[0]!.id,
+    });
+    expect(emptyAccepted?.mcpAccountBindings).toEqual([]);
+    const existing = (await getScheduledTask(client.db, workspace.workspaceId, task.id))!;
+    await expect(
+      validatedScheduledTaskUpdate({
+        settings,
+        db: client.db,
+        objectStorage: null,
+        grant: { ...grant, subjectId: `other-${crypto.randomUUID()}` },
+        existing,
+        payload: UpdateScheduledTaskRequest.parse({
+          agentConfig: { ...existing.agentConfig, prompt: "not the owner" },
+        }),
+        toolsProvided: true,
+      }),
+    ).rejects.toThrow();
+    const selections = [first, second].map(({ connection }) => ({
+      serverId: "scheduled-common",
+      connectionId: connection.id,
+    }));
+    const selectedUpdate = await validatedScheduledTaskUpdate({
+      settings,
+      db: client.db,
+      objectStorage: null,
+      grant,
+      existing,
+      payload: UpdateScheduledTaskRequest.parse({ connectionAccounts: selections }),
+    });
+    expect(selectedUpdate.agentConfig).toMatchObject({ connectionAccountsFrozen: true });
+    expect(selectedUpdate.agentConfig?.connectionAccounts).toHaveLength(2);
+    await updateScheduledTask(client.db, workspace.workspaceId, task.id, selectedUpdate);
+    await commonConnectionDelegationFixture(workspace);
+    const selectedRun = await dispatch();
+    expect(selectedRun.action).toBe("start");
+    const selectedRuns = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    const selectedAccepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: workspace.workspaceId,
+      runId: selectedRuns.find((run) => run.id !== runs[0]!.id)!.id,
+    });
+    expect(
+      selectedAccepted?.mcpAccountBindings?.map((binding) => binding.connectionId).sort(),
+    ).toEqual(selections.map((selection) => selection.connectionId).sort());
+    await admin`update connections set status = 'revoked' where id = ${first.connection.id}`;
+    expect(await dispatch()).toEqual({
+      action: "blocked",
+      reason: "connection_account_unavailable",
+    });
+    expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
+      2,
+    );
+  });
+
   test("fresh occurrences resolve current owner accounts while retries retain the accepted account", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -408,7 +540,7 @@ describe("scheduled task personal MCP authority", () => {
     await connect();
     expect(
       await scheduler.dispatchScheduledTaskRun({ ...firstInput, producerKey: crypto.randomUUID() }),
-    ).toEqual({ action: "blocked", reason: "connection_account_unavailable" });
+    ).toMatchObject({ action: "start" });
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, {
       agentConfig: {
         ...task.agentConfig,
@@ -419,7 +551,7 @@ describe("scheduled task personal MCP authority", () => {
       await scheduler.dispatchScheduledTaskRun({ ...firstInput, producerKey: crypto.randomUUID() }),
     ).toEqual({ action: "blocked", reason: "connection_account_unavailable" });
     expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
-      2,
+      3,
     );
   });
 
@@ -520,11 +652,12 @@ describe("scheduled task personal MCP authority", () => {
       workspaceId: workspace.workspaceId,
       runId: run!.id,
     });
-    expect(accepted?.personalConnectionDelegations).toMatchObject([
+    expect(accepted?.personalConnectionDelegations).toEqual([
       {
-        serverId: "scheduled-common",
-        connectionId: connection.connection.id,
-        ownerSubjectId: workspace.subjectId,
+        ...connection.delegation,
+        serverId: mcpAccountRouteId("scheduled-common", connection.connection.id),
+        canonicalServerId: "scheduled-common",
+        connectionType: "mcp",
       },
     ]);
     expect(TurnExecutionPolicyV1.parse(accepted?.turnExecutionPolicy)).toMatchObject({
@@ -1850,7 +1983,14 @@ describe("scheduled task personal MCP authority", () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const common = await commonConnectionDelegationFixture(workspace);
-    const acceptedDelegations = [common.delegation];
+    const acceptedDelegations = [
+      {
+        ...common.delegation,
+        serverId: mcpAccountRouteId("scheduled-common", common.connection.id),
+        canonicalServerId: "scheduled-common",
+        connectionType: "mcp" as const,
+      },
+    ];
     const task = await createScheduledTask(client.db, {
       ...workspace,
       name: "freeze accepted occurrence",

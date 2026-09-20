@@ -166,6 +166,13 @@ describe("Workspace switcher trigger in Chromium", () => {
       await page.getByRole("menuitem", { name: "Product Testing", exact: true }).isVisible(),
     ).toBe(true);
     await page.keyboard.press("Escape");
+    // Radix restores focus during deferred close cleanup, not synchronously on Escape.
+    await page.waitForFunction(
+      () =>
+        document.activeElement === document.querySelector('button[aria-label$="Switch workspace"]'),
+      undefined,
+      { timeout: 2_000 },
+    );
     expect(await trigger.evaluate((element) => document.activeElement === element)).toBe(true);
 
     await trigger.press("Space");

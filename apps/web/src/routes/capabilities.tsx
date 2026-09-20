@@ -86,6 +86,7 @@ import {
   isMissingCredentialsError,
   normalizeProviderDomain,
   oauthConnectionRef,
+  catalogConnectionAccountSelection,
   oauthConnectionOwnership,
   oauthResumeAction,
   registryResultsForQuery,
@@ -1135,7 +1136,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       const resolvedOwnership =
         ownership ?? (returnedConnection?.subjectId === null ? "workspace" : "personal");
       await client.enableCapability(workspaceId, item!.id, {
-        connectionRef: oauthConnectionRef(resolvedOwnership, connectionId!, refDomain),
+        connectionRef: oauthConnectionRef(
+          resolvedOwnership,
+          connectionId!,
+          refDomain,
+          catalogConnectionAccountSelection(item!),
+        ),
       });
       await refresh();
       onRuntimeChanged();

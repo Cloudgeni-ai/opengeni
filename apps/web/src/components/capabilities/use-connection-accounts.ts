@@ -5,13 +5,14 @@ import {
   selectedConnectionAccounts,
   sessionConnectedAccounts,
   type ConnectedAccountGroup,
+  type ConnectionAccountChoices,
 } from "./session-connection-accounts";
 
 export function useConnectionAccounts(
   client: OpenGeniBrowserClient,
   session: Pick<Session, "id" | "workspaceId"> & { selectedIds: string[] },
   catalog: CapabilityCatalogItem[],
-  initialChoices: Record<string, string> = {},
+  initialChoices: ConnectionAccountChoices = {},
 ) {
   const identity = `${session.workspaceId}:${session.id}`;
   const selectedIds = session.selectedIds;
@@ -21,7 +22,7 @@ export function useConnectionAccounts(
   const [choices, setChoices] = useState<{
     client: OpenGeniBrowserClient;
     identity: string;
-    accounts: Record<string, string>;
+    accounts: ConnectionAccountChoices;
   } | null>(null);
   const [result, setResult] = useState<{
     client: OpenGeniBrowserClient;
@@ -35,6 +36,7 @@ export function useConnectionAccounts(
   const refresh = useCallback(async () => {
     const invocation = scope.current;
     const revision = ++request.current;
+    setResult(null);
     const current = () =>
       request.current === revision &&
       scope.current.client === invocation.client &&
@@ -59,7 +61,7 @@ export function useConnectionAccounts(
           error:
             failure instanceof Error
               ? failure.message
-              : "Personal connection access could not be checked.",
+              : "Connection accounts could not be checked.",
         });
     }
     // Account inventory depends on caller/session identity and selected tools.
@@ -77,10 +79,11 @@ export function useConnectionAccounts(
     result.identity === identity &&
     result.catalog === catalog &&
     result.selectedKey === selectedKey;
-  const hasPersonal = catalog.some(
+  const hasNative = catalog.some(
     (item) =>
       item.enabled &&
-      item.connectionRef?.subjectScope === "subject" &&
+      item.connectionRef &&
+      item.connectionRef.authoritySource !== "host" &&
       item.runtime.mcpServerId &&
       selectedIds.includes(item.runtime.mcpServerId),
   );
@@ -89,12 +92,10 @@ export function useConnectionAccounts(
   const selection = selectedConnectionAccounts(matches ? result.groups : [], accountChoices);
   return {
     selections: selection.selections,
-    accountGroups: matches
-      ? result.groups.filter((group) => group.accounts.length > 1 || accountChoices[group.serverId])
-      : [],
+    accountGroups: matches ? result.groups : [],
     accountChoices,
     requiresAccountChoice: selection.unresolved.length > 0,
-    selectAccount: (serverId: string, connectionId: string) =>
+    selectAccount: (serverId: string, connectionIds: string[]) =>
       setChoices((current) => ({
         client,
         identity,
@@ -102,11 +103,11 @@ export function useConnectionAccounts(
           ...(current?.client === client && current.identity === identity
             ? current.accounts
             : initialChoices),
-          [serverId]: connectionId,
+          [serverId]: connectionIds,
         },
       })),
     error: matches ? result.error : null,
-    loading: hasPersonal && !matches,
+    loading: hasNative && !matches,
     refresh,
   };
 }

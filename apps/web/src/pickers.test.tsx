@@ -78,6 +78,10 @@ describe("unified session tool picker", () => {
     }
     try {
       await act(async () => root.render(<Harness />));
+      // Connector controls are deliberately outside the eager composer graph.
+      await act(async () => {
+        await import("@/components/session-connectors-menu-body");
+      });
       const customize = container.querySelector<HTMLButtonElement>(
         'button[role="switch"][aria-label="Customize connectors"]',
       )!;

@@ -644,6 +644,19 @@ export function connectionHealth(
   if (!ref) return { state: "none" };
   if (ref.authoritySource === "host") return { state: "none" };
   if (!loaded) return { state: "unverified" };
+  if (ref.accountSelection === "all_eligible" && !ref.connectionId) {
+    const matching = connections.filter(
+      (candidate) =>
+        candidate.kind === ref.kind &&
+        normalizeProviderDomain(candidate.providerDomain) ===
+          normalizeProviderDomain(ref.providerDomain),
+    );
+    const connection =
+      matching.find((candidate) => candidate.status === "active") ?? matching[0] ?? null;
+    return connection?.status === "active"
+      ? { state: "connected", connection }
+      : { state: "attention", connection };
+  }
   const connection =
     ref.subjectScope === "subject"
       ? (connections.find(
@@ -814,19 +827,44 @@ export function subjectOAuthConnectionRef(providerDomain: string): {
   return { providerDomain, kind: "oauth2", subjectScope: "subject" };
 }
 
+/** New catalog connects opt into all eligible accounts; reconnects preserve
+ * existing exact refs and retain an explicitly installed selector. */
+export function catalogConnectionAccountSelection(
+  item: Pick<CapabilityCatalogItem, "enabled" | "connectionRef">,
+): "all_eligible" | undefined {
+  if (item.connectionRef?.connectionId) return undefined;
+  return !item.enabled || item.connectionRef?.accountSelection === "all_eligible"
+    ? "all_eligible"
+    : undefined;
+}
+
 /** Build the capability binding that matches the OAuth row's explicit ownership. */
 export function oauthConnectionRef(
   ownership: ConnectionOwnership,
   connectionId: string,
   providerDomain: string,
+  accountSelection?: "all_eligible",
 ):
   | ReturnType<typeof subjectOAuthConnectionRef>
+  | {
+      providerDomain: string;
+      kind: "oauth2";
+      subjectScope: "workspace" | "subject";
+      accountSelection: "all_eligible";
+    }
   | {
       connectionId: string;
       providerDomain: string;
       kind: "oauth2";
       subjectScope: "workspace";
     } {
+  if (accountSelection)
+    return {
+      providerDomain,
+      kind: "oauth2",
+      subjectScope: ownership === "personal" ? "subject" : "workspace",
+      accountSelection,
+    };
   return ownership === "personal"
     ? subjectOAuthConnectionRef(providerDomain)
     : {
@@ -841,14 +879,28 @@ export function apiKeyConnectionRef(
   ownership: ConnectionOwnership,
   connectionId: string,
   providerDomain: string,
+  accountSelection?: "all_eligible",
 ):
   | { providerDomain: string; kind: "api_key"; subjectScope: "subject" }
+  | {
+      providerDomain: string;
+      kind: "api_key";
+      subjectScope: "workspace" | "subject";
+      accountSelection: "all_eligible";
+    }
   | {
       connectionId: string;
       providerDomain: string;
       kind: "api_key";
       subjectScope: "workspace";
     } {
+  if (accountSelection)
+    return {
+      providerDomain,
+      kind: "api_key",
+      subjectScope: ownership === "personal" ? "subject" : "workspace",
+      accountSelection,
+    };
   return ownership === "personal"
     ? { providerDomain, kind: "api_key", subjectScope: "subject" }
     : {

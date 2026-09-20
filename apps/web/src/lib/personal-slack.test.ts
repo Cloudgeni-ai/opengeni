@@ -1,13 +1,126 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
+import type { ConnectAttempt } from "@opengeni/connect";
 import { OPENGENI_PERSONAL_SLACK_MCP_URL } from "@opengeni/contracts";
 
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
 import {
+  enableNewSlackAccountTools,
   personalSlackAccountState,
   personalSlackCapability,
   hostedSlackConnections,
   preferredHostedSlackConnection,
 } from "./personal-slack";
+
+test("completed stock Slack setup explicitly enables account selection without rewriting existing pins", async () => {
+  const enableCapability = mock(async () => ({ status: "active" }));
+  const workspaceId = "33333333-3333-4333-8333-333333333333";
+  const attempt: ConnectAttempt = {
+    id: "attempt",
+    workspaceId,
+    providerId: "slack-personal",
+    ownership: "workspace",
+    revision: 2,
+    state: "complete",
+    credentialsCommitted: true,
+    integrationInstalled: false,
+    completionRequirement: "connection",
+    nextAction: { type: "none" },
+    expiresAt: "2030-01-01T00:00:00Z",
+    account: {
+      id: "account",
+      version: 1,
+      providerId: "slack-personal",
+      ownership: "workspace",
+      label: "Slack",
+      status: "connected",
+    },
+  };
+  await enableNewSlackAccountTools(
+    { enableCapability },
+    workspaceId,
+    capability({ enabled: false, actions: ["connect", "inspect"] }),
+    attempt,
+  );
+  expect(enableCapability).toHaveBeenCalledWith(workspaceId, "mcp:personal-slack", {
+    onlyIfUninstalled: true,
+    connectionRef: {
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      subjectScope: "workspace",
+      accountSelection: "all_eligible",
+    },
+  });
+  enableCapability.mockClear();
+  await enableNewSlackAccountTools(
+    { enableCapability },
+    workspaceId,
+    capability({
+      enabled: true,
+      connectionRef: { connectionId: "pinned", providerDomain: "slack.com", kind: "oauth2" },
+    }),
+    attempt,
+  );
+  await enableNewSlackAccountTools(
+    { enableCapability },
+    workspaceId,
+    capability({ enabled: false }),
+    { ...attempt, providerId: "slack-bot" },
+  );
+  await enableNewSlackAccountTools(
+    { enableCapability },
+    workspaceId,
+    capability({ enabled: false }),
+    { ...attempt, workspaceId: "another" },
+  );
+  expect(enableCapability).not.toHaveBeenCalled();
+  const fresh = capability({
+    enabled: false,
+    connectionRef: null,
+    actions: ["connect", "inspect"],
+  });
+  for (const state of ["failed", "cancelled", "requires_user_action"] as const) {
+    await enableNewSlackAccountTools({ enableCapability }, workspaceId, fresh, {
+      ...attempt,
+      state,
+    });
+  }
+  await enableNewSlackAccountTools(
+    { enableCapability },
+    workspaceId,
+    { ...fresh, runtime: { ...fresh.runtime, available: false } },
+    attempt,
+  );
+  await enableNewSlackAccountTools(
+    { enableCapability },
+    workspaceId,
+    { ...fresh, actions: ["inspect"] },
+    attempt,
+  );
+  await enableNewSlackAccountTools(
+    { enableCapability },
+    workspaceId,
+    {
+      ...fresh,
+      connectionRef: { providerDomain: "slack.com", kind: "oauth2", connectionId: "disabled-pin" },
+    },
+    attempt,
+  );
+  await enableNewSlackAccountTools({ enableCapability }, workspaceId, fresh, {
+    ...attempt,
+    account: { ...attempt.account!, ownership: "personal" },
+  });
+  expect(enableCapability).not.toHaveBeenCalled();
+  enableCapability.mockImplementationOnce(async () => ({ status: "disabled" }));
+  await expect(
+    enableNewSlackAccountTools({ enableCapability }, workspaceId, fresh, attempt),
+  ).rejects.toThrow("remain disabled");
+  enableCapability.mockImplementationOnce(async () => {
+    throw new Error("capabilities:manage required");
+  });
+  await expect(
+    enableNewSlackAccountTools({ enableCapability }, workspaceId, fresh, attempt),
+  ).rejects.toThrow("capabilities:manage required");
+});
 
 function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
   return {

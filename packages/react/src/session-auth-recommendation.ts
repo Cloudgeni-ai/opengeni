@@ -14,11 +14,12 @@ export function sessionAuthRecommendation(
   )
     return undefined;
   if (item.capability) return item;
+  const recoveryServerId = item.canonicalServerId ?? item.serverId;
   const matches = catalog.filter(
     (candidate) =>
-      (item.serverId !== null &&
-        candidate.runtime.mcpServerId === item.serverId &&
-        item.serverId !== "opengeni") ||
+      (recoveryServerId !== null &&
+        candidate.runtime.mcpServerId === recoveryServerId &&
+        recoveryServerId !== "opengeni") ||
       (item.connectionId !== null && candidate.connectionRef?.connectionId === item.connectionId),
   );
   if (matches.length !== 1) return undefined;
@@ -26,8 +27,8 @@ export function sessionAuthRecommendation(
   const personalAccess = item.reason === "personal_authority_unavailable";
   if (
     personalAccess &&
-    (entry.connectionRef?.subjectScope !== "subject" ||
-      entry.connectionRef.authoritySource === "host")
+    ((item.connectionSubjectScope ?? entry.connectionRef?.subjectScope) !== "subject" ||
+      entry.connectionRef?.authoritySource === "host")
   )
     return undefined;
   return {

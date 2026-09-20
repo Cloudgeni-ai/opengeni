@@ -2084,6 +2084,8 @@ BEGIN
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
       'read_sender_connection(uuid,uuid,uuid,text)',
+      'validate_mcp_account_bindings(jsonb,jsonb)',
+      'fence_mcp_account_bindings()',
       'guard_mcp_operation_immutable()',
       'mcp_operation_command_scoped(jsonb,text,jsonb)',
       'guard_workspace_owned_skill_head_delete()',

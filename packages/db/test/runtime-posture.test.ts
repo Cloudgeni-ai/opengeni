@@ -2169,4 +2169,41 @@ describe("runtime database posture evaluator", () => {
       );
     }
   });
+
+  test("accepted MCP account binding helpers remain owner-only and use their exact execution modes", () => {
+    for (const name of [
+      "validate_mcp_account_bindings(jsonb, jsonb)",
+      "fence_mcp_account_bindings()",
+    ]) {
+      const posture = safePosture();
+      const routine = {
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: name === "fence_mcp_account_bindings()",
+      };
+      posture.privateRoutines.push(routine);
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+      routine.execute = true;
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `runtime or PUBLIC has forbidden EXECUTE on MCP account binding internal routine ${name}`,
+      );
+      routine.execute = false;
+      routine.publicExecute = true;
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `runtime or PUBLIC has forbidden EXECUTE on MCP account binding internal routine ${name}`,
+      );
+      routine.publicExecute = false;
+      routine.owner = "another_owner";
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `MCP account binding internal routine ${name} owner does not match turn owner`,
+      );
+      routine.owner = "opengeni_migrator";
+      routine.securityDefiner = !routine.securityDefiner;
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `MCP account binding internal routine ${name} has unsafe execution mode`,
+      );
+    }
+  });
 });

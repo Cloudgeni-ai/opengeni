@@ -216,6 +216,13 @@ test.each(["configured", "session-local", "durable"] as const)(
         expect(scheduledClaim.turn.personalConnectionDelegations).toMatchObject([
           { connectionId: selections[i]!.connection.id, ownerSubjectId: identities[i]!.subjectId },
         ]);
+        expect(scheduledClaim.turn.mcpAccountBindings).toHaveLength(1);
+        const scheduledBinding = scheduledClaim.turn.mcpAccountBindings![0]!;
+        expect(scheduledBinding).toMatchObject({
+          canonicalServerId: server.id,
+          connectionId: selections[i]!.connection.id,
+          ownerSubjectId: identities[i]!.subjectId,
+        });
         const scheduledResolver = connectionTokenResolverForTurn({
           db: db.db,
           settings,
@@ -227,9 +234,10 @@ test.each(["configured", "session-local", "durable"] as const)(
         });
         const credential = await scheduledResolver({
           workspaceId: workspace.id,
-          serverId: server.id,
+          subjectId: identities[i]!.subjectId,
+          serverId: scheduledBinding.serverId,
           destinationUrl: server.url,
-          connectionRef: { ...connectionRef, connectionId: selections[i]!.connection.id },
+          connectionRef: scheduledBinding.connectionRef,
         });
         expect(credential.status).toBe("ok");
         if (credential.status !== "ok")
@@ -316,6 +324,13 @@ test.each(["configured", "session-local", "durable"] as const)(
     });
     if (claim.action !== "claimed") throw new Error(`Cannot claim: ${claim.action}`);
     expect(claim.turn.initiatingHumanSubjectId).toBe(identities[1]!.subjectId);
+    expect(claim.turn.mcpAccountBindings).toHaveLength(1);
+    const binding = claim.turn.mcpAccountBindings![0]!;
+    expect(binding).toMatchObject({
+      canonicalServerId: server.id,
+      connectionId: selections[1]!.connection.id,
+      ownerSubjectId: identities[1]!.subjectId,
+    });
     const resolver = connectionTokenResolverForTurn({
       db: db.db,
       settings,
@@ -328,11 +343,20 @@ test.each(["configured", "session-local", "durable"] as const)(
     const request = {
       workspaceId: workspace.id,
       subjectId: identities[1]!.subjectId,
-      serverId: server.id,
+      serverId: binding.serverId,
       destinationUrl: server.url,
-      connectionRef: { ...connectionRef, connectionId: selections[1]!.connection.id },
+      connectionRef: binding.connectionRef,
     };
     const resolved = await resolver(request);
+    expect((await resolver({ ...request, serverId: server.id })).status).toBe("auth_needed");
+    expect(
+      (
+        await resolver({
+          ...request,
+          connectionRef: { ...binding.connectionRef, connectionId: selections[0]!.connection.id },
+        })
+      ).status,
+    ).toBe("auth_needed");
     expect(resolved.status).toBe("ok");
     if (resolved.status !== "ok") throw new Error(`Native resolution denied: ${resolved.reason}`);
     expect(resolved.headers.Authorization ?? resolved.headers.authorization).toBe(
@@ -372,6 +396,7 @@ test.each(["configured", "session-local", "durable"] as const)(
     });
     if (childClaim.action !== "claimed") throw new Error("Cannot claim child");
     expect(childClaim.turn.initiatingHumanSubjectId).toBe(identities[1]!.subjectId);
+    expect(childClaim.turn.mcpAccountBindings).toEqual(claim.turn.mcpAccountBindings);
     expect(childClaim.turn.personalConnectionDelegations).toMatchObject([
       { connectionId: selections[1]!.connection.id, ownerSubjectId: identities[1]!.subjectId },
     ]);

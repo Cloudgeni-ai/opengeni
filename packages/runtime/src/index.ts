@@ -2875,8 +2875,8 @@ function maybeInstallLazyToolTransport(
   if (!enabled) return;
 
   const mcpServers = options.mcpServers ?? [];
-  // Prepared servers use a shared SDK lifecycle name; tool prefixes come from
-  // their registry identity. Preserve the fallback for embedded/test servers.
+  // Prepared servers use exact model-name mappings, not SDK lifecycle names
+  // or parseable prefixes. Preserve legacy embedded/test-server classification.
   const mcpServerIds = new Set(mcpServers.map((server) => mcpServerRegistryId(server)));
   const deferredMcpServerIds = new Set(
     mcpServers
@@ -2890,6 +2890,18 @@ function maybeInstallLazyToolTransport(
     options.toolPreparationReady,
     deferredMcpServerIds,
     new Set(options.preparationIndependentToolNames ?? []),
+    () => {
+      const identities = new Map<string, string>();
+      for (const server of mcpServers) {
+        if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
+          continue;
+        for (const name of server.modelToolNames()) {
+          if (identities.has(name)) throw new Error("MCP model tool identity collision");
+          identities.set(name, server.registryId);
+        }
+      }
+      return identities;
+    },
   );
 }
 
@@ -2922,7 +2934,7 @@ function sessionMcpApprovalConnectionId(serverId: string, url: string): string {
   return `session-mcp:${serverId}:${targetHash}`;
 }
 
-/** A per-server approval policy keyed by the server's `<id>__` tool prefix. */
+/** Exact server policy. Prefix matching is only for legacy unwrapped servers. */
 type McpApprovalPolicy = {
   prefix: string;
   serverId: string;
@@ -2934,6 +2946,7 @@ type McpApprovalPolicy = {
 /** The subset of the agent surface the approval wrap needs — including `clone`. */
 type ApprovalCapableAgent = {
   getMcpTools: (runContext: unknown) => Promise<Tool<any>[]>;
+  mcpServers?: MCPServer[];
   clone?: (config: unknown) => ApprovalCapableAgent;
 };
 
@@ -2976,9 +2989,9 @@ function modelMcpSourceCallId(modelName: string): string | undefined {
 /**
  * Install the approval wrap on a single agent instance: replace `getMcpTools`
  * with one that stamps `needsApproval: () => true` on every MCP tool whose
- * server policy demands it. Tools are matched by the server's `<id>__` prefix
- * (LONGEST prefix first — see {@link applyMcpApprovalPolicy}), then the
- * unprefixed tool name.
+ * server policy demands it. Prepared tools resolve through their frozen model
+ * name -> original server/tool map; legacy unwrapped servers retain longest-
+ * prefix matching. Never infer account authority from a sanitized SDK name.
  *
  * CLONE SURVIVAL (also used by `installLazyToolRuntime`): the sandbox runtime
  * resolves tools not on the agent we build here but on a FRESH clone —
@@ -3001,15 +3014,30 @@ function installMcpApprovalPolicy(
   const listMcpTools = agent.getMcpTools.bind(agent);
   agent.getMcpTools = async (resolutionContext: unknown) => {
     const tools = await listMcpTools(resolutionContext);
+    const identities = new Map<string, { serverId: string; toolName: string }>();
+    for (const server of agent.mcpServers ?? []) {
+      if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
+        continue;
+      for (const descriptor of await server.listTools()) {
+        if (identities.has(descriptor.name)) throw new Error("MCP model tool identity collision");
+        identities.set(descriptor.name, {
+          serverId: server.registryId,
+          toolName: await server.unprefixedToolName(descriptor.name),
+        });
+      }
+    }
     return tools.map((tool) => {
       if (tool.type !== "function") {
         return tool;
       }
-      const policy = policies.find((entry) => tool.name.startsWith(entry.prefix));
+      const identity = identities.get(tool.name);
+      const policy = identity
+        ? policies.find((entry) => entry.serverId === identity.serverId)
+        : policies.find((entry) => tool.name.startsWith(entry.prefix));
       if (!policy) {
         return tool;
       }
-      const unprefixed = tool.name.slice(policy.prefix.length);
+      const unprefixed = identity?.toolName ?? tool.name.slice(policy.prefix.length);
       const originalNeedsApproval = tool.needsApproval.bind(tool);
       const originalInvoke = tool.invoke.bind(tool);
       const legacyApproval =
@@ -3323,7 +3351,8 @@ function installInteractionInterventionPolicy(
  * tools to function tools with `needsApproval` unset (defaults false) and exposes
  * no per-server/agent approval knob, so we wrap the agent's `getMcpTools` to
  * attach a `needsApproval: () => true` predicate to the matching tools — matched
- * by the server's `<id>__` prefix, then the unprefixed tool name. A tool that
+ * by exact prepared server/tool identity (legacy unwrapped servers use their
+ * `<id>__` prefix). A tool that
  * needs approval raises a run INTERRUPTION, which the worker turns into
  * `session.requiresAction` and resolves via `user.approvalDecision`
  * (resumeApproval) — the same generic path other tool approvals use, so
@@ -3714,6 +3743,8 @@ export type ToolPreparationPhaseMeasurement = {
 };
 
 export type PrepareToolsOptions = {
+  /** Frozen, explicitly selected account labels keyed by execution route, not provider. */
+  mcpAccountLabels?: ReadonlyMap<string, string>;
   /** Opt-in exact-attempt persistence; absence preserves ordinary MCP execution. */
   mcpOperationPersistence?: McpOperationPersistence;
   /** Live exact-owner control refresh; API remains read/observation authority. */
@@ -3964,6 +3995,7 @@ class DeferredPreparedMcpServer implements MCPServer {
   readonly cacheToolsList = false;
   readonly deferredPreparation = true;
   readonly name: string;
+  private readonly listedModelNames = new Set<string>();
 
   constructor(
     readonly registryId: string,
@@ -3994,7 +4026,20 @@ class DeferredPreparedMcpServer implements MCPServer {
   async listTools(): Promise<RuntimeMcpTool[]> {
     if (!this.isPrepared()) return [];
     const target = await this.resolveTarget();
-    return target ? ((await target.listTools()) as RuntimeMcpTool[]) : [];
+    const tools = target ? ((await target.listTools()) as RuntimeMcpTool[]) : [];
+    this.listedModelNames.clear();
+    for (const tool of tools) this.listedModelNames.add(tool.name);
+    return tools;
+  }
+
+  modelToolNames(): Iterable<string> {
+    return this.listedModelNames.values();
+  }
+
+  async unprefixedToolName(name: string): Promise<string> {
+    const target = await this.requiredTarget();
+    if (!(target instanceof PrefixedMcpServer)) throw new Error("Unknown prepared MCP identity");
+    return target.unprefixedToolName(name);
   }
 
   async callTool(
@@ -4111,6 +4156,9 @@ export async function prepareAgentTools(
                 tool.eager !== true,
                 local.preflightCall,
                 local.approvalAuthority,
+                undefined,
+                undefined,
+                options.mcpAccountLabels?.get(config.id),
               ),
               config,
               options,
@@ -4252,6 +4300,7 @@ export async function prepareAgentTools(
             firstParty && config.id === "opengeni" && !config.connectionRef && !bridge
               ? options.refreshOwnedCommand
               : undefined,
+            options.mcpAccountLabels?.get(config.id),
           ),
           config,
           options,
@@ -6463,7 +6512,15 @@ function normalizeUrl(raw: string): string | null {
 }
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
-  return sharedPrefixedMcpToolName(registryId, toolName);
+  const name = sharedPrefixedMcpToolName(registryId, toolName);
+  // The SDK normalizes punctuation (including hyphens) and providers cap names
+  // at 64 characters. Use the complete digest, not lossy truncation. Hex names
+  // cannot collide with ordinary names, which always contain the __ separator.
+  return name.length <= 64 && /^[A-Za-z0-9_]+$/.test(name)
+    ? name
+    : createHash("sha256")
+        .update(JSON.stringify([registryId, toolName]))
+        .digest("hex");
 }
 
 const MCP_SDK_LIFECYCLE_NAME = "opengeni-mcp-lifecycle";
@@ -6660,6 +6717,11 @@ export class PrefixedMcpServer implements MCPServer {
   private loggedListToolsFailure = false;
   private listedToolSchemaTokens = 0;
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
+  private readonly originalToolNames = new Map<string, string>();
+  /** Exact attempt-local classification, including names too long for a prefix. */
+  modelToolNames(): Iterable<string> {
+    return this.originalToolNames.keys();
+  }
   private attemptToolEnvironment: AttemptToolEnvironment | null = null;
   private attemptToolSubjectId = "worker:mcp-model";
   private readonly resultCustomDataBridge: McpResultCustomDataBridge;
@@ -6681,6 +6743,7 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly approvalAuthority?: unknown,
     private readonly inputWaitYield?: InputWaitYield,
     private readonly refreshOwnedCommand?: (commandId: string) => Promise<boolean>,
+    private readonly accountLabel?: string,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -6857,10 +6920,23 @@ export class PrefixedMcpServer implements MCPServer {
       const tools = assertMcpToolListWithinBounds(await this.inner.listTools()) as RuntimeMcpTool[];
       const exposed = tools
         .filter((tool) => this.isAllowed(tool.name))
-        .map((tool) => ({
-          ...tool,
-          name: prefixedMcpToolName(this.registryId, tool.name),
-        }));
+        .map((tool) => {
+          const name = prefixedMcpToolName(this.registryId, tool.name);
+          const prior = this.originalToolNames.get(name);
+          if (prior !== undefined && prior !== tool.name)
+            throw new Error("MCP model tool identity collision");
+          this.originalToolNames.set(name, tool.name);
+          return {
+            ...tool,
+            name,
+            ...(this.accountLabel
+              ? {
+                  description:
+                    `Account: ${this.accountLabel}. Use only this account; if the intended account for a write is unclear, ask before calling.\n${tool.description ?? ""}`.trimEnd(),
+                }
+              : {}),
+          };
+        });
       const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
         assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
       this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
@@ -7170,7 +7246,21 @@ export class PrefixedMcpServer implements MCPServer {
   }
 
   private unprefixToolName(toolName: string): string {
-    if (!toolName.startsWith(this.prefix)) {
+    const original = this.originalToolNames.get(toolName);
+    if (original !== undefined) return original;
+    // Existing in-process callers may still use the raw qualified name. This
+    // is not a model identifier: accept it only for an exact frozen catalog
+    // entry on this server, never by normalizing or guessing a different route.
+    const rawPrefix = sharedPrefixedMcpToolName(this.registryId, "");
+    if (toolName.startsWith(rawPrefix)) {
+      const candidate = toolName.slice(rawPrefix.length);
+      if (
+        this.originalToolNames.get(prefixedMcpToolName(this.registryId, candidate)) === candidate
+      ) {
+        return candidate;
+      }
+    }
+    if (!this.prefix.endsWith("__") || !toolName.startsWith(this.prefix)) {
       throw new Error(`MCP tool ${toolName} is missing expected ${this.registryId} prefix`);
     }
     return toolName.slice(this.prefix.length);

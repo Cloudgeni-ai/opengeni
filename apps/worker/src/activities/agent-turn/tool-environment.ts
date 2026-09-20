@@ -38,6 +38,11 @@ import {
   resolveGoogleDrivePublicationTarget,
 } from "../google-drive-publication";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
+import {
+  accountRouteAuthNeededPayload,
+  expandApiIntegrationAccountRoutes,
+  expandMcpAccountRoutes,
+} from "../mcp-account-routes";
 import { createMcpOperationPersistence } from "@opengeni/db/mcp-operations";
 import { createMcpOperationReadStore } from "../mcp-operation-store";
 import { createMcpOperationObserverResolver } from "../mcp-operation-observer";
@@ -364,9 +369,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     codexAppsCredentialId,
     turnExecutionPolicy,
     trigger,
-    runSettings,
+    runSettings: canonicalRunSettings,
     lazyToolTransport,
-    turnTools,
+    turnTools: canonicalTurnTools,
     sandboxArtifactRuntime,
     activeSandboxBackend,
     groupBoxBackend,
@@ -379,6 +384,13 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     throwIfTurnCancelled,
   } = deps;
 
+  const accountRoutes = expandMcpAccountRoutes({
+    settings: canonicalRunSettings,
+    tools: canonicalTurnTools,
+    bindings: turn.mcpAccountBindings,
+  });
+  const runSettings = accountRoutes.settings;
+  const turnTools = accountRoutes.tools;
   const toolContextPreparationStartedAt = performance.now();
   throwIfWorkerShuttingDown();
   throwIfTurnCancelled();
@@ -387,6 +399,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const rawResolveCredential = connectionTokenResolverForTurn({
     db,
     settings: runSettings,
+    canonicalMcpServerIds: canonicalRunSettings.mcpServers
+      .filter((server) => server.connectionRef)
+      .map((server) => server.id),
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
@@ -458,16 +473,24 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       return;
     }
     await eventing.publish!(
-      [{ type: "tool.auth_needed", payload: rollingSafeToolAuthNeededPayload(payload) }],
+      [
+        {
+          type: "tool.auth_needed",
+          payload: rollingSafeToolAuthNeededPayload(
+            accountRouteAuthNeededPayload(payload, turn.mcpAccountBindings),
+          ),
+        },
+      ],
       true,
     );
   };
-  const selectedApiIntegrationServerIds = new Set(turnTools.map((tool) => tool.id));
   const apiIntegrationMcpServers = buildApiIntegrationMcpServers({
     settings: runSettings,
-    integrations: installedApiIntegrations.filter((integration) =>
-      selectedApiIntegrationServerIds.has(integration.serverId),
-    ),
+    integrations: expandApiIntegrationAccountRoutes({
+      integrations: installedApiIntegrations,
+      bindings: turn.mcpAccountBindings,
+      tools: turnTools,
+    }),
     authority: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -944,6 +967,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   try {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
+        mcpAccountLabels: accountRoutes.accountLabels,
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,

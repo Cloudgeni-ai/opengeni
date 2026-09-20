@@ -31,6 +31,7 @@ const AI_GATEWAY_CONNECTION_E2E = "test/e2e/ai-gateway-connection.browser.e2e.ts
 const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
 const FAILED_SESSION_RECOVERY_E2E = "test/e2e/failed-session-recovery.browser.e2e.ts";
 const COMPOSER_MENUS_E2E = "test/e2e/composer-menus.browser.e2e.ts";
+const CONNECTOR_ACCOUNTS_E2E = "test/e2e/connector-accounts.browser.e2e.ts";
 const PERSONAL_WORKSPACE_ACCESSIBILITY_E2E =
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts";
 const PERSONAL_RESOURCE_ATTACHMENTS_E2E = "test/e2e/personal-resource-attachments.browser.e2e.ts";
@@ -50,6 +51,24 @@ const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
+  test("managed actor response coverage follows web and fixture dependencies", () => {
+    const suite = "test/e2e/managed-actor-response.browser.e2e.ts";
+    for (const path of [
+      suite,
+      "apps/web/src/api.ts",
+      "apps/web/test/managed-actor-response-fixture.ts",
+      "apps/web/test/managed-actor-response.html",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(suite);
+      expect(plan.unitTests, path).not.toContain(suite);
+      expect(plan.integrationTests, path).not.toContain(suite);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(suite);
+  });
+
   test("native report delivery belongs to the required prepared package lane, never unit shards", () => {
     const suite = "apps/api/test/native-report-delivery.test.ts";
     expect(OPT_IN_TESTS[suite]).toContain("required package-contracts gate");
@@ -188,9 +207,11 @@ describe("fail-closed change impact", () => {
       "test/e2e/composer-pane.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
+      CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
+      "test/e2e/managed-actor-response.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
       PERSONAL_GITHUB_IDENTITY_E2E,
@@ -511,6 +532,26 @@ describe("fail-closed change impact", () => {
     }
   });
 
+  test("connector account controls follow web dependencies without widening leaf plans", () => {
+    for (const path of [
+      CONNECTOR_ACCOUNTS_E2E,
+      "apps/web/test/connector-menu.html",
+      "apps/web/test/connector-menu-fixture.tsx",
+      "apps/web/src/components/session-connectors-menu-body.tsx",
+      "apps/web/src/components/capabilities/connection-account-picker.tsx",
+      "packages/react/src/index.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(CONNECTOR_ACCOUNTS_E2E);
+      expect(plan.unitTests, path).not.toContain(CONNECTOR_ACCOUNTS_E2E);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(
+      CONNECTOR_ACCOUNTS_E2E,
+    );
+  });
+
   test("account request observation stays in the native accounts lane", () => {
     const regression = "test/e2e/browser-account-request-observation.browser.e2e.ts";
     const plan = createImpactPlan([regression]);
@@ -607,9 +648,11 @@ describe("fail-closed change impact", () => {
       "test/e2e/composer-pane.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
+      CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
+      "test/e2e/managed-actor-response.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
       PERSONAL_GITHUB_IDENTITY_E2E,

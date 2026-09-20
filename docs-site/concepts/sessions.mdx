@@ -71,6 +71,29 @@ An agent can spawn child sessions for parallel or delegated work. Children run a
 
 Workspaces are shared by their members, and sessions in a shared workspace are visible to members by default. An organization owner can allow members to create "Only me" sessions that only their owner can see. Personal workspaces belong to one person.
 
+### Connected accounts
+
+Open **Connectors** in the composer to see the accounts attached to each enabled
+connector. Personal and workspace accounts can be attached together. Account rows
+show a readable identity and whether the connection is **Only me** or **This
+workspace**; use their toggles to narrow which accounts the agent may use.
+Add or connect accounts from the connector's **Capabilities** page, not from the
+chat's account list.
+
+Connectors configured for one exact account keep that restriction. Account
+selection does not broaden an existing pinned custom integration.
+
+Personal credentials belong to the person sending the message, even in a shared
+session. Another participant cannot inherit those credentials by replying. The
+results of an action in a shared session are still visible to its participants.
+Scheduled tasks use their execution owner's authorized account selections and
+revalidate access for each occurrence.
+
+Each attached account has its own tool route. A missing or revoked account is an
+access failure, not permission to silently switch to another identity. If you
+attach several accounts, name the account or workspace when the intended identity
+is not clear from your request—especially for actions that send or change data.
+
 ## Agent access in product integrations
 
 `agentAccess` controls how an agent reaches other session trees within its workspace:

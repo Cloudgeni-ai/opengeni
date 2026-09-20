@@ -24,7 +24,7 @@ import {
   workspaceCustomModelReference,
   lockActiveCustomModelForAdmission,
   scheduledSlackBotConnectionId,
-  freezePersonalConnectionDelegations,
+  freezeConnectionAccounts,
   ConnectionAccountSelectionError,
   scheduledConnectionSurfaceEligibility,
   scheduledConnectionTools,
@@ -475,8 +475,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         taskTools,
         taskAuthoritySubjectId ?? undefined,
       );
-      const taskPersonalConnectionDelegations = await freezePersonalConnectionDelegations({
+      const taskConnections = await freezeConnectionAccounts({
         db,
+        accountId: task.accountId,
         workspaceId: task.workspaceId,
         settings: connectionTarget
           ? settingsWithSessionMcpServerMetadata(connectionSettings, connectionTarget.mcpServers)
@@ -487,6 +488,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           ? { kind: "subject", subjectId: taskAuthoritySubjectId, accountId: task.accountId }
           : { kind: "none" },
         authoritySelections: task.agentConfig.connectionAccounts ?? [],
+        authoritySelectionsFrozen: task.agentConfig.connectionAccountsFrozen === true,
         ...scheduledConnectionSurfaceEligibility(
           settings,
           connectionTarget ?? {
@@ -498,9 +500,13 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         if (error instanceof ConnectionAccountSelectionError) return null;
         throw error;
       });
-      if (taskPersonalConnectionDelegations === null) {
+      if (taskConnections === null) {
         return { action: "blocked", reason: "connection_account_unavailable" };
       }
+      const {
+        personalConnectionDelegations: taskPersonalConnectionDelegations,
+        mcpAccountBindings: taskMcpAccountBindings,
+      } = taskConnections;
       const taskConnectionAuthoritySubjectId =
         taskPersonalConnectionDelegations.length > 0 ? taskAuthoritySubjectId : null;
       const creatorSessionPolicy = scheduledCreatorSessionPolicyInput(
@@ -878,6 +884,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           targetSessionExecution,
           generatedSessionBinding,
           personalConnectionDelegations: taskPersonalConnectionDelegations,
+          mcpAccountBindings: taskMcpAccountBindings,
           personalResourceAuthoritySubjectId: taskPersonalResourceAuthoritySubjectId,
           causalHumanSubjectId,
           causalHumanAuthority: taskRevisionAuthority,
@@ -1396,6 +1403,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                     : {}),
                 },
                 personalConnectionDelegations: taskPersonalConnectionDelegations,
+                mcpAccountBindings: taskMcpAccountBindings,
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
                 scheduledTaskRunId: run.id,
               },
@@ -1523,6 +1531,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                     : {}),
                 },
                 personalConnectionDelegations: taskPersonalConnectionDelegations,
+                mcpAccountBindings: taskMcpAccountBindings,
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
                 scheduledTaskRunId: run.id,
               },
@@ -2371,6 +2380,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
           : {}),
       },
       personalConnectionDelegations: input.acceptedExecution.personalConnectionDelegations,
+      mcpAccountBindings: input.acceptedExecution.mcpAccountBindings ?? null,
       xaiProviderAccountAuthoritySnapshot:
         input.acceptedExecution.xaiProviderAccountAuthoritySnapshot,
       scheduledTaskRunId: input.run.id,

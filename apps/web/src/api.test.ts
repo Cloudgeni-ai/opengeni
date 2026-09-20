@@ -26,6 +26,73 @@ import {
 } from "./api";
 
 describe("web API auth helpers", () => {
+  test.each(["text", "json"] as const)(
+    "managed actor %s preserves decoding and single body consumption",
+    async (method) => {
+      let cleanups = 0;
+      const response = managedActorTrackedResponse(
+        new Response('\uFEFF{"label":"café 🌍"}'),
+        new AbortController().signal,
+        () => cleanups++,
+      );
+      expect(response instanceof Response).toBe(true);
+      expect(response.bodyUsed).toBe(false);
+      expect(await response[method]()).toEqual(
+        method === "json" ? { label: "café 🌍" } : '{"label":"café 🌍"}',
+      );
+      expect(response.bodyUsed).toBe(true);
+      expect(cleanups).toBe(1);
+      await expect(response[method]()).rejects.toBeInstanceOf(TypeError);
+    },
+  );
+
+  test.each(["text", "json"] as const)(
+    "managed actor %s rejects locked and canceled bodies without exposing bytes",
+    async (method) => {
+      const response = managedActorTrackedResponse(
+        new Response('{"secret":"old actor"}'),
+        new AbortController().signal,
+        () => {},
+      );
+      const reader = response.body!.getReader();
+      await expect(response[method]()).rejects.toBeInstanceOf(TypeError);
+      reader.releaseLock();
+      await response.body!.cancel();
+      await expect(response[method]()).rejects.toBeInstanceOf(TypeError);
+    },
+  );
+
+  test.each(["text", "json"] as const)(
+    "managed actor %s preserves a genuine stream failure",
+    async (method) => {
+      const failure = new Error("synthetic transport failure");
+      const source = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.error(failure);
+        },
+      });
+      let cleanups = 0;
+      const response = managedActorTrackedResponse(
+        new Response(source),
+        new AbortController().signal,
+        () => cleanups++,
+      );
+      await expect(response[method]()).rejects.toBe(failure);
+      expect(cleanups).toBe(1);
+      expect(source.locked).toBe(false);
+    },
+  );
+
+  test("managed actor JSON still rejects malformed JSON", async () => {
+    const response = managedActorTrackedResponse(
+      new Response("not JSON"),
+      new AbortController().signal,
+      () => {},
+    );
+    await expect(response.json()).rejects.toBeInstanceOf(SyntaxError);
+    expect(response.bodyUsed).toBe(true);
+  });
+
   test.each([
     ["DELETE", 204],
     ["POST", 205],

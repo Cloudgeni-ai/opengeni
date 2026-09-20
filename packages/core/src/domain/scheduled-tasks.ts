@@ -84,7 +84,7 @@ import {
 import { prepareExternalLinkTaskAdmission } from "../application/external-link-work-admission";
 import { validateVariableSetAttachment } from "./environments";
 import {
-  freezePersonalConnectionDelegations,
+  freezeConnectionAccounts,
   personalConnectionDelegationSourceForGrant,
 } from "./personal-connection-delegations";
 import {
@@ -289,6 +289,7 @@ export async function createValidatedScheduledTask(input: {
       });
   }
   if (!knowledgeAction) {
+    agentConfig.connectionAccountsFrozen = true;
     await validateScheduledTaskMachineTarget({
       settings: input.settings,
       db: input.db,
@@ -335,11 +336,12 @@ export async function createValidatedScheduledTask(input: {
     runtimeSettings && target
       ? settingsWithSessionMcpServerMetadata(runtimeSettings, target.mcpServers)
       : runtimeSettings;
-  const personalConnectionDelegations =
+  const acceptedConnections =
     knowledgeAction || !effectiveRuntimeSettings
-      ? []
-      : await freezePersonalConnectionDelegations({
+      ? { personalConnectionDelegations: [], mcpAccountBindings: [] }
+      : await freezeConnectionAccounts({
           db: input.db,
+          accountId: input.grant.accountId,
           workspaceId: input.grant.workspaceId,
           settings: effectiveRuntimeSettings,
           tools: await scheduledConnectionTools(
@@ -355,15 +357,24 @@ export async function createValidatedScheduledTask(input: {
           authoritySelections: input.payload.connectionAccounts,
           ...scheduledConnectionSurfaceEligibility(effectiveRuntimeSettings, target),
         });
-  if (personalConnectionDelegationSourceForGrant(input.grant).kind === "turn") {
-    agentConfig.connectionAccounts = personalConnectionDelegations
-      .filter(
-        (item) =>
-          !item.connectionType ||
-          item.connectionType === "mcp" ||
-          item.connectionType === "github_personal",
-      )
-      .map(({ serverId, connectionId }) => ({ serverId, connectionId }));
+  const { personalConnectionDelegations, mcpAccountBindings } = acceptedConnections;
+  if (!knowledgeAction) {
+    const boundRoutes = new Set((mcpAccountBindings ?? []).map((binding) => binding.serverId));
+    agentConfig.connectionAccounts = [
+      ...(mcpAccountBindings ?? []).map(({ canonicalServerId, connectionId }) => ({
+        serverId: canonicalServerId,
+        connectionId,
+      })),
+      ...personalConnectionDelegations
+        .filter(
+          (item) =>
+            !boundRoutes.has(item.serverId) &&
+            (!item.connectionType ||
+              item.connectionType === "mcp" ||
+              item.connectionType === "github_personal"),
+        )
+        .map(({ serverId, connectionId }) => ({ serverId, connectionId })),
+    ];
   }
   const creationInitiator = scheduledTaskInitiatorForGrant(input.grant);
   const captureLinkAuthority = prepareExternalLinkTaskAdmission(
@@ -1161,8 +1172,9 @@ export async function validatedScheduledTaskUpdate(input: {
       rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
       agentConfig: nextAgentConfig,
     });
-    await freezePersonalConnectionDelegations({
+    const acceptedConnections = await freezeConnectionAccounts({
       db: input.db,
+      accountId: input.grant.accountId,
       workspaceId: input.grant.workspaceId,
       settings: nextTarget
         ? settingsWithSessionMcpServerMetadata(runtimeSettings, nextTarget.mcpServers)
@@ -1180,8 +1192,33 @@ export async function validatedScheduledTaskUpdate(input: {
         ? { kind: "subject", subjectId: ownerSubjectId, accountId: input.existing.accountId }
         : { kind: "none" },
       authoritySelections: nextAgentConfig.connectionAccounts ?? [],
+      authoritySelectionsFrozen:
+        input.payload.connectionAccounts === undefined &&
+        input.existing.agentConfig.connectionAccountsFrozen === true,
       ...scheduledConnectionSurfaceEligibility(runtimeSettings, nextTarget),
     });
+    const routeIds = new Set(
+      (acceptedConnections.mcpAccountBindings ?? []).map((binding) => binding.serverId),
+    );
+    nextAgentConfig.connectionAccounts = [
+      ...(acceptedConnections.mcpAccountBindings ?? []).map(
+        ({ canonicalServerId, connectionId }) => ({
+          serverId: canonicalServerId,
+          connectionId,
+        }),
+      ),
+      ...acceptedConnections.personalConnectionDelegations
+        .filter(
+          (item) =>
+            !routeIds.has(item.serverId) &&
+            (!item.connectionType ||
+              item.connectionType === "mcp" ||
+              item.connectionType === "github_personal"),
+        )
+        .map(({ serverId, connectionId }) => ({ serverId, connectionId })),
+    ];
+    nextAgentConfig.connectionAccountsFrozen = true;
+    update.agentConfig = nextAgentConfig;
   }
   if (
     !materialExecutionChange &&
