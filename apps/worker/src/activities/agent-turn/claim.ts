@@ -1,3 +1,4 @@
+import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
 import {
   applySessionTurnSettlement,
   claimSessionWorkForAttempt,
@@ -193,6 +194,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       update,
     });
   const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
+    filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
     sessionId: input.sessionId,
     workflowId: input.workflowId,
     workflowRunId: input.workflowRunId,
@@ -338,6 +340,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   attempt.triggerType = trigger.type;
   const attachPendingUpdatesAfterOpenSuffix = async (): Promise<boolean> => {
     const attached = await claimSessionWorkForAttempt(db, input.workspaceId, {
+      filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
       sessionId: input.sessionId,
       workflowId: input.workflowId,
       workflowRunId: input.workflowRunId,

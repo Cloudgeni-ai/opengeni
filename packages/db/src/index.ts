@@ -45242,6 +45242,11 @@ async function projectPublicSandboxRecovery(
       and provenance = 'native_capture' and source_workspace_generation = ${selection.archiveGeneration}) as valid`,
   );
   if (!artifact?.valid) return unavailable("checkpoint_artifact_invalid", selection);
+  const [activation] = await rawRows<{ consent_enabled: boolean }>(
+    tx,
+    sql`select consent_enabled from opengeni_private.sandbox_recovery_rollout where singleton`,
+  );
+  if (!activation?.consent_enabled) return unavailable("recovery_not_enabled", selection);
   return { version: 1, status: "eligible", reason: null, checkpoint: selection, operationId: null };
 }
 
@@ -65163,6 +65168,9 @@ function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(
 }
 
 export type ClaimSessionWorkForAttemptInput = {
+  /** Internal worker-build declaration, never request-derived or universally
+   * stamped by createDb. Only builds that always reconstruct the warning opt in. */
+  filesystemDiscontinuityProtocol?: 1;
   sessionId: string;
   workflowId: string;
   workflowRunId: string;
@@ -65530,6 +65538,33 @@ async function acknowledgeConsumedChildLifecycleNotices(
         where ${pins.acknowledgedSequence} < excluded.acknowledged_sequence
     `);
   });
+}
+
+/** Scope the worker-build declaration to registration, including nested claims. */
+async function withSandboxRecoveryWarningClaimProtocol<T>(
+  tx: Database,
+  version: 1 | undefined,
+  register: () => Promise<T>,
+): Promise<T> {
+  const [prior] = await rawRows<{ protocol: string }>(
+    tx,
+    sql`select coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v1', true), '') as protocol`,
+  );
+  await tx.execute(
+    sql`select set_config('opengeni.filesystem_discontinuity_protocol_v1', ${version === 1 ? "1" : ""}, true)`,
+  );
+  let completed = false;
+  try {
+    const result = await register();
+    completed = true;
+    return result;
+  } finally {
+    const restore = tx.execute(
+      sql`select set_config('opengeni.filesystem_discontinuity_protocol_v1', ${prior?.protocol ?? ""}, true)`,
+    );
+    if (completed) await restore;
+    else await restore.catch(() => undefined); // Claim savepoint rolls back a rejected INSERT.
+  }
 }
 
 /**
@@ -66430,24 +66465,30 @@ export async function claimSessionWorkForAttempt(
               );
             }
           }
-          const attempt = await registerSessionTurnAttemptClaim(tx as unknown as Database, {
-            id: input.attemptId,
-            accountId: session.accountId,
-            workspaceId,
-            sessionId,
-            turnId: turn.id,
-            executionGeneration: turn.executionGeneration,
-            temporalWorkflowId: workflowId,
-            temporalWorkflowRunId: input.workflowRunId,
-            temporalActivityId: input.dispatchId,
-            verifiedControlRevision: Number(workspaceControl.revision),
-            authorityEpoch: session.authorityEpoch,
-            authorityVisibility: session.visibility as "user_private" | "workspace_shared",
-            authorityOwnerOrganizationMembershipId: session.ownerOrganizationMembershipId ?? null,
-            personalResourceProtocolVersion: turn.personalResourceProtocolVersion,
-            mcpApprovalPolicies,
-            connectorActionPolicies: connectorPolicyRows,
-          });
+          const attempt = await withSandboxRecoveryWarningClaimProtocol(
+            tx,
+            input.filesystemDiscontinuityProtocol,
+            () =>
+              registerSessionTurnAttemptClaim(tx as unknown as Database, {
+                id: input.attemptId,
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                turnId: turn.id,
+                executionGeneration: turn.executionGeneration,
+                temporalWorkflowId: workflowId,
+                temporalWorkflowRunId: input.workflowRunId,
+                temporalActivityId: input.dispatchId,
+                verifiedControlRevision: Number(workspaceControl.revision),
+                authorityEpoch: session.authorityEpoch,
+                authorityVisibility: session.visibility as "user_private" | "workspace_shared",
+                authorityOwnerOrganizationMembershipId:
+                  session.ownerOrganizationMembershipId ?? null,
+                personalResourceProtocolVersion: turn.personalResourceProtocolVersion,
+                mcpApprovalPolicies,
+                connectorActionPolicies: connectorPolicyRows,
+              }),
+          );
           // Freeze governance only after this exact attempt is durably claimed,
           // while the claim transaction still owns the session/turn/attempt
           // locks. Later policy or preference activation applies to a future

@@ -591,9 +591,8 @@ describe("release schema contract", () => {
                                             : organizationUsageAnalyticalCapability
                                               ? "0473_organization_usage_analytical_capability.sql"
                                               : "0472_usage_events_workspace_recent_index.sql",
-      deploymentMode: consentedRecovery
-        ? "maintenance"
-        : warmCaptureHolderReclamation || periodicCaptureAttemptCadence
+      deploymentMode:
+        consentedRecovery || warmCaptureHolderReclamation || periodicCaptureAttemptCadence
           ? "rolling"
           : modalCommandByteOffsets ||
               permanentSkillRemoval ||

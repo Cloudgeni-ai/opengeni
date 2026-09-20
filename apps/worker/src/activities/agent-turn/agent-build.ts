@@ -10,8 +10,8 @@ import {
   getSessionTurnForAttempt,
   ensureSessionReasoningConfiguration,
   ensureSessionSkillCatalog,
-  getSandboxRecoveryDiscontinuity,
 } from "@opengeni/db";
+import { recoveryAwareSessionInstructions } from "./recovery-warning";
 import {
   formatSkillCatalog,
   type AttemptConnectorActionBinding,
@@ -196,14 +196,11 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   const preparedTools = eventing.preparedTools!;
   // Durable recovery truth is read for every attempt, including reconstruction
   // after compaction. It is never inferred from transcript tool successes.
-  const filesystemDiscontinuity = await getSandboxRecoveryDiscontinuity(
+  const sessionInstructions = await recoveryAwareSessionInstructions(
     db,
     input.workspaceId,
-    session.id,
+    session,
   );
-  const sessionInstructions = [session.instructions, filesystemDiscontinuity]
-    .filter(Boolean)
-    .join("\n\n");
 
   const missingSessionTitleHint = preparationIndependentToolNames.includes(
     SESSION_TITLE_MODEL_TOOL_NAME,

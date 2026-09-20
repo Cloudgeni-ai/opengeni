@@ -52,6 +52,7 @@ export type SandboxRecoveryState = {
 /** Public blocker codes are stable; UI copy must not expose persistence jargon. */
 export function sandboxRecoveryBlocker(reason: string): string {
   const messages: Record<string, string> = {
+    recovery_not_enabled: "Checkpoint recovery has not been enabled by your operator.",
     managed_modal_home_required: "Recovery supports only this session's managed Modal home.",
     singleton_required: "This sandbox is shared with another session and cannot be recovered here.",
     checkpoint_unavailable: "No recoverable checkpoint is available.",

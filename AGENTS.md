@@ -354,8 +354,10 @@ The accepted operation protects membership, active route and CURRENT artifact
 until verified restoration or failed creation. Keep consent, restore completion
 and failed-turn Retry separate. Every later attempt reconstructs the filesystem
 discontinuity warning from the durable command receipt, outside compactable
-history. Migration 0492 is maintenance-only because old workers lack that warning;
-never restart a pre-0492 worker after activation. See `docs/run-lifecycle.md`.
+history. Migration 0492 is additive with DB-default-off consent. Activate only
+after verifying compatible immutable worker images/templates. Permanent consent
+receipts fence old inference claims, including reattachment, even after disabling
+new consent or replacing a lease. See `docs/run-lifecycle.md`.
 
 Sandbox acquisition and workspace mutation waits honor the first observed
 capture's durable remaining timeout once, within the lifecycle ceiling.
