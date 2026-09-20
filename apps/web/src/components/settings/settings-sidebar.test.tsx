@@ -6,15 +6,15 @@ import { createRoot } from "react-dom/client";
 mock.module("@tanstack/react-router", () => ({
   Link: ({
     children,
-    to: _to,
-    params: _params,
+    to,
+    params,
     ...props
   }: {
     children: ReactNode;
-    to: unknown;
-    params: unknown;
+    to: string;
+    params?: { workspaceId: string };
   }) => (
-    <a {...props} href="#sessions">
+    <a {...props} href={to.replace("$workspaceId", params?.workspaceId ?? "")}>
       {children}
     </a>
   ),
@@ -31,6 +31,46 @@ beforeAll(() => {
   media = originalMatchMedia.call(window, "(max-width: 1023px)");
   Object.defineProperty(media, "matches", { get: () => narrow });
   window.matchMedia = () => media;
+});
+
+test("organization back control returns to workspace settings on desktop and mobile", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    for (const isNarrow of [false, true]) {
+      narrow = isNarrow;
+      await act(async () => {
+        root.render(
+          <SettingsSidebar
+            workspaceId="origin-workspace"
+            backToWorkspaceSettings
+            label="Organization settings"
+            currentPage="Overview"
+            identity="Organization"
+          >
+            <nav />
+          </SettingsSidebar>,
+        );
+        media.dispatchEvent(new Event("change"));
+      });
+      const back = container.querySelector<HTMLAnchorElement>(
+        'a[href="/workspaces/origin-workspace/settings"]',
+      );
+      expect(back).not.toBeNull();
+      expect(isNarrow ? back?.getAttribute("aria-label") : back?.textContent).toBe(
+        "Back to workspace settings",
+      );
+      if (!isNarrow) {
+        expect(
+          container.querySelector('a[href="/workspaces/origin-workspace/sessions"]')?.textContent,
+        ).toContain("OpenGeni");
+      }
+    }
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });
 afterAll(() => {
   window.matchMedia = originalMatchMedia;
@@ -65,6 +105,9 @@ test("narrow settings keep navigation in a dismissible drawer and restore the de
   try {
     await act(async () => root.render(render()));
     expect(container.querySelector("aside")).toBeNull();
+    expect(container.querySelector('a[aria-label="Back to sessions"]')?.getAttribute("href")).toBe(
+      "/workspaces/workspace/sessions",
+    );
     expect(container.textContent).toContain("General");
     expect(document.body.textContent).not.toContain("Switch workspace");
     await open();
@@ -90,5 +133,26 @@ test("narrow settings keep navigation in a dismissible drawer and restore the de
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+test("settings without a workspace return to OpenGeni", async () => {
+  narrow = false;
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <SettingsSidebar label="Personal settings" currentPage="General" identity="You">
+          <nav />
+        </SettingsSidebar>,
+      ),
+    );
+    const back = Array.from(container.querySelectorAll("a")).find(
+      (link) => link.textContent === "Back to OpenGeni",
+    );
+    expect(back?.getAttribute("href")).toBe("/");
+  } finally {
+    await act(async () => root.unmount());
   }
 });
