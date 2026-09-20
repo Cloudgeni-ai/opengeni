@@ -4,7 +4,10 @@ import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/test
 import postgres from "postgres";
 import { McpConnectionAccountBindings } from "@opengeni/contracts";
 import { personalDelegationsForAccountBindings } from "../../core/src/domain/mcp-account-bindings";
-import { nativeMcpAccountBindingsFixture } from "./mcp-account-bindings-fixture";
+import {
+  nativeMcpAccountBindingsFixture,
+  nativeMcpAccountBindingsJsonTypes,
+} from "./mcp-account-bindings-fixture";
 
 // Optional isolated WASM PostgreSQL for sandboxes without Docker. No deployed
 // database URL is read; otherwise use the repository's disposable DB harness.
@@ -67,7 +70,7 @@ beforeAll(async () => {
     blank = await acquireBlankTestDatabase("migration-0493-exact-mcp");
     if (!blank)
       throw new Error("0493 requires disposable PostgreSQL or OPENGENI_MCP_BINDINGS_PGLITE_MODULE");
-    const sql = postgres(blank.databaseUrl, { max: 1 });
+    const sql = postgres(blank.databaseUrl, { max: 1, types: nativeMcpAccountBindingsJsonTypes });
     db = nativeMcpAccountBindingsFixture(sql);
   }
   // Minimal, local-only prerequisites. Install the real 0478 resolver and
@@ -170,6 +173,30 @@ async function validate(values: unknown, delegations: unknown = []) {
     JSON.stringify(delegations),
   ]);
 }
+
+test("native JSONB wire encoding preserves the array required by the SQL validator", async () => {
+  const defaults = postgres();
+  const native = postgres({ types: nativeMcpAccountBindingsJsonTypes });
+  try {
+    const encoded = JSON.stringify([binding]);
+    const previousWire = defaults.options.serializers[3802]!(encoded) as string;
+    await expect(
+      db.query("SELECT opengeni_private.validate_mcp_account_bindings($1::jsonb,'[]'::jsonb)", [
+        previousWire,
+      ]),
+    ).rejects.toThrow("invalid MCP account bindings");
+    const wire = native.options.serializers[3802]!(encoded) as string;
+    await db.query("SELECT opengeni_private.validate_mcp_account_bindings($1::jsonb,'[]'::jsonb)", [
+      wire,
+    ]);
+    expect((await db.query("SELECT jsonb_typeof($1::jsonb) AS kind", [wire])).rows[0]!.kind).toBe(
+      "array",
+    );
+  } finally {
+    await native.end();
+    await defaults.end();
+  }
+});
 async function use(
   options: {
     connectionId?: string;

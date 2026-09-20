@@ -1,6 +1,38 @@
 import { expect, test } from "bun:test";
-import type postgres from "postgres";
-import { nativeMcpAccountBindingsFixture } from "./mcp-account-bindings-fixture";
+import postgres from "postgres";
+import {
+  nativeMcpAccountBindingsFixture,
+  nativeMcpAccountBindingsJsonTypes,
+} from "./mcp-account-bindings-fixture";
+
+test("native fixture sends pre-encoded JSON as JSON rather than a JSON string", async () => {
+  // Client construction installs the actual driver's serializers but does not
+  // open a socket. Exercise both server-inferred JSON OIDs without a database.
+  const defaults = postgres();
+  const native = postgres({ types: nativeMcpAccountBindingsJsonTypes });
+  try {
+    for (const oid of [114, 3802]) {
+      for (const value of [
+        [],
+        [{ serverId: "account-test", ownerSubjectId: null }],
+        { mcpAccountBindings: [] },
+        null,
+      ]) {
+        const encoded = JSON.stringify(value);
+        const oldWire = defaults.options.serializers[oid]!(encoded) as string;
+        expect(JSON.parse(oldWire)).toBe(encoded);
+        const wire = native.options.serializers[oid]!(encoded) as string;
+        expect(wire).toBe(encoded);
+        expect(JSON.parse(wire)).toEqual(value);
+        expect(native.options.parsers[oid]!(wire)).toEqual(value);
+      }
+    }
+    expect(native.options.serializers[16]!(true)).toBe(defaults.options.serializers[16]!(true));
+  } finally {
+    await native.end();
+    await defaults.end();
+  }
+});
 
 test("native fixture activates lazy driver queries before Bun rejection assertions", async () => {
   // Model Postgres.js Query's Promise subclass: execution starts in then(),
