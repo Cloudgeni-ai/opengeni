@@ -3723,6 +3723,8 @@ export type ToolPreparationPhaseMeasurement = {
 };
 
 export type PrepareToolsOptions = {
+  /** Frozen, explicitly selected account labels keyed by execution route, not provider. */
+  mcpAccountLabels?: ReadonlyMap<string, string>;
   /** Opt-in exact-attempt persistence; absence preserves ordinary MCP execution. */
   mcpOperationPersistence?: McpOperationPersistence;
   /** Live exact-owner control refresh; API remains read/observation authority. */
@@ -4120,6 +4122,9 @@ export async function prepareAgentTools(
                 tool.eager !== true,
                 local.preflightCall,
                 local.approvalAuthority,
+                undefined,
+                undefined,
+                options.mcpAccountLabels?.get(config.id),
               ),
               config,
               options,
@@ -4261,6 +4266,7 @@ export async function prepareAgentTools(
             firstParty && config.id === "opengeni" && !config.connectionRef && !bridge
               ? options.refreshOwnedCommand
               : undefined,
+            options.mcpAccountLabels?.get(config.id),
           ),
           config,
           options,
@@ -6690,6 +6696,7 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly approvalAuthority?: unknown,
     private readonly inputWaitYield?: InputWaitYield,
     private readonly refreshOwnedCommand?: (commandId: string) => Promise<boolean>,
+    private readonly accountLabel?: string,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -6869,6 +6876,12 @@ export class PrefixedMcpServer implements MCPServer {
         .map((tool) => ({
           ...tool,
           name: prefixedMcpToolName(this.registryId, tool.name),
+          ...(this.accountLabel
+            ? {
+                description:
+                  `Account: ${this.accountLabel}. Use only this account; if the intended account for a write is unclear, ask before calling.\n${tool.description ?? ""}`.trimEnd(),
+              }
+            : {}),
         }));
       const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
         assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
