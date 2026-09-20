@@ -1306,6 +1306,9 @@ export async function requestRemoteCompactionV2(
   const request: ModelRequest = {
     ...prefix,
     input: buildRemoteCompactionV2PromptInput(input) as AgentInputItem[],
+    // This call outlives the SDK Runner trace. Tracing is client-side metadata,
+    // not part of the provider request or cache prefix.
+    tracing: false,
     // The stopped inference stream may have aborted its per-call signal.
     // Compaction uses the still-active turn cancellation signal instead.
     ...(options.signal ? { signal: options.signal } : {}),
