@@ -208,6 +208,61 @@ describe("explicit singleton checkpoint recovery", () => {
       }),
     );
   }
+
+  test("disabled activation also rejects accepted lease INSERT and receipt reclassification", async () => {
+    const f = await fixture();
+    const fresh = await f.create();
+    const leaseId = crypto.randomUUID();
+    const operationId = crypto.randomUUID();
+    const publicRecovery = {
+      version: 1,
+      status: "accepted",
+      sessionId: fresh.id,
+      subjectId: f.subjectId,
+      operationId,
+      selection: {
+        ...f.request.selection,
+        sessionId: fresh.id,
+        sandboxGroupId: fresh.sandboxGroupId,
+        leaseId,
+      },
+    };
+    await shared.admin`update opengeni_private.sandbox_recovery_rollout set consent_enabled = false`;
+    try {
+      await rejectsWithSqlState(
+        withWorkspaceRls(client.db, f.workspaceId, (tx) =>
+          tx.execute(sql`
+        insert into sandbox_leases(id, account_id, workspace_id, sandbox_group_id, backend, liveness, expires_at, public_recovery)
+        values(${leaseId}, ${f.accountId}, ${f.workspaceId}, ${fresh.sandboxGroupId}, 'modal', 'cold', now(), ${JSON.stringify(publicRecovery)}::jsonb)`),
+        ),
+      );
+      const [ordinary] = await withWorkspaceRls(client.db, f.workspaceId, (tx) =>
+        tx.execute<{ id: string }>(sql`
+        insert into session_command_receipts(account_id, workspace_id, actor_type, actor_subject_id,
+          action, target_session_id, operation_key, canonical_request_hash, result)
+        values(${f.accountId}, ${f.workspaceId}, 'human', ${f.subjectId}, 'ordinary.command',
+          ${f.session.id}, ${operationId}, 'not-consent', ${JSON.stringify({ operationId })}::jsonb) returning id`),
+      );
+      await rejectsWithSqlState(
+        withWorkspaceRls(client.db, f.workspaceId, (tx) =>
+          tx.execute(sql`
+        update session_command_receipts set action = 'sandbox.recovery.consent' where id = ${ordinary!.id}`),
+        ),
+      );
+      expect(
+        (
+          await shared.admin`select action from session_command_receipts where id = ${ordinary!.id}`
+        )[0]!.action,
+      ).toBe("ordinary.command");
+      expect(
+        (
+          await shared.admin`select count(*)::int as count from sandbox_leases where id = ${leaseId}`
+        )[0]!.count,
+      ).toBe(0);
+    } finally {
+      await shared.admin`update opengeni_private.sandbox_recovery_rollout set consent_enabled = true`;
+    }
+  });
   function claimInput(f: Awaited<ReturnType<typeof fixture>>) {
     return {
       sessionId: f.session.id,
