@@ -12840,6 +12840,8 @@ export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
 export const ToolAuthNeededPayload = z
   .object({
     serverId: z.string().min(1),
+    /** Exact configured connector for recovery; serverId remains the execution route. */
+    canonicalServerId: z.string().min(1).optional(),
     toolName: z.string().min(1).nullable().optional(),
     providerDomain: z.string().min(1),
     provider: z.string().min(1).max(128).optional(),

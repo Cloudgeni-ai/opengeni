@@ -8504,7 +8504,9 @@ describe("runtime event normalization", () => {
     );
     try {
       const tools = await prepared.mcpServers[0]!.listTools();
-      expect(tools.map((tool) => tool.name)).toContain("cap-secure__search_documents");
+      expect(tools.map((tool) => tool.name)).toContain(
+        prefixedMcpToolName("cap-secure", "search_documents"),
+      );
       const result = await prepared.mcpServers[0]!.callTool("cap-secure__search_documents", {
         query: "headers",
       });
@@ -8553,7 +8555,9 @@ describe("runtime event normalization", () => {
     );
     try {
       const tools = await prepared.mcpServers[0]!.listTools();
-      expect(tools.map((tool) => tool.name)).toContain("cap-broker__search_documents");
+      expect(tools.map((tool) => tool.name)).toContain(
+        prefixedMcpToolName("cap-broker", "search_documents"),
+      );
       const result = await prepared.mcpServers[0]!.callTool("cap-broker__search_documents", {
         query: "broker",
       });
@@ -8615,7 +8619,9 @@ describe("runtime event normalization", () => {
     );
     try {
       const tools = await prepared.mcpServers[0]!.listTools();
-      expect(tools.map((tool) => tool.name)).toContain("cap-refresh__search_documents");
+      expect(tools.map((tool) => tool.name)).toContain(
+        prefixedMcpToolName("cap-refresh", "search_documents"),
+      );
       expect(resolved.some((input) => input.forceRefresh === true)).toBe(true);
       expect(providerAuthorizations).toBe(mcp.requests.length);
     } finally {
@@ -8725,6 +8731,9 @@ describe("runtime event normalization", () => {
       },
     );
     try {
+      // Model dispatch always follows catalog discovery; opaque bounded names
+      // retain their reverse identity in that frozen catalog.
+      await prepared.mcpServers[0]!.listTools();
       const setupAuthorizations = providerAuthorizations;
       const result = await prepared.mcpServers[0]!.callToolResult!(
         "cap-uncertain__search_documents",

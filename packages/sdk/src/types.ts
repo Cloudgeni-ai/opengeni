@@ -2182,6 +2182,8 @@ export type SessionEventPage = {
 
 export type ToolAuthNeededPayload = {
   serverId: string;
+  /** Configured connector for recovery; serverId retains the execution alias. */
+  canonicalServerId?: string | undefined;
   toolName?: string | null | undefined;
   providerDomain: string;
   provider?: string | undefined;

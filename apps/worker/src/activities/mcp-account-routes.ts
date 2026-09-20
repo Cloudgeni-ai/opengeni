@@ -1,6 +1,18 @@
 import type { Settings } from "@opengeni/config";
-import type { McpConnectionAccountBinding, ToolRef } from "@opengeni/contracts";
+import type {
+  McpConnectionAccountBinding,
+  ToolRef,
+  ToolAuthNeededPayload,
+} from "@opengeni/contracts";
 import type { ApiIntegrationRuntime } from "@opengeni/db";
+
+export function accountRouteAuthNeededPayload(
+  payload: ToolAuthNeededPayload,
+  bindings: readonly McpConnectionAccountBinding[] | null | undefined,
+): ToolAuthNeededPayload {
+  const binding = bindings?.find((candidate) => candidate.serverId === payload.serverId);
+  return binding ? { ...payload, canonicalServerId: binding.canonicalServerId } : payload;
+}
 
 /** Expand only after canonical tool-policy admission. Aliases are execution
  * identities, never an alternate way to gain admission to a connector. */

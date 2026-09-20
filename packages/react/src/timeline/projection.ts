@@ -1034,6 +1034,8 @@ export function buildTimeline(
           id: event.id,
           turnId,
           serverId: typeof payload.serverId === "string" ? payload.serverId : null,
+          canonicalServerId:
+            typeof payload.canonicalServerId === "string" ? payload.canonicalServerId : null,
           source: capability
             ? "capability"
             : event.type === "tool.auth_needed"

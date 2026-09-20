@@ -38,7 +38,11 @@ import {
   resolveGoogleDrivePublicationTarget,
 } from "../google-drive-publication";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
-import { expandApiIntegrationAccountRoutes, expandMcpAccountRoutes } from "../mcp-account-routes";
+import {
+  accountRouteAuthNeededPayload,
+  expandApiIntegrationAccountRoutes,
+  expandMcpAccountRoutes,
+} from "../mcp-account-routes";
 import { createMcpOperationPersistence } from "@opengeni/db/mcp-operations";
 import { createMcpOperationReadStore } from "../mcp-operation-store";
 import { createMcpOperationObserverResolver } from "../mcp-operation-observer";
@@ -469,7 +473,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       return;
     }
     await eventing.publish!(
-      [{ type: "tool.auth_needed", payload: rollingSafeToolAuthNeededPayload(payload) }],
+      [
+        {
+          type: "tool.auth_needed",
+          payload: rollingSafeToolAuthNeededPayload(
+            accountRouteAuthNeededPayload(payload, turn.mcpAccountBindings),
+          ),
+        },
+      ],
       true,
     );
   };

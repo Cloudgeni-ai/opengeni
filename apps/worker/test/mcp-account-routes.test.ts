@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import type { McpConnectionAccountBinding } from "@opengeni/contracts";
-import { expandMcpAccountRoutes } from "../src/activities/mcp-account-routes";
+import {
+  accountRouteAuthNeededPayload,
+  expandMcpAccountRoutes,
+} from "../src/activities/mcp-account-routes";
 
 const personal: McpConnectionAccountBinding = {
   serverId: "mail-account-personal",
@@ -51,6 +54,21 @@ const settings = () =>
       },
     ],
   });
+
+test("auth recovery keeps exact execution alias and adds only frozen canonical identity", () => {
+  const payload = {
+    serverId: personal.serverId,
+    providerDomain: personal.providerDomain,
+    reason: "personal_authority_unavailable" as const,
+  };
+  expect(accountRouteAuthNeededPayload(payload, [personal])).toEqual({
+    ...payload,
+    canonicalServerId: "mail",
+  });
+  expect(
+    accountRouteAuthNeededPayload({ ...payload, serverId: "unknown" }, [personal]),
+  ).not.toHaveProperty("canonicalServerId");
+});
 
 test("simultaneous routes retain canonical restrictions and distinct exact account identities", () => {
   const original = settings();
