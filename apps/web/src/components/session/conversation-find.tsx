@@ -155,21 +155,28 @@ export default function ConversationFind(props: {
     props.initial.matchSequence,
     props.initial.matchOffset,
   ]);
-  const lastIdentity = useRef(JSON.stringify([scope, committedQuery]));
+  const lastIdentity = useRef({ scope, query: committedQuery, client });
   useEffect(() => {
-    const identity = JSON.stringify([scope, committedQuery]);
-    if (lastIdentity.current === identity && !search.accessDenied) return;
-    lastIdentity.current = identity;
+    const sameAuthority =
+      lastIdentity.current.scope === scope && lastIdentity.current.client === client;
+    if (sameAuthority && lastIdentity.current.query === committedQuery && !search.accessDenied)
+      return;
+    lastIdentity.current = { scope, query: committedQuery, client };
     ++navigationLifetime.current.generation;
     navigationLifetime.current.controller?.abort();
     setNavigating(false);
-    desired.current = null;
-    setSeeking(false);
+    // A replacement route installs its exact occurrence before the query
+    // debounce commits. Preserve that pending target for this query, but never
+    // carry it across authority changes, denial, or an unrelated draft commit.
+    if (!sameAuthority || search.accessDenied || desired.current?.query !== committedQuery) {
+      desired.current = null;
+    }
+    setSeeking(desired.current !== null);
     handledPage.current = null;
     setNavigationError(null);
     setIndex(0);
     onTarget(null);
-  }, [scope, committedQuery, search.accessDenied, onTarget]);
+  }, [scope, committedQuery, client, search.accessDenied, onTarget]);
   function move(direction: -1 | 1) {
     if (!matches.length || search.loading) return;
     const next = index + direction;
