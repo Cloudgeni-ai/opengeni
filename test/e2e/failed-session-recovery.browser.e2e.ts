@@ -259,16 +259,9 @@ test("permission-disabled model picker never receives recovery guidance", async 
     const picker = page.getByRole("button", { name: "Model and effort", exact: true });
     await picker.waitFor();
     expect(await picker.isDisabled()).toBe(true);
-    await banner.getByRole("alert").waitFor();
-    expect(await banner.textContent()).toContain("This model isn’t available.");
-    expect(await banner.textContent()).not.toContain("Choose another below");
-    expect(await banner.textContent()).toContain(
-      "You do not have permission to recover this sandbox.",
-    );
-    expect(await banner.getByRole("alert").textContent()).toBe(
-      "Could not check checkpoint recovery. No new recovery request was sent.",
-    );
-    expect(await banner.getByRole("button").allTextContents()).toEqual(["Check recovery status"]);
+    expect(await banner.textContent()).toBe("This model isn’t available.");
+    expect(await banner.getByRole("alert").count()).toBe(0);
+    expect(await banner.getByRole("button").count()).toBe(0);
     if (evidenceDir)
       await page.screenshot({
         path: `${evidenceDir}/permission-disabled-desktop.png`,

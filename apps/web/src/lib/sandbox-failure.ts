@@ -11,3 +11,11 @@ export function isStructuralSandboxFailure(payload: Record<string, unknown>): bo
     payload.code === "unrecoverable"
   );
 }
+
+/** A known no-compute route has no checkpoint to restore. Unknown routes stay gated. */
+export function needsSandboxRecoveryCheck(
+  route: { sandboxBackend?: string; activeSandboxId?: string | null },
+  structuralFailure = false,
+): boolean {
+  return structuralFailure || route.sandboxBackend !== "none" || route.activeSandboxId !== null;
+}
