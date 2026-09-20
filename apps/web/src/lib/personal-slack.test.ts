@@ -12,7 +12,7 @@ import {
 } from "./personal-slack";
 
 test("completed stock Slack setup explicitly enables account selection without rewriting existing pins", async () => {
-  const enableCapability = mock(async () => {});
+  const enableCapability = mock(async () => ({ status: "active" }));
   const workspaceId = "33333333-3333-4333-8333-333333333333";
   const attempt: ConnectAttempt = {
     id: "attempt",
@@ -38,10 +38,11 @@ test("completed stock Slack setup explicitly enables account selection without r
   await enableNewSlackAccountTools(
     { enableCapability },
     workspaceId,
-    capability({ enabled: false }),
+    capability({ enabled: false, actions: ["connect", "inspect"] }),
     attempt,
   );
   expect(enableCapability).toHaveBeenCalledWith(workspaceId, "mcp:personal-slack", {
+    onlyIfUninstalled: true,
     connectionRef: {
       providerDomain: "slack.com",
       kind: "oauth2",
@@ -72,6 +73,53 @@ test("completed stock Slack setup explicitly enables account selection without r
     { ...attempt, workspaceId: "another" },
   );
   expect(enableCapability).not.toHaveBeenCalled();
+  const fresh = capability({
+    enabled: false,
+    connectionRef: null,
+    actions: ["connect", "inspect"],
+  });
+  for (const state of ["failed", "cancelled", "requires_user_action"] as const) {
+    await enableNewSlackAccountTools({ enableCapability }, workspaceId, fresh, {
+      ...attempt,
+      state,
+    });
+  }
+  await enableNewSlackAccountTools(
+    { enableCapability },
+    workspaceId,
+    { ...fresh, runtime: { ...fresh.runtime, available: false } },
+    attempt,
+  );
+  await enableNewSlackAccountTools(
+    { enableCapability },
+    workspaceId,
+    { ...fresh, actions: ["inspect"] },
+    attempt,
+  );
+  await enableNewSlackAccountTools(
+    { enableCapability },
+    workspaceId,
+    {
+      ...fresh,
+      connectionRef: { providerDomain: "slack.com", kind: "oauth2", connectionId: "disabled-pin" },
+    },
+    attempt,
+  );
+  await enableNewSlackAccountTools({ enableCapability }, workspaceId, fresh, {
+    ...attempt,
+    account: { ...attempt.account!, ownership: "personal" },
+  });
+  expect(enableCapability).not.toHaveBeenCalled();
+  enableCapability.mockImplementationOnce(async () => ({ status: "disabled" }));
+  await expect(
+    enableNewSlackAccountTools({ enableCapability }, workspaceId, fresh, attempt),
+  ).rejects.toThrow("remain disabled");
+  enableCapability.mockImplementationOnce(async () => {
+    throw new Error("capabilities:manage required");
+  });
+  await expect(
+    enableNewSlackAccountTools({ enableCapability }, workspaceId, fresh, attempt),
+  ).rejects.toThrow("capabilities:manage required");
 });
 
 function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {

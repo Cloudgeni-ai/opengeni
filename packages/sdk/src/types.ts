@@ -6679,6 +6679,7 @@ export type CreateCapabilityCatalogItemRequest = {
 };
 
 export type EnableCapabilityRequest = {
+  onlyIfUninstalled?: boolean | undefined;
   config?: Record<string, unknown> | undefined;
   metadata?: Record<string, unknown> | undefined;
   connectionRef?: McpServerConnectionRef | undefined;

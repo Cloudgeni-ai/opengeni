@@ -363,6 +363,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
     kind: item.kind,
     config: installationConfig,
     metadata: installationMetadata,
+    ...(input.payload.onlyIfUninstalled ? { onlyIfUninstalled: true } : {}),
   };
   return {
     commit: (db: Database) =>

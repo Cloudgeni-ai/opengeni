@@ -422,6 +422,8 @@ describe("useSlackIntegration model selection and gating", () => {
       bindings: [],
     });
     try {
+      expect(rendered.model.notice?.title).toBe("Account connected; Slack tools are not enabled");
+      expect(rendered.model.notice?.description).toContain("capability-management permission");
       const container = document.createElement("div");
       document.body.appendChild(container);
       const root = createRoot(container);

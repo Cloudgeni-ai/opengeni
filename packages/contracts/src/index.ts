@@ -11123,6 +11123,8 @@ export const CreateCapabilityCatalogItemRequest = z.object({
 export type CreateCapabilityCatalogItemRequest = z.infer<typeof CreateCapabilityCatalogItemRequest>;
 
 export const EnableCapabilityRequest = z.object({
+  /** Automatic setup may create a missing installation, never rewrite an existing one. */
+  onlyIfUninstalled: z.boolean().optional(),
   config: z.record(z.string(), z.unknown()).default({}),
   metadata: z.record(z.string(), z.unknown()).default({}),
   connectionRef: McpServerConnectionRef.optional(),

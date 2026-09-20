@@ -15,7 +15,7 @@ export async function enableNewSlackAccountTools(
   client: {
     enableCapability(
       ...args: Parameters<OpenGeniBrowserClient["enableCapability"]>
-    ): Promise<unknown>;
+    ): Promise<{ status: string }>;
   },
   workspaceId: string,
   item: CapabilityCatalogItem | null,
@@ -24,16 +24,22 @@ export async function enableNewSlackAccountTools(
   if (
     !item ||
     item.enabled ||
+    item.connectionRef?.connectionId !== undefined ||
+    !item.runtime.available ||
+    !item.actions.includes("connect") ||
     personalSlackCapability([item]) !== item ||
     attempt.workspaceId !== workspaceId ||
     attempt.providerId !== "slack-personal" ||
     attempt.state !== "complete" ||
     !attempt.credentialsCommitted ||
     !attempt.account ||
+    attempt.account.providerId !== attempt.providerId ||
+    attempt.account.ownership !== attempt.ownership ||
     attempt.account.status !== "connected"
   )
     return;
-  await client.enableCapability(workspaceId, item.id, {
+  const installation = await client.enableCapability(workspaceId, item.id, {
+    onlyIfUninstalled: true,
     connectionRef: {
       providerDomain: PERSONAL_SLACK_PROVIDER_DOMAIN,
       kind: "oauth2",
@@ -41,6 +47,9 @@ export async function enableNewSlackAccountTools(
       accountSelection: "all_eligible",
     },
   });
+  if (installation.status !== "active") {
+    throw new Error("The account is connected, but the existing Slack tools remain disabled.");
+  }
 }
 
 export type PersonalSlackAccountState =

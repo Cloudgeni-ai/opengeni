@@ -6066,6 +6066,8 @@ export type EnableCapabilityInstallationInput = {
   workspaceId: string;
   capabilityId: string;
   kind: "mcp";
+  /** Automatic setup must preserve every existing installation, including disabled ones. */
+  onlyIfUninstalled?: boolean;
   config?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
 };
@@ -9403,6 +9405,7 @@ export async function enableCapabilityInstallation(
         )
         .limit(1);
       if (existing) {
+        if (input.onlyIfUninstalled) return mapCapabilityInstallation(existing);
         const [row] = await scopedDb
           .update(schema.capabilityInstallations)
           .set({
@@ -9425,18 +9428,28 @@ export async function enableCapabilityInstallation(
         }
         return mapCapabilityInstallation(row);
       }
-      const [row] = await scopedDb
-        .insert(schema.capabilityInstallations)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          capabilityId: input.capabilityId,
-          kind: input.kind,
-          status: "active",
-          config: input.config ?? {},
-          metadata: input.metadata ?? {},
-        })
-        .returning();
+      const insert = scopedDb.insert(schema.capabilityInstallations).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        capabilityId: input.capabilityId,
+        kind: input.kind,
+        status: "active",
+        config: input.config ?? {},
+        metadata: input.metadata ?? {},
+      });
+      const [row] = await (
+        input.onlyIfUninstalled ? insert.onConflictDoNothing() : insert
+      ).returning();
+      if (!row && input.onlyIfUninstalled) {
+        // A concurrent installation won. Never turn a create-only completion
+        // into an update of its status, credentials, or restricted config.
+        const current = await getCapabilityInstallation(
+          scopedDb,
+          input.workspaceId,
+          input.capabilityId,
+        );
+        if (current) return current;
+      }
       if (!row) {
         throw new Error("Failed to enable capability installation");
       }

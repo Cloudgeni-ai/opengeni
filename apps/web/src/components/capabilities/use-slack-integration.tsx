@@ -1033,12 +1033,18 @@ export function useSlackIntegration({
                   ? "Slack no longer accepts this connection. Reconnect it to restore access."
                   : "OpenGeni could not use this connection. Reconnect it to restore access.",
           }
-        : !personalAvailable && state.state === "not_connected"
+        : connectedPersonal && !personalItem?.enabled
           ? {
               tone: "muted",
-              title: "Personal Slack is not available in this deployment's catalog.",
+              title: "Account connected; Slack tools are not enabled",
+              description: "Enabling tools requires workspace capability-management permission.",
             }
-          : undefined;
+          : !personalAvailable && state.state === "not_connected"
+            ? {
+                tone: "muted",
+                title: "Personal Slack is not available in this deployment's catalog.",
+              }
+            : undefined;
 
     const canStartOAuth = personalAvailable && canManagePersonal && !readOnly;
     // Changing an account still requires connection management permission.
