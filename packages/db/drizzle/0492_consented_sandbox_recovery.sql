@@ -49,7 +49,11 @@ BEGIN
   FOR runtime_role IN SELECT jsonb_array_elements_text(
     current_setting('opengeni.migration_application_roles')::jsonb)
   LOOP
-    EXECUTE format('GRANT SELECT ON opengeni_private.sandbox_recovery_rollout TO %I', runtime_role);
+    -- Fresh installation migrates before provisioning runtime roles. Existing
+    -- rolling roles retain read access now; provisionRoles converges late roles.
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = runtime_role) THEN
+      EXECUTE format('GRANT SELECT ON opengeni_private.sandbox_recovery_rollout TO %I', runtime_role);
+    END IF;
   END LOOP;
 END
 $read_grants$;
