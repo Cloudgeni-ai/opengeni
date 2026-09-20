@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import postgres from "postgres";
+import { createDb } from "@opengeni/db";
+import { supervisedCommandProtocolReady } from "@opengeni/db/retained-provider-commands";
 import {
   acquireCanaryDatabase,
   NATIVE_CANARY_DATABASE_OPT_IN,
@@ -38,6 +40,8 @@ test.skipIf(process.env.OPENGENI_OPE534_NATIVE_POSTGRES !== NATIVE_CANARY_DATABA
         const databaseName = new URL(fixture.adminUrl).pathname.slice(1);
         const app = postgres(fixture.appUrl, { max: 1 });
         defer("fixture test app client", () => app.end());
+        const client = createDb(fixture.appUrl);
+        defer("readiness test client", () => client.close());
         expect(databaseName).toMatch(/^og_ope534_rotation_canary_[a-f0-9]{32}$/);
         const [identity] = await app`select current_user as login, current_database() as database,
         (select rolsuper or rolbypassrls or rolcreaterole or rolcreatedb from pg_roles where rolname=current_user) as privileged`;
@@ -56,6 +60,16 @@ test.skipIf(process.env.OPENGENI_OPE534_NATIVE_POSTGRES !== NATIVE_CANARY_DATABA
         await expect(
           (async () => await app`select * from schema_migrations limit 1`)(),
         ).rejects.toThrow();
+        // Exercise the actual prevention readiness API under the restricted app
+        // login. The altered trigger belongs only to this disposable database.
+        expect(await supervisedCommandProtocolReady(client.db)).toBe(true);
+        await fixture.admin`alter table sandbox_lease_holders disable trigger supervised_command_holder_guard`;
+        try {
+          expect(await supervisedCommandProtocolReady(client.db)).toBe(false);
+        } finally {
+          await fixture.admin`alter table sandbox_lease_holders enable trigger supervised_command_holder_guard`;
+        }
+        expect(await supervisedCommandProtocolReady(client.db)).toBe(true);
         return { databaseName, appRole: fixture.appRole };
       },
     );

@@ -50,6 +50,7 @@ import {
   readLease,
 } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
+import { supervisedCommandProtocolReady } from "@opengeni/db/retained-provider-commands";
 import { createObservability } from "@opengeni/observability";
 import { RoutingSandboxSession } from "@opengeni/runtime";
 import {
@@ -77,6 +78,12 @@ import {
 import { acquireCanaryDatabase } from "./ope534-rotation-canary-database";
 import { runCanaryCleanupStages, withCanaryFixture } from "./ope534-rotation-canary-cleanup";
 import { verifyCanaryImageProvenance } from "./ope534-rotation-canary-provenance";
+import {
+  assertCanarySupervisionReady,
+  assertCompletedTurnPreservedSupervision,
+  assertSettledCanarySupervision,
+  type CanarySupervisionProjection,
+} from "./ope534-rotation-canary-supervision";
 
 const LIFETIME_SECONDS = 600;
 const ROTATION_LEAD_MS = 180_000;
@@ -136,11 +143,14 @@ test.skipIf(!live)(
           sandboxPreparationProfiles: "none",
           sandboxEnvAllowlist: "",
         }),
-        // Structural overlay keeps this harness independently typecheckable on
-        // its pre-integration base. The integrated launch path additionally
-        // enforces DB readiness; old/legacy launches fail the descriptor check.
+        // Requires the integrated prevention runtime and readiness migration.
         modalCommandSupervisionEnabled: true,
       };
+      assertCanarySupervisionReady({
+        enabled: settings.modalCommandSupervisionEnabled,
+        databaseReady: await supervisedCommandProtocolReady(db),
+        backend: settings.sandboxBackend,
+      });
       const observability = createObservability(settings, { component: "ope534-isolated-canary" });
       const services = { db, settings, observability, objectStorage: null };
       const activities = createSandboxLeaseActivities(
@@ -239,6 +249,7 @@ test.skipIf(!live)(
           createdEventPayload: {},
         });
         let first = true;
+        const capabilityChecked = new Set<string>();
         async function turn() {
           if (!first) {
             await addSessionSystemUpdate(db, {
@@ -306,6 +317,13 @@ test.skipIf(!live)(
             route instanceof RoutingSandboxSession,
             "canonical routing proxy unavailable",
           );
+          if (!capabilityChecked.has(resumed.established.instanceId)) {
+            // There is no native --probe subcommand. This ordinary routed
+            // command must itself launch/settle under the native supervisor,
+            // exercising its fail-closed subreaper/pidfd capability checks.
+            await command(route, "test -x /usr/local/bin/opengeni-command-supervisor");
+            capabilityChecked.add(resumed.established.instanceId);
+          }
           return {
             resumed,
             route,
@@ -375,6 +393,18 @@ test.skipIf(!live)(
           }
           return result;
         }
+        async function supervisionProjection(processId: string) {
+          const [row] = await admin<CanarySupervisionProjection[]>`
+            select p.provider_command as "providerCommand", p.state, p.exit_code as "exitCode",
+              p.settled_at as "settledAt", p.supervision_receipt as "supervisionReceipt",
+              p.supervision_output_captured as "supervisionOutputCaptured",
+              p.cancellation_requested_at as "cancellationRequestedAt", p.cancellation_reason as "cancellationReason",
+              b.state as "backgroundState", b.cancel_requested_at as "backgroundCancelledAt",
+              b.exit_code as "backgroundExitCode"
+            from sandbox_retained_processes p join session_background_commands b on b.retained_process_id=p.id
+            where p.id=${processId} and p.workspace_id=${ids.workspaceId} and p.session_id=${session.id}`;
+          return row;
+        }
         let current = await turn();
         await writeMarker(current.route, "baseline");
         for (let cycle = 1; cycle <= 2; cycle++) {
@@ -412,15 +442,9 @@ test.skipIf(!live)(
           );
           const supervisionIdentity = assertSupervisedCanaryCommand(retained.provider_command);
           await current.complete();
-          const [afterCompletedTurn] =
-            await admin`select p.state,b.state as background_state,b.cancel_requested_at
-          from sandbox_retained_processes p join session_background_commands b on b.retained_process_id=p.id
-          where p.id=${retained.id}`;
-          requireCanary(
-            afterCompletedTurn?.state === "active" &&
-              afterCompletedTurn.background_state === "running" &&
-              afterCompletedTurn.cancel_requested_at === null,
-            "completed originating turn cancelled its adopted server",
+          assertCompletedTurnPreservedSupervision(
+            retained.provider_command,
+            await supervisionProjection(retained.id),
           );
           current = await turn();
           requireCanary(
@@ -433,6 +457,10 @@ test.skipIf(!live)(
           );
           await writeMarker(current.route, `after-turn-${cycle}`);
           await current.complete();
+          assertCompletedTurnPreservedSupervision(
+            retained.provider_command,
+            await supervisionProjection(retained.id),
+          );
           const before = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
           requireCanary(
             before?.instanceId && before.providerDeadlineAt && before.providerCreatedAt,
@@ -498,6 +526,13 @@ test.skipIf(!live)(
               artifact.source_lease_epoch === before.leaseEpoch,
             "checkpoint has wrong predecessor identity",
           );
+          requireCanary(rotationRequestedAt !== null, "rotation admission was not observed");
+          const settledSupervision = assertSettledCanarySupervision(
+            retained.provider_command,
+            await supervisionProjection(retained.id),
+            rotationRequestedAt,
+            before.providerDeadlineAt.getTime(),
+          );
           current = await turn();
           const restoredHashes = await verifyMarkers(current.route);
           const after = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
@@ -508,6 +543,7 @@ test.skipIf(!live)(
           const receipt = {
             cycle,
             supervision: supervisionIdentity,
+            settledSupervision,
             predecessor: before.instanceId,
             successor: after.instanceId,
             predecessorEpoch: before.leaseEpoch,
