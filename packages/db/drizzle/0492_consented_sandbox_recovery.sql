@@ -100,12 +100,12 @@ CREATE FUNCTION guard_public_sandbox_recovery_lease() RETURNS trigger
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 BEGIN
   IF NEW.public_recovery->>'status' = 'accepted'
-    AND (OLD.public_recovery->>'status' IS DISTINCT FROM 'accepted'
+    AND (TG_OP = 'INSERT' OR OLD.public_recovery->>'status' IS DISTINCT FROM 'accepted'
       OR NEW.public_recovery->>'operationId' IS DISTINCT FROM OLD.public_recovery->>'operationId')
     AND NOT coalesce((SELECT consent_enabled FROM opengeni_private.sandbox_recovery_rollout WHERE singleton), false) THEN
     RAISE EXCEPTION 'public checkpoint consent is not activated' USING ERRCODE = '55000';
   END IF;
-  IF OLD.public_recovery->>'status' = 'accepted' THEN
+  IF TG_OP = 'UPDATE' AND OLD.public_recovery->>'status' = 'accepted' THEN
     IF NEW.current_checkpoint_artifact_id IS DISTINCT FROM OLD.current_checkpoint_artifact_id
       OR NEW.workspace_generation IS DISTINCT FROM OLD.workspace_generation
       OR NEW.archive_generation IS DISTINCT FROM OLD.archive_generation THEN
@@ -120,7 +120,7 @@ BEGIN
   RETURN NEW;
 END $$;
 REVOKE ALL ON FUNCTION guard_public_sandbox_recovery_lease() FROM PUBLIC;
-CREATE TRIGGER public_sandbox_recovery_lease_guard BEFORE UPDATE ON sandbox_leases
+CREATE TRIGGER public_sandbox_recovery_lease_guard BEFORE INSERT OR UPDATE ON sandbox_leases
   FOR EACH ROW EXECUTE FUNCTION guard_public_sandbox_recovery_lease();
 
 -- Finalized consent is the monotonic affected-session marker, independent of
@@ -158,7 +158,8 @@ BEGIN
     END IF;
   END IF;
   IF TG_OP <> 'DELETE' AND NEW.action = 'sandbox.recovery.consent'
-    AND NEW.result ? 'operationId' AND (TG_OP = 'INSERT' OR NOT (OLD.result ? 'operationId'))
+    AND NEW.result ? 'operationId' AND (TG_OP = 'INSERT'
+      OR OLD.action IS DISTINCT FROM 'sandbox.recovery.consent' OR NOT (OLD.result ? 'operationId'))
     AND NOT coalesce((SELECT consent_enabled FROM opengeni_private.sandbox_recovery_rollout WHERE singleton), false) THEN
     RAISE EXCEPTION 'public checkpoint consent is not activated' USING ERRCODE = '55000';
   END IF;

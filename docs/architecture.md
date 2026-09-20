@@ -428,7 +428,8 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 Same-session historical CURRENT recovery requires managed-human consent, exact
 checkpoint/generation CAS, fenced singleton membership and durable model warnings;
 never command replay. Public authority: `packages/core/src/application/sandbox-recovery.ts`;
-restore lifecycle: `packages/db/src/index.ts`; membership/GC guards: migration 0492.
+restore lifecycle: `packages/db/src/index.ts`; membership/GC/protocol guards: migration 0492.
+Default-off activation and permanent worker-protocol fencing protect rolling rollout.
 Retry checks the effective route. See [run lifecycle](run-lifecycle.md).
 
 Sessions retain home-compute policy and epoch-fenced targets. Selection proves
