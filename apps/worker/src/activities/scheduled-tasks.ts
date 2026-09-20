@@ -488,6 +488,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           ? { kind: "subject", subjectId: taskAuthoritySubjectId, accountId: task.accountId }
           : { kind: "none" },
         authoritySelections: task.agentConfig.connectionAccounts ?? [],
+        authoritySelectionsFrozen: task.agentConfig.connectionAccountsFrozen === true,
         ...scheduledConnectionSurfaceEligibility(
           settings,
           connectionTarget ?? {

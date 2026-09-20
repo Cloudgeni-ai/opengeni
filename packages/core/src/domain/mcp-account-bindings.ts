@@ -7,7 +7,7 @@ import {
   type McpConnectionAccountSelection,
   type McpPersonalConnectionDelegation,
 } from "@opengeni/contracts";
-import { HTTPException } from "hono/http-exception";
+import { ConnectionAccountSelectionError } from "./connection-account-selection-error";
 
 /** Account routes are stable across retries, but are never parsed to discover
  * authority. The canonical server is retained separately in the binding. */
@@ -56,6 +56,8 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
   servers: McpServerConfig[];
   connections: ConnectionMetadata[];
   selections?: McpConnectionAccountSelection[];
+  /** The complete accepted set, including an explicitly empty set. */
+  selectionsFrozen?: boolean;
 }): McpConnectionAccountBinding[] {
   const remaining = new Set(
     (input.selections ?? []).map((selection) =>
@@ -66,6 +68,9 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
   for (const server of input.servers) {
     const ref = server.connectionRef;
     if (!ref || ref.authoritySource === "host") continue;
+    // A selector becomes an exact reference at acceptance; do not persist a
+    // selection directive beside the frozen connection UUID.
+    const { accountSelection: _accountSelection, ...exactRef } = ref;
     const selections = (input.selections ?? []).filter(
       (selection) => selection.serverId === server.id,
     );
@@ -76,11 +81,11 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
         connection.status !== "active" ||
         connection.providerDomain.toLowerCase() !== ref.providerDomain.toLowerCase() ||
         (ref.kind && connection.kind !== ref.kind) ||
-        (ref.selectedResources && ref.connectionId !== connection.id) ||
+        (ref.connectionId !== undefined && ref.connectionId !== connection.id) ||
         (ref.resource &&
           (typeof connection.metadata.resource !== "string" ||
             canonicalResource(connection.metadata.resource) !== canonicalResource(ref.resource))) ||
-        (selectedIds.size > 0 && !selectedIds.has(connection.id))
+        ((input.selectionsFrozen || selectedIds.size > 0) && !selectedIds.has(connection.id))
       )
         continue;
       const personal = connection.subjectId !== null;
@@ -102,7 +107,7 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
         providerDomain: connection.providerDomain,
         kind: connection.kind,
         connectionRef: {
-          ...ref,
+          ...exactRef,
           connectionId: connection.id,
           providerDomain: connection.providerDomain,
           kind: connection.kind,
@@ -115,9 +120,9 @@ export function mcpAccountBindingsFromVisibleConnections(input: {
     }
   }
   if (remaining.size > 0) {
-    throw new HTTPException(422, {
-      message: "An attached connector account is unavailable. Review its connection settings.",
-    });
+    throw new ConnectionAccountSelectionError(
+      "An attached connector account is unavailable. Review its connection settings.",
+    );
   }
   return McpConnectionAccountBindings.parse(
     bindings.sort((left, right) => left.serverId.localeCompare(right.serverId)),

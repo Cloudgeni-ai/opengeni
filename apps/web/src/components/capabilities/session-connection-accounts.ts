@@ -32,7 +32,7 @@ function eligibleConnections(
       (entry.subjectId === null || entry.authorityId != null) &&
       entry.status === "active" &&
       (!ref.kind || entry.kind === ref.kind) &&
-      (!ref.selectedResources || entry.id === ref.connectionId) &&
+      (ref.connectionId === undefined || entry.id === ref.connectionId) &&
       (!ref.resource ||
         (typeof entry.metadata?.resource === "string" &&
           canonicalResource(entry.metadata.resource) === canonicalResource(ref.resource))) &&

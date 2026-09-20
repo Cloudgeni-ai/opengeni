@@ -517,6 +517,7 @@ async function validateMcpCapabilityConnectionRef(
     providerDomain: ref.providerDomain.trim(),
     subjectScope,
     ...(ref.connectionId ? { connectionId: ref.connectionId } : {}),
+    ...(ref.accountSelection ? { accountSelection: ref.accountSelection } : {}),
     ...(ref.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
     ...(ref.provider ? { provider: ref.provider.trim() } : {}),
     ...(ref.kind ? { kind: ref.kind } : {}),
@@ -554,7 +555,11 @@ async function validateMcpCapabilityConnectionRef(
         input.grant.subjectId,
       )
     : null;
-  if (!connection && subjectScope === "subject" && !normalized.connectionId) {
+  if (
+    !connection &&
+    !normalized.connectionId &&
+    (subjectScope === "subject" || normalized.accountSelection === "all_eligible")
+  ) {
     const visible = await listConnectionsMetadata(
       input.db,
       input.workspaceId,
@@ -563,7 +568,7 @@ async function validateMcpCapabilityConnectionRef(
     connection =
       visible.find(
         (candidate) =>
-          candidate.subjectId === input.grant.subjectId &&
+          candidate.subjectId === (subjectScope === "subject" ? input.grant.subjectId : null) &&
           candidate.providerDomain === normalized.providerDomain &&
           (!normalized.kind || candidate.kind === normalized.kind) &&
           candidate.status === "active",
@@ -1725,10 +1730,8 @@ function installationConnectionRef(
   if (!ref || typeof ref !== "object") {
     return null;
   }
-  const { authoritySource, connectionId, providerDomain, kind, subjectScope } = ref as Record<
-    string,
-    unknown
-  >;
+  const { authoritySource, connectionId, providerDomain, kind, subjectScope, accountSelection } =
+    ref as Record<string, unknown>;
   if (typeof providerDomain !== "string" || typeof kind !== "string") {
     return null;
   }
@@ -1739,10 +1742,22 @@ function installationConnectionRef(
     // open old browser bundles cannot treat a host UUID as native OAuth state.
     return null;
   }
+  if (accountSelection === "all_eligible" && connectionId === undefined) {
+    return {
+      providerDomain,
+      kind,
+      accountSelection,
+      ...(subjectScope === "subject" ? { subjectScope } : {}),
+    };
+  }
   if (subjectScope === "subject") {
     // Never project a native personal connection UUID through workspace-visible
     // capability configuration, including legacy rows that still contain one.
-    return { providerDomain, kind, subjectScope: "subject" };
+    return {
+      providerDomain,
+      kind,
+      subjectScope: "subject",
+    };
   }
   if (typeof connectionId !== "string") {
     return null;

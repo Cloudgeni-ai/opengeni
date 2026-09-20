@@ -136,7 +136,7 @@ test("native refs expose matching accounts across scopes; host refs are not nati
     connectedAccountGroups(selectedNativeConnectorRefs([fixed]), accounts)[0]?.accounts.map(
       (value) => value.id,
     ),
-  ).toEqual(["connection", "other"]);
+  ).toEqual(["other"]);
   expect(
     connectedAccountGroups(
       selectedNativeConnectorRefs([
@@ -176,4 +176,20 @@ test("account-specific resource restrictions do not transfer to sibling accounts
       { ...account, id: "other", metadata: { resource: "https://other.example/mcp" } },
     ] as unknown as ConnectionMetadata[])[0]?.accounts.map((value) => value.id),
   ).toEqual(["connection"]);
+});
+
+test("explicit catalog selectors include both ownership scopes without overriding exact pins", () => {
+  const selector = {
+    ...item,
+    connectionRef: { ...item.connectionRef!, accountSelection: "all_eligible" as const },
+  };
+  const accounts = [
+    account,
+    { ...account, id: "workspace", subjectId: null },
+  ] as ConnectionMetadata[];
+  expect(
+    connectedAccountGroups(selectedNativeConnectorRefs([selector]), accounts)[0]?.accounts.map(
+      (entry) => entry.id,
+    ),
+  ).toEqual(["connection", "workspace"]);
 });

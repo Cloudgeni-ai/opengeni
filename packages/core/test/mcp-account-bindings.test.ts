@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import type { ConnectionMetadata } from "@opengeni/contracts";
+import type {
+  CapabilityCatalogItem,
+  CapabilityInstallation,
+  ConnectionMetadata,
+} from "@opengeni/contracts";
+import { ConnectionAccountSelectionError } from "../src/domain/personal-connection-delegations";
+import { applyCapabilityEnablement } from "../src/domain/capabilities";
 import {
   mcpAccountBindingsFromVisibleConnections,
   mcpAccountRouteId,
@@ -39,6 +45,26 @@ function connection(subjectId: string | null = "alice"): ConnectionMetadata {
 }
 const input = { accountId, workspaceId, subjectId: "alice", servers: [server] };
 
+test("catalog projection distinguishes intentional workspace selectors from exact installation pins", () => {
+  const item = {
+    kind: "mcp",
+    source: "manual",
+    runtime: { available: true },
+    metadata: {},
+    authModel: null,
+  } as CapabilityCatalogItem;
+  const project = (connectionRef: Record<string, unknown>) =>
+    applyCapabilityEnablement(item, {
+      status: "active",
+      config: { connectionRef },
+      metadata: { mcpConnectivity: { status: "auth_deferred" } },
+    } as CapabilityInstallation).connectionRef;
+  const selector = { ...server.connectionRef, accountSelection: "all_eligible" };
+  expect(project(selector)).toEqual(selector);
+  const pinned = { ...server.connectionRef, connectionId: crypto.randomUUID() };
+  expect(project(pinned)).toEqual(pinned);
+});
+
 test("workspace and two personal accounts attach with distinct exact routes", () => {
   const connections = [connection(null), connection(), connection()];
   const bindings = mcpAccountBindingsFromVisibleConnections({ ...input, connections });
@@ -50,6 +76,25 @@ test("workspace and two personal accounts attach with distinct exact routes", ()
   ).toBeNull();
   expect(personalDelegationsForAccountBindings(bindings)).toHaveLength(2);
   expect(bindings.map((binding) => binding.accountLabel)).toContain("Alice · Example · Only me");
+});
+
+test("intentional catalog selectors accept workspace and personal accounts and freeze exact refs", () => {
+  const connections = [connection(null), connection()];
+  const bindings = mcpAccountBindingsFromVisibleConnections({
+    ...input,
+    servers: [
+      { ...server, connectionRef: { ...server.connectionRef, accountSelection: "all_eligible" } },
+    ],
+    connections,
+  });
+  expect(bindings).toHaveLength(2);
+  expect(
+    bindings.every(
+      (binding) =>
+        binding.connectionRef.connectionId === binding.connectionId &&
+        binding.connectionRef.accountSelection === undefined,
+    ),
+  ).toBe(true);
 });
 
 test("explicit workspace-only selection excludes personal accounts", () => {
@@ -103,7 +148,75 @@ test("missing selected account never falls back to another eligible account", ()
       connections: [connection()],
       selections: [{ serverId: server.id, connectionId: crypto.randomUUID() }],
     }),
-  ).toThrow("unavailable");
+  ).toThrow(ConnectionAccountSelectionError);
+});
+
+test("explicit connection refs remain exact without selectedResources or account choices", () => {
+  const pinned = connection(null);
+  const other = connection();
+  const exact = {
+    ...input,
+    servers: [{ ...server, connectionRef: { ...server.connectionRef, connectionId: pinned.id } }],
+  };
+  expect(
+    mcpAccountBindingsFromVisibleConnections({ ...exact, connections: [pinned, other] }).map(
+      (binding) => binding.connectionId,
+    ),
+  ).toEqual([pinned.id]);
+  expect(() =>
+    mcpAccountBindingsFromVisibleConnections({
+      ...exact,
+      connections: [pinned, other],
+      selections: [{ serverId: server.id, connectionId: other.id }],
+    }),
+  ).toThrow(ConnectionAccountSelectionError);
+  expect(mcpAccountBindingsFromVisibleConnections({ ...exact, connections: [other] })).toEqual([]);
+});
+
+test("frozen empty selection never expands when an account appears; historic omission still resolves", () => {
+  const later = connection();
+  expect(
+    mcpAccountBindingsFromVisibleConnections({
+      ...input,
+      connections: [],
+      selections: [],
+      selectionsFrozen: true,
+    }),
+  ).toEqual([]);
+  expect(
+    mcpAccountBindingsFromVisibleConnections({
+      ...input,
+      connections: [later],
+      selections: [],
+      selectionsFrozen: true,
+    }),
+  ).toEqual([]);
+  expect(
+    mcpAccountBindingsFromVisibleConnections({ ...input, connections: [later], selections: [] }),
+  ).toHaveLength(1);
+});
+
+test("frozen selections exclude newly eligible connectors and reject revoked accounts with shared typed error", () => {
+  const selected = connection();
+  const selections = [{ serverId: server.id, connectionId: selected.id }];
+  const frozen = {
+    ...input,
+    servers: [server, { ...server, id: "other" }],
+    selections,
+    selectionsFrozen: true,
+  };
+  expect(
+    mcpAccountBindingsFromVisibleConnections({
+      ...frozen,
+      connections: [selected, connection()],
+    }).map((binding) => binding.connectionId),
+  ).toEqual([selected.id]);
+  expect(() =>
+    mcpAccountBindingsFromVisibleConnections({
+      ...frozen,
+      connections: [{ ...selected, status: "revoked" }, connection()],
+    }),
+  ).toThrow(ConnectionAccountSelectionError);
 });
 
 test("resource constraints are enforced before attaching accounts", () => {

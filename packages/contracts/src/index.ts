@@ -4181,6 +4181,8 @@ export const McpServerConnectionRef = z
   .object({
     /** Opaque host or standalone connection identifier. */
     connectionId: z.string().min(1).optional(),
+    /** Explicit native catalog selector. Never overrides an exact connection pin. */
+    accountSelection: z.literal("all_eligible").optional(),
     /** Host-owned credential authority; omission keeps OpenGeni's native connection authority. */
     authoritySource: z.literal("host").optional(),
     /** Durable fixed reference, or an explicit configuration-only selector.
@@ -4207,6 +4209,19 @@ export const McpServerConnectionRef = z
   })
   .strict()
   .superRefine((reference, context) => {
+    if (
+      reference.accountSelection &&
+      (reference.connectionId !== undefined ||
+        reference.authoritySource === "host" ||
+        reference.selectedResources !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["accountSelection"],
+        message:
+          "An all-eligible selector cannot contain an exact connection, host authority, or selected resources",
+      });
+    }
     const acceptedTurn = reference.hostBinding && "selection" in reference.hostBinding;
     if (
       acceptedTurn &&
@@ -4487,7 +4502,21 @@ export const McpConnectionAccountSelections = z
   .max(128)
   .superRefine((selections, context) => {
     const seen = new Set<string>();
+    const specialized = new Set<string>();
     for (const [index, selection] of selections.entries()) {
+      if (
+        selection.serverId === "github:personal" ||
+        selection.serverId === "google-drive-publishing"
+      ) {
+        if (specialized.has(selection.serverId)) {
+          context.addIssue({
+            code: "custom",
+            message: "This specialized surface accepts only one connection account",
+            path: [index, "serverId"],
+          });
+        }
+        specialized.add(selection.serverId);
+      }
       const key = JSON.stringify([selection.serverId, selection.connectionId]);
       if (seen.has(key)) {
         context.addIssue({
@@ -9331,8 +9360,9 @@ function refineScheduledTaskAgentConfig(
 export const ScheduledTaskAgentConfig = /* @__PURE__ */ z
   .object(scheduledTaskAgentConfigShape(false))
   .extend({
-    /** Account choices narrow the owner's current connections on each occurrence. */
+    /** Exact accepted choices when frozen; legacy omission retains historical selection. */
     connectionAccounts: McpConnectionAccountSelections.optional(),
+    connectionAccountsFrozen: z.literal(true).optional(),
   })
   .superRefine(refineScheduledTaskAgentConfig);
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
@@ -11020,6 +11050,7 @@ export const CapabilityCatalogItem = z.object({
   connectionRef: z
     .object({
       connectionId: z.string().min(1).optional(),
+      accountSelection: z.literal("all_eligible").optional(),
       authoritySource: z.literal("host").optional(),
       providerDomain: z.string().min(1),
       kind: z.string().min(1),

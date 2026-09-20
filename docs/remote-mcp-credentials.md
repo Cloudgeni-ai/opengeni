@@ -21,6 +21,7 @@ custom API instances. Multi-account selectors are unpinned; the explicit
 `accountSelection: "all_eligible"` mode cannot be combined with a connection ID,
 host authority, or account-specific selected resources. Existing exact
 configurations are not silently converted to selectors.
+Legacy unpinned selectors retain their existing eligible-account behavior.
 
 Admission resolves credential-free `mcpAccountBindings`. Each binding retains its
 canonical connector ID for policy and a stable account-qualified runtime route
@@ -33,15 +34,21 @@ account. Missing or revoked accounts do not fall back to another identity.
 The accepted binding set follows queued work, continuations, child work and
 scheduled occurrences. New empty sets mean no authenticated account routes;
 historical absent/null sets retain the legacy execution path. Scheduled tasks
-save the selected pairs under the task's execution owner and revalidate them
-when an occurrence is accepted. A frozen empty selection stays empty even if an
-account is connected later. Later workspace participants cannot borrow the
+save the selected pairs with `connectionAccountsFrozen: true` under the task's
+execution owner and revalidate them when an occurrence is accepted. A frozen
+empty list stays empty if accounts are connected later. Material edits preserve
+the accepted selection unless the owner explicitly replaces the account choices;
+historical tasks without the marker retain their prior selection semantics.
+Unavailable selected accounts permanently block the occurrence with
+`connection_account_unavailable`, rather than retrying another identity.
+Later workspace participants cannot borrow the
 prior sender's personal accounts. Results posted in a shared session remain
 visible to that session's participants.
 
 Dedicated first-party surfaces, such as personal GitHub repository access and
 Google Drive publication, retain their existing specialized selection contracts;
-generic MCP account attachment does not broaden those permissions.
+they accept at most one account per specialized surface. Generic MCP account
+attachment does not broaden those permissions.
 
 The former host-specific credential callback is removed from API and worker
 startup and from the core package. The direct workspace tool gateway also uses

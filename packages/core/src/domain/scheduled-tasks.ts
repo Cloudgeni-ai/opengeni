@@ -289,6 +289,7 @@ export async function createValidatedScheduledTask(input: {
       });
   }
   if (!knowledgeAction) {
+    agentConfig.connectionAccountsFrozen = true;
     await validateScheduledTaskMachineTarget({
       settings: input.settings,
       db: input.db,
@@ -1191,6 +1192,9 @@ export async function validatedScheduledTaskUpdate(input: {
         ? { kind: "subject", subjectId: ownerSubjectId, accountId: input.existing.accountId }
         : { kind: "none" },
       authoritySelections: nextAgentConfig.connectionAccounts ?? [],
+      authoritySelectionsFrozen:
+        input.payload.connectionAccounts === undefined &&
+        input.existing.agentConfig.connectionAccountsFrozen === true,
       ...scheduledConnectionSurfaceEligibility(runtimeSettings, nextTarget),
     });
     const routeIds = new Set(
@@ -1213,6 +1217,7 @@ export async function validatedScheduledTaskUpdate(input: {
         )
         .map(({ serverId, connectionId }) => ({ serverId, connectionId })),
     ];
+    nextAgentConfig.connectionAccountsFrozen = true;
     update.agentConfig = nextAgentConfig;
   }
   if (
