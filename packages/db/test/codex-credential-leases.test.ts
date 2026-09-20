@@ -41,6 +41,7 @@ import {
   setCodexCredentialStatusById,
   setActiveCodexCredential,
   setSessionCodexPinInTransaction,
+  setWorkspaceCodexSubscriptionMode,
   switchSessionCodexAccount,
   getSession,
   updateCodexRotationSettings,
@@ -342,6 +343,101 @@ afterAll(async () => {
 }, 180_000);
 
 describe("credential allocator atomic Codex credential allocation", () => {
+  for (const nextMode of ["disabled", "organization", "workspace", "automatic"] as const) {
+    test(`live workspace lease survives source setting ${nextMode} without granting ordinary reads`, async () => {
+      if (!available) return;
+      const [ws] = await freshAccount();
+      const credentialId = await connectCredential(ws!, `live-switch-${nextMode}`);
+      const turnId = await seedTurn(ws!);
+      const leased = await acquire(dbA, ws!, turnId);
+      expect(leased.credentialId).toBe(credentialId);
+      const [before] = await admin`select metadata from session_turns where id = ${turnId}`;
+      await setWorkspaceCodexSubscriptionMode(dbB, {
+        ...ws!,
+        subjectId: null,
+        mode: nextMode,
+      });
+      const [after] = await admin`select metadata from session_turns where id = ${turnId}`;
+      expect(after!.metadata).toEqual(before!.metadata);
+      const reacquired = await acquire(dbB, ws!, turnId);
+      expect(reacquired.credentialId).toBe(credentialId);
+      const authority = {
+        turnId,
+        holderId: `holder:${turnId}`,
+        generation: reacquired.generation!,
+      };
+      expect(
+        (await loadCodexCredentialForRun(dbA, settings, ws!.workspaceId, credentialId, authority))
+          ?.id,
+      ).toBe(credentialId);
+      expect(
+        await loadCodexCredentialForRun(dbA, settings, ws!.workspaceId, credentialId, {
+          ...authority,
+          holderId: "foreign-holder",
+        }),
+      ).toBeNull();
+      if (nextMode === "disabled" || nextMode === "organization") {
+        expect(
+          await loadCodexCredentialForRun(dbA, settings, ws!.workspaceId, credentialId),
+        ).toBeNull();
+        const nextTurn = await seedTurn(ws!, 2);
+        expect((await acquire(dbA, ws!, nextTurn)).credentialId).toBeNull();
+      }
+    });
+  }
+
+  test("legacy turn source is bound before cutover without rewriting its metadata", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    const credentialId = await connectCredential(ws!, "legacy-live-switch");
+    const turnId = await seedTurn(ws!);
+    const [before] = await admin`select metadata from session_turns where id = ${turnId}`;
+    await setWorkspaceCodexSubscriptionMode(dbA, { ...ws!, subjectId: null, mode: "disabled" });
+    const [after] = await admin`select metadata from session_turns where id = ${turnId}`;
+    expect(after!.metadata).toEqual(before!.metadata);
+    const [binding] =
+      await admin`select source from codex_turn_source_bindings where turn_id = ${turnId}`;
+    expect(binding!.source).toBe("workspace");
+    expect((await acquire(dbA, ws!, turnId)).credentialId).toBe(credentialId);
+    await setWorkspaceCodexSubscriptionMode(dbB, { ...ws!, subjectId: null, mode: "organization" });
+    expect((await acquire(dbB, ws!, turnId)).credentialId).toBe(credentialId);
+  });
+
+  test("organization turn retains its pool after Automatic begins preferring a new local account", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    const encrypted = encryptEnvironmentValue(
+      Buffer.from(settings.environmentsEncryptionKey!, "base64"),
+      JSON.stringify({ access_token: "org", refresh_token: "org", id_token: "org" }),
+    );
+    const [organization] = await admin<{ id: string }[]>`
+      insert into codex_subscription_credentials
+        (account_id, organization_id, authority_scope, credential_encrypted, chatgpt_account_id, status)
+      values (${ws!.accountId}, ${ws!.accountId}, 'organization', ${encrypted}, 'retained-org', 'active')
+      returning id`;
+    await admin`insert into organization_codex_rotation_settings (account_id, active_credential_id, rotation_enabled)
+      values (${ws!.accountId}, ${organization!.id}, true)`;
+    const turnId = await seedTurn(ws!);
+    expect((await acquire(dbA, ws!, turnId)).credentialId).toBe(organization!.id);
+    const local = await connectCredential(ws!, "new-local");
+    const original = await acquire(dbB, ws!, turnId);
+    expect(original.credentialId).toBe(organization!.id);
+    expect(original.accounts.map((account) => account.id)).toEqual([organization!.id]);
+    expect(
+      await loadCodexCredentialForRun(dbA, settings, ws!.workspaceId, organization!.id),
+    ).toBeNull();
+    expect(
+      (
+        await loadCodexCredentialForRun(dbA, settings, ws!.workspaceId, organization!.id, {
+          turnId,
+          holderId: original.holderId!,
+          generation: original.generation!,
+        })
+      )?.id,
+    ).toBe(organization!.id);
+    expect((await acquire(dbA, ws!, await seedTurn(ws!, 2))).credentialId).toBe(local);
+  });
+
   for (const policy of ["sharded", "manual", "rotation_off"] as const) {
     for (const recoveryKind of ["quota", "rate_limit", "status", "reconnect"] as const) {
       test(`${policy} same-turn ${recoveryKind} recovery uses ordered refusal evidence`, async () => {
@@ -1008,6 +1104,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
 
     expect(await setActiveCodexCredential(dbA, ws!.workspaceId, credentialId)).toBe(true);
     await updateCodexRotationSettings(dbA, ws!.workspaceId, { rotationEnabled: true });
+    await setWorkspaceCodexSubscriptionMode(dbB, { ...ws!, subjectId: null, mode: "disabled" });
 
     const observed: Array<{ activeCredentialId: string | null; rotationEnabled: boolean }> = [];
     const reconciled = await reconcileCodexCapacityWait(

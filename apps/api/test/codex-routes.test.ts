@@ -309,6 +309,74 @@ describe("codex connect routes", () => {
     });
   });
 
+  for (const mode of ["automatic", "workspace", "organization", "disabled"] as const) {
+    test(`connect/poll preserves ${mode} source preference`, async () => {
+      mockDevice({
+        usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }),
+      });
+      const { body } = await start(WS_A);
+      mockDevice({
+        token: () => json({ authorization_code: "authorization-code", code_verifier: "verifier" }),
+        exchange: () =>
+          json({
+            id_token: jwt({
+              "https://api.openai.com/auth": {
+                chatgpt_account_id: "provider-account",
+                chatgpt_plan_type: "pro",
+              },
+            }),
+            access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+            refresh_token: "refresh-token",
+          }),
+      });
+      const source = {
+        accountId: ACCOUNT,
+        workspaceId: WS_A,
+        workspaceKind: "shared" as const,
+        mode,
+        effectiveSource: mode === "automatic" ? ("organization" as const) : mode,
+        workspaceAvailable: false,
+        organizationAvailable: true,
+      };
+      const mocks = [
+        spyOn(opengeniDb, "getWorkspaceCodexSubscriptionSource").mockResolvedValue(source),
+        spyOn(opengeniDb, "upsertCodexSubscriptionCredential").mockResolvedValue({
+          kind: "upserted",
+          id: "local-account",
+          isNew: true,
+        }),
+        spyOn(opengeniDb, "ensureCodexRotationSettings").mockResolvedValue(undefined),
+        spyOn(opengeniDb, "setInitialActiveCodexCredential").mockResolvedValue(true),
+        spyOn(opengeniDb, "getCodexRotationSettings").mockResolvedValue(null),
+      ];
+      const setMode = spyOn(
+        opengeniDb,
+        "setWorkspaceCodexSubscriptionModeInTransaction",
+      ).mockResolvedValue(source);
+      const mutation = spyOn(opengeniDb, "withSessionCodexCapacityMutation").mockImplementation(
+        async (_db, _input, mutate) => {
+          const result = await mutate(poisonDb as never);
+          return { result: result.result, wakeTargets: [] };
+        },
+      );
+      restores.push(...[...mocks, setMode, mutation].map((mock) => () => mock.mockRestore()));
+      const res = await app().request(`/v1/workspaces/${WS_A}/codex/connect/poll`, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(WS_A, ["connections:write"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ state: body.state }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ status: "connected", accountId: "local-account" });
+      expect(setMode.mock.calls[0]?.[1]).toMatchObject({
+        mode,
+        effectiveSourceBeforeMutation: source.effectiveSource,
+      });
+    });
+  }
+
   test("connect/poll rejects a state minted for a different workspace", async () => {
     mockDevice({
       usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }),

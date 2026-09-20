@@ -753,6 +753,7 @@ export const FORCE_RLS_TABLES = [
   "codex_reset_redemption_attempts",
   "codex_rotation_settings",
   "codex_subscription_credentials",
+  "codex_turn_source_bindings",
   "company_brain_context_selection_receipts",
   "company_brain_preference_proposal_receipts",
   "company_brain_turn_context_snapshots",
@@ -1327,6 +1328,7 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 export const RUNTIME_READ_INSERT_TABLES = [
   "browser_revision_components",
   "browser_revisions",
+  "codex_turn_source_bindings",
   "company_profile_revisions",
   "editable_artifact_blob_refs",
   "editable_artifact_idempotency_receipts",

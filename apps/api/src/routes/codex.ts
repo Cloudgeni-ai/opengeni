@@ -1214,7 +1214,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
-        mode: "workspace",
+        // Connecting local capacity does not override an explicit source choice.
+        // Automatic naturally prefers the newly connected workspace pool.
+        mode: sourceBeforeConnect.mode,
         effectiveSourceBeforeMutation: sourceBeforeConnect.effectiveSource,
       });
       const rotation = await getCodexRotationSettings(tx, workspaceId);

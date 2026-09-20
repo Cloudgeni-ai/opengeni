@@ -983,12 +983,29 @@ provider dispatch and follows the existing lease-loss recovery path.
 Heartbeat renewal is fail-closed as well: a response that arrives after the
 prior worker-confirmed deadline is discarded, while expiry-sensitive lease SQL
 uses execution-time database time after its relevant locks are acquired.
-An effective workspace/organization source transition is a serialized hard
-cutover: the source advisory lock rejects it while a Codex turn is running,
-awaiting action, recovering, waiting for capacity, or still holds a live lease.
-This keeps a capacity waiter from resuming against an obsolete allocator pool;
-same-source pointer, rotation, allocator, and health mutations may wake and
-re-evaluate the immutable accepted snapshot.
+Workspace/organization/disabled source transitions are serialized by the source
+advisory lock, but do not require idle turns. Source-bearing accepted policies
+retain their pool across allocation, recovery, capacity reconciliation, and
+credential materialization. Before a settings or credential mutation, legacy
+turns without a source-bearing policy receive an insert-only
+`codex_turn_source_bindings` sidecar containing the pre-change source; their
+metadata and conversation history are not rewritten. New work uses the new
+setting. Model token materialization and refresh prove the exact live turn lease;
+ordinary workspace reads remain current-source-only. Capacity refresh uses the
+exact accepted turn's pool, and organization capacity wakes include workspaces
+whose new-work source has changed. Membership, ownership, health, token-family
+CAS, and disconnect-with-live-lease fences remain independent of source settings.
+Connecting a local account preserves Automatic, organization, and disabled
+preferences; Automatic naturally selects local capacity for new work.
+
+Migration 0492 is a forward-only maintenance cutover. Stop every old/new API,
+control-worker, and turn-worker process and provide the complete runtime login
+list before migration; its before/after guards reject any live listed database
+session. Provision roles and start only compatible binaries. This drains
+processes, not accepted turns: retain their checkpoints and recover the same
+logical turns with the sidecar intact. Never restart pre-0492 binaries, whose
+credential loaders cannot honor a switched-away accepted source. Normal source
+settings changes after activation require no idle workspace or turn cancellation.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`model-providers.md`](model-providers.md),
