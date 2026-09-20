@@ -207,14 +207,17 @@ export function bindNativeConnectionCredentialsToTurn(
         },
       };
     };
+    const { subjectId: requestSubjectId, ...requestWithoutSubject } = request;
     const result = await nativeResolver({
-      ...request,
+      ...requestWithoutSubject,
       ...(accountBinding?.connectionAuthorityGeneration !== undefined
         ? { expectedAuthorityGeneration: accountBinding.connectionAuthorityGeneration }
         : {}),
       // Workspace authority has no personal owner, even when the turn has a
       // causal human. Do not pass that human as credential ownership context.
-      ...(accountBinding?.subjectScope === "workspace" ? { subjectId: undefined } : {}),
+      ...(accountBinding?.subjectScope !== "workspace" && requestSubjectId !== undefined
+        ? { subjectId: requestSubjectId }
+        : {}),
       connectionUseContext: credentialUseContext,
     });
     if (

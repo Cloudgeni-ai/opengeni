@@ -174,6 +174,6 @@ test("account-specific resource restrictions do not transfer to sibling accounts
     connectedAccountGroups(selectedNativeConnectorRefs([resourceBound]), [
       { ...account, metadata: { resource: "https://example.com/mcp" } },
       { ...account, id: "other", metadata: { resource: "https://other.example/mcp" } },
-    ] as ConnectionMetadata[])[0]?.accounts.map((value) => value.id),
+    ] as unknown as ConnectionMetadata[])[0]?.accounts.map((value) => value.id),
   ).toEqual(["connection"]);
 });

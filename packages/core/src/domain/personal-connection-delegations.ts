@@ -858,9 +858,13 @@ export async function freezeConnectionAccounts(
         ...workspace.filter((connection) => connection.subjectId === null),
         ...personal,
       ],
-      selections: input.authoritySelections?.filter((selection) =>
-        serverIds.has(selection.serverId),
-      ),
+      ...(input.authoritySelections
+        ? {
+            selections: input.authoritySelections.filter((selection) =>
+              serverIds.has(selection.serverId),
+            ),
+          }
+        : {}),
     });
   }
   // Dedicated first-party publication/repository/social surfaces keep their
@@ -871,9 +875,13 @@ export async function freezeConnectionAccounts(
       ...input.settings,
       mcpServers: input.settings.mcpServers.filter((server) => !serverIds.has(server.id)),
     },
-    authoritySelections: input.authoritySelections?.filter(
-      (selection) => !serverIds.has(selection.serverId),
-    ),
+    ...(input.authoritySelections
+      ? {
+          authoritySelections: input.authoritySelections.filter(
+            (selection) => !serverIds.has(selection.serverId),
+          ),
+        }
+      : {}),
   });
   return {
     mcpAccountBindings,

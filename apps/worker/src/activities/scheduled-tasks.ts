@@ -2379,7 +2379,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
           : {}),
       },
       personalConnectionDelegations: input.acceptedExecution.personalConnectionDelegations,
-      mcpAccountBindings: input.acceptedExecution.mcpAccountBindings,
+      mcpAccountBindings: input.acceptedExecution.mcpAccountBindings ?? null,
       xaiProviderAccountAuthoritySnapshot:
         input.acceptedExecution.xaiProviderAccountAuthoritySnapshot,
       scheduledTaskRunId: input.run.id,

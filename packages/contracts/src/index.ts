@@ -9575,7 +9575,7 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
       .strict()
       .nullable(),
     personalConnectionDelegations: McpPersonalConnectionDelegations,
-    mcpAccountBindings: McpConnectionAccountBindings.nullable().default(null),
+    mcpAccountBindings: McpConnectionAccountBindings.nullable().optional(),
     personalResourceAuthoritySubjectId: z.string().min(1).nullable(),
     /** One accepted human principal for every resource-bearing scheduled run. */
     causalHumanSubjectId: z.string().min(1).nullable().default(null),
