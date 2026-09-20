@@ -104,7 +104,7 @@ export function SearchResultsView(props: {
     props.scrollPosition,
     // Title results are interactive while the independent message scan runs.
     // Loading only prevents persistence when it has replaced the actual rows.
-    props.active !== false && !!props.query.trim() && !props.error && props.results.length > 0,
+    props.active !== false && !!props.query.trim() && props.results.length > 0,
     props.results,
     props.query,
   );
@@ -130,21 +130,22 @@ export function SearchResultsView(props: {
         saveScroll(event.currentTarget);
       }}
     >
-      {!props.query.trim() ? (
-        <SearchMessage>Search session titles and messages across this workspace.</SearchMessage>
-      ) : props.error ? (
-        <SearchMessage>
-          <span role="alert">{props.error}</span>
+      {props.query.trim() && props.error ? (
+        <div className="flex items-center gap-2 px-4 py-3 text-sm" role="alert">
+          <span>{props.error}</span>
           <Button variant="outline" size="sm" onClick={props.onRetry}>
             Retry search
           </Button>
-        </SearchMessage>
+        </div>
+      ) : null}
+      {!props.query.trim() ? (
+        <SearchMessage>Search session titles and messages across this workspace.</SearchMessage>
       ) : props.loading && props.results.length === 0 ? (
         <SearchMessage>
           <Loader2Icon className="size-4 animate-spin" aria-hidden="true" />
           <span role="status">Searching conversations…</span>
         </SearchMessage>
-      ) : props.results.length === 0 ? (
+      ) : props.results.length === 0 && props.error ? null : props.results.length === 0 ? (
         <SearchMessage>
           <SearchIcon className="size-5" aria-hidden="true" />
           <span role="status">No matching sessions. Try a shorter phrase or different words.</span>
@@ -229,7 +230,7 @@ export function SearchPreviewView(props: {
   const saveScroll = useRetainedScroll(
     body,
     props.scrollPosition,
-    props.active !== false && !props.loading,
+    props.active !== false && props.messages.length > 0,
     props.messages,
     props.query,
   );
@@ -246,7 +247,11 @@ export function SearchPreviewView(props: {
           <ArrowLeftIcon className="size-4" />
         </Button>
         <h3 className="min-w-0 flex-1 truncate text-sm font-medium">{props.title}</h3>
-        <Button size="sm" onClick={props.onOpen} disabled={props.loading || !!props.error}>
+        <Button
+          size="sm"
+          onClick={props.onOpen}
+          disabled={!props.titleOnly && props.messages.length === 0}
+        >
           {props.titleOnly ? "Open session" : "Open here"}
           <ArrowRightIcon className="size-3.5" />
         </Button>
@@ -258,18 +263,19 @@ export function SearchPreviewView(props: {
         }}
         className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4"
       >
-        {props.loading ? (
-          <SearchMessage>
-            <span role="status">Loading context…</span>
-          </SearchMessage>
-        ) : props.error ? (
-          <SearchMessage>
-            <span role="alert">{props.error}</span>
+        {props.error ? (
+          <div className="flex items-center gap-2 text-sm" role="alert">
+            <span>{props.error}</span>
             <Button variant="outline" size="sm" onClick={props.onRetry}>
               Retry preview
             </Button>
+          </div>
+        ) : null}
+        {props.loading && props.messages.length === 0 ? (
+          <SearchMessage>
+            <span role="status">Loading context…</span>
           </SearchMessage>
-        ) : props.titleOnly ? (
+        ) : props.titleOnly && !props.error ? (
           <SearchMessage>This session title matches. No matching message was found.</SearchMessage>
         ) : (
           props.messages.map((message) => (
