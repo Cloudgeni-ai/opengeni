@@ -88,12 +88,22 @@ async function connectionLineage(
     createdEventPayload: {},
   });
   if (!started.turn) throw new Error("missing causal fixture turn");
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+    sessionId: source.id,
+    workflowId: `session-${source.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error("causal fixture turn was not claimed");
   return {
     connectionAuthoritySubjectId: ownerSubjectId,
     callerSessionId: source.id,
     callerTurnId: started.turn.id,
-    callerAttemptId: crypto.randomUUID(),
-    callerExecutionGeneration: started.turn.executionGeneration,
+    callerAttemptId: attemptId,
+    callerExecutionGeneration: claim.turn.executionGeneration,
   };
 }
 
@@ -1187,11 +1197,13 @@ describe("immutable session turn initiators", () => {
     if (mixedClaim.action !== "claimed") throw new Error("Mixed service batch was not claimed");
     expect(mixedClaim.turn.initiator).toEqual({
       kind: "service",
-      subjectId: "internal-update",
-      label: "OpenGeni internal update",
+      subjectId: "goal-continuation",
+      label: "OpenGeni goal continuation",
     });
-    // The mixed service batch has no single subject initiator, but an ordinary
-    // coalesced notice must not erase the goal's routing policy.
+    // An old message without caller lineage must not borrow the goal's human.
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, mixedTarget.id),
+    ).toMatchObject([{ kind: "agent_message", state: "pending" }]);
     expect(mixedClaim.turn.source).toBe("goal");
     expect(mixedClaim.turn.model).toBe("goal-routed-model");
     expect(mixedClaim.turn.reasoningEffort).toBe("high");

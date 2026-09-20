@@ -99,8 +99,8 @@ ordered, exactly-once history.
 `wait_for_input` ends execution after tool-batch settlement, preserving trusted
 wait authority and immutable same-turn deadlines. Command results remain durable;
 alone, they wake only explicit waits. Notices cannot block other inbox input.
-Different causal turns may coalesce only with equivalent human/execution authority,
-preserving lineage. See [`run-lifecycle.md`](run-lifecycle.md).
+Batching preserves causal authority; messages/Steer inherit the sender’s human
+independently of connections. See [`run-lifecycle.md`](run-lifecycle.md).
 
 `runAgentTurn` is non-retryable by default: model/tool/sandbox/Git/connector/cloud
 operations have external effects. Recovery is explicit and attempt-fenced.

@@ -712,7 +712,9 @@ describe("transactional session workflow wake outbox", () => {
       expect(claimed.turn.id).toBe(turns[0]!.id);
       expect(
         await listOutstandingSessionSystemUpdates(client.db, workspaceId, sessionId),
-      ).toHaveLength(0);
+      ).toMatchObject([
+        { id: laterUpdate.added ? laterUpdate.update.id : "missing", state: "pending" },
+      ]);
     } finally {
       await shared.admin.unsafe(
         "DROP TRIGGER IF EXISTS zz_test_preclaim_denial ON session_turn_attempts; DROP FUNCTION IF EXISTS test_preclaim_denial();",

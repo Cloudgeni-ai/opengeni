@@ -13,6 +13,7 @@ import {
   createSession,
   getSessionHistoryItems,
   getSession,
+  getSessionTurn,
   getSessionQueueSnapshot,
   listOutstandingSessionSystemUpdates,
   listSessionEvents,
@@ -143,12 +144,19 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
 
       try {
         await waitFor(() => model.calls === 1);
+        const caller = await getSessionTurn(dbClient.db, grant.workspaceId, initial.turn.id);
+        if (!caller?.activeAttemptId) throw new Error("missing live sender attempt");
         const updates = await Promise.all(
           Array.from({ length: 100 }, (_, index) =>
-            addSessionSystemUpdate(
-              dbClient.db,
-              neutralSystemUpdateInput(grant, session.id, "notices:integration", index),
-            ),
+            addSessionSystemUpdate(dbClient.db, {
+              ...neutralSystemUpdateInput(grant, session.id, "notices:integration", index),
+              lineage: {
+                callerSessionId: session.id,
+                callerTurnId: caller.id,
+                callerAttemptId: caller.activeAttemptId,
+                callerExecutionGeneration: caller.executionGeneration,
+              },
+            }),
           ),
         );
         const acceptedUpdates = updates.filter(

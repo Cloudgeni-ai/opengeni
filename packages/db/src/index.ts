@@ -65737,13 +65737,13 @@ function systemUpdateCausalHumanTurnId(
   return value;
 }
 
-function agentSteerCausalActor(update: Pick<BoundedSystemUpdate, "kind" | "lineage">): {
+function agentCommandCausalActor(update: Pick<BoundedSystemUpdate, "kind" | "lineage">): {
   sessionId: string;
   turnId: string;
   attemptId: string;
   executionGeneration: number;
 } | null {
-  if (update.kind !== "agent_steer_instruction") return null;
+  if (update.kind !== "agent_steer_instruction" && update.kind !== "agent_message") return null;
   const lineage =
     update.lineage && typeof update.lineage === "object" && !Array.isArray(update.lineage)
       ? (update.lineage as Record<string, unknown>)
@@ -65788,15 +65788,15 @@ function systemUpdateCausalExecutionKey(
     // borrow another child, goal, or Steer's causal principal.
     return `${update.kind}-update:${update.id}`;
   }
-  if (update.kind !== "agent_steer_instruction") return null;
-  const actor = agentSteerCausalActor(update);
+  if (update.kind !== "agent_steer_instruction" && update.kind !== "agent_message") return null;
+  const actor = agentCommandCausalActor(update);
   if (actor) {
-    return `agent-steer:${actor.sessionId}:${actor.turnId}:${actor.attemptId}:${actor.executionGeneration}`;
+    return `agent-command:${actor.sessionId}:${actor.turnId}:${actor.attemptId}:${actor.executionGeneration}`;
   }
-  // A malformed historical Steer still owns a distinct claim. Let its existing
+  // A malformed historical agent command still owns a distinct claim. Let its
   // provenance fallback run without borrowing another authority-bearing
   // update's causal principal.
-  return `agent-steer-update:${update.id}`;
+  return `${update.kind}-update:${update.id}`;
 }
 
 function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
@@ -65814,7 +65814,7 @@ function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
   // Null is compatible context (for example an ordinary notice riding with a
   // goal continuation). Once a batch contains frozen causal execution, every
   // further authority-bearing member must have equivalent inherited authority. Agent
-  // Steer uses its caller identity and therefore never borrows a child/goal
+  // commands use their caller identity and therefore never borrow a child/goal
   // continuation's target-turn human.
   const selectedCausalKey = selected
     .map((update) => systemUpdateCausalExecutionKey(update, causalExecutionKeys))
@@ -68021,6 +68021,8 @@ export async function claimSessionWorkForAttempt(
           // Agent Steer is a stronger causal command and therefore suppresses
           // goal routing for this inference.
           const routingGoalUpdate = agentSteerUpdate ? undefined : goalUpdate;
+          const agentCommandUpdate =
+            agentSteerUpdate ?? delivered.updates.find((update) => update.kind === "agent_message");
           const internalUpdateInitiator = (provenanceError?: string): FrozenTurnInitiator => ({
             initiator: {
               kind: "service",
@@ -68040,16 +68042,18 @@ export async function claimSessionWorkForAttempt(
             `session_system_updates:${workspaceId}:${sessionId}:${authorityUpdate.id}`,
           );
           const internalXaiAuthority = frozenXaiExecutionAuthority(authorityUpdate);
-          // Agent Steer is the causal command for this inference. Ordinary
-          // machine notices may coalesce into the same batch as context, but
-          // their timing must not erase the steering subject's authority.
-          if (agentSteerUpdate) {
-            const actor = agentSteerCausalActor(agentSteerUpdate);
+          // Messages and Steer inherit the exact admitted sender turn, even
+          // with no personal connections. Other notices are context; they
+          // cannot replace the command's causal human.
+          if (agentCommandUpdate) {
+            const actor = agentCommandCausalActor(agentCommandUpdate);
             if (!actor) {
               // Corrupt/hand-inserted historical rows must not wedge every
               // recovery claim forever. Fail closed to a named service actor
               // while retaining a bounded, non-secret diagnostic marker.
-              internalInitiator = internalUpdateInitiator("agent_steer_lineage_incomplete");
+              internalInitiator = internalUpdateInitiator(
+                `${agentCommandUpdate.kind === "agent_message" ? "agent_message" : "agent_steer"}_lineage_incomplete`,
+              );
             } else {
               try {
                 internalInitiator = await frozenInitiatorForCommandActor(
@@ -68068,7 +68072,9 @@ export async function claimSessionWorkForAttempt(
                   error instanceof Error &&
                   error.message.startsWith("Agent initiator turn not found:")
                 ) {
-                  internalInitiator = internalUpdateInitiator("agent_steer_source_turn_missing");
+                  internalInitiator = internalUpdateInitiator(
+                    `${agentCommandUpdate.kind === "agent_message" ? "agent_message" : "agent_steer"}_source_turn_missing`,
+                  );
                 } else {
                   throw error;
                 }
