@@ -245,10 +245,11 @@ test.each([400, 401, 403, 404, 410])(
 
 test("scope changes hide old hits immediately and reject late responses even if transport ignores abort", async () => {
   const old = deferred<ConversationSearchPage>();
+  const next = deferred<ConversationSearchPage>();
+  const archived = deferred<ConversationSearchPage>();
+  const responses = [old, next, archived];
   let reads = 0;
-  const view = await harness(async () =>
-    ++reads === 1 ? old.promise : page({ matches: [hit("new")] }),
-  );
+  const view = await harness(async () => responses[reads++]!.promise);
   try {
     await flush();
     await view.render({ authority: "b", query: "different" });
@@ -256,11 +257,17 @@ test("scope changes hide old hits immediately and reject late responses even if 
     expect(view.state().page).toBeNull();
     await flush();
     await act(async () => old.resolve(page({ matches: [hit("old")] })));
+    expect(view.state().page).toBeNull();
+    await act(async () => next.resolve(page({ matches: [hit("new")] })));
     expect(view.state().page?.matches.map((match) => match.eventId)).toEqual(["new"]);
+    const scopeChangeCommit = view.commits.length;
     await view.render({ authority: "b", query: "different", archiveStatus: "archived" });
     expect(view.state().page).toBeNull();
     await flush();
     expect(reads).toBe(3);
+    expect(view.commits.slice(scopeChangeCommit).every((state) => state.page === null)).toBe(true);
+    await act(async () => archived.resolve(page({ matches: [hit("archived")] })));
+    expect(view.state().page?.matches.map((match) => match.eventId)).toEqual(["archived"]);
   } finally {
     await view.unmount();
   }
