@@ -49632,8 +49632,25 @@ export async function enrollUnobservableCommandIdleDrain(
         (process.lease_epoch = ${initial.leaseEpoch}
           and process.provider_instance_id = ${initial.instanceId}
           and process.provider_backend = 'modal' and process.route_target_id is null
-          and process.last_reconcile_outcome in ('process_observation_unavailable',
-            'quarantined_process_observation_unavailable')
+          and (
+            process.last_reconcile_outcome in ('process_observation_unavailable',
+              'quarantined_process_observation_unavailable')
+            or (
+              process.last_reconcile_outcome = 'provider_error'
+              and process.reconcile_attempts >= 5
+              and attempt.quiesced_at is not null
+              and exists (
+                select 1 from session_background_commands command
+                where command.retained_process_id = process.id
+                  and command.workspace_id = process.workspace_id
+                  and command.session_id = process.session_id
+                  and command.provider = 'managed'
+                  and command.state = 'stopping'
+                  and command.cancel_requested_at < now() -
+                    (${input.idleGraceMs}::bigint * interval '1 millisecond')
+              )
+            )
+          )
           and attempt.state = 'closed'
           and greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at), process.started_at) < now() -
             (${input.idleGraceMs}::bigint * interval '1 millisecond')) as eligible

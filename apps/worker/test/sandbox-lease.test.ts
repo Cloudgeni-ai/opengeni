@@ -3444,8 +3444,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     }
   }, 60_000);
 
-  for (const lateExit of [false, true]) {
-    test(`idle unobservable commands use the existing drain; late exit=${lateExit}`, async () => {
+  for (const [lateExit, stoppingErrors] of [
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ] as const) {
+    test(`idle unobservable commands use the existing drain; late exit=${lateExit}, stopping errors=${stoppingErrors}`, async () => {
       if (!available) throw new Error("Real PostgreSQL required for idle drain regression");
       const ids = await freshWorkspace();
       const attempt = await freshWarmSnapshotAttempt(ids);
@@ -3534,6 +3539,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
           })
         ).get(attempt.sessionId),
       ).toMatchObject({ count: 1, unavailableCount: 1 });
+      if (stoppingErrors) {
+        await admin`update sandbox_retained_processes set last_reconcile_outcome = 'provider_error',
+          reconcile_attempts = 5 where id = ${processId}`;
+        await admin`update session_background_commands set state = 'stopping',
+          cancel_requested_at = now() - interval '2 minutes', cancel_requested_by = 'test:stop-request'
+          where id = ${processId}`;
+      }
       expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
       await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'turn'`;
       // A live attempt without a holder is still protected.
@@ -3553,6 +3565,12 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       ).toBeNull();
       await admin`update session_turn_attempts set quiesced_at = null, closed_at = now() - interval '2 minutes'
       where id in (${sibling.attemptId}, ${attempt.attemptId})`;
+      if (stoppingErrors) {
+        // Explicit cancellation cannot substitute for physical owner quiescence.
+        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+        await admin`update session_turn_attempts set quiesced_at = now() - interval '2 minutes'
+          where id = ${attempt.attemptId}`;
+      }
       await verifyPendingQuiescenceBlocks(ids, sibling, async () => {
         expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
       });
@@ -3573,6 +3591,23 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         admission: child,
         outcome: "resolved",
       });
+      if (stoppingErrors) {
+        await admin`update sandbox_retained_processes set reconcile_attempts = 4 where id = ${processId}`;
+        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+        await admin`update sandbox_retained_processes set reconcile_attempts = 5 where id = ${processId}`;
+        await admin`update session_background_commands set state = 'running', cancel_requested_at = null,
+          cancel_requested_by = null
+          where id = ${processId}`;
+        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+        await admin`update session_background_commands set state = 'stopping', cancel_requested_at = now(),
+          cancel_requested_by = 'test:stop-request'
+          where id = ${processId}`;
+        expect(
+          await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 60_000 }),
+        ).toBeNull();
+        await admin`update session_background_commands set cancel_requested_at = now() - interval '2 minutes'
+          where id = ${processId}`;
+      }
       if (!lateExit) {
         const ordinaryIds = await freshWorkspace();
         await insertLease(ordinaryIds, {
@@ -3703,6 +3738,34 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       ).toBe(lateExit ? "exited" : "lost");
     }, 180_000);
   }
+
+  test("stopping-command inventory migration replays without widening public authority", async () => {
+    if (!available) throw new Error("Real PostgreSQL required for containment migration");
+    const definition = async () => {
+      const [row] = await admin`select pg_get_functiondef(
+        'opengeni_private.list_unobservable_command_drain_candidates(integer)'::regprocedure
+      ) as definition`;
+      return String(row!.definition);
+    };
+    const before = await definition();
+    expect(before).toContain("process.reconcile_attempts >= 5");
+    expect(before).toContain("command.cancel_requested_at IS NOT NULL");
+    const migration = await Bun.file(
+      new URL(
+        "../../../packages/db/drizzle/0493_stopping_command_error_containment.sql",
+        import.meta.url,
+      ),
+    ).text();
+    await admin.begin(async (tx) => {
+      await tx.unsafe(migration);
+    });
+    expect(await definition()).toBe(before);
+    const [permission] = await admin`select coalesce(bool_or(acl.grantee = 0
+        and acl.privilege_type = 'EXECUTE'), false) as public_execute
+      from pg_proc p cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
+      where p.oid = 'opengeni_private.list_unobservable_command_drain_candidates(integer)'::regprocedure`;
+    expect(permission!.public_execute).toBe(false);
+  }, 60_000);
 
   test("(1b-retained-race) yielded success is tracked once before stale-route rejection and remains settleable", async () => {
     if (!available) return;
