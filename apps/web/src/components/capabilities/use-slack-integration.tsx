@@ -33,6 +33,7 @@ import { useAppContext } from "@/context";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { clearSlackInstallResult, slackInstallFeedback } from "@/lib/slack-install-feedback";
 import {
+  enableNewSlackAccountTools,
   personalSlackAccountState,
   personalSlackCapability,
   preferredHostedSlackConnection,
@@ -1116,9 +1117,15 @@ export function useSlackIntegration({
             botOperationPending.current = false;
             setConnectRequest(null);
           }}
-          onComplete={() => {
+          onComplete={(attempt) => {
             botOperationPending.current = false;
-            completeConnect();
+            void enableNewSlackAccountTools(client, workspaceId, personalItem, attempt)
+              .catch(() =>
+                toast.error(
+                  "Account connected, but Slack tools could not be enabled. Retry from Connectors.",
+                ),
+              )
+              .finally(completeConnect);
           }}
         />
       )}

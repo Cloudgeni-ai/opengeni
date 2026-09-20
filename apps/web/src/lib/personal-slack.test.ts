@@ -1,13 +1,78 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
+import type { ConnectAttempt } from "@opengeni/connect";
 import { OPENGENI_PERSONAL_SLACK_MCP_URL } from "@opengeni/contracts";
 
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
 import {
+  enableNewSlackAccountTools,
   personalSlackAccountState,
   personalSlackCapability,
   hostedSlackConnections,
   preferredHostedSlackConnection,
 } from "./personal-slack";
+
+test("completed stock Slack setup explicitly enables account selection without rewriting existing pins", async () => {
+  const enableCapability = mock(async () => {});
+  const workspaceId = "33333333-3333-4333-8333-333333333333";
+  const attempt: ConnectAttempt = {
+    id: "attempt",
+    workspaceId,
+    providerId: "slack-personal",
+    ownership: "workspace",
+    revision: 2,
+    state: "complete",
+    credentialsCommitted: true,
+    integrationInstalled: false,
+    completionRequirement: "connection",
+    nextAction: { type: "none" },
+    expiresAt: "2030-01-01T00:00:00Z",
+    account: {
+      id: "account",
+      version: 1,
+      providerId: "slack-personal",
+      ownership: "workspace",
+      label: "Slack",
+      status: "connected",
+    },
+  };
+  await enableNewSlackAccountTools(
+    { enableCapability },
+    workspaceId,
+    capability({ enabled: false }),
+    attempt,
+  );
+  expect(enableCapability).toHaveBeenCalledWith(workspaceId, "mcp:personal-slack", {
+    connectionRef: {
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      subjectScope: "workspace",
+      accountSelection: "all_eligible",
+    },
+  });
+  enableCapability.mockClear();
+  await enableNewSlackAccountTools(
+    { enableCapability },
+    workspaceId,
+    capability({
+      enabled: true,
+      connectionRef: { connectionId: "pinned", providerDomain: "slack.com", kind: "oauth2" },
+    }),
+    attempt,
+  );
+  await enableNewSlackAccountTools(
+    { enableCapability },
+    workspaceId,
+    capability({ enabled: false }),
+    { ...attempt, providerId: "slack-bot" },
+  );
+  await enableNewSlackAccountTools(
+    { enableCapability },
+    workspaceId,
+    capability({ enabled: false }),
+    { ...attempt, workspaceId: "another" },
+  );
+  expect(enableCapability).not.toHaveBeenCalled();
+});
 
 function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
   return {

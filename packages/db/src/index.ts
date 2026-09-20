@@ -79618,6 +79618,14 @@ function connectionRefConfig(value: unknown): McpServerConnectionRef | undefined
   if (record.subjectScope === "workspace" || record.subjectScope === "subject") {
     ref.subjectScope = record.subjectScope;
   }
+  if (
+    record.accountSelection === "all_eligible" &&
+    record.connectionId === undefined &&
+    record.authoritySource !== "host" &&
+    record.selectedResources === undefined
+  ) {
+    ref.accountSelection = "all_eligible";
+  }
   return ref;
 }
 

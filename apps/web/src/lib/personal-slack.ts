@@ -4,8 +4,44 @@ import {
 } from "@opengeni/contracts";
 
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
+import type { ConnectAttempt } from "@opengeni/connect";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 const PERSONAL_SLACK_PROVIDER_DOMAIN = "slack.com";
+
+/** A newly connected stock Slack account makes its catalog tools selectable.
+ * Reconnect never rewrites an already enabled (possibly exact-pinned) binding. */
+export async function enableNewSlackAccountTools(
+  client: {
+    enableCapability(
+      ...args: Parameters<OpenGeniBrowserClient["enableCapability"]>
+    ): Promise<unknown>;
+  },
+  workspaceId: string,
+  item: CapabilityCatalogItem | null,
+  attempt: ConnectAttempt,
+): Promise<void> {
+  if (
+    !item ||
+    item.enabled ||
+    personalSlackCapability([item]) !== item ||
+    attempt.workspaceId !== workspaceId ||
+    attempt.providerId !== "slack-personal" ||
+    attempt.state !== "complete" ||
+    !attempt.credentialsCommitted ||
+    !attempt.account ||
+    attempt.account.status !== "connected"
+  )
+    return;
+  await client.enableCapability(workspaceId, item.id, {
+    connectionRef: {
+      providerDomain: PERSONAL_SLACK_PROVIDER_DOMAIN,
+      kind: "oauth2",
+      subjectScope: attempt.ownership === "personal" ? "subject" : "workspace",
+      accountSelection: "all_eligible",
+    },
+  });
+}
 
 export type PersonalSlackAccountState =
   | { state: "unverified" }

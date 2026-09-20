@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { mcpAccountRouteId } from "@opengeni/core";
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
@@ -2075,16 +2076,28 @@ describe("connections routes", () => {
       const admitted = await started.json();
       expect(admitted.id).toBeString();
       expect(admitted.initialTurnId).toBeString();
+      const acceptedRouteId = mcpAccountRouteId("provisioned", provisionedBody.connection.id);
       const capturedOAuth = await shared!.admin`
-        select personal_connection_delegations from session_turns
+        select personal_connection_delegations, mcp_account_bindings from session_turns
         where workspace_id = ${workspace.workspaceId} and session_id = ${admitted.id}
           and id = ${admitted.initialTurnId}
       `;
       expect(capturedOAuth[0]?.personal_connection_delegations).toMatchObject([
         {
-          serverId: "provisioned",
+          serverId: acceptedRouteId,
+          canonicalServerId: "provisioned",
           connectionId: provisionedBody.connection.id,
           ownerSubjectId: identity.subjectId,
+        },
+      ]);
+      expect(capturedOAuth[0]?.mcp_account_bindings).toMatchObject([
+        {
+          serverId: acceptedRouteId,
+          canonicalServerId: "provisioned",
+          connectionId: provisionedBody.connection.id,
+          ownerSubjectId: identity.subjectId,
+          subjectScope: "subject",
+          connectionRef: { connectionId: provisionedBody.connection.id, subjectScope: "subject" },
         },
       ]);
       expect(
@@ -2096,7 +2109,8 @@ describe("connections routes", () => {
         ),
       ).toMatchObject([
         {
-          serverId: "provisioned",
+          serverId: acceptedRouteId,
+          canonicalServerId: "provisioned",
           connectionId: provisionedBody.connection.id,
           ownerSubjectId: identity.subjectId,
         },
@@ -2116,18 +2130,20 @@ describe("connections routes", () => {
       );
       expect(continued.status).toBe(202);
       const continuedCaptures = await shared!.admin`
-        select personal_connection_delegations from session_turns
+        select personal_connection_delegations, mcp_account_bindings from session_turns
         where workspace_id = ${workspace.workspaceId} and session_id = ${admitted.id}
       `;
       expect(continuedCaptures).toHaveLength(2);
       for (const captured of continuedCaptures) {
         expect(captured.personal_connection_delegations).toMatchObject([
           {
-            serverId: "provisioned",
+            serverId: acceptedRouteId,
+            canonicalServerId: "provisioned",
             connectionId: provisionedBody.connection.id,
             ownerSubjectId: identity.subjectId,
           },
         ]);
+        expect(captured.mcp_account_bindings).toEqual(capturedOAuth[0]?.mcp_account_bindings);
       }
       for (const runMode of ["existing_session", "new_session_per_run"] as const) {
         const scheduled = await sessionApi.request(

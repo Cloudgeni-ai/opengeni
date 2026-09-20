@@ -111,6 +111,7 @@ import {
   normalizeProviderDomain,
   oauthConnectionOwnership,
   oauthConnectionRef,
+  catalogConnectionAccountSelection,
 } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
@@ -725,7 +726,12 @@ export function SessionRoute({
         throw new Error("The authorized capability could not be resolved from the live catalog.");
       }
       await capabilityClient.enableCapability(workspaceId, item.id, {
-        connectionRef: oauthConnectionRef(ownership, connectionId, providerDomain),
+        connectionRef: oauthConnectionRef(
+          ownership,
+          connectionId,
+          providerDomain,
+          catalogConnectionAccountSelection(item),
+        ),
       });
       await refreshCapabilityCatalog(workspaceId);
       const connected = (await capabilityClient.listCapabilities(workspaceId)).items.find(

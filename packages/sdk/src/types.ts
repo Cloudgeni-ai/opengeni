@@ -736,6 +736,7 @@ export type McpConnectionAccountSelection = {
 
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
+  accountSelection?: "all_eligible" | undefined;
   authoritySource?: "host" | undefined;
   /** accepted_turn is configuration-only; each accepted owner must select a grant. */
   hostBinding?:
@@ -6633,6 +6634,7 @@ export type CapabilityCatalogItem = {
   /** The connection backing this enabled installation, or null when none is involved. */
   connectionRef: {
     connectionId?: string | undefined;
+    accountSelection?: "all_eligible" | undefined;
     authoritySource?: "host" | undefined;
     providerDomain: string;
     kind: string;

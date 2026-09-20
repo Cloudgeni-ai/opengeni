@@ -22,6 +22,12 @@ custom API instances. Multi-account selectors are unpinned; the explicit
 host authority, or account-specific selected resources. Existing exact
 configurations are not silently converted to selectors.
 Legacy unpinned selectors retain their existing eligible-account behavior.
+New catalog OAuth/API-key enables explicitly select this mode. Reconnects retain
+an existing selector or exact pin; adding an account never silently converts an
+existing exact installation into a selector.
+The dedicated Slack account setup enables a previously disabled stock Slack
+capability with this selector after successful account connection. Bot setup and
+reconnects of already-enabled capabilities do not rewrite their bindings.
 
 Admission resolves credential-free `mcpAccountBindings`. Each binding retains its
 canonical connector ID for policy and a stable account-qualified runtime route
