@@ -190,12 +190,6 @@ WHERE t.source IN ('user','api') AND t.initiator_kind='subject' AND e.type='user
     AND u.file_id=f.id AND u.status='completed' AND u.private_file_owner_subject_id=t.initiator_subject_id)
 ORDER BY t.account_id,t.workspace_id,t.session_id,f.id,e.sequence
 ON CONFLICT DO NOTHING;
-ALTER TABLE files FORCE ROW LEVEL SECURITY;
-ALTER TABLE file_uploads FORCE ROW LEVEL SECURITY;
-ALTER TABLE session_events FORCE ROW LEVEL SECURITY;
-ALTER TABLE session_turns FORCE ROW LEVEL SECURITY;
-ALTER TABLE opengeni_private.session_file_attachments FORCE ROW LEVEL SECURITY;
-
 -- Copy only already accepted attachment grants at the existing authorized fork
 -- boundary. A message fork cannot acquire files attached after its cut point.
 DO $forks$
@@ -221,3 +215,11 @@ $boundary$ ELSE '' END || E'    ON CONFLICT DO NOTHING;';
     EXECUTE replace(definition,marker,replacement);
   END LOOP;
 END $forks$;
+
+-- Restore owner isolation after installing the scoped fork definitions.
+ALTER TABLE files FORCE ROW LEVEL SECURITY;
+ALTER TABLE file_uploads FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_turns FORCE ROW LEVEL SECURITY;
+ALTER TABLE opengeni_private.session_file_attachments FORCE ROW LEVEL SECURITY;
+

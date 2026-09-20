@@ -76,6 +76,8 @@ const withheldMigrationNames = [
   "0491_warm_capture_holder_reclamation.sql",
   "0494_mcp_account_bindings.sql",
   "0496_supervised_command_settlement.sql",
+  // Rewrites the original-file policy introduced by withheld 0461.
+  "0499_session_attachment_access.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

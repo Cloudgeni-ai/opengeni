@@ -555,7 +555,10 @@ test("migration backfills only original uploads proven by accepted human message
     const [owner] =
       await tx`select r.rolname from pg_class c join pg_roles r on r.oid=c.relowner where c.oid='files'::regclass`;
     await tx.unsafe(`SET LOCAL ROLE "${String(owner!.rolname).replaceAll('"', '""')}"`);
-    await tx.unsafe(migration.slice(start, end));
+    await tx.unsafe(
+      migration.slice(start, end) +
+        migration.slice(migration.indexOf("-- Restore owner isolation")),
+    );
   });
   expect(await f.read("user:viewer")).toHaveLength(1);
   expect(

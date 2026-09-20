@@ -57,6 +57,8 @@ const forwardMigrations = [
   "0469_knowledge_source_discovery.sql",
   // Requires the post-0461 Skill lifecycle, including confirm_response.
   "0488_permanent_skill_removal.sql",
+  // Rewrites the original-file policy introduced by 0461.
+  "0499_session_attachment_access.sql",
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;
