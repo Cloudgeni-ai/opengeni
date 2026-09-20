@@ -4,6 +4,7 @@ import {
   getSession,
   getSessionGoal,
   getSessionParentPersonalConnectionDelegations,
+  getSessionParentMcpAccountBindings,
   getSessionParentXaiProviderAccountAuthority,
   addSessionSystemUpdateWithSourceMutation,
   claimPendingSessionSystemUpdateOutbox,
@@ -75,6 +76,11 @@ export async function notifyParentOfChildIdle(
       workspaceId,
       childSessionId,
     );
+    const mcpAccountBindings = await getSessionParentMcpAccountBindings(
+      svc.db,
+      workspaceId,
+      childSessionId,
+    );
     const xaiAuthority = await getSessionParentXaiProviderAccountAuthority(
       svc.db,
       workspaceId,
@@ -97,6 +103,7 @@ export async function notifyParentOfChildIdle(
         ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
       },
       personalConnectionDelegations,
+      mcpAccountBindings,
       xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
     });
     if (outbox.status === "delivered") {
@@ -214,6 +221,7 @@ async function deliverParentSystemUpdateOutbox(
         summary: outbox.summary,
         lineage: outbox.lineage,
         personalConnectionDelegations: outbox.personalConnectionDelegations,
+        mcpAccountBindings: outbox.mcpAccountBindings,
         xaiProviderAccountAuthoritySnapshot: outbox.xaiProviderAccountAuthoritySnapshot,
       },
       async (tx) => {
