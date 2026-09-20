@@ -409,6 +409,10 @@ worker:
 artifactMaterializer:
   enabled: false
   replicaCount: 1
+  # null preserves the cluster default. false selects a pod user namespace;
+  # node kernel/runtime support is required. See docs/deployment.md before
+  # selecting procMount: Unmasked or a node-local AppArmor profile.
+  hostUsers: null
   # Defaults to secret.existingSecret for backward-compatible secret ownership,
   # while still projecting only these dedicated keys into the workload.
   credentialsSecret: ""
