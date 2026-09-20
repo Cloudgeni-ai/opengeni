@@ -16962,3 +16962,4 @@ export { mcpEndpointIdentity } from "./mcp-endpoint";
 export { pluginMcpUnavailableReason } from "./mcp-endpoint";
 export * from "./connector-tool-permissions";
 export * from "./skill-catalog-context";
+export * from "./sandbox-recovery";

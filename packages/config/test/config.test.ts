@@ -2029,6 +2029,19 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).not.toThrow();
   });
 
+  test("native command supervision is explicit opt-in and false stays disabled", () => {
+    for (const [value, expected] of [
+      [undefined, false],
+      ["false", false],
+      ["true", true],
+    ] as const) {
+      expect(
+        withEnv({ OPENGENI_MODAL_COMMAND_SUPERVISION_ENABLED: value }, () => getSettings())
+          .modalCommandSupervisionEnabled,
+      ).toBe(expected);
+    }
+  });
+
   test("production modal+desktop defaults to a public pin and accepts an override", () => {
     const digestRef = `example.azurecr.io/opengeni-desktop@sha256:${"a".repeat(64)}`;
     expect(

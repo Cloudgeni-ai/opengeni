@@ -1,5 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { SandboxProviderCommand, ModalRouterProviderCommand } from "@opengeni/contracts";
+import type {
+  SandboxProviderCommand,
+  ModalRouterProviderCommand,
+  CommandSupervisionReceipt,
+} from "@opengeni/contracts";
 
 export type ProviderCommandOutput = {
   command: SandboxProviderCommand;
@@ -13,9 +17,14 @@ export type ProviderCommandOutput = {
 /** These callbacks are supplied by the control plane after exact-route
  * retention/adoption. They are never accepted as command arguments. */
 export type ProviderCommandPersistence = {
+  rejectSupervisedLaunch?(command: ModalRouterProviderCommand): Promise<void>;
   load(): Promise<SandboxProviderCommand | null>;
   acknowledge(command: SandboxProviderCommand): Promise<SandboxProviderCommand>;
   reserveInput(byteLength?: number): Promise<number>;
+  recordSupervisionReceipt?(receipt: CommandSupervisionReceipt): Promise<void>;
+  loadSupervisionReceipt?(): Promise<CommandSupervisionReceipt | null>;
+  requestCancellation?(reason: "provider_deadline" | "explicit_stop"): Promise<void>;
+  cancellationRequested?(): Promise<boolean>;
   captureRouterPage?(page: {
     expected: ModalRouterProviderCommand;
     command: ModalRouterProviderCommand;
@@ -24,7 +33,20 @@ export type ProviderCommandPersistence = {
   }): Promise<{ command: ModalRouterProviderCommand; captured: boolean }>;
 };
 
+export class ProviderCommandStartRejectedError extends Error {
+  constructor(cause: unknown) {
+    super("Provider rejected command before start", { cause });
+    this.name = "ProviderCommandStartRejectedError";
+  }
+}
+
 export type ProviderCommandSession = {
+  verifyCommandSupervisionCapability?(): Promise<{ sandboxId: string; taskId: string }>;
+  releaseSupervisedCommand?(handle: number): Promise<void>;
+  cancelSupervisedCommand?(
+    handle: number,
+    reason: "provider_deadline" | "explicit_stop",
+  ): Promise<boolean>;
   /** Abort only starts/initial observations still owned by this session call. */
   cancelPendingExecCommand?(): Promise<void>;
   getProviderCommand?(handle: number): SandboxProviderCommand | null;
@@ -41,6 +63,41 @@ export type ProviderCommandSession = {
 };
 
 const admission = new AsyncLocalStorage<number>();
+export type PendingCommandSupervision = { managed: boolean };
+const pendingSupervision = new AsyncLocalStorage<PendingCommandSupervision>();
+export function withPendingCommandSupervision<T>(
+  state: PendingCommandSupervision | undefined,
+  fn: () => T,
+): T {
+  return state ? pendingSupervision.run(state, fn) : fn();
+}
+/** Called only by the provider adapter before dispatching an idle supervisor. */
+export function markPendingCommandSupervised(): void {
+  const state = pendingSupervision.getStore();
+  if (state) state.managed = true;
+}
+const supervisionReady = new AsyncLocalStorage<boolean>();
+type SupervisedLaunchReservation = {
+  reserve(command: ModalRouterProviderCommand): Promise<void>;
+};
+const supervisedLaunch = new AsyncLocalStorage<SupervisedLaunchReservation>();
+export function withSupervisedLaunchReservation<T>(
+  reservation: SupervisedLaunchReservation,
+  fn: () => T,
+): T {
+  return supervisedLaunch.run(reservation, fn);
+}
+export async function reserveSupervisedLaunch(command: ModalRouterProviderCommand): Promise<void> {
+  const reservation = supervisedLaunch.getStore();
+  if (!reservation) throw new Error("Supervised launch requires durable pre-dispatch reservation");
+  await reservation.reserve(command);
+}
+export function withCommandSupervisionReady<T>(ready: boolean, fn: () => T): T {
+  return supervisionReady.run(ready, fn);
+}
+export function admittedCommandSupervisionReady(): boolean {
+  return supervisionReady.getStore() === true;
+}
 export const MAX_PROVIDER_COMMAND_HANDLE = 2147483647;
 
 /** The alias is allocated by serialized workspace mutation admission, not by

@@ -2071,6 +2071,24 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    IF to_regclass('opengeni_private.modal_inventory_read_capabilities') IS NOT NULL THEN
+      -- Inventory is the only capability mint. Reprovisioning must repair
+      -- accidental table and column grants, never expose its private ledger.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.modal_inventory_read_capabilities FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL (backend_pid, transaction_id, data_schema) ON TABLE opengeni_private.modal_inventory_read_capabilities FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.modal_inventory_read_capabilities FROM PUBLIC;
+      REVOKE ALL (backend_pid, transaction_id, data_schema) ON TABLE opengeni_private.modal_inventory_read_capabilities FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.list_live_modal_sandbox_leases() FROM PUBLIC;
+    END IF;
+    IF to_regclass('opengeni_private.sandbox_recovery_rollout') IS NOT NULL THEN
+      -- Migration may precede this role's creation. Converge only read access;
+      -- runtime identities and PUBLIC never receive recovery activation writes.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.sandbox_recovery_rollout FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL (singleton, consent_enabled, release_evidence) ON TABLE opengeni_private.sandbox_recovery_rollout FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.sandbox_recovery_rollout FROM PUBLIC;
+      REVOKE ALL (singleton, consent_enabled, release_evidence) ON TABLE opengeni_private.sandbox_recovery_rollout FROM PUBLIC;
+      EXECUTE format('GRANT SELECT ON TABLE opengeni_private.sandbox_recovery_rollout TO %I', ${literal(role)});
+    END IF;
     IF to_regclass('opengeni_private.organization_usage_read_capabilities') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM PUBLIC;

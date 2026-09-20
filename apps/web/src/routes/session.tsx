@@ -14,6 +14,7 @@ import type { NativeConnectRequest } from "@/components/capabilities/native-conn
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { needsSandboxRecoveryCheck } from "@/lib/sandbox-failure";
 import {
   admissionRecheckControl,
   admissionControlNeedsRefresh,
@@ -2078,9 +2079,9 @@ function SessionChatPane(props: {
       {
         failedSessionCopy(
           props.failure,
-          props.creditExhausted,
+          props.creditExhausted && !props.failure.structuralSandboxFailure,
           Boolean(composerPolicy && composerPolicy.model !== props.session.model),
-          canChooseRecoveryModel,
+          canChooseRecoveryModel && !props.failure.structuralSandboxFailure,
         ).reason
       }
     </div>
@@ -2400,6 +2401,16 @@ function SessionChatPane(props: {
               props.session.workspaceId,
               "connections:write",
             )}
+            sandboxRecovery={
+              needsSandboxRecoveryCheck(props.session, props.failure.structuralSandboxFailure)
+                ? {
+                    client: context.client,
+                    workspaceId: props.session.workspaceId,
+                    sessionId: props.session.id,
+                    canControl: workspacePermissions.includes("sessions:control"),
+                  }
+                : undefined
+            }
             actions={{
               failureId: props.failure.failureEventId,
               retryInput: pendingRetryInput,

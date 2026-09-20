@@ -27,6 +27,7 @@ export class SessionRetryConflictError extends Error {
       | "RETRY_STALE_FAILURE"
       | "RETRY_EXECUTION_UNRESOLVED"
       | "RETRY_PAUSED"
+      | "RETRY_SANDBOX_RECOVERY_REQUIRED"
       | "RETRY_UNSUPPORTED_FAILURE",
     message: string,
   ) {
@@ -65,8 +66,24 @@ export async function getSessionRetryReceiptInTransaction(
   return { ...SessionRetryResponseSchema.parse(receipt.result), outcome: "replayed" };
 }
 
+type EffectiveSandboxRecoveryBlocked = (
+  db: Database,
+  session: typeof schema.sessions.$inferSelect,
+) => Promise<boolean>;
+
+/** The root composition binds the canonical effective-route guard. Keep this
+ * leaf independent of the root barrel; there is no permissive default. */
+export function createRetryFailedSessionInTransaction(
+  sessionEffectiveSandboxRecoveryBlocked: EffectiveSandboxRecoveryBlocked,
+) {
+  return (
+    db: SessionActivityDatabase,
+    input: Parameters<typeof retryFailedSessionInTransaction>[1],
+  ) => retryFailedSessionInTransaction(db, input, sessionEffectiveSandboxRecoveryBlocked);
+}
+
 /** Caller owns the tenant/activity transaction and authorization. No provider I/O. */
-export async function retryFailedSessionInTransaction(
+async function retryFailedSessionInTransaction(
   db: SessionActivityDatabase,
   input: {
     accountId: string;
@@ -76,6 +93,7 @@ export async function retryFailedSessionInTransaction(
     request: SessionRetryRequest;
     executionPolicy: TurnExecutionPolicyV1;
   },
+  sessionEffectiveSandboxRecoveryBlocked: EffectiveSandboxRecoveryBlocked,
 ): Promise<SessionRetryResponse & { eventIds: string[] }> {
   const { accountId, workspaceId, sessionId, request } = input;
   const locks = await lockSessionEventWriteRows(db, {
@@ -190,6 +208,11 @@ export async function retryFailedSessionInTransaction(
       "Execution or tool settlement is unresolved; retry cannot replay it",
     );
   const now = new Date();
+  if (await sessionEffectiveSandboxRecoveryBlocked(db, session))
+    throw new SessionRetryConflictError(
+      "RETRY_SANDBOX_RECOVERY_REQUIRED",
+      "The effective sandbox route requires recovery; review its checkpoint before retrying",
+    );
   // A never-claimed prompt must traverse normal first claim exactly once so
   // its original user history item is inserted. Started turns retain history.
   const preclaim = turn.executionGeneration === 0;

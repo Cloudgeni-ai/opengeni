@@ -1,15 +1,27 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes } from "node:crypto";
 import { posix } from "node:path";
 import { shellQuote } from "@openai/agents-core/sandbox/internal";
-import { SandboxProviderCommand, type ModalRouterProviderCommand } from "@opengeni/contracts";
+import {
+  SandboxProviderCommand,
+  CommandSupervisionReceipt,
+  type ModalRouterProviderCommand,
+} from "@opengeni/contracts";
 import type { ChannelAExecArgs } from "../channel-a";
 import type { ProviderCommandOutput } from "../provider-command-session";
+import {
+  admittedCommandSupervisionReady,
+  markPendingCommandSupervised,
+  reserveSupervisedLaunch,
+} from "../provider-command-session";
 import {
   ModalCommandControl as LegacyControl,
   commandControlPlane,
   decodePage,
 } from "./modal-legacy-command-control";
-import { ModalCommandRouterWire } from "./modal-command-router-wire";
+import {
+  ModalCommandRouterWire,
+  ModalCommandStartRejectedError,
+} from "./modal-command-router-wire";
 
 export { modalCommandAbortMiddleware } from "./modal-legacy-command-control";
 export type ModalProviderCommand = SandboxProviderCommand;
@@ -131,6 +143,8 @@ export class ModalCommandControl {
 
   async start(args: ChannelAExecArgs, signal?: AbortSignal): Promise<ModalRouterProviderCommand> {
     signal?.throwIfAborted();
+    const supervised = admittedCommandSupervisionReady() && !args.tty && !args.runAs;
+    if (supervised) markPendingCommandSupervised();
     const sandboxId = this.sandboxId;
     const workdir = posix.resolve(this.root, args.workdir ?? this.root);
     if (workdir !== this.root && !workdir.startsWith(`${this.root.replace(/\/$/u, "")}/`))
@@ -141,6 +155,17 @@ export class ModalCommandControl {
     if (this.sandboxId !== sandboxId)
       throw new Error("Modal sandbox changed during command preparation");
     const execId = randomUUID();
+    // PTY and runAs retain their existing explicit unsupported supervision
+    // semantics. Never attach a fabricated descriptor to either path.
+    const invocationId = randomUUID();
+    const supervision = supervised
+      ? {
+          protocol: "native-subreaper-v1" as const,
+          invocationId,
+          nonce: randomBytes(32).toString("hex"),
+          controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
+        }
+      : undefined;
     let commandArgs = [
       args.shell ?? "/bin/sh",
       args.shell && (args.login ?? true) ? "-lc" : "-c",
@@ -156,41 +181,169 @@ export class ModalCommandControl {
       ];
     }
     const env = typeof this.environment === "function" ? this.environment() : this.environment;
-    await this.withRouter(taskId, signal, (router) =>
-      router.start(
-        {
-          taskId,
-          execId,
-          commandArgs,
-          workdir,
-          env,
-          ...(args.tty
-            ? {
-                ptyInfo: {
-                  enabled: true,
-                  winszRows: 24,
-                  winszCols: 80,
-                  envTerm: "xterm",
-                  ptyType: 1,
-                  noTerminateOnIdleStdin: true,
-                },
-              }
-            : {}),
-        },
-        signal,
-      ),
-    );
-    return {
+    if (supervision)
+      commandArgs = [
+        "/usr/local/bin/opengeni-command-supervisor",
+        "launch",
+        "--invocation",
+        supervision.invocationId,
+        "--nonce",
+        supervision.nonce,
+        "--socket",
+        supervision.controlPath,
+        "--",
+        ...commandArgs,
+      ];
+    const command: ModalRouterProviderCommand = {
       kind: "modal-router-v1",
       sandboxId,
-      taskId: task.taskId,
+      taskId,
       execId,
       ...(args.tty ? { pty: true } : {}),
+      ...(supervision ? { supervision } : {}),
       streams: {
         stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
         stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
       },
     };
+    if (supervision) await reserveSupervisedLaunch(command);
+    try {
+      await this.withRouter(taskId, signal, (router) =>
+        router.start(
+          {
+            taskId,
+            execId,
+            commandArgs,
+            workdir,
+            env,
+            ...(args.tty
+              ? {
+                  ptyInfo: {
+                    enabled: true,
+                    winszRows: 24,
+                    winszCols: 80,
+                    envTerm: "xterm",
+                    ptyType: 1,
+                    noTerminateOnIdleStdin: true,
+                  },
+                }
+              : {}),
+          },
+          signal,
+        ),
+      );
+    } catch (error) {
+      // A client-chosen router id remains the only possible invocation. The
+      // supervisor is idle, so an ambiguous launch never ran user code. Retain
+      // the descriptor and reconcile that id; do not replay the start.
+      if (!supervision || error instanceof ModalCommandStartRejectedError) throw error;
+    }
+    return command;
+  }
+
+  /** Read-only, authenticated control execution on this exact instance. Never
+   * inferred from a fleet image selector or user command stdout. No cache: warm
+   * instances and route/task replacement must each pass before admission. */
+  async verifySupervisionCapability(): Promise<{ sandboxId: string; taskId: string }> {
+    const sandboxId = this.sandboxId;
+    const signal = AbortSignal.timeout(5_000);
+    const task = await this.client.sandboxGetTaskId({ sandboxId }, { signal });
+    if (!task.taskId || task.taskResult) throw new Error("Modal command task is unavailable");
+    await this.withRouter(task.taskId, signal, async (router) => {
+      const identity = { taskId: task.taskId!, execId: randomUUID() };
+      await router.start(
+        {
+          ...identity,
+          commandArgs: ["/usr/local/bin/opengeni-command-supervisor", "capabilities"],
+          workdir: "/tmp",
+          env: {},
+        },
+        signal,
+      );
+      let offset = 0;
+      let output = "";
+      let eof = false;
+      let exit: number | null = null;
+      while (!eof || exit === null) {
+        signal.throwIfAborted();
+        const page = await router.read(identity, "stdout", offset, 250, signal);
+        offset += page.bytes.length;
+        if (offset > 128) throw new Error("Modal supervision capability response exceeds bound");
+        output += page.bytes.toString("utf8");
+        eof = page.eof;
+        exit = await router.poll(identity, signal);
+      }
+      if (exit !== 0 || output !== "native-subreaper-v1")
+        throw new Error(
+          "Exact Modal instance lacks compatible native supervision; command not admitted",
+        );
+    });
+    if (sandboxId !== this.sandboxId)
+      throw new Error("Modal instance changed during supervision capability verification");
+    return { sandboxId, taskId: task.taskId };
+  }
+
+  /** Separate authenticated provider execution of the installed control helper.
+   * User command streams are never inspected for control evidence. */
+  async supervisionControl(
+    command: ModalRouterProviderCommand,
+    action: "release" | "cancel" | "status" | "ack",
+    receiptId?: string,
+  ): Promise<{ state: "idle" | "running" | "quiescent"; receipt?: CommandSupervisionReceipt }> {
+    SandboxProviderCommand.parse(command);
+    const descriptor = command.supervision;
+    if (!descriptor || command.sandboxId !== this.sandboxId)
+      throw new Error("Supervised command identity is unavailable");
+    const identity = { taskId: command.taskId, execId: randomUUID() };
+    const signal = AbortSignal.timeout(5_000);
+    return await this.withRouter(command.taskId, signal, async (router) => {
+      await router.start(
+        {
+          ...identity,
+          commandArgs: [
+            "/usr/local/bin/opengeni-command-supervisor",
+            "control",
+            "--invocation",
+            descriptor.invocationId,
+            "--nonce",
+            descriptor.nonce,
+            "--socket",
+            descriptor.controlPath,
+            "--action",
+            action,
+            ...(receiptId ? ["--receipt", receiptId] : []),
+          ],
+          workdir: "/tmp",
+          env: {},
+        },
+        signal,
+      );
+      const buffers: Buffer[] = [];
+      let offset = 0;
+      let eof = false;
+      let exit: number | null = null;
+      while (!eof || exit === null) {
+        signal.throwIfAborted();
+        const page = await router.read(identity, "stdout", offset, 250, signal);
+        offset += page.bytes.length;
+        if (offset > 4096) throw new Error("Supervisor control response exceeds its bound");
+        buffers.push(page.bytes);
+        eof = page.eof;
+        exit = await router.poll(identity, signal);
+      }
+      if (exit !== 0) throw new Error("Supervisor control is unavailable");
+      const result = JSON.parse(Buffer.concat(buffers).toString("utf8"));
+      if (!result || !["idle", "running", "quiescent"].includes(result.state))
+        throw new Error("Invalid supervisor control response");
+      if (result.receipt !== undefined) {
+        result.receipt = CommandSupervisionReceipt.parse(result.receipt);
+        if (result.receipt.invocationId !== descriptor.invocationId)
+          throw new Error("Supervisor receipt invocation mismatch");
+      }
+      if ((result.state === "quiescent") !== Boolean(result.receipt))
+        throw new Error("Supervisor quiescence response lacks its receipt");
+      return result;
+    });
   }
 
   async read(

@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "d932992a63da8accc4d3a35cfa87596f40e1f88cb3aafb1cb1f927271d2d5f38"
+      "sha256": "e5e390bf67c4513c09be3c30af6345ed9b13fad46435324f99b23d5e6d2ae7c2"
     },
     {
       "path": ".github/workflows/agent-release.yml",

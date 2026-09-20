@@ -14,6 +14,7 @@ import {
   failSessionWorkBeforeAttemptClaim,
   getActiveSessionHistoryItems,
   getSession,
+  readPublicSandboxRecovery,
   getSessionTurn,
   listSessionEvents,
   mutateSessionControlInTransaction,
@@ -187,6 +188,37 @@ async function fixture(
 }
 
 describe("intent-preserving failed-session retry", () => {
+  test("unchanged blocked effective route refuses Retry, including model changes; healthy Connected Machine ignores degraded home", async () => {
+    const f = await fixture(false, "completed");
+    await shared.admin`insert into sandbox_leases(account_id,workspace_id,sandbox_group_id,backend,liveness,resume_state,expires_at)
+      values(${f.grant.accountId},${f.workspaceId},${f.session.sandboxGroupId},'modal','cold',
+        '{"opengeniRecovery":{"restore":{"status":"unrecoverable","retryable":false}}}'::jsonb,now())`;
+    await expect(f.retry()).rejects.toMatchObject({ code: "RETRY_SANDBOX_RECOVERY_REQUIRED" });
+    await expect(f.retry({ model: "another-model" })).rejects.toMatchObject({
+      code: "RETRY_SANDBOX_RECOVERY_REQUIRED",
+    });
+    const machineId = crypto.randomUUID();
+    const enrollmentId = crypto.randomUUID();
+    await shared.admin`insert into enrollments(id,account_id,workspace_id,pubkey,last_seen_at) values(${enrollmentId},${f.grant.accountId},${f.workspaceId},${`ed25519:${machineId}`},now())`;
+    await shared.admin`insert into sandboxes(id,account_id,workspace_id,kind,name,enrollment_id) values(${machineId},${f.grant.accountId},${f.workspaceId},'selfhosted','healthy machine',${enrollmentId})`;
+    await shared.admin`update sessions set active_sandbox_id = ${machineId}, active_epoch = active_epoch + 1 where id = ${f.session.id}`;
+    expect(
+      await readPublicSandboxRecovery(client.db, {
+        accountId: f.grant.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: f.session.id,
+        subjectId: f.grant.subjectId,
+      }),
+    ).toMatchObject({
+      status: "unsupported",
+      reason: "connected_machine_selected",
+      checkpoint: null,
+    });
+    expect((await f.retry()).outcome).toBe("accepted");
+    await shared.admin`update sessions set active_sandbox_id = null, active_epoch = active_epoch + 1 where id = ${f.session.id}`;
+    expect((await f.retry()).outcome).toBe("replayed");
+  });
+
   test("exact capacity Retry replenishes only its budget and suppression; Pause, stale failure and replay cannot reset it", async () => {
     const f = await fixture(false, "completed", "codex_capacity_recovery_exhausted");
     const pinnedCredentialId = crypto.randomUUID();

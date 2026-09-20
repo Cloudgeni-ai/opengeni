@@ -39,6 +39,16 @@ import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics
 import { createAccountReadDiagnostics } from "./browser-account-read-diagnostics";
 import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
 import {
+  observeCapabilityResume,
+  consumeCapabilityResumeRead,
+  evaluateCapabilityResumeRead,
+  type CapabilityResumeEvidence,
+} from "./browser-account-capability-resume";
+import {
+  createCapabilityDiagnostics,
+  capabilityMatcherDiagnostics,
+} from "./browser-account-capability-diagnostics";
+import {
   sanitizeRaceProjection,
   sanitizeRaceRequest,
   sanitizeRaceResult,
@@ -83,6 +93,7 @@ type PendingFiniteRead = {
 };
 
 type BrowserProblems = {
+  capabilityDiagnostics: ReturnType<typeof createCapabilityDiagnostics>;
   crossTabReloadStartedAt?: number;
   acceptedRequestTerminals: Array<{
     observedAt: number;
@@ -849,6 +860,7 @@ async function authSessionCount(email: string): Promise<number> {
 
 function observeBrowser(page: Page): BrowserProblems {
   const problems: BrowserProblems = {
+    capabilityDiagnostics: createCapabilityDiagnostics(),
     acceptedRequestTerminals: [],
     activeStreams: new Map(),
     boundedHttp1StreamDispatches: 0,
@@ -888,6 +900,16 @@ function observeBrowser(page: Page): BrowserProblems {
     const requestSessionSetAuthorityHash = request
       .headerValue("cookie")
       .then(sessionSetAuthorityHash, () => null);
+    problems.capabilityDiagnostics.request(
+      request,
+      problems.phase,
+      request.url(),
+      request.method(),
+      actorEpoch,
+    );
+    void requestSessionSetAuthorityHash.then((authorityHash) => {
+      problems.capabilityDiagnostics.authority(request, problems.phase, authorityHash);
+    });
     if (actorEpoch !== null) problems.actorDispatches.push({ actorEpoch, startedAt });
     if (pathname.endsWith("/stream") || pathname.includes("/live-events/stream")) {
       if (requestUrl.searchParams.get("transport") === "http1-bounded") {
@@ -933,6 +955,7 @@ function observeBrowser(page: Page): BrowserProblems {
   });
   page.on("response", (response) => {
     const request = response.request();
+    problems.capabilityDiagnostics.response(request, problems.phase, response.status());
     if (companionReadDiagnostics?.page === page) {
       companionReadDiagnostics.ledger.response("browser", request, response.status());
     }
@@ -989,6 +1012,7 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   });
   page.on("requestfinished", (request) => {
+    problems.capabilityDiagnostics.terminal(request, problems.phase, "finished");
     if (companionReadDiagnostics?.page === page) {
       companionReadDiagnostics.ledger.finish("browser", request, "finished");
     }
@@ -1034,6 +1058,7 @@ function observeBrowser(page: Page): BrowserProblems {
       // every other browser error strict.
       if (!isExpectedHttpConsoleError(rendered, problems.phase)) {
         problems.consoleErrors.push(`[${problems.phase}] ${rendered}`);
+        problems.capabilityDiagnostics.console(problems.phase, source, message.text());
       }
     }
   });
@@ -1043,6 +1068,7 @@ function observeBrowser(page: Page): BrowserProblems {
     problems.pageErrors.push(message);
   });
   page.on("requestfailed", (request) => {
+    problems.capabilityDiagnostics.terminal(request, problems.phase, "failed");
     if (companionReadDiagnostics?.page === page) {
       companionReadDiagnostics.ledger.finish("browser", request, "failed");
     }
@@ -1130,6 +1156,7 @@ function observeBrowser(page: Page): BrowserProblems {
 
 function setBrowserPhase(problems: BrowserProblems, phase: string): void {
   problems.phase = phase;
+  problems.capabilityDiagnostics.boundary(phase, "phase");
 }
 
 async function waitForFiniteReadQuiescence(
@@ -1394,13 +1421,15 @@ async function expectNoBrowserProblems(problems: BrowserProblems): Promise<void>
 async function expectAndConsumeConsoleErrors(
   page: Page,
   problems: BrowserProblems,
-  allowed: string[],
-  required: string[] = allowed,
+  allowed: string[] | (() => Promise<string[]>),
+  required?: string[],
 ): Promise<void> {
   // Console delivery trails the response event by a task. Consume only the
   // exact fail-closed requests intentionally induced by the current window;
   // every later or additional browser error remains subject to the final gate.
+  const capabilityGateId = problems.capabilityDiagnostics.beginGate(problems.phase);
   await page.waitForTimeout(1_000);
+  const allowedMessages = typeof allowed === "function" ? await allowed() : allowed;
   const counts = Object.fromEntries(
     [...new Set(problems.consoleErrors)].map((message) => [
       message,
@@ -1408,18 +1437,22 @@ async function expectAndConsumeConsoleErrors(
     ]),
   );
   const allowedCounts = Object.fromEntries(
-    [...new Set(allowed)].map((message) => [
+    [...new Set(allowedMessages)].map((message) => [
       message,
-      allowed.filter((candidate) => candidate === message).length,
+      allowedMessages.filter((candidate) => candidate === message).length,
     ]),
   );
+  problems.capabilityDiagnostics.countedGate(problems.phase, capabilityGateId);
   expect({
     excess: Object.fromEntries(
       Object.entries(counts).filter(([message, count]) => count > (allowedCounts[message] ?? 0)),
     ),
-    missing: required.filter((message) => !problems.consoleErrors.includes(message)),
+    missing: (required ?? allowedMessages).filter(
+      (message) => !problems.consoleErrors.includes(message),
+    ),
   }).toEqual({ excess: {}, missing: [] });
   problems.consoleErrors.splice(0);
+  problems.capabilityDiagnostics.clearedGate(problems.phase, capabilityGateId);
 }
 
 async function expectAndConsumePageErrors(
@@ -4358,6 +4391,10 @@ describe("provider-neutral browser account acceptance", () => {
     const secondTab = await context.newPage();
     const otherPage = await otherBrowserSet.newPage();
     const pageProblems = observeBrowser(page);
+    let capabilityResumeObserver: Awaited<ReturnType<typeof observeCapabilityResume>> | undefined;
+    let capabilityResumeEvidence: CapabilityResumeEvidence | undefined;
+    let capabilityMatcherEvidence: ReturnType<typeof capabilityMatcherDiagnostics> | undefined;
+    const consumedCapabilityResumeRequests = new Set<string>();
     const draftRequests: Array<{ method: string; pathname: string }> = [];
     page.on("request", (request) => {
       const pathname = new URL(request.url()).pathname;
@@ -4789,6 +4826,15 @@ describe("provider-neutral browser account acceptance", () => {
         ],
         [],
       );
+      const resumeCapabilityUrl = `${publicOrigin}/v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`;
+      pageProblems.capabilityDiagnostics.boundary(pageProblems.phase, "resume-arm-begin");
+      capabilityResumeObserver = await observeCapabilityResume(page, {
+        url: resumeCapabilityUrl,
+        phase: () => pageProblems.phase,
+        actorEpochHeader: MANAGED_AUTH_ACTOR_EPOCH_HEADER,
+        hashAuthority: sessionSetAuthorityHash,
+      });
+      pageProblems.capabilityDiagnostics.boundary(pageProblems.phase, "resume-arm-end");
       const reauthMenu = await openAccountMenu(page, beta.displayName);
       const alphaReauthSlot = reauthMenu.getByRole("menuitem", {
         name: new RegExp(alpha.displayName),
@@ -4806,24 +4852,50 @@ describe("provider-neutral browser account acceptance", () => {
       await expectAndConsumeConsoleErrors(
         page,
         pageProblems,
-        [
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-          // WebKit can restore page visibility after closing the popup as well
-          // as remounting the actor. useSessionCapabilities renegotiates once
-          // on that page-live transition. Budget only this exact denied read.
-          ...(engine === "webkit"
-            ? [
-                `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-              ]
-            : []),
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
-          ...optionalWebKitReauthenticationReloadError(pageProblems, engine),
-        ],
+        async () => {
+          const authorityHash = sessionSetAuthorityHash(await browserCookieHeader(context));
+          pageProblems.capabilityDiagnostics.boundary(pageProblems.phase, "resume-seal-begin");
+          const evidence = await capabilityResumeObserver!.finish();
+          pageProblems.capabilityDiagnostics.boundary(pageProblems.phase, "resume-seal-end");
+          capabilityResumeEvidence = evidence;
+          // A controlled resume reproduces this extra read in Chromium too.
+          // Original CI causation remains unknown; only actual lifecycle and
+          // authenticated request evidence can authorize this one extra error.
+          const expectedResume = {
+            url: resumeCapabilityUrl,
+            actorEpoch: projection.actorEpoch,
+            authorityHash,
+            phase: pageProblems.phase,
+          };
+          capabilityMatcherEvidence = capabilityMatcherDiagnostics(
+            expectedResume,
+            evaluateCapabilityResumeRead(
+              evidence,
+              expectedResume,
+              consumedCapabilityResumeRequests,
+            ),
+          );
+          const resumedRequest = consumeCapabilityResumeRead(
+            evidence,
+            expectedResume,
+            consumedCapabilityResumeRequests,
+          );
+          return [
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+            ...(resumedRequest !== null
+              ? [
+                  `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+                ]
+              : []),
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+            ...optionalWebKitReauthenticationReloadError(pageProblems, engine),
+          ];
+        },
         [],
       );
       await expectAndConsumePageErrors(
@@ -5135,6 +5207,40 @@ describe("provider-neutral browser account acceptance", () => {
         )}\n`,
       );
     } finally {
+      const diagnosticWrites = [
+        writeFile(
+          `${EVIDENCE_DIR}/${engine}-capability-diagnostics.json`,
+          `${JSON.stringify(
+            {
+              resumeSnapshot: capabilityResumeEvidence
+                ? { status: "available", clock: "browser-unix-ms" }
+                : { status: "unavailable", reason: "finish-not-reached" },
+              matcher: capabilityMatcherEvidence ?? { status: "unavailable" },
+              primary: pageProblems.capabilityDiagnostics.snapshot(),
+              secondTab: secondTabProblems.capabilityDiagnostics.snapshot(),
+              independent: otherProblems.capabilityDiagnostics.snapshot(),
+            },
+            null,
+            2,
+          )}\n`,
+        ),
+      ];
+      if (capabilityResumeEvidence) {
+        diagnosticWrites.push(
+          writeFile(
+            `${EVIDENCE_DIR}/${engine}-capability-resume.json`,
+            `${JSON.stringify(capabilityResumeEvidence, null, 2)}\n`,
+          ),
+        );
+      }
+      // Diagnostic write failures must not replace the assertion failure or
+      // prevent browser cleanup. No diagnostic I/O occurs before gate counting.
+      if (
+        (await Promise.allSettled(diagnosticWrites)).some((result) => result.status === "rejected")
+      ) {
+        console.warn("Capability diagnostic evidence could not be fully persisted.");
+      }
+      await capabilityResumeObserver?.dispose();
       await context.close().catch(() => undefined);
       await otherBrowserSet.close().catch(() => undefined);
       await independentBrowser.close().catch(() => undefined);

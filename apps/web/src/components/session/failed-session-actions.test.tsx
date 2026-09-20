@@ -77,6 +77,31 @@ test("double clicks and accepted submissions never duplicate recovery", async ()
   expect(container.querySelector('[role="status"]')!.textContent).toBe("Retry requested.");
 });
 
+test("typed structural sandbox failure never exposes retry or model-switch remedies", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        failure={{
+          reason: "Checkpoint is older than workspace",
+          failedAt: null,
+          consecutiveRecoveryCount: null,
+          structuralSandboxFailure: true,
+        }}
+        actions={{
+          onRetry: async () => true,
+          retryBlocker: null,
+        }}
+      />,
+    ),
+  );
+  expect(container.textContent).not.toContain("Retry");
+  expect(container.textContent).not.toContain("Choose another model");
+  expect(container.textContent).toBe("Checkpoint is older than workspace");
+  expect(container.querySelectorAll("button")).toHaveLength(0);
+});
 test("all draft, delivery, work, permission and deliberate pause guards hide Retry", async () => {
   let sends = 0;
   const container = await render(null);
@@ -118,6 +143,141 @@ test("all draft, delivery, work, permission and deliberate pause guards hide Ret
   }
   expect(sends).toBe(0);
 });
+
+test("sandbox projection gates compact Retry and structural failures override billing", async () => {
+  const sandboxRecovery = {
+    workspaceId: "workspace-a",
+    sessionId: "session-a",
+    canControl: true,
+    client: {
+      getSandboxRecovery: async () => ({
+        version: 1 as const,
+        status: "unsupported" as const,
+        reason: null,
+        operationId: null,
+        checkpoint: null,
+      }),
+      recoverSandbox: async () => {
+        throw new Error("Rendering must not submit consent");
+      },
+    },
+  };
+  const container = await render(
+    <FailedSessionBanner failure={failure} actions={actions} sandboxRecovery={sandboxRecovery} />,
+  );
+  expect(container.querySelectorAll("button")).toHaveLength(1);
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        failure={{
+          ...failure,
+          reason: "Checkpoint is older than workspace",
+          structuralSandboxFailure: true,
+        }}
+        actions={actions}
+        sandboxRecovery={sandboxRecovery}
+        creditExhausted
+        workspaceId="workspace-a"
+        canBuyCredits
+        canConnectModel
+        canChooseModel
+      />,
+    ),
+  );
+  expect(container.querySelectorAll('[data-testid="failed-session-banner"]')).toHaveLength(1);
+  expect(container.querySelectorAll("a")).toHaveLength(0);
+  expect(container.textContent).toContain("Checkpoint is older than workspace");
+  expect(container.textContent).not.toMatch(/Retry|Choose another|credits/);
+  expect(container.querySelector("button")!.textContent).toBe("Check recovery status");
+});
+
+test.each(["restored", "connected_machine"] as const)(
+  "%s projection exposes only explicit compact Retry through the structural banner",
+  async (route) => {
+    let retries = 0;
+    const sandboxRecovery = {
+      workspaceId: "workspace-a",
+      sessionId: "session-a",
+      canControl: true,
+      client: {
+        getSandboxRecovery: async () => ({
+          version: 1 as const,
+          status: route === "restored" ? ("restored" as const) : ("unsupported" as const),
+          reason: route === "restored" ? null : "connected_machine_selected",
+          operationId: route === "restored" ? "durable-operation" : null,
+          checkpoint: null,
+        }),
+        recoverSandbox: async () => {
+          throw new Error("Current route must not submit consent");
+        },
+      },
+    };
+    const failureProps = { ...failure, structuralSandboxFailure: true };
+    const retryProps = {
+      ...actions,
+      onRetry: async () => {
+        retries++;
+        return true;
+      },
+    };
+    const container = await render(
+      <FailedSessionBanner
+        failure={failureProps}
+        actions={retryProps}
+        sandboxRecovery={sandboxRecovery}
+      />,
+    );
+    expect(retries).toBe(0);
+    expect(container.querySelectorAll("button")).toHaveLength(1);
+    expect(container.querySelector("button")!.textContent).toBe("Retry");
+    expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
+    expect(container.textContent).not.toContain("Choose another model");
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={failureProps}
+          actions={{ ...retryProps, retryBlocker: "paused" }}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={{ ...failureProps, safetyRefusal: true }}
+          actions={retryProps}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={{ ...failureProps, reason: "The model is unavailable" }}
+          actions={retryProps}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={failureProps}
+          actions={retryProps}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(retries).toBe(0);
+    await act(async () => container.querySelector("button")!.click());
+    expect(retries).toBe(1);
+    expect(container.querySelector("button")).toBeNull();
+  },
+);
 
 test("local non-submission remains retryable", async () => {
   const container = await render(<FailedSessionActions {...actions} onRetry={async () => false} />);
