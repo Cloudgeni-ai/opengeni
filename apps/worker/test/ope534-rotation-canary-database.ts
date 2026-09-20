@@ -1,8 +1,7 @@
-import { execFileSync } from "node:child_process";
 import postgres from "postgres";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import type { SharedTestDatabase } from "@opengeni/testing";
 import { requireCanary } from "./ope534-rotation-canary-evidence";
 
 export const NATIVE_CANARY_DATABASE_OPT_IN = "LOCAL_DISPOSABLE_55434";
@@ -18,32 +17,8 @@ export async function acquireCanaryDatabase(
     !env.OPENGENI_TEST_POSTGRES_ADMIN_URL && !env.OPENGENI_TEST_POSTGRES_APP_URL,
     "external database overrides are forbidden",
   );
-  if (!env.OPENGENI_OPE534_NATIVE_POSTGRES) {
-    requireCanary(
-      (!env.DOCKER_HOST || env.DOCKER_HOST.startsWith("unix://")) &&
-        (!env.DOCKER_CONTEXT || env.DOCKER_CONTEXT === "default"),
-      "use local Docker only",
-    );
-    let endpoint: unknown;
-    try {
-      endpoint = JSON.parse(
-        execFileSync(
-          "docker",
-          ["context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"],
-          { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-        ),
-      );
-    } catch {
-      throw new Error("OPE534 canary: local Docker context is unavailable");
-    }
-    requireCanary(
-      typeof endpoint === "string" && endpoint.startsWith("unix://"),
-      "refusing remote Docker",
-    );
-    const shared = await acquireSharedTestDatabase("ope534_rotation_canary");
-    requireCanary(shared, "isolated Docker database unavailable (not a skip)");
-    return { ...shared, appRole: "opengeni_app" };
-  }
+  // No Docker fallback: the shared-PG template provisioner accepts ambient
+  // capability/Temporal credentials and cannot provide this fixture's scope.
   requireCanary(
     env.OPENGENI_OPE534_NATIVE_POSTGRES === NATIVE_CANARY_DATABASE_OPT_IN,
     "native database opt-in must name LOCAL_DISPOSABLE_55434",

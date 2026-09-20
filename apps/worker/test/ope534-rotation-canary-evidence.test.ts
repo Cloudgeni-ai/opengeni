@@ -10,7 +10,8 @@ const env = {
   OPENGENI_OPE534_CANARY: "1",
   OPENGENI_OPE534_CANARY_AUTHORIZATION: "ISOLATED_MODAL_CANARY_ONLY",
   OPENGENI_OPE534_SOURCE_SHA: "a".repeat(40),
-  OPENGENI_OPE534_IMAGE_REF: `example.invalid/sandbox@sha256:${"b".repeat(64)}`,
+  OPENGENI_OPE534_IMAGE_REF: `ghcr.io/cloudgeni-ai/opengeni-sandbox@sha256:${"b".repeat(64)}`,
+  OPENGENI_OPE534_NATIVE_POSTGRES: "LOCAL_DISPOSABLE_55434",
   OPENGENI_OPE534_MODAL_ENVIRONMENT: "ope534-canary-12345678",
   MODAL_TOKEN_ID: "test-only",
   MODAL_TOKEN_SECRET: "test-only",
@@ -96,8 +97,8 @@ describe("OPE534 isolated canary admission", () => {
     { OPENGENI_TEST_POSTGRES_ADMIN_URL: "postgres://localhost/shared" },
     { OPENGENI_TEST_POSTGRES_APP_URL: "postgres://localhost/shared" },
     { MODAL_TOKEN_SECRET: "" },
-    { DOCKER_HOST: "ssh://shared-host" },
-    { DOCKER_CONTEXT: "staging" },
+    { OPENGENI_OPE534_IMAGE_REF: `example.invalid/sandbox@sha256:${"b".repeat(64)}` },
+    { OPENGENI_OPE534_NATIVE_POSTGRES: "" },
     { OPENGENI_OPE534_NATIVE_POSTGRES: "staging" },
   ])
     test(`rejects ${Object.keys(patch)[0]}`, () => {

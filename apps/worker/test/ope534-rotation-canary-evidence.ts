@@ -56,8 +56,8 @@ export function canaryConfiguration(env: Record<string, string | undefined>) {
   const environment = env.OPENGENI_OPE534_MODAL_ENVIRONMENT ?? "";
   requireCanary(/^[a-f0-9]{40}$/.test(sourceSha), "pin the integrated source SHA");
   requireCanary(
-    /^[^\s@]+@sha256:[a-f0-9]{64}$/.test(image),
-    "pin an immutable sandbox image digest",
+    /^ghcr\.io\/cloudgeni-ai\/opengeni-sandbox@sha256:[a-f0-9]{64}$/.test(image),
+    "pin the canonical GHCR sandbox image digest",
   );
   requireCanary(
     /^ope534-canary-[a-z0-9-]{8,48}$/.test(environment),
@@ -65,20 +65,12 @@ export function canaryConfiguration(env: Record<string, string | undefined>) {
   );
   requireCanary(
     !env.OPENGENI_TEST_POSTGRES_ADMIN_URL && !env.OPENGENI_TEST_POSTGRES_APP_URL,
-    "external database overrides are forbidden; use the throwaway shared-PG fixture",
+    "external database overrides are forbidden; use the isolated native PG17 fixture",
   );
-  if (env.OPENGENI_OPE534_NATIVE_POSTGRES) {
-    requireCanary(
-      env.OPENGENI_OPE534_NATIVE_POSTGRES === "LOCAL_DISPOSABLE_55434",
-      "native database opt-in must name LOCAL_DISPOSABLE_55434",
-    );
-  } else {
-    requireCanary(
-      (!env.DOCKER_HOST || env.DOCKER_HOST.startsWith("unix://")) &&
-        (!env.DOCKER_CONTEXT || env.DOCKER_CONTEXT === "default"),
-      "the database fixture requires a local default Docker daemon",
-    );
-  }
+  requireCanary(
+    env.OPENGENI_OPE534_NATIVE_POSTGRES === "LOCAL_DISPOSABLE_55434",
+    "native database opt-in must name LOCAL_DISPOSABLE_55434; Docker fallback is disabled",
+  );
   requireCanary(
     env.MODAL_TOKEN_ID && env.MODAL_TOKEN_SECRET,
     "explicit Modal credentials are required",
