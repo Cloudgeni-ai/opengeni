@@ -43,13 +43,18 @@ export function installModalCommandSession(
     verifyMaterializedPath?: (path: string, workdir: string) => Promise<void>;
   },
   control: Pick<ModalCommandControl, "start" | "read" | "readProbe" | "write"> &
-    Partial<Pick<ModalCommandControl, "supervisionControl">>,
+    Partial<Pick<ModalCommandControl, "supervisionControl" | "verifySupervisionCapability">>,
 ): void {
   markTypedExecHandleLoss(session);
   const originalExec = session.execCommand?.bind(session);
   const originalWrite = session.writeStdin?.bind(session);
   const cancelLegacyStart = session.cancelPendingExecCommand?.bind(session);
   const pendingStarts = new Set<AbortController>();
+  session.verifyCommandSupervisionCapability = async () => {
+    if (!control.verifySupervisionCapability)
+      throw new Error("Modal instance lacks supervised command capability verification");
+    return await control.verifySupervisionCapability();
+  };
   session.verifyMaterializedPath = (path, workdir) =>
     verifyModalMaterializedPath(control, path, workdir, pendingStarts);
   const entries = new Map<number, Entry>();
@@ -61,7 +66,7 @@ export function installModalCommandSession(
   const receipts = new Map<string, { handle: number; page: ProviderCommandOutput }>();
   const atomicallyCaptured = new WeakSet<ProviderCommandOutput>();
 
-  const supervise = async (entry: Entry): Promise<void> => {
+  const supervise = async (entry: Entry, release = false): Promise<void> => {
     if (entry.command.kind !== "modal-router-v1" || !entry.command.supervision) return;
     const persistence = entry.persistence;
     if (
@@ -73,7 +78,11 @@ export function installModalCommandSession(
       throw new Error("Supervised command requires durable control persistence");
     let receipt = await persistence.loadSupervisionReceipt();
     if (!receipt) {
-      const action = (await persistence.cancellationRequested()) ? "cancel" : "release";
+      const action = (await persistence.cancellationRequested())
+        ? "cancel"
+        : release
+          ? "release"
+          : "status";
       const observation = await control.supervisionControl(entry.command, action);
       receipt = observation.receipt ?? null;
       if (receipt) await persistence.recordSupervisionReceipt(receipt);
@@ -209,7 +218,11 @@ export function installModalCommandSession(
     const cancellation = new AbortController();
     pendingStarts.add(cancellation);
     try {
-      const entry = { command: await control.start(args, cancellation.signal) };
+      const command = await control.start(args, cancellation.signal);
+      // Pre-dispatch reservation can already bind protected persistence.
+      const entry = entries.get(handle) ?? { command };
+      if (!sameExecution(entry.command, command))
+        throw new Error("Reserved Modal command changed during dispatch");
       entries.set(handle, entry);
       if (entry.command.kind === "modal-router-v1" && entry.command.supervision) {
         // The launch cannot run user code until the routing layer commits
@@ -259,7 +272,7 @@ export function installModalCommandSession(
     if (!retained || !sameExecution(entry.command, retained))
       throw new Error("Supervisor release requires committed initial retention");
     entry.command = retained;
-    await supervise(entry);
+    await supervise(entry, true);
   };
   session.cancelSupervisedCommand = async (handle, reason) => {
     const entry = entries.get(handle);

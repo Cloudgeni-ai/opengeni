@@ -397,6 +397,7 @@ async function resolveCurrentHomeBackend(
       sandboxGroupId: ids.sandboxGroupId,
       expectedEpoch: lease.leaseEpoch,
       expectedInstanceId: lease.instanceId,
+      expectedBackend: lease.backend,
       diagnostic: "provider_not_found_during_home_route_rebind",
     });
     if (marked.status === "marked") {
@@ -1082,6 +1083,7 @@ export function wrapTurnBoxWithRouting(
               sandboxGroupId: home.sandboxGroupId,
               expectedEpoch,
               expectedInstanceId,
+              expectedBackend: home.backend,
               diagnostic: "provider_not_found_during_routed_operation",
             });
             if (marked.status === "marked") {
@@ -1343,6 +1345,7 @@ export function wrapLazyTurnBoxWithRouting(
               sandboxGroupId: home.sandboxGroupId,
               expectedEpoch: backend.leaseEpoch,
               expectedInstanceId: backend.providerInstanceId,
+              expectedBackend: home.backend,
               diagnostic: "provider_not_found_during_routed_operation",
             });
             if (marked.status === "marked") {

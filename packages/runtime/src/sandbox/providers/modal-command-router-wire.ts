@@ -1,5 +1,6 @@
 import { Client, Metadata, credentials, status, type ServiceError } from "@grpc/grpc-js";
 import protobuf from "protobufjs";
+import { ProviderCommandStartRejectedError } from "../provider-command-session";
 
 // Narrow wire projection of Modal 0.9.0's task_command_router.proto. The public
 // SDK does not expose resumable byte offsets or cancellable command RPCs. Keep
@@ -33,6 +34,18 @@ message Empty {}
 const prefix = "/modal.task_command_router.TaskCommandRouter/";
 const maxPageBytes = 64 * 1024;
 const maxWireBytes = 4 * 1024 * 1024;
+
+/** Only constructed at the authenticated Start RPC boundary. Transport loss,
+ * deadline, cancellation and UNKNOWN are deliberately not rejection proof. */
+export class ModalCommandStartRejectedError extends ProviderCommandStartRejectedError {
+  constructor(
+    readonly code: number,
+    cause: unknown,
+  ) {
+    super(cause);
+    this.name = "ModalCommandStartRejectedError";
+  }
+}
 
 export type ModalRouterIdentity = { taskId: string; execId: string };
 export type ModalRouterAccess = { url: string; jwt: string };
@@ -114,17 +127,33 @@ export class ModalCommandRouterWire {
   }
 
   async start(request: ModalRouterStart, signal?: AbortSignal): Promise<void> {
-    await this.unary(
-      "TaskExecStart",
-      "Start",
-      "Empty",
-      {
-        ...request,
-        stdoutConfig: 1,
-        stderrConfig: 1,
-      },
-      signal,
-    );
+    try {
+      await this.unary(
+        "TaskExecStart",
+        "Start",
+        "Empty",
+        {
+          ...request,
+          stdoutConfig: 1,
+          stderrConfig: 1,
+        },
+        signal,
+      );
+    } catch (error) {
+      const code = (error as Partial<ServiceError> | null)?.code;
+      if (
+        typeof code === "number" &&
+        [
+          status.INVALID_ARGUMENT,
+          status.NOT_FOUND,
+          status.PERMISSION_DENIED,
+          status.UNAUTHENTICATED,
+          status.UNIMPLEMENTED,
+        ].includes(code)
+      )
+        throw new ModalCommandStartRejectedError(code, error);
+      throw error;
+    }
   }
 
   async write(

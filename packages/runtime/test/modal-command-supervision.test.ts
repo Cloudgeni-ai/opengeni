@@ -7,6 +7,9 @@ import {
   type ProviderCommandPersistence,
   type ProviderCommandSession,
   withProviderCommandHandle,
+  admittedCommandSupervisionReady,
+  reserveSupervisedLaunch,
+  ProviderCommandStartRejectedError,
 } from "../src/sandbox/provider-command-session";
 import { installModalCommandSession } from "../src/sandbox/providers/modal-command-session";
 import { RoutingSandboxSession } from "../src/sandbox/routing/routing-session";
@@ -45,6 +48,7 @@ function fixture() {
   let failAck = false;
   let failCapture = false;
   let controlUnavailable = false;
+  let startRejection = false;
   const actions: string[] = [];
   const persistence: ProviderCommandPersistence = {
     load: async () => structuredClone(retained),
@@ -75,7 +79,14 @@ function fixture() {
     },
   };
   const control = {
+    verifySupervisionCapability: async () => ({
+      sandboxId: command.sandboxId,
+      taskId: command.taskId,
+    }),
     start: async () => {
+      if (admittedCommandSupervisionReady()) await reserveSupervisedLaunch(command);
+      if (startRejection)
+        throw new ProviderCommandStartRejectedError(new Error("provider rejected start"));
       actions.push("launch-idle");
       return structuredClone(command);
     },
@@ -133,6 +144,9 @@ function fixture() {
     command,
     receipt,
     persistence,
+    rejectStart: () => {
+      startRejection = true;
+    },
     recreate: () => {
       const next = adapter();
       next.bindProviderCommand!(41, retained!, persistence);
@@ -181,7 +195,7 @@ test("natural quiescence persists receipt before ACK and terminal output", async
   f.retain();
   f.quiesce();
   expect(parseExecBannerExitCode(await f.read())).toBe(7);
-  expect(f.actions).toEqual(["launch-idle", "release", "persist-proof", "ack", "capture-output"]);
+  expect(f.actions).toEqual(["launch-idle", "status", "persist-proof", "ack", "capture-output"]);
 });
 
 test("lost proof persistence never ACKs and replay recovers on another adapter", async () => {
@@ -258,7 +272,7 @@ test("a reconstructed handle cannot substitute the immutable supervision identit
   );
 });
 
-test("routing never releases on failed retention and recovers the same invocation", async () => {
+test("routing never dispatches before durable reservation and can retry a never-dispatched call", async () => {
   const f = fixture();
   let failRetention = true;
   const backend = { session: f.session, sandboxId: null, kind: "modal", activeEpoch: 0 } as const;
@@ -277,14 +291,78 @@ test("routing never releases on failed retention and recovers the same invocatio
     captureProcessOutput: async () => {},
   });
   await expect(routed.execCommand({ cmd: "once" })).rejects.toThrow(
-    "lost durable process promotion",
+    "Reserved supervised launch did not return",
   );
-  expect(f.actions).toEqual(["launch-idle"]);
-  expect(routed.hasRetainedProcess(41)).toBe(true);
+  expect(f.actions).toEqual([]);
+  expect(routed.hasRetainedProcess(41)).toBe(false);
   failRetention = false;
-  await routed.writeStdinForProcessRead({ sessionId: 41, chars: "", yieldTimeMs: 0 });
+  await routed.execCommand({ cmd: "once" });
   expect(f.actions.filter((action) => action === "launch-idle")).toHaveLength(1);
   expect(f.actions).toContain("release");
+});
+
+test("an incompatible warm instance fails before admission without legacy fallback", async () => {
+  const f = fixture();
+  f.session.verifyCommandSupervisionCapability = async () => {
+    throw new Error("native helper missing");
+  };
+  let admitted = false;
+  const backend = { session: f.session, sandboxId: null, kind: "modal", activeEpoch: 0 } as const;
+  const routed = new RoutingSandboxSession({
+    defaultResolved: backend,
+    readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+    resolveActiveBackend: async () => backend,
+    providerSupervisionReady: async () => true,
+    providerCommandHandle: () => 41,
+    providerCommandPersistence: () => f.persistence,
+    beforeMutation: async () => {
+      admitted = true;
+    },
+    afterMutation: async () => {},
+  });
+  await expect(routed.execCommand({ cmd: "never" })).rejects.toThrow("helper missing");
+  expect(admitted).toBe(false);
+  expect(f.actions).toEqual([]);
+});
+
+test("authenticated never-started rejection settles its reservation without quiescence or running receipt", async () => {
+  const f = fixture();
+  f.rejectStart();
+  let rejected = false;
+  f.persistence.rejectSupervisedLaunch = async (command) => {
+    expect(command).toEqual(f.command);
+    rejected = true;
+  };
+  const backend = { session: f.session, sandboxId: null, kind: "modal", activeEpoch: 0 } as const;
+  const routed = new RoutingSandboxSession({
+    defaultResolved: backend,
+    readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+    resolveActiveBackend: async () => backend,
+    providerSupervisionReady: async () => true,
+    providerCommandHandle: () => 41,
+    providerCommandPersistence: () => f.persistence,
+    beforeMutation: async () => "admitted",
+    afterMutation: async () => {
+      f.retain();
+    },
+  });
+  await expect(routed.execCommand({ cmd: "never" })).rejects.toBeInstanceOf(
+    ProviderCommandStartRejectedError,
+  );
+  expect(rejected).toBe(true);
+  expect(routed.hasRetainedProcess(41)).toBe(false);
+  expect(f.actions).toEqual([]);
+});
+
+test("a fresh observer never releases an abandoned idle reservation", async () => {
+  const f = fixture();
+  await f.start();
+  f.retain();
+  await f.read(f.recreate());
+  expect(f.actions).toContain("status");
+  expect(f.actions).not.toContain("release");
+  await f.recreate().cancelSupervisedCommand!(41, "provider_deadline");
+  expect(f.actions).toContain("cancel");
 });
 
 test("routing retains the locator when release response is ambiguous", async () => {

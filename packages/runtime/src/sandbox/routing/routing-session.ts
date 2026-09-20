@@ -28,9 +28,12 @@
 // `@opengeni/db`.
 
 import type { ExposedPortEndpoint } from "../stream-port";
+import { isDeepStrictEqual } from "node:util";
 import {
   withProviderCommandHandle,
   withCommandSupervisionReady,
+  withSupervisedLaunchReservation,
+  ProviderCommandStartRejectedError,
   type ProviderCommandPersistence,
   type ProviderCommandSession,
 } from "../provider-command-session";
@@ -304,6 +307,15 @@ export interface RoutingSandboxSessionDeps {
     kind: string;
     backend: ResolvedActiveBackend;
   }) => Promise<DefaultBackendLossResult | null>;
+}
+
+function eligibleForSupervision(args: unknown): boolean {
+  return Boolean(
+    args &&
+    typeof args === "object" &&
+    !(args as { tty?: boolean }).tty &&
+    !(args as { runAs?: string }).runAs,
+  );
 }
 
 export type RoutingSandboxOperationObservation = {
@@ -1445,17 +1457,30 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     op: string,
     mutatesWorkspace: boolean,
     fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
+    supervisionEligible = false,
   ): Promise<T> {
     const firstOperationObserver = this.deps.onFirstOperation;
     if (this.firstOperationClaimed || !firstOperationObserver) {
-      return await this.dispatchWithRetries(op, mutatesWorkspace, fn);
+      return await this.dispatchWithRetries(
+        op,
+        mutatesWorkspace,
+        fn,
+        undefined,
+        supervisionEligible,
+      );
     }
     this.firstOperationClaimed = true;
     const startedAt = performance.now();
     const timing: RoutingSandboxFirstOperationTiming = { phases: {} };
     let outcome: RoutingSandboxPhaseOutcome = "failed";
     try {
-      const result = await this.dispatchWithRetries(op, mutatesWorkspace, fn, timing);
+      const result = await this.dispatchWithRetries(
+        op,
+        mutatesWorkspace,
+        fn,
+        timing,
+        supervisionEligible,
+      );
       outcome = "completed";
       return result;
     } finally {
@@ -1477,6 +1502,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     mutatesWorkspace: boolean,
     fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
     firstOperationTiming?: RoutingSandboxFirstOperationTiming,
+    supervisionEligible = false,
   ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
@@ -1498,7 +1524,29 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       // Admission failures are NOT provider fence errors and must never enter
       // the retry/rebind loop. If this exact route cannot advance its durable
       // mutation generation, fail before the provider sees the operation.
+      const supervisionReady =
+        supervisionEligible &&
+        backend.kind === "modal" &&
+        ((await this.deps.providerSupervisionReady?.()) ?? false);
+      let verifiedSupervision: { sandboxId: string; taskId: string } | undefined;
+      if (supervisionReady) {
+        if (
+          !backend.session.verifyCommandSupervisionCapability ||
+          !this.deps.afterMutation ||
+          !this.deps.providerCommandPersistence
+        )
+          throw new Error(
+            "Supervised command requires exact-instance verification and durable reservation wiring",
+          );
+        verifiedSupervision = await backend.session.verifyCommandSupervisionCapability();
+        if (
+          backend.providerInstanceId &&
+          verifiedSupervision.sandboxId !== backend.providerInstanceId
+        )
+          throw new Error("Supervision capability does not match the admitted provider instance");
+      }
       let admission: unknown;
+      let reservedProcess: RoutingRetainedProcess | undefined;
       if (mutatesWorkspace && this.deps.beforeMutation) {
         const admissionStartedAt = performance.now();
         let admissionWaitMs = 0;
@@ -1534,16 +1582,58 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         let providerWaitMs = 0;
         let providerOutcome: RoutingSandboxPhaseOutcome = "failed";
         try {
-          const supervisionReady =
-            op === "exec" || op === "execCommand"
-              ? ((await this.deps.providerSupervisionReady?.()) ?? false)
-              : false;
           result = await this.invokeProviderOperation(
             op,
             backend,
             () =>
               withProviderCommandHandle(this.deps.providerCommandHandle?.(admission), () =>
-                withCommandSupervisionReady(supervisionReady, () => fn(backend.session, backend)),
+                withCommandSupervisionReady(supervisionReady, () =>
+                  withSupervisedLaunchReservation(
+                    {
+                      reserve: async (command) => {
+                        const handle = this.deps.providerCommandHandle?.(admission);
+                        if (!supervisionReady || !handle || reservedProcess || !command.supervision)
+                          throw new Error("Invalid supervised launch reservation");
+                        if (
+                          command.sandboxId !== verifiedSupervision?.sandboxId ||
+                          command.taskId !== verifiedSupervision.taskId
+                        )
+                          throw new Error(
+                            "Modal task changed after supervision capability verification",
+                          );
+                        const process = {
+                          id: crypto.randomUUID(),
+                          providerSessionId: handle,
+                          providerCommand: command,
+                        };
+                        reservedProcess = process;
+                        const reservationResult = await this.deps.afterMutation!({
+                          op,
+                          backend,
+                          admission,
+                          outcome: "resolved",
+                          retainedProcess: process,
+                        });
+                        // Even a durable-but-authority-rejected reservation must
+                        // never dispatch user work. Its exact row remains recoverable.
+                        if (reservationResult)
+                          throw new RoutingMutationOutcomeUnknownError(
+                            op,
+                            "Supervised launch reservation lost authority before dispatch",
+                            { retainedProcess: process },
+                          );
+                        const persisted =
+                          await this.deps.providerCommandPersistence!(process).load();
+                        if (!persisted || !isDeepStrictEqual(persisted, command))
+                          throw new Error(
+                            "Supervised launch reservation did not retain the exact invocation",
+                          );
+                        this.registerRetainedProcess(process, backend).durable = true;
+                      },
+                    },
+                    () => fn(backend.session, backend),
+                  ),
+                ),
               ),
             (observation) => {
               providerWaitMs += Math.max(0, observation.durationMs);
@@ -1566,6 +1656,34 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           );
         }
       } catch (error) {
+        if (reservedProcess) {
+          if (
+            error instanceof ProviderCommandStartRejectedError &&
+            reservedProcess.providerCommand?.kind === "modal-router-v1"
+          ) {
+            const persistence = this.deps.providerCommandPersistence?.(reservedProcess);
+            if (persistence?.rejectSupervisedLaunch) {
+              try {
+                await persistence.rejectSupervisedLaunch(reservedProcess.providerCommand);
+              } catch (cause) {
+                throw new RoutingMutationOutcomeUnknownError(
+                  op,
+                  "Never-started provider rejection could not settle its exact reservation",
+                  { cause, retainedProcess: reservedProcess },
+                );
+              }
+              this.retainedProcesses.delete(reservedProcess.providerSessionId);
+              throw error;
+            }
+          }
+          // A retained pre-dispatch identity is never erased or converted into
+          // ordinary rejected-admission settlement. Reconciliation owns it.
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            "Reserved supervised launch did not return; exact invocation retained and not replayed",
+            { cause: error, retainedProcess: reservedProcess },
+          );
+        }
         const partialMutation = error instanceof ChannelAPartialMutationError;
         if (mutatesWorkspace && this.deps.afterMutation) {
           const settlementStartedAt = performance.now();
@@ -1645,18 +1763,21 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       const providerCommand =
         yieldedSessionId === null ? null : backend.session.getProviderCommand?.(yieldedSessionId);
       const retainedProcess =
-        yieldedSessionId === null
+        reservedProcess ??
+        (yieldedSessionId === null
           ? undefined
           : {
               id: crypto.randomUUID(),
               providerSessionId: yieldedSessionId,
               ...(providerCommand ? { providerCommand } : {}),
-            };
+            });
       const retainedRecord = retainedProcess
-        ? this.registerRetainedProcess(retainedProcess, backend)
+        ? reservedProcess
+          ? this.retainedProcess(reservedProcess.providerSessionId)
+          : this.registerRetainedProcess(retainedProcess, backend)
         : null;
 
-      if (mutatesWorkspace && this.deps.afterMutation) {
+      if (mutatesWorkspace && this.deps.afterMutation && !reservedProcess) {
         const settlement: PendingParentPromotion = {
           op,
           backend,
@@ -1861,30 +1982,40 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   // degrades via the natural fallback or RoutingUnsupportedError.
 
   async exec(args: unknown): Promise<unknown> {
-    return this.dispatch("exec", true, async (s) => {
-      if (s.exec) {
-        return s.exec(args);
-      }
-      // Some backends (selfhosted) only expose exec; others only execCommand.
-      if (s.execCommand) {
-        return structuredExecResultFromBanner(await s.execCommand(args));
-      }
-      throw new RoutingUnsupportedError("exec", this.cached?.kind ?? "unknown");
-    });
+    return this.dispatch(
+      "exec",
+      true,
+      async (s) => {
+        if (s.exec) {
+          return s.exec(args);
+        }
+        // Some backends (selfhosted) only expose exec; others only execCommand.
+        if (s.execCommand) {
+          return structuredExecResultFromBanner(await s.execCommand(args));
+        }
+        throw new RoutingUnsupportedError("exec", this.cached?.kind ?? "unknown");
+      },
+      eligibleForSupervision(args),
+    );
   }
 
   async execCommand(args: unknown): Promise<string> {
     try {
-      return await this.dispatch("execCommand", true, async (s) => {
-        if (s.execCommand) {
-          return s.execCommand(args);
-        }
-        if (s.exec) {
-          const r = (await s.exec(args)) as { stdout?: string; output?: string };
-          return r.stdout ?? r.output ?? "";
-        }
-        throw new RoutingUnsupportedError("execCommand", this.cached?.kind ?? "unknown");
-      });
+      return await this.dispatch(
+        "execCommand",
+        true,
+        async (s) => {
+          if (s.execCommand) {
+            return s.execCommand(args);
+          }
+          if (s.exec) {
+            const r = (await s.exec(args)) as { stdout?: string; output?: string };
+            return r.stdout ?? r.output ?? "";
+          }
+          throw new RoutingUnsupportedError("execCommand", this.cached?.kind ?? "unknown");
+        },
+        eligibleForSupervision(args),
+      );
     } catch (error) {
       // Render a terminal selfhosted fault as the tool's result (four fields, correct
       // verdict) instead of letting the SDK mislabel it "Please try again".

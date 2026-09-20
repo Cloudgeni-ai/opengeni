@@ -10,6 +10,7 @@ import { withRlsContext, withSessionActivityRlsContext, type Database } from "./
 import { lockSessionEventWriteRows } from "./session-control";
 import { appendSessionCommandOutput } from "./session-command-output";
 import * as schema from "./schema";
+import { rejectRetainedSupervisedLaunch } from "./index";
 
 export type ProcessScope = {
   accountId: string;
@@ -25,6 +26,8 @@ export function retainedProviderCommandPersistence(
   publish?: (events: SessionEvent[]) => Promise<void>,
 ) {
   return {
+    rejectSupervisedLaunch: (command: ModalRouterProviderCommand) =>
+      rejectRetainedSupervisedLaunch(db, scope, command),
     recordSupervisionReceipt: (receipt: SupervisionReceipt) =>
       recordRetainedSupervisionReceipt(db, scope, receipt),
     loadSupervisionReceipt: () => loadRetainedSupervisionReceipt(db, scope),
@@ -316,9 +319,10 @@ function supervisionDescriptor(command: SandboxProviderCommand) {
 /** Fail before provider start, not after discovering an unprotected DB at retention. */
 export async function supervisedCommandProtocolReady(db: Database): Promise<boolean> {
   const [row] = await db.execute<{ ready: boolean }>(sql`
-    select count(*) = 3 as ready from pg_catalog.pg_trigger
+    select count(*) = 4 as ready from pg_catalog.pg_trigger
     where (tgrelid, tgname) in (
       ('sandbox_retained_processes'::regclass, 'supervised_command_guard'),
+      ('sandbox_retained_processes'::regclass, 'supervised_provider_loss_commit_guard'),
       ('sandbox_workspace_mutation_admissions'::regclass, 'supervised_command_admission_guard'),
       ('sandbox_lease_holders'::regclass, 'supervised_command_holder_guard')
     ) and tgenabled in ('O', 'A') and not tgisinternal

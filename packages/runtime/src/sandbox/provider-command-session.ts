@@ -17,6 +17,7 @@ export type ProviderCommandOutput = {
 /** These callbacks are supplied by the control plane after exact-route
  * retention/adoption. They are never accepted as command arguments. */
 export type ProviderCommandPersistence = {
+  rejectSupervisedLaunch?(command: ModalRouterProviderCommand): Promise<void>;
   load(): Promise<SandboxProviderCommand | null>;
   acknowledge(command: SandboxProviderCommand): Promise<SandboxProviderCommand>;
   reserveInput(byteLength?: number): Promise<number>;
@@ -32,7 +33,15 @@ export type ProviderCommandPersistence = {
   }): Promise<{ command: ModalRouterProviderCommand; captured: boolean }>;
 };
 
+export class ProviderCommandStartRejectedError extends Error {
+  constructor(cause: unknown) {
+    super("Provider rejected command before start", { cause });
+    this.name = "ProviderCommandStartRejectedError";
+  }
+}
+
 export type ProviderCommandSession = {
+  verifyCommandSupervisionCapability?(): Promise<{ sandboxId: string; taskId: string }>;
   releaseSupervisedCommand?(handle: number): Promise<void>;
   cancelSupervisedCommand?(
     handle: number,
@@ -68,6 +77,21 @@ export function markPendingCommandSupervised(): void {
   if (state) state.managed = true;
 }
 const supervisionReady = new AsyncLocalStorage<boolean>();
+type SupervisedLaunchReservation = {
+  reserve(command: ModalRouterProviderCommand): Promise<void>;
+};
+const supervisedLaunch = new AsyncLocalStorage<SupervisedLaunchReservation>();
+export function withSupervisedLaunchReservation<T>(
+  reservation: SupervisedLaunchReservation,
+  fn: () => T,
+): T {
+  return supervisedLaunch.run(reservation, fn);
+}
+export async function reserveSupervisedLaunch(command: ModalRouterProviderCommand): Promise<void> {
+  const reservation = supervisedLaunch.getStore();
+  if (!reservation) throw new Error("Supervised launch requires durable pre-dispatch reservation");
+  await reservation.reserve(command);
+}
 export function withCommandSupervisionReady<T>(ready: boolean, fn: () => T): T {
   return supervisionReady.run(ready, fn);
 }
