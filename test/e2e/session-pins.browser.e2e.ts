@@ -2120,6 +2120,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         });
         expect(failure.action).toBe("failed");
         expect(failure.turnId).toBeTruthy();
+        // Ordinary Retry supports this configured principal. Checkpoint consent
+        // does not: its managed-human restriction must not gate a no-compute route.
+        const recoveryUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${failed.id}/sandbox-recovery`;
+        expect((await context.request.get(recoveryUrl)).status()).toBe(403);
+        let recoveryReads = 0;
+        page.on("request", (request) => {
+          if (request.url() === recoveryUrl) recoveryReads++;
+        });
         await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${failed.id}`);
         const banner = page.getByTestId("failed-session-banner");
         const chooseModel = page.getByRole("button", {
@@ -2138,6 +2146,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           .waitFor({ state: "detached" });
         const retryButton = banner.getByRole("button", { name: "Retry", exact: true });
         await waitFor(async () => !(await retryButton.isDisabled()));
+        expect(recoveryReads).toBe(0);
         let submissions = 0;
         const submittedBodies: Record<string, unknown>[] = [];
         type RetryReceipt = {

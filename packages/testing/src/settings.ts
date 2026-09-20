@@ -218,6 +218,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     dockerNetwork: undefined,
     modalAppName: "opengeni-sandbox",
     modalImageRef: undefined,
+    modalCommandSupervisionEnabled: false,
     modalImageId: undefined,
     modalTimeoutSeconds: 3600,
     modalSandboxCpu: undefined,

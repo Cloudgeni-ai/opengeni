@@ -546,7 +546,7 @@ test("migration backfills only original uploads proven by accepted human message
   const unrelated = await fixture();
   expect(await f.read("user:viewer")).toEqual([]);
   const migration = await Bun.file(
-    new URL("../drizzle/0496_session_attachment_access.sql", import.meta.url),
+    new URL("../drizzle/0499_session_attachment_access.sql", import.meta.url),
   ).text();
   const start = migration.indexOf("ALTER TABLE files NO FORCE ROW LEVEL SECURITY;");
   const end = migration.indexOf("-- Copy only already accepted attachment grants", start);

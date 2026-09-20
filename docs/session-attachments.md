@@ -5,7 +5,7 @@ attached private uploads into the session transaction. Realtime creation only st
 resources; the first authenticated human prompt establishes grants, using immutable
 creation provenance. Merely inheriting a human identity does not publish attachments.
 
-`packages/db/src/session-file-attachments.ts` and migration 0496 own the exact
+`packages/db/src/session-file-attachments.ts` and migration 0499 own the exact
 session/file grants. Only completed uploads owned by the accepting human qualify.
 The migration backfills explicit accepted human-message attachments, never inferred
 ownership from session creators or arbitrary history references.

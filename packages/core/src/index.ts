@@ -116,6 +116,7 @@ export * from "./application/new-session-drafts";
 export * from "./application/composer-submit";
 export * from "./application/session-commands";
 export * from "./application/session-tenancy";
+export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";
 export * from "./application/api-integration-servers";
 

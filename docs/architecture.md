@@ -1,6 +1,5 @@
 # OpenGeni architecture reference
 
-> Code/docs define behavior.
 > Setup: [`../AGENTS.md`](../AGENTS.md). Documentation index: [`README.md`](README.md).
 
 ## Navigation
@@ -20,8 +19,8 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-OpenGeni: self-hostable session-based agent runtime. Postgres owns durable
-truth, Temporal execution coordination, and NATS reconstructible transport.
+OpenGeni: self-hostable session agent runtime. Postgres owns durable truth;
+Temporal coordinates execution; NATS transports reconstructible events.
 Control plane: identity, tenancy, sessions, human intervention, goals,
 recovery, compute, files, artifacts, usage, and observability. The API authorizes
 clients and bounded browser access to storage, sandboxes, relays, Codex WebRTC,
@@ -428,32 +427,47 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
-Sessions have durable home-compute policy and optional epoch-fenced active targets.
-Selection proves turn-context establishment authority; invalid pointers reconcile visibly.
-The lease/reaper owns managed sandboxes, not API/viewer requests. Identity persists before
-setup; capture fences every writer. Provider loss retires only the matching instance,
-never licensing ambiguous replay. Agent execution keeps the lazy routing wrapper after
-provisioning; raw handles serve lifecycle setup/capture (`turn-sandbox-access.ts`).
+Historical CURRENT recovery requires same-session managed-human consent,
+checkpoint/generation CAS, singleton fencing and durable model warnings; never replay.
+Authority: `packages/core/src/application/sandbox-recovery.ts`; lifecycle:
+`packages/db/src/index.ts`; membership/GC/protocol guards: migration 0495.
+Rolling activation defaults off; permanent worker-protocol fencing applies.
+Retry checks effective routes. See [run lifecycle](run-lifecycle.md).
 
-Ordinary snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains
-and rotations may use `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` (unset inherits
-the ordinary budget). Boot admission reserves rotation headroom for the larger
-budget plus a reaper period, including historical Modal leases after a backend
-change. Explicit drain budgets must fit dispatch, capture and retry handoff
-inside the lifecycle ceiling. Reclamation and heartbeat cleanup retain its holder
-until its original deadline despite logical turn closure, preventing drain
-takeover without extending execution authority.
+Home-compute selection proves establishment authority; invalid pointers reconcile
+visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture
+fences writers. Exact-instance loss never authorizes ambiguous replay. Routing stays
+lazy; raw handles serve setup/capture (`turn-sandbox-access.ts`).
+Global Modal inventory uses an owner-only SELECT capability under FORCE RLS (0497).
 
-Explicitly stopping managed commands with repeated provider observation errors
-use the existing idle checkpoint-before-termination containment only after
-owner quiescence and cancellation grace. Observation failure is never exit
-proof, and running commands without cancellation remain excluded.
+Stock Modal non-PTY/no-`runAs` commands support native subreaper supervision.
+Exact-instance capability verification precedes admission; durable invocation
+retention precedes dispatch. The supervisor starts idle. Only original launch
+releases user code; reconstructed observers never release abandoned reservations.
+Invocation-authenticated quiescence
+receipts are persisted before ACK permits supervisor exit. Canonical database
+settlement additionally requires authenticated provider terminal evidence and
+atomic output capture, on natural completion as well as cancellation. Deadline
+cancellation intent is monotonic across reconciliation claims and fences new
+stdin; already admitted writes remain blockers until settled. Provider loss,
+missing proof, and descriptor-free legacy commands never become successful
+supervision. See [command supervision](command-supervision.md).
 
-Acquisition/mutation waiters may extend their configured budget once for the
-first observed durable capture deadline plus handoff grace, capped at one hour.
-Expired/replacement claims cannot replenish it; zero-wait probes remain immediate.
-Expiry returns a fence, never capture takeover or writer authority. The shared
-policy is `packages/db/src/sandbox-transition-wait.ts`.
+Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
+may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the
+larger budget plus reaper period, including historical Modal leases after backend
+changes. Drain budgets include dispatch/capture/retry within the lifecycle ceiling.
+Warm-capture reclamation/heartbeat cleanup preserve holders through the original
+deadline despite turn closure: no takeover or extended authority.
+
+Legacy stopping-error containment requires owner quiescence and cancellation grace.
+Supervision-key presence—even malformed—blocks enrollment/capture/publication/teardown.
+Observation failure never proves exit; uncancelled running commands stay excluded.
+
+Acquisition/mutation waits extend once through the first durable capture deadline
+plus handoff grace (one-hour cap). Expired/replacement claims never replenish
+budgets; zero-wait probes remain immediate. Expiry grants no capture/writer authority.
+Policy: `packages/db/src/sandbox-transition-wait.ts`.
 
 A settled capture rejection releases only its exact unpublished claim, allowing
 waiters to re-arm the intact instance. Unresolved timeouts and publication/teardown
@@ -658,7 +672,7 @@ may embed API/core/worker packages, but the same domain and persistence
 boundaries still apply.
 
 Console appearance: `apps/web/src/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
-Managed sign-in layout: `apps/web/src/components/signed-out-page.tsx`; existing managed/broker authentication remains unchanged.
+Managed/broker sign-in: `apps/web/src/components/signed-out-page.tsx`; authentication unchanged.
 Workspace management route classification lives in `apps/web/src/lib/workspace-management-location.ts`. The workspace route loads `components/settings/workspace-settings-shell.tsx` lazily only for management destinations, so session navigation does not import the settings interface.
 
 ---
@@ -976,30 +990,27 @@ Provider-refusal cooldowns retain provenance and revisions: fresh usage repairs
 older quota refusals, never generic backpressure or newer refusals. All-capped
 admission and capacity waits reconcile through bounded refreshes.
 
-Every Codex turn requires a durable credential lease. `rotation_enabled` controls
-leaving the active account, not leasing: off waits on a capped account; on allows
-same-turn recovery elsewhere. First allocation atomically freezes source,
-active-pointer, rotation, strategy, and pin in `codexCredentialPolicySnapshotV1`,
-even before a no-credential wait. Recovery reuses this policy with current
-health/cooldowns. Missing/expired confirmed lease deadlines fail closed; late
-heartbeats are discarded. Expiry SQL reads database time after acquiring locks.
+Codex turns require durable credential leases. `rotation_enabled` controls
+account switching: off waits on capped accounts; on allows same-turn recovery
+elsewhere. First allocation atomically freezes source, active-pointer, rotation,
+strategy, and pin in `codexCredentialPolicySnapshotV1`, before no-credential waits.
+Recovery reuses that policy with current health/cooldowns. Missing/expired confirmed
+deadlines fail closed; discard late heartbeats. Expiry SQL reads database time
+after locking.
 
-Source changes serialize under the source advisory lock without requiring idle
-turns. Accepted work retains its pool through allocation, recovery, capacity
-checks, and token materialization. A content-free guarded capture records legacy
-turns' pre-change source in immutable `codex_turn_source_bindings`; it never
-rewrites history. New work uses the new setting. Connecting accounts preserves
-the selected mode; Automatic prefers connected local accounts. Token loading and
-refresh require the exact live lease. Workspace lists use current pools;
-authorized session pickers use accepted pools for waits and current pools for new work.
-Wakes follow accepted pools even after source changes. Membership, ownership,
-health, token-family CAS, and live-lease disconnect fences remain enforced.
+Source-advisory locks serialize changes without idle turns. Accepted pools govern
+allocation, recovery, capacity, tokens and wakes. Guarded content-free capture
+preserves immutable legacy pre-change sources in `codex_turn_source_bindings`,
+never rewriting history. New work uses new settings. Connecting preserves selected
+mode; Automatic prefers connected local accounts. Token loading/refresh requires
+exact live leases. Workspace lists use current pools; authorized session pickers use
+accepted pools for waits, current pools for new work. Membership, ownership, health,
+token-family CAS and live-lease disconnect fences remain enforced.
 
 Migration 0492 requires maintenance: drain API/control/turn processes, supply all
-runtime logins, migrate, provision roles, and start compatible binaries only.
-Before/after guards reject live runtime database sessions. Preserve checkpoints
-and recover accepted turns; do not cancel them. Never restart pre-0492 binaries.
-See the lifecycle and deployment guides for details.
+runtime logins, migrate, provision roles; start compatible binaries only.
+Before/after guards reject live runtime DB sessions. Preserve checkpoints and
+recover—not cancel—accepted turns. Never restart pre-0492 binaries.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`model-providers.md`](model-providers.md),
@@ -1120,14 +1131,11 @@ Canonical: [`../agent/README.md`](../agent/README.md) and
 `apps/api` owns HTTP concerns: middleware, request/response translation,
 cookies and bearer extraction, route composition, SSE, callbacks, and API-side
 control adapters. `@opengeni/core` owns reusable access, domain, billing, and
-admission behavior. A route should not create a second implementation of a
-domain rule already used by MCP, workers, or embedded hosts.
+admission behavior. Routes reuse domain rules shared with MCP, workers, and embedded hosts.
 
-Composer draft submission is one shared application command in
-`packages/core/src/application/composer-submit.ts`. The stock HTTP route and
-in-process embedding hosts call that command so validation, draft rotation,
-event append, turn routing, receipt/replay behavior, and the response contract
-have one owner.
+Composer submission's shared command, `packages/core/src/application/composer-submit.ts`,
+serves stock HTTP and in-process embedding hosts, owning validation, draft rotation,
+event append, turn routing, receipt/replay behavior, and the response contract.
 
 Canonical: `apps/api/src/app.ts`, `apps/api/src/routes/`, and
 `packages/core/src/`.
@@ -1558,10 +1566,10 @@ subjects cannot supply human authority. See [`skills-lifecycle.md`](skills-lifec
   choose arbitrary credential destinations.
 - **Connected Machine transport is tenant-scoped.** NATS credentials, subjects,
   enrollment generation, connection instance, operation identity, and relay
-  tokens prevent one machine or viewer from crossing workspaces or epochs.
-- **Sandbox credentials are least-lived and least-scoped.** Host preparation
-  profiles and explicit allowlists are the only way ambient credentials enter
-  managed sandboxes. Connected Machines retain their own environment.
+  tokens prevent machine/viewer access across workspaces or epochs.
+- **Sandbox credentials are least-lived and least-scoped.** Ambient credentials enter
+  managed sandboxes only through host preparation profiles and explicit allowlists.
+  Connected Machines retain their environment.
 
 Canonical: [`../SECURITY.md`](../SECURITY.md),
 [`credentials.md`](credentials.md), [`variable-sets.md`](variable-sets.md),
@@ -1575,12 +1583,12 @@ Canonical: [`../SECURITY.md`](../SECURITY.md),
 
 Production npm availability reconciles independently of acceptance; see `reconcile-production-packages.yml`.
 
-The stack uses Bun/strict TypeScript and Cargo for the Rust agent/relay.
+Toolchains: Bun/strict TypeScript; Cargo for the Rust agent/relay.
 Unit tests and typechecking are infrastructure-free; integration, end-to-end,
 browser, artifact-runtime, and live lanes explicitly add required services/credentials.
 
-Evidence-bound publication covers npm packages, container images, Helm, the
-Rust agent, and retained source identity. Package manifests, Changesets, CI,
+Evidence-bound publication covers npm packages, container images, Helm,
+Rust agent, and retained source identity. Manifests, Changesets, CI,
 and release scripts own closure/procedure. Web assets compile natively for both CPU targets.
 
 Commands:
@@ -1591,12 +1599,12 @@ Toolchain: [`toolchain.md`](toolchain.md).
 
 ## 12. Deployment
 
-Standalone and embedded deployments use typed `@opengeni/deployment` profiles
-to derive validated environment requirements, preflights, stack plans, and runtime artifacts.
+Typed `@opengeni/deployment` profiles derive standalone/embedded deployments'
+validated environment requirements, preflights, stack plans, and runtime artifacts.
 
 Helm owns application components and integration resources; cloud Terraform
 roots/stack wrappers compose external infrastructure. Bundled Postgres, Temporal,
-NATS, and object-storage templates are development, CI, conformance, or documented
+NATS, and object-storage templates serve development, CI, conformance, or documented
 single-machine fixtures—not production defaults.
 
 Procedures, provider requirements, activation boundaries, and recovery:

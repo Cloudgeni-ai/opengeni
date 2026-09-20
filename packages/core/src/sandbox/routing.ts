@@ -15,10 +15,11 @@ import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/confi
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import {
   createProviderCommandRetainer,
-  retainedProviderCommandPersistence,
+  supervisedCommandProtocolReady,
 } from "@opengeni/db/retained-provider-commands";
 import {
   advanceWorkspaceGenerationForDirectRequest,
+  retainedProviderCommandPersistence,
   advanceWorkspaceGenerationForRetainedProcess,
   getLiveEnrollmentConnection,
   getRetainedProcess,
@@ -532,6 +533,8 @@ export function wrapChannelABoxWithRouting(
   });
 
   const proxy = new RoutingSandboxSession({
+    providerSupervisionReady: async () =>
+      settings.modalCommandSupervisionEnabled && (await supervisedCommandProtocolReady(db)),
     providerCommandHandle: (value) =>
       value && typeof value === "object"
         ? (value as PersistableMutationAdmission).admission?.workspaceGeneration
@@ -598,6 +601,7 @@ export function wrapChannelABoxWithRouting(
               sandboxGroupId: homeLease.sandboxGroupId,
               expectedEpoch: homeLease.leaseEpoch,
               expectedInstanceId: homeLease.instanceId,
+              expectedBackend: homeLease.backend,
               diagnostic: "provider_not_found_during_routed_operation",
             });
             if (marked.status === "marked" && bus) {

@@ -41,6 +41,25 @@ their own activity indicators.
 
 When a session is waiting on you (a tool approval or a structured question), a normal Send replaces that wait with your new prompt.
 
+## Recovering unavailable workspace files
+
+If a managed Modal workspace is unavailable but an older registered checkpoint
+remains, an authorized signed-in human can review and explicitly restore that
+checkpoint in the same chat. This is available only when the session is the sole
+member of its sandbox group and has no unsettled work.
+
+The confirmation identifies the checkpoint time. Newer filesystem changes are
+unavailable; the conversation stays intact and external effects are not undone.
+The displayed generation gap is not a count of lost files or edits. Accepting
+consent is not proof of completion: restoration must pass verification before the
+UI reports it restored. The agent receives a persistent filesystem warning before
+later inference. No failed command is automatically retried. Pause and Cancel
+remain separate controls, and changing models cannot repair missing files.
+
+Shared groups, other providers, previous/unregistered checkpoints, and empty
+workspace resets are not supported by this recovery action. If recovery is blocked,
+the UI explains the blocker instead of promising a fresh sandbox with intact files.
+
 ## Attached context
 
 A session can carry repositories, uploaded files, workspace documents, selected tools, and Skills. Tool selection is durable session state: an explicit tool list is taken verbatim, and omitting it selects the workspace default.

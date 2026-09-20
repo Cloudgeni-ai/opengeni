@@ -31,6 +31,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import {
+  captureRetainedRouterOutput,
+  createProviderCommandRetainer,
+} from "@opengeni/db/retained-provider-commands";
+import {
   backgroundCommandActivityForSessions,
   getSessionBackgroundCommand,
   listSessionBackgroundCommands,
@@ -38,6 +42,8 @@ import {
 import { getSettings, type Settings } from "@opengeni/config";
 import {
   acquireLease,
+  retainedProviderCommandPersistence,
+  appendSessionEvents,
   authorizeHistoricalSandboxCheckpointRecovery,
   registerSandboxCheckpointArtifact,
   enrollUnobservableCommandIdleDrain,
@@ -293,11 +299,13 @@ async function verifyPendingQuiescenceBlocks(
   await admin`delete from session_attempt_interruptions where id = ${interruption!.id}`;
   await admin`delete from session_command_receipts where id = ${receipt!.id}`;
   await admin`update session_turn_attempts set outcome = 'interrupted_recoverable' where id = ${attempt.attemptId}`;
-  const [event] = await admin`insert into session_events (
-    account_id,workspace_id,session_id,turn_id,turn_attempt_id,sequence,type)
-    select ${ids.accountId},${ids.workspaceId},${attempt.sessionId},${attempt.turnId},
-      ${attempt.attemptId},coalesce(max(sequence),0)+1,'turn.recovery.requested'
-    from session_events where session_id = ${attempt.sessionId} returning id`;
+  const [event] = await appendSessionEvents(db, ids.workspaceId, attempt.sessionId, [
+    {
+      type: "turn.recovery.requested",
+      turnId: attempt.turnId,
+      turnAttemptId: attempt.attemptId,
+    },
+  ]);
   await check();
   await admin`delete from session_events where id = ${event!.id}`;
   await admin`update session_turn_attempts set outcome = 'completed' where id = ${attempt.attemptId}`;
@@ -3444,6 +3452,301 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     }
   }, 60_000);
 
+  for (const supervision of ["native", "null", "unknown", "string"] as const) {
+    test(`supervised ${supervision} command never enters legacy containment or stale capture teardown`, async () => {
+      if (!available) throw new Error("Real PostgreSQL required for supervision containment");
+      const ids = await freshWorkspace();
+      const attempt = await freshWarmSnapshotAttempt(ids);
+      ids.groupId = attempt.sandboxGroupId;
+      const instanceId = "box-supervised-containment";
+      const leaseId = await insertLease(ids, {
+        liveness: "warm",
+        refcount: 1,
+        turnHolders: 1,
+        leaseEpoch: 12,
+        expiresInMs: 600_000,
+        instanceId,
+        backend: "modal",
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: { providerState: { sandboxId: instanceId } },
+        },
+      });
+      await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+      const admission = await advanceWorkspaceGeneration(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        ...attempt,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 12,
+        expectedInstanceId: instanceId,
+        operation: "supervisedContainment",
+        routeKind: "home",
+        routeTargetId: null,
+        routeEpoch: 0,
+      });
+      const processId = crypto.randomUUID();
+      const retain = createProviderCommandRetainer(retainWorkspaceMutationProcess, () => null);
+      await retain(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        processId,
+        providerSessionId: 42,
+        admissionId: admission.id,
+        admittedWorkspaceGeneration: admission.workspaceGeneration,
+        operation: "supervisedContainment",
+        providerBinding: MODAL_PROVIDER_BINDING,
+        backgroundCommand: { commandId: processId, command: "supervised command" },
+        owner: {
+          kind: "turn",
+          ...attempt,
+          expectedEpoch: 12,
+          expectedInstanceId: instanceId,
+          routeKind: "home",
+          routeTargetId: null,
+          routeEpoch: 0,
+        },
+        providerCommand: {
+          kind: "modal-router-v1",
+          sandboxId: instanceId,
+          taskId: "task",
+          execId: crypto.randomUUID(),
+          supervision: {
+            protocol: "native-subreaper-v1",
+            invocationId: crypto.randomUUID(),
+            nonce: "a".repeat(64),
+            controlPath: `/tmp/opengeni-supervision/${crypto.randomUUID()}.sock`,
+          },
+          streams: {
+            stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+            stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+          },
+        },
+      });
+      await admin`delete from sandbox_lease_holders where lease_id=${leaseId} and kind='turn'`;
+      await admin`update sandbox_leases set refcount=1,turn_holders=0 where id=${leaseId}`;
+      await admin`update session_turn_attempts set state='closed',outcome='completed',
+        closed_at=now()-interval '2 minutes',quiesced_at=now()-interval '2 minutes' where id=${attempt.attemptId}`;
+      await admin`update sandbox_retained_processes set started_at=now()-interval '2 minutes',
+        last_reconcile_outcome='provider_error',reconcile_attempts=5 where id=${processId}`;
+      await admin`update session_background_commands set state='stopping',
+        cancel_requested_at=now()-interval '2 minutes',cancel_requested_by='test:stop' where id=${processId}`;
+      if (supervision !== "native") {
+        // Simulate old/corrupt data. Current writers reject these descriptors;
+        // readers must still fence on presence rather than parser success.
+        await admin.begin(async (tx) => {
+          await tx`set constraints all immediate`;
+          await tx`alter table sandbox_retained_processes disable trigger supervised_command_guard`;
+          await tx`update sandbox_retained_processes set provider_command=provider_command ||
+            ${tx.json({ supervision: supervision === "null" ? null : supervision === "string" ? "malformed" : { protocol: "future-v99" } })}::jsonb where id=${processId}`;
+          await tx`alter table sandbox_retained_processes enable trigger supervised_command_guard`;
+        });
+      }
+      const scope = {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+      };
+      expect(await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 1 })).toBeNull();
+      // Model enrollment from an older worker/rollout, not fresh authority.
+      // Current DB writers must reject it even if application checks are skipped.
+      await expect(
+        Promise.resolve(admin`update sandbox_leases set liveness='draining',
+        unobservable_command_drain_ids=array[${processId}::uuid] where id=${leaseId}`),
+      ).rejects.toThrow("Supervised command blocks");
+      const oldLeaseWrite = async (
+        write: (tx: postgres.TransactionSql) => PromiseLike<unknown>,
+      ) => {
+        await admin.begin(async (tx) => {
+          await tx`set constraints all immediate`;
+          await tx`alter table sandbox_leases disable trigger supervised_command_capture_guard`;
+          await write(tx);
+          await tx`alter table sandbox_leases enable trigger supervised_command_capture_guard`;
+        });
+      };
+      await oldLeaseWrite(
+        (tx) => tx`update sandbox_leases set liveness='draining',
+        unobservable_command_drain_ids=array[${processId}::uuid] where id=${leaseId}`,
+      );
+      expect(await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 1 })).toBeNull();
+      const captureId = crypto.randomUUID();
+      const capture = {
+        ...scope,
+        expectedEpoch: 12,
+        expectedInstanceId: instanceId,
+        liveness: "draining" as const,
+      };
+      expect(await readWorkspaceArchiveCapturePreflight(db, capture)).toBeNull();
+      expect(
+        await claimWorkspaceArchiveCapture(db, {
+          ...capture,
+          captureId,
+          captureTimeoutMs: 120_000,
+          minIntervalMs: 0,
+        }),
+      ).toEqual({ status: "mutation_in_progress" });
+      const operationId = crypto.randomUUID();
+      const providerRequestId = crypto.randomUUID();
+      await oldLeaseWrite(
+        (tx) => tx`update sandbox_leases set archive_capture_id=${captureId},
+        archive_capture_operation_id=${operationId},archive_capture_provider_request_id=${providerRequestId},
+        archive_capture_attempt=1,archive_capture_generation=workspace_generation,
+        archive_capture_started_at=now()-interval '2 minutes',archive_capture_deadline_at=now()-interval '1 minute',
+        archive_capture_takeover_safe=true where id=${leaseId}`,
+      );
+      expect(
+        await replaceWorkspaceArchiveCaptureAfterProof(db, {
+          ...scope,
+          expectedEpoch: 12,
+          expectedInstanceId: instanceId,
+          priorCaptureId: captureId,
+          captureId: crypto.randomUUID(),
+          operationId,
+          attempt: 2,
+          captureTimeoutMs: 120_000,
+        }),
+      ).toBeNull();
+      const persist = {
+        ...scope,
+        expectedEpoch: 12,
+        expectedInstanceId: instanceId,
+        expectedWorkspaceGeneration: admission.workspaceGeneration,
+        captureId,
+        providerRequestId,
+      };
+      expect(
+        (await persistDrainSnapshotRaw(db, { ...persist, workspaceArchive: null })).wrote,
+      ).toBe(false);
+      expect(
+        (
+          await persistDrainSnapshotRaw(db, {
+            ...persist,
+            workspaceArchive: Buffer.from("must not publish").toString("base64"),
+            workspaceArchiveMeta: archiveDescriptor(
+              Buffer.from("must not publish").toString("base64"),
+              Date.now(),
+            ),
+          })
+        ).wrote,
+      ).toBe(false);
+      // Already-published retry bypasses persistArchive: must fence BEFORE the
+      // provider seam, with command/admission/holder and archive unchanged.
+      await expect(
+        Promise.resolve(admin`update sandbox_leases set archive_capture_published_at=now()
+        where id=${leaseId}`),
+      ).rejects.toThrow("Supervised command blocks");
+      await oldLeaseWrite(
+        (tx) =>
+          tx`update sandbox_leases set archive_capture_published_at=now() where id=${leaseId}`,
+      );
+      const spy = makeTerminateSpy();
+      const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
+        terminateBox: spy.fn,
+      });
+      const result = await drainSandboxLease({
+        target: {
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.groupId,
+          instanceId,
+          leaseEpoch: 12,
+        },
+        timeoutClass: "fast",
+        snapshotTimeoutMs: 60_000,
+        captureTimeoutMs: 120_000,
+        operationId: crypto.randomUUID(),
+      });
+      expect(result.status).not.toBe("terminated");
+      expect(spy.calls).toHaveLength(0);
+      expect(spy.persisted).toHaveLength(0);
+      const [process] = await admin`select state,supervision_receipt,supervision_output_captured
+        from sandbox_retained_processes where id=${processId}`;
+      expect(process).toMatchObject({
+        state: "active",
+        supervision_receipt: null,
+        supervision_output_captured: false,
+      });
+      const [parent] =
+        await admin`select settled_at from sandbox_workspace_mutation_admissions where id=${admission.id}`;
+      expect(parent!.settled_at).toBeNull();
+      expect((await readLease(db, ids.workspaceId, ids.groupId))?.archiveGeneration).toBeNull();
+      if (supervision === "native") {
+        // Proof-backed native settlement still permits the ordinary drain.
+        const processScope = {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId,
+        };
+        const persistence = retainedProviderCommandPersistence(db, processScope);
+        const command = await persistence.load();
+        if (command?.kind !== "modal-router-v1" || !command.supervision)
+          throw new Error("Missing native fixture");
+        await persistence.recordSupervisionReceipt({
+          protocol: "native-subreaper-v1",
+          invocationId: command.supervision.invocationId,
+          receiptId: crypto.randomUUID(),
+          leaderExitCode: 0,
+        });
+        const terminal = structuredClone(command);
+        for (const stream of [terminal.streams.stdout, terminal.streams.stderr]) {
+          stream.eof = true;
+          stream.exitCode = 0;
+        }
+        await captureRetainedRouterOutput(db, processScope, {
+          expected: command,
+          command: terminal,
+          stdout: "",
+          stderr: "",
+        });
+        const retained = await getRetainedProcess(db, processScope);
+        expect(
+          (
+            await settleRetainedProcess(db, {
+              ...processScope,
+              expected: retainedProcessSettlementIdentity(retained!),
+              outcome: "exited",
+              exitCode: 0,
+              reason: "provider_exit_banner",
+              idleGraceMs: 1,
+            })
+          ).settled,
+        ).toBe(true);
+        // Discard only the deliberately injected, byte-less test claim; the
+        // ordinary drain now creates and publishes its own verified capture.
+        await admin`update sandbox_leases set archive_capture_published_at=null,
+          unobservable_command_drain_ids=null where id=${leaseId}`;
+        expect(
+          await releaseWorkspaceArchiveCapture(db, {
+            ...scope,
+            captureId,
+            expectedEpoch: 12,
+            expectedInstanceId: instanceId,
+          }),
+        ).toBe(true);
+        expect(
+          (
+            await drainSandboxLease({
+              target: {
+                workspaceId: ids.workspaceId,
+                sandboxGroupId: ids.groupId,
+                instanceId,
+                leaseEpoch: 12,
+              },
+              timeoutClass: "fast",
+              snapshotTimeoutMs: 60_000,
+              captureTimeoutMs: 120_000,
+              operationId: crypto.randomUUID(),
+            })
+          ).status,
+        ).toBe("terminated");
+        expect(spy.calls).toHaveLength(1);
+        expect(spy.persisted).toContainEqual({ group: ids.groupId, wrote: true });
+      }
+    }, 180_000);
+  }
+
   for (const [lateExit, stoppingErrors] of [
     [false, false],
     [true, false],
@@ -4401,7 +4704,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(blockedPreview.status).toBe("blocked");
     expect(blockedPreview.blockers).toContain("workspace_generation_mismatch");
     expect(blockedPreview.database).toMatchObject({
-      role: "opengeni_app",
+      role: new URL(shared!.appUrl).username,
       roleSuperuser: false,
       roleBypassRls: false,
       transactionReadOnly: true,
@@ -4591,7 +4894,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       await admin.unsafe(
         `create role ${quotedBypassRole} with login nosuperuser bypassrls nocreaterole nocreatedb noreplication inherit password '${roleCredential}'`,
       );
-      await admin.unsafe(`grant opengeni_app to ${quotedBypassRole}`);
+      await admin`grant ${admin(new URL(shared!.appUrl).username)} to ${admin(bypassRole)}`;
       const [bypassPosture] = await admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
         select rolsuper, rolbypassrls from pg_roles where rolname = ${bypassRole}`;
       expect(bypassPosture).toEqual({ rolsuper: false, rolbypassrls: true });
@@ -4704,6 +5007,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
 
     const possibleWriterAttemptId = crypto.randomUUID();
     await admin.begin(async (tx) => {
+      // The attempt-admission trigger runs under the FORCE-RLS owner. Raw
+      // fixture writes need the same tenant and protocol context as setRlsContext.
+      await tx`select set_config('opengeni.account_id', ${ids.accountId}, true),
+        set_config('opengeni.workspace_id', ${ids.workspaceId}, true),
+        set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
       await tx`
         update sessions
         set active_turn_id = ${attempt.turnId}, status = 'running'
@@ -6472,6 +6780,15 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
             workspacePersistence: "snapshot_filesystem",
           }
         : tarDescriptor;
+      // Deferred checkpoint validators run as the non-bypass owner under FORCE
+      // RLS, even when invoked by admin. Keep tenant scope through COMMIT so
+      // native artifact checks see the exact fixture instead of an invisible row.
+      const mutateFixture = (write: (tx: postgres.TransactionSql) => PromiseLike<unknown>) =>
+        admin.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${ids.accountId}, true),
+            set_config('opengeni.workspace_id', ${ids.workspaceId}, true)`;
+          await write(tx);
+        });
       const leaseId = await insertLease(ids, {
         liveness: "cold",
         backend: "modal",
@@ -6507,12 +6824,15 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
           workspaceArchive: archive,
           workspaceArchiveMeta: descriptor,
         });
-        await admin.begin(async (tx) => {
+        await mutateFixture(async (tx) => {
           await tx`update sandbox_leases set archive_generation = 0, current_checkpoint_artifact_id = ${artifact.id} where id = ${leaseId}`;
           await tx`update sandbox_checkpoint_artifacts set state = 'current' where id = ${artifact.id}`;
         });
       }
-      await admin`update sandbox_leases set workspace_generation = 3, archive_generation = 0 where id = ${leaseId}`;
+      await mutateFixture(
+        (tx) =>
+          tx`update sandbox_leases set workspace_generation = 3, archive_generation = 0 where id = ${leaseId}`,
+      );
       const scope = {
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
@@ -6572,13 +6892,19 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         if (mutation === "epoch")
           await admin`update sandbox_leases set lease_epoch = 2 where id = ${leaseId}`;
         if (mutation === "generation")
-          await admin`update sandbox_leases set workspace_generation = 4 where id = ${leaseId}`;
+          await mutateFixture(
+            (tx) => tx`update sandbox_leases set workspace_generation = 4 where id = ${leaseId}`,
+          );
         if (mutation === "pointer")
-          await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
-          '{opengeniHistoricalArchiveRecoveryId}', to_jsonb(${crypto.randomUUID()}::text)) where id = ${leaseId}`;
+          await mutateFixture(
+            (tx) => tx`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{opengeniHistoricalArchiveRecoveryId}', to_jsonb(${crypto.randomUUID()}::text)) where id = ${leaseId}`,
+          );
         if (mutation === "revision")
-          await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
-          '{sessionState,workspaceArchiveMeta,revision}', to_jsonb('wa1:1900000000001:changed'::text)) where id = ${leaseId}`;
+          await mutateFixture(
+            (tx) => tx`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{sessionState,workspaceArchiveMeta,revision}', to_jsonb('wa1:1900000000001:changed'::text)) where id = ${leaseId}`,
+          );
         if (mutation === "receipt-group")
           await admin`update audit_events set target_id = ${crypto.randomUUID()} where id = ${authorization.operationId}`;
         expect(
@@ -6590,11 +6916,15 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
             leaseTtlMs: 60_000,
           }),
         ).toMatchObject({ role: "blocked" });
-        await admin`update sandbox_leases set lease_epoch = 1, workspace_generation = 3,
+        await mutateFixture(
+          (tx) => tx`update sandbox_leases set lease_epoch = 1, workspace_generation = 3,
           resume_state = jsonb_set(resume_state, '{opengeniHistoricalArchiveRecoveryId}',
-          to_jsonb(${authorization.operationId}::text)) where id = ${leaseId}`;
-        await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
-          '{sessionState,workspaceArchiveMeta,revision}', to_jsonb(${descriptor.revision}::text)) where id = ${leaseId}`;
+          to_jsonb(${authorization.operationId}::text)) where id = ${leaseId}`,
+        );
+        await mutateFixture(
+          (tx) => tx`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{sessionState,workspaceArchiveMeta,revision}', to_jsonb(${descriptor.revision}::text)) where id = ${leaseId}`,
+        );
         await admin`update audit_events set target_id = ${ids.groupId} where id = ${authorization.operationId}`;
       }
       expect(await authorizeHistoricalSandboxCheckpointRecovery(db, authorization)).toEqual({
@@ -6610,16 +6940,16 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       const rematerializationId = crypto.randomUUID();
       const epoch = elected.lease.leaseEpoch;
       if (native) {
-        // Even a fixture bypassing immutability cannot commit mismatched provenance.
+        // The immutable source generation cannot be rebound to a newer archive
+        // generation. Exercise the deferred fence without disabling any guard.
         await expect(
-          admin.begin(async (tx) => {
-            await tx`alter table sandbox_checkpoint_artifacts disable trigger sandbox_checkpoint_artifact_immutability_guard`;
-            await tx`update sandbox_checkpoint_artifacts set source_workspace_generation = 1
-            where id = (select current_checkpoint_artifact_id from sandbox_leases where id = ${leaseId})`;
-            await tx`update sandbox_leases set current_checkpoint_artifact_id = current_checkpoint_artifact_id where id = ${leaseId}`;
-            await tx`alter table sandbox_checkpoint_artifacts enable trigger sandbox_checkpoint_artifact_immutability_guard`;
-          }),
+          mutateFixture(
+            (tx) => tx`update sandbox_leases set archive_generation = 1 where id = ${leaseId}`,
+          ),
         ).rejects.toThrow("current checkpoint artifact does not match its exact lease scope");
+        expect(await readLease(db, ids.workspaceId, ids.groupId)).toMatchObject({
+          archiveGeneration: 0,
+        });
       }
       expect(
         await beginSandboxRematerialization(db, {

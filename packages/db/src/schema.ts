@@ -1,6 +1,7 @@
 import type { StoredSessionAdmissionBlock } from "./session-admission-block";
 import type {
   SandboxProviderCommand,
+  CommandSupervisionReceipt,
   AutomationAcceptedExecution,
   AutomationSessionTemplate,
   AttemptToolCatalog,
@@ -9324,6 +9325,7 @@ export const sandboxLeases = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     sandboxGroupId: uuid("sandbox_group_id").notNull(),
+    publicRecovery: jsonb("public_recovery").$type<Record<string, unknown>>(),
 
     unobservableCommandDrainIds: uuid("unobservable_command_drain_ids").array(),
     unobservableCommandCheckedAt: timestamp("unobservable_command_checked_at", {
@@ -9918,6 +9920,13 @@ export const sandboxRetainedProcesses = pgTable(
     routeEpoch: integer("route_epoch").notNull(),
     providerSessionId: integer("provider_session_id").notNull(),
     providerCommand: jsonb("provider_command").$type<SandboxProviderCommand>(),
+    supervisionRetentionXid: customType<{ data: string }>({ dataType: () => "xid8" })(
+      "supervision_retention_xid",
+    ).default(sql`pg_current_xact_id()`),
+    supervisionReceipt: jsonb("supervision_receipt").$type<CommandSupervisionReceipt>(),
+    supervisionOutputCaptured: boolean("supervision_output_captured").notNull().default(false),
+    cancellationRequestedAt: timestamp("cancellation_requested_at", { withTimezone: true }),
+    cancellationReason: text("cancellation_reason"),
     providerCommandInputIndex: bigint("provider_command_input_index", { mode: "number" })
       .notNull()
       .default(0),

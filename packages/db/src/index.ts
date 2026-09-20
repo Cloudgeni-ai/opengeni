@@ -8,6 +8,12 @@ export {
 import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
   SKILL_CATALOG_CONTEXT_PREFIX,
+  SandboxRecoverySelection,
+  SandboxRecoveryResponse,
+  sandboxRecoveryDiscontinuity,
+  type SandboxRecoveryProjection,
+  type SandboxRecoveryRequest,
+  ModalRouterProviderCommand,
   readSkillCatalogContext,
   skillCatalogContextItem,
 } from "@opengeni/contracts";
@@ -18,7 +24,12 @@ import {
 } from "@opengeni/codex";
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
-export * from "./session-retry";
+import { createRetryFailedSessionInTransaction } from "./session-retry";
+export { SessionRetryConflictError, getSessionRetryReceiptInTransaction } from "./session-retry";
+import { retainedProviderCommandPersistence as retainedProviderCommandState } from "./retained-provider-commands";
+export const retryFailedSessionInTransaction = createRetryFailedSessionInTransaction(
+  sessionEffectiveSandboxRecoveryBlocked,
+);
 import { unresolvedCodexCredentialFailures } from "./codex-failure-eligibility";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
@@ -482,6 +493,9 @@ import {
   evaluateSessionDiscoveryControls,
   evaluateSessionWriteAdmissionControl,
   lockSessionEventWriteRows,
+  boundedLockStep,
+  workspaceControlLockBudget,
+  workspaceControlRequestLockTimeoutMs,
   lockWorkspaceInferenceControl,
   registerInternalUpdateWakeInTransaction,
   registerSessionWorkflowWakeInTransaction,
@@ -43840,6 +43854,8 @@ type LeaseRow = {
 } & Record<string, unknown>;
 
 export interface LeaseSnapshot {
+  /** Consent is not archive completeness; begin/commit revalidate the receipt. */
+  historicalRecoveryAuthorized?: boolean;
   /** Exact idle-only enrollment. Commands remain active until provider stop. */
   unobservableCommandDrainIds?: string[] | null;
   id: string;
@@ -45343,7 +45359,14 @@ async function acquireLeaseOnce(
           // casRows.length === 0 cannot happen under the held row lock (defensive):
           // a lost CAS means a sibling flipped it first, so we attach.
           const role = casRows.length === 0 ? ("attached" as const) : ("spawner" as const);
-          return { role, lease: mapLeaseRow(updated) };
+          return {
+            role,
+            lease: {
+              ...mapLeaseRow(updated),
+              historicalRecoveryAuthorized:
+                (await authorizedHistoricalArchiveGeneration(tx, updated)) !== null,
+            },
+          };
         }
 
         // -- warm: epoch fence for re-establishing turn holders (split-brain). A
@@ -45545,6 +45568,386 @@ async function hasSandboxGroupAttemptActivityTx(
   return false;
 }
 
+export class SandboxRecoveryConflictError extends Error {
+  readonly code = "SANDBOX_RECOVERY_CONFLICT";
+}
+
+/** Retry already owns workspace/session/turn locks. Fence the EFFECTIVE route,
+ * not a degraded managed home behind an explicitly selected Connected Machine. */
+export async function sessionEffectiveSandboxRecoveryBlocked(
+  tx: Database,
+  session: typeof schema.sessions.$inferSelect,
+): Promise<boolean> {
+  if (session.activeSandboxId !== null) {
+    const [target] = await tx
+      .select({ kind: schema.sandboxes.kind })
+      .from(schema.sandboxes)
+      .where(
+        and(
+          eq(schema.sandboxes.workspaceId, session.workspaceId),
+          eq(schema.sandboxes.id, session.activeSandboxId),
+        ),
+      )
+      .for("share");
+    if (target?.kind === "selfhosted") return false;
+  }
+  const groupId = session.activeSandboxId ?? session.sandboxGroupId;
+  const [row] =
+    await tx.execute<LeaseRow>(sql`select * from sandbox_leases where workspace_id = ${session.workspaceId}
+    and sandbox_group_id = ${groupId} for update`);
+  if (!row) return false;
+  if ((row.public_recovery as Record<string, unknown> | null)?.status === "accepted") return true;
+  if (row.liveness !== "cold") return false;
+  const recovery = recoveryStateFromLeaseRow(row);
+  return (
+    recovery.restore.status === "unrecoverable" ||
+    (recovery.restore.status === "degraded" && recovery.restore.retryable !== true) ||
+    (recovery.archive.status === "available" && !hasCompleteWorkspaceArchive(row))
+  );
+}
+
+type PublicRecoveryScope = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  subjectId: string;
+};
+
+/** Count the complete tenant group, not the actor-visible subset. The caller
+ * has already authorized the selected session; this returns no member data. */
+async function completeRecoveryGroupCount(
+  tx: Database,
+  input: PublicRecoveryScope,
+  groupId: string,
+): Promise<number> {
+  await tx.execute(sql`select set_config('opengeni.subject_id', '', true)`);
+  try {
+    const [row] = await rawRows<{ count: number }>(
+      tx,
+      sql`select count(*)::int as count from (select id from sessions
+      where account_id = ${input.accountId} and workspace_id = ${input.workspaceId} and sandbox_group_id = ${groupId} limit 2) members`,
+    );
+    return Number(row?.count ?? 0);
+  } finally {
+    await setSubjectRlsContext(tx, input.subjectId);
+  }
+}
+
+async function projectPublicSandboxRecovery(
+  tx: Database,
+  input: PublicRecoveryScope,
+): Promise<SandboxRecoveryProjection> {
+  const unavailable = (
+    reason: string,
+    checkpoint: SandboxRecoverySelection | null = null,
+  ): SandboxRecoveryProjection => ({
+    version: 1,
+    status: "blocked",
+    reason,
+    checkpoint,
+    operationId: null,
+  });
+  const [session] = await tx
+    .select()
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, input.sessionId),
+        eq(schema.sessions.accountId, input.accountId),
+      ),
+    );
+  if (!session) return unavailable("session_unavailable");
+  if (session.activeSandboxId !== null && session.activeSandboxId !== session.sandboxGroupId) {
+    const [target] = await tx
+      .select({ kind: schema.sandboxes.kind })
+      .from(schema.sandboxes)
+      .where(
+        and(
+          eq(schema.sandboxes.workspaceId, input.workspaceId),
+          eq(schema.sandboxes.id, session.activeSandboxId),
+        ),
+      );
+    return {
+      ...unavailable(
+        target?.kind === "selfhosted"
+          ? "connected_machine_selected"
+          : "managed_modal_home_required",
+      ),
+      status: "unsupported",
+    };
+  }
+  if (session.sandboxBackend !== "modal")
+    return { ...unavailable("managed_modal_home_required"), status: "unsupported" };
+  if ((await completeRecoveryGroupCount(tx, input, session.sandboxGroupId)) !== 1)
+    return { ...unavailable("singleton_required"), status: "unsupported" };
+  const [row] =
+    await tx.execute<LeaseRow>(sql`select * from sandbox_leases where workspace_id = ${input.workspaceId}
+    and sandbox_group_id = ${session.sandboxGroupId}`);
+  if (!row) return { ...unavailable("historical_checkpoint_not_required"), status: "unsupported" };
+  if (row.backend !== "modal")
+    return { ...unavailable("managed_modal_home_required"), status: "unsupported" };
+  const publicRecovery = row.public_recovery as Record<string, unknown> | null;
+  const acceptedSelection = SandboxRecoverySelection.safeParse(publicRecovery?.selection);
+  if (publicRecovery && acceptedSelection.success && publicRecovery.sessionId === input.sessionId) {
+    const recovery = recoveryStateFromLeaseRow(row);
+    const verified = publicRecovery.status === "verified";
+    const stale =
+      !verified &&
+      (session.authorityEpoch !== acceptedSelection.data.authorityEpoch ||
+        session.activeEpoch !== acceptedSelection.data.routeEpoch ||
+        Number(row.lease_epoch) !== acceptedSelection.data.leaseEpoch);
+    return {
+      version: 1,
+      status:
+        verified && recovery.workspace.status === "ready"
+          ? "restored"
+          : verified || stale || publicRecovery.status === "failed"
+            ? "blocked"
+            : row.liveness === "warming"
+              ? "restoring"
+              : "consent_accepted",
+      reason:
+        publicRecovery.status === "failed"
+          ? "restore_failed"
+          : stale
+            ? "consent_stale"
+            : verified && recovery.workspace.status !== "ready"
+              ? "restored_checkpoint_no_longer_ready"
+              : null,
+      checkpoint: acceptedSelection.data,
+      operationId: String(publicRecovery.operationId),
+    };
+  }
+  const recovery = recoveryStateFromLeaseRow(row);
+  // No authoritative recovery failure: a model/transport failure must keep its
+  // ordinary remedies even before the first checkpoint or lease exists.
+  if (
+    recovery.restore.status !== "unrecoverable" &&
+    recovery.restore.status !== "degraded" &&
+    (recovery.archive.status !== "available" || hasCompleteWorkspaceArchive(row))
+  )
+    return { ...unavailable("historical_checkpoint_not_required"), status: "unsupported" };
+  const descriptor = recovery.archive.current;
+  if (
+    !descriptor ||
+    descriptor.version !== 2 ||
+    recovery.archive.status !== "available" ||
+    !row.current_checkpoint_artifact_id
+  )
+    return unavailable("registered_current_checkpoint_required");
+  const parsed = SandboxRecoverySelection.safeParse({
+    version: 1,
+    sessionId: session.id,
+    sandboxGroupId: session.sandboxGroupId,
+    leaseId: row.id,
+    routeEpoch: session.activeEpoch,
+    authorityEpoch: session.authorityEpoch,
+    leaseEpoch: Number(row.lease_epoch),
+    workspaceGeneration: Number(row.workspace_generation),
+    archiveGeneration: row.archive_generation === null ? null : Number(row.archive_generation),
+    artifactId: row.current_checkpoint_artifact_id,
+    revision: descriptor.revision,
+    capturedAt: descriptor.capturedAt,
+  });
+  if (!parsed.success) return unavailable("checkpoint_metadata_invalid");
+  const selection = parsed.data;
+  if (selection.archiveGeneration >= selection.workspaceGeneration)
+    return unavailable("historical_checkpoint_not_required", selection);
+  if (row.liveness !== "cold" || row.instance_id !== null || Number(row.refcount) !== 0)
+    return unavailable("lease_not_quiescent", selection);
+  if (session.activeTurnId !== null || session.status === "cancelled")
+    return unavailable("session_not_quiescent", selection);
+  const [pending] = await rawRows<{ present: boolean }>(
+    tx,
+    sql`select
+    exists(select 1 from session_turns where workspace_id = ${input.workspaceId} and session_id = ${input.sessionId}
+      and status in ('queued','running','recovering','requires_action','waiting_capacity'))
+    or exists(select 1 from sandbox_lease_holders where lease_id = ${row.id})
+    or exists(select 1 from sandbox_workspace_mutation_admissions where lease_id = ${row.id} and settled_at is null)
+    or exists(select 1 from sandbox_retained_processes where lease_id = ${row.id} and state = 'active') as present`,
+  );
+  if (
+    pending?.present ||
+    (await hasSandboxGroupAttemptActivityTx(tx, {
+      workspaceId: input.workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      idleGraceMs: 0,
+    }))
+  )
+    return unavailable("execution_unresolved", selection);
+  if (row.archive_capture_id !== null && row.archive_capture_published_at === null)
+    return unavailable("capture_unresolved", selection);
+  const [artifact] = await rawRows<{ valid: boolean }>(
+    tx,
+    sql`select exists(select 1 from sandbox_checkpoint_artifacts
+    where id = ${selection.artifactId} and account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
+      and sandbox_group_id = ${selection.sandboxGroupId} and source_lease_id = ${selection.leaseId}
+      and state = 'current' and provider_backend = 'modal' and descriptor_revision = ${selection.revision}
+      and (descriptor->>'capturedAt') = ${selection.capturedAt}
+      and provenance = 'native_capture' and source_workspace_generation = ${selection.archiveGeneration}) as valid`,
+  );
+  if (!artifact?.valid) return unavailable("checkpoint_artifact_invalid", selection);
+  const [activation] = await rawRows<{ consent_enabled: boolean }>(
+    tx,
+    sql`select consent_enabled from opengeni_private.sandbox_recovery_rollout where singleton`,
+  );
+  if (!activation?.consent_enabled) return unavailable("recovery_not_enabled", selection);
+  return { version: 1, status: "eligible", reason: null, checkpoint: selection, operationId: null };
+}
+
+/** Authorized caller only; provider-free and mutation-free (transaction scope only). */
+export async function readPublicSandboxRecovery(
+  db: Database,
+  input: PublicRecoveryScope,
+): Promise<SandboxRecoveryProjection> {
+  return withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, (tx) =>
+    projectPublicSandboxRecovery(tx, input),
+  );
+}
+
+/** Core authenticates the canonical managed human before calling this seam.
+ * Exclusive tenancy precedes the complete membership proof and is shared by
+ * every attach/child writer. No provider operation or inference is dispatched. */
+export async function consentPublicSandboxRecovery(
+  db: Database,
+  input: PublicRecoveryScope & { request: SandboxRecoveryRequest },
+): Promise<SandboxRecoveryResponse> {
+  const budget = workspaceControlLockBudget(workspaceControlRequestLockTimeoutMs());
+  return withRlsContext(
+    db,
+    input,
+    async (tx) => {
+      const lock = <T>(step: () => Promise<T>) =>
+        boundedLockStep(tx, input.workspaceId, budget, step);
+      await lock(() =>
+        tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${input.accountId}`}, 0))`,
+        ),
+      );
+      await lock(() =>
+        tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`session-tenancy:${input.workspaceId}`}, 0))`,
+        ),
+      );
+      await setSubjectRlsContext(tx, input.subjectId);
+      if (!(await subjectHasLiveWorkspaceAuthorityInScope(tx, input)))
+        throw new SandboxRecoveryConflictError("Current human authority is unavailable");
+      const activity = tx;
+      await lockWorkspaceInferenceControl(activity, input.workspaceId, "update", { budget });
+      const locks = await lock(() =>
+        lockSessionEventWriteRows(activity, {
+          workspaceId: input.workspaceId,
+          controlLock: "none",
+          sessionIds: [input.sessionId],
+        }),
+      );
+      const session = locks.sessions[0];
+      if (!session || session.accountId !== input.accountId)
+        throw new SandboxRecoveryConflictError("Session is unavailable");
+      const reserved = await reserveSessionCommandReceipt(activity, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        targetSessionId: input.sessionId,
+        targetTurnId: null,
+        actor: { type: "human", subjectId: input.subjectId },
+        action: "sandbox.recovery.consent",
+        operationKey: input.request.operationId,
+        canonicalRequestHash: canonicalSessionCommandHash(input.request),
+      });
+      if (reserved.replay)
+        return {
+          ...SandboxRecoveryResponse.parse(reserved.receipt.result),
+          outcome: "replayed" as const,
+        };
+      if (input.request.selection.sessionId !== input.sessionId)
+        throw new SandboxRecoveryConflictError("Consent names a different session");
+      await lock(() =>
+        lockSandboxLeaseAdmission(activity, input.workspaceId, session.sandboxGroupId),
+      );
+      await lock(() =>
+        activity.execute(
+          sql`select id from sandbox_leases where workspace_id = ${input.workspaceId} and sandbox_group_id = ${session.sandboxGroupId} for update`,
+        ),
+      );
+      const projection = await projectPublicSandboxRecovery(activity, input);
+      if (
+        projection.status !== "eligible" ||
+        canonicalSessionCommandHash(projection.checkpoint) !==
+          canonicalSessionCommandHash(input.request.selection)
+      )
+        throw new SandboxRecoveryConflictError(
+          "The checkpoint or recovery eligibility changed; review a fresh preview",
+        );
+      const selection = input.request.selection;
+      const authorized = await authorizeHistoricalSandboxCheckpointRecovery(activity, {
+        ...input,
+        sandboxGroupId: selection.sandboxGroupId,
+        expectedEpoch: selection.leaseEpoch,
+        expectedWorkspaceGeneration: selection.workspaceGeneration,
+        expectedArchiveGeneration: selection.archiveGeneration,
+        selectedRevision: selection.revision,
+        operationId: input.request.operationId,
+        acceptHistoricalCheckpoint: true,
+        reason: `Explicit same-session checkpoint consent at ${selection.capturedAt}`,
+      });
+      if (!authorized.authorized)
+        throw new SandboxRecoveryConflictError("Recovery quiescence changed");
+      await activity.execute(
+        sql`update sandbox_leases set public_recovery = ${JSON.stringify({
+          version: 1,
+          status: "accepted",
+          sessionId: input.sessionId,
+          subjectId: input.subjectId,
+          operationId: input.request.operationId,
+          selection,
+        })}::jsonb where id = ${selection.leaseId}`,
+      );
+      const result: SandboxRecoveryResponse = {
+        outcome: "accepted",
+        operationId: input.request.operationId,
+        recovery: {
+          ...projection,
+          status: "consent_accepted",
+          operationId: input.request.operationId,
+        },
+      };
+      await updateSessionCommandReceiptResult(activity, reserved.receipt.id, { result });
+      return result;
+    },
+    undefined,
+    "none",
+  );
+}
+
+/** These warnings are outside compactable history and survive ordinary context
+ * reconstruction. Receipts describe consent, never unverified restore success. */
+export async function getSandboxRecoveryDiscontinuity(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | null> {
+  return withWorkspaceRls(db, workspaceId, async (tx) => {
+    const rows = await tx
+      .select({ result: schema.sessionCommandReceipts.result })
+      .from(schema.sessionCommandReceipts)
+      .where(
+        and(
+          eq(schema.sessionCommandReceipts.workspaceId, workspaceId),
+          eq(schema.sessionCommandReceipts.targetSessionId, sessionId),
+          eq(schema.sessionCommandReceipts.action, "sandbox.recovery.consent"),
+        ),
+      )
+      .orderBy(desc(schema.sessionCommandReceipts.createdAt))
+      .limit(1);
+    if (!rows[0]) return null;
+    const receipt = SandboxRecoveryResponse.parse(rows[0].result);
+    return receipt.recovery.checkpoint
+      ? sandboxRecoveryDiscontinuity(receipt.recovery.checkpoint)
+      : null;
+  });
+}
+
 /** Operator-only authorization for an exact historical checkpoint. Direct
  * database access is the authority boundary; subjectId records attribution.
  * This never resumes a turn or changes the archive/workspace generations. */
@@ -45641,6 +46044,45 @@ async function authorizedHistoricalArchiveGeneration(
   db: Database,
   row: LeaseRow,
 ): Promise<number | null> {
+  const publicRecovery = row.public_recovery as Record<string, unknown> | null;
+  if (publicRecovery) {
+    const selected = SandboxRecoverySelection.safeParse(publicRecovery.selection);
+    if (publicRecovery.status !== "accepted" || !selected.success) return null;
+    const selection = selected.data;
+    const [session] = await db
+      .select()
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.accountId, row.account_id),
+          eq(schema.sessions.workspaceId, row.workspace_id),
+          eq(schema.sessions.id, selection.sessionId),
+        ),
+      );
+    if (
+      !session ||
+      session.sandboxGroupId !== selection.sandboxGroupId ||
+      session.sandboxBackend !== "modal" ||
+      session.authorityEpoch !== selection.authorityEpoch ||
+      session.activeEpoch !== selection.routeEpoch ||
+      (session.activeSandboxId !== null && session.activeSandboxId !== selection.sandboxGroupId) ||
+      row.current_checkpoint_artifact_id !== selection.artifactId ||
+      recoveryStateFromLeaseRow(row).archive.current?.capturedAt !== selection.capturedAt ||
+      publicRecovery.operationId !== row.resume_state?.opengeniHistoricalArchiveRecoveryId
+    )
+      return null;
+    // This is a live-authority oracle for the already authenticated, durable
+    // consent actor, NOT an authentication of a request-supplied subject.
+    if (
+      typeof publicRecovery.subjectId !== "string" ||
+      !(await namedSubjectHasLiveWorkspaceAuthority(db, {
+        accountId: row.account_id,
+        workspaceId: row.workspace_id,
+        subjectId: publicRecovery.subjectId,
+      }))
+    )
+      return null;
+  }
   const operationId = row.resume_state?.opengeniHistoricalArchiveRecoveryId;
   if (
     typeof operationId !== "string" ||
@@ -45648,7 +46090,7 @@ async function authorizedHistoricalArchiveGeneration(
   )
     return null;
   const [receipt] = await db
-    .select({ metadata: schema.auditEvents.metadata })
+    .select({ metadata: schema.auditEvents.metadata, subjectId: schema.auditEvents.subjectId })
     .from(schema.auditEvents)
     .where(
       and(
@@ -45661,7 +46103,8 @@ async function authorizedHistoricalArchiveGeneration(
     );
   const metadata = receipt?.metadata;
   const archiveGeneration = row.archive_generation === null ? null : Number(row.archive_generation);
-  return metadata?.version === 1 &&
+  return (!publicRecovery || receipt?.subjectId === publicRecovery.subjectId) &&
+    metadata?.version === 1 &&
     metadata.acceptedHistoricalCheckpoint === true &&
     metadata.leaseId === row.id &&
     metadata.leaseEpoch === Number(row.lease_epoch) &&
@@ -46455,6 +46898,9 @@ export async function commitWarmingToWarm(
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             liveness          = 'warm',
+            public_recovery = case when public_recovery->>'status' = 'accepted'
+              then jsonb_set(jsonb_set(public_recovery, '{status}', '"verified"'::jsonb), '{verifiedAt}', ${JSON.stringify(completedAt)}::jsonb)
+              else public_recovery end,
             instance_id       = ${input.instanceId},
             data_plane_url    = ${input.dataPlaneUrl ?? null},
             terminal_data_plane_url = null,
@@ -48126,6 +48572,7 @@ async function lockExactLostProviderWorkspaceBlockersTx(
     leaseId: string;
     sandboxGroupId: string;
     lostEpoch: number;
+    lostBackend: string;
     lostInstanceId: string;
   },
 ): Promise<void> {
@@ -48136,6 +48583,7 @@ async function lockExactLostProviderWorkspaceBlockersTx(
       and lease_id = ${input.leaseId}
       and sandbox_group_id = ${input.sandboxGroupId}
       and lease_epoch = ${input.lostEpoch}
+      and provider_backend = ${input.lostBackend}
       and provider_instance_id = ${input.lostInstanceId}
       and state = 'active'
     order by id
@@ -48148,6 +48596,7 @@ async function lockExactLostProviderWorkspaceBlockersTx(
       and lease_id = ${input.leaseId}
       and sandbox_group_id = ${input.sandboxGroupId}
       and lease_epoch = ${input.lostEpoch}
+      and provider_backend = ${input.lostBackend}
       and provider_instance_id = ${input.lostInstanceId}
       and settled_at is null
     order by id
@@ -48160,6 +48609,7 @@ async function lockExactLostProviderWorkspaceBlockersTx(
       and lease_id = ${input.leaseId}
       and sandbox_group_id = ${input.sandboxGroupId}
       and lease_epoch = ${input.lostEpoch}
+      and provider_backend = ${input.lostBackend}
       and provider_instance_id = ${input.lostInstanceId}
       and status = 'open'
     order by id
@@ -48175,9 +48625,19 @@ async function settleExactLostProviderWorkspaceBlockersTx(
     leaseId: string;
     sandboxGroupId: string;
     lostEpoch: number;
+    lostBackend: string;
     lostInstanceId: string;
   },
 ): Promise<LostProviderWorkspaceSettlement> {
+  // Only callers that locked and revalidated this exact provider tuple reach
+  // here. Migration0495 independently checks the cold missing-provider outcome
+  // at commit. This is loss classification, not a supervision/EOF receipt.
+  const [priorLossBinding] = await tx.execute<{ value: string | null }>(sql`
+    select current_setting('opengeni.supervised_provider_loss_binding', true) as value
+  `);
+  await tx.execute(sql`
+    select set_config('opengeni.supervised_provider_loss_binding', ${JSON.stringify(input)}, true)
+  `);
   const lostProcesses = await tx
     .update(schema.sandboxRetainedProcesses)
     .set({
@@ -48193,6 +48653,7 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         eq(schema.sandboxRetainedProcesses.leaseId, input.leaseId),
         eq(schema.sandboxRetainedProcesses.sandboxGroupId, input.sandboxGroupId),
         eq(schema.sandboxRetainedProcesses.leaseEpoch, input.lostEpoch),
+        eq(schema.sandboxRetainedProcesses.providerBackend, input.lostBackend),
         eq(schema.sandboxRetainedProcesses.providerInstanceId, input.lostInstanceId),
         eq(schema.sandboxRetainedProcesses.state, "active"),
       ),
@@ -48201,6 +48662,9 @@ async function settleExactLostProviderWorkspaceBlockersTx(
       id: schema.sandboxRetainedProcesses.id,
       holderId: schema.sandboxRetainedProcesses.holderId,
     });
+  await tx.execute(sql`
+    select set_config('opengeni.supervised_provider_loss_binding', ${priorLossBinding?.value ?? ""}, true)
+  `);
 
   const rejectedAdmissions = await tx
     .update(schema.sandboxWorkspaceMutationAdmissions)
@@ -48212,6 +48676,7 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         eq(schema.sandboxWorkspaceMutationAdmissions.leaseId, input.leaseId),
         eq(schema.sandboxWorkspaceMutationAdmissions.sandboxGroupId, input.sandboxGroupId),
         eq(schema.sandboxWorkspaceMutationAdmissions.leaseEpoch, input.lostEpoch),
+        eq(schema.sandboxWorkspaceMutationAdmissions.providerBackend, input.lostBackend),
         eq(schema.sandboxWorkspaceMutationAdmissions.providerInstanceId, input.lostInstanceId),
         isNull(schema.sandboxWorkspaceMutationAdmissions.settledAt),
       ),
@@ -48228,6 +48693,7 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         eq(schema.sandboxPtySessions.leaseId, input.leaseId),
         eq(schema.sandboxPtySessions.sandboxGroupId, input.sandboxGroupId),
         eq(schema.sandboxPtySessions.leaseEpoch, input.lostEpoch),
+        eq(schema.sandboxPtySessions.providerBackend, input.lostBackend),
         eq(schema.sandboxPtySessions.providerInstanceId, input.lostInstanceId),
         eq(schema.sandboxPtySessions.status, "open"),
       ),
@@ -48298,6 +48764,8 @@ export async function markWarmLeaseInstanceLost(
     sandboxGroupId: string;
     expectedEpoch: number;
     expectedInstanceId: string;
+    /** Optional for legacy callers; new provider observers should bind backend too. */
+    expectedBackend?: string;
     /** Bounded classifier output only; never raw provider error text. */
     diagnostic?: string;
   },
@@ -48318,7 +48786,8 @@ export async function markWarmLeaseInstanceLost(
           !observed ||
           observed.liveness !== "warm" ||
           Number(observed.lease_epoch) !== input.expectedEpoch ||
-          observed.instance_id !== input.expectedInstanceId
+          observed.instance_id !== input.expectedInstanceId ||
+          (input.expectedBackend !== undefined && observed.backend !== input.expectedBackend)
         ) {
           return {
             status: "stale" as const,
@@ -48332,6 +48801,7 @@ export async function markWarmLeaseInstanceLost(
           leaseId: observed.id,
           sandboxGroupId: input.sandboxGroupId,
           lostEpoch: input.expectedEpoch,
+          lostBackend: observed.backend,
           lostInstanceId: input.expectedInstanceId,
         };
         await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
@@ -48347,7 +48817,8 @@ export async function markWarmLeaseInstanceLost(
           current.id !== observed.id ||
           current.liveness !== "warm" ||
           Number(current.lease_epoch) !== input.expectedEpoch ||
-          current.instance_id !== input.expectedInstanceId
+          current.instance_id !== input.expectedInstanceId ||
+          current.backend !== observed.backend
         ) {
           return {
             status: "stale" as const,
@@ -48595,6 +49066,7 @@ export async function reconcileColdLostLeaseInstanceBlockers(
           leaseId: observed.id,
           sandboxGroupId: input.sandboxGroupId,
           lostEpoch: input.expectedLostEpoch,
+          lostBackend: observed.backend,
           lostInstanceId: input.expectedLostInstanceId,
         };
         await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
@@ -49761,10 +50233,12 @@ export async function enrollUnobservableCommandIdleDrain(
       parent_admission_id: string;
       holder_id: string;
       eligible: boolean;
+      supervised: boolean;
     }>(
       tx,
       sql`
       select process.id, process.parent_admission_id, process.holder_id,
+        (coalesce(process.provider_command, '{}'::jsonb) ? 'supervision') as supervised,
         (process.lease_epoch = ${initial.leaseEpoch}
           and process.provider_instance_id = ${initial.instanceId}
           and process.provider_backend = 'modal' and process.route_target_id is null
@@ -49820,6 +50294,7 @@ export async function enrollUnobservableCommandIdleDrain(
     const ids = enrolled ?? processes.map((p) => p.id);
     if (
       !ids.length ||
+      processes.some((p) => p.supervised) ||
       (!enrolled && processes.some((p) => !p.eligible)) ||
       processes.some((p) => !ids.includes(p.id))
     )
@@ -50259,6 +50734,7 @@ export async function confirmDrainCold(
                 leaseId: observed.id,
                 sandboxGroupId: input.sandboxGroupId,
                 lostEpoch: input.expectedEpoch,
+                lostBackend: observed.backend,
                 lostInstanceId: observed.instance_id,
               }
             : null;
@@ -50287,7 +50763,8 @@ export async function confirmDrainCold(
           (row.refcount !== 0 && !row.unobservable_command_drain_ids?.length) ||
           Number(row.lease_epoch) !== input.expectedEpoch ||
           row.archive_capture_id !== (input.expectedCaptureId ?? null) ||
-          (blockerScope && row.instance_id !== blockerScope.lostInstanceId)
+          (blockerScope && row.instance_id !== blockerScope.lostInstanceId) ||
+          (blockerScope && row.backend !== blockerScope.lostBackend)
         ) {
           return { wentCold: false };
         }
@@ -51309,6 +51786,12 @@ async function lockWorkspaceMutationAuthorityTx(
   }
   if (process.state !== "active") {
     throw new SandboxRetainedProcessTerminalError(process.state, process.exitCode);
+  }
+  if (process.cancellationRequestedAt || process.supervisionReceipt) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Workspace mutation rejected because retained command input is closed",
+    );
   }
   if (session.sandboxGroupId !== process.sandboxGroupId) {
     throw new SandboxWorkspaceMutationFencedError(
@@ -53039,6 +53522,53 @@ export async function settleRetainedProcess(
   process: SandboxRetainedProcess;
   backgroundCommandEvents: SessionEvent[];
 }> {
+  return settleRetainedProcessWithAuthority(db, input);
+}
+
+/** Only call for an authenticated, typed provider response proving this exact
+ * retained launch was never started. Ambiguous dispatch is NOT rejection proof.
+ * The command equality and empty launch checks repeat under the settlement lock. */
+export async function rejectRetainedSupervisedLaunch(
+  db: Database,
+  scope: { accountId: string; workspaceId: string; sessionId: string; processId: string },
+  command: ModalRouterProviderCommand,
+): Promise<void> {
+  const expectedCommand = ModalRouterProviderCommand.parse(command);
+  if (!expectedCommand.supervision) throw new Error("Launch rejection requires supervision");
+  const process = await getRetainedProcess(db, scope);
+  if (!process) throw new Error("Retained supervised launch is unavailable");
+  await settleRetainedProcessWithAuthority(
+    db,
+    {
+      ...scope,
+      expected: process,
+      outcome: "lost",
+      reason: "provider_start_rejected",
+      idleGraceMs: 0,
+    },
+    expectedCommand,
+  );
+}
+
+/** Compose the leaf cursor/proof persistence with canonical settlement. The
+ * leaf subpath cannot import this root without reversing the DB boundary. */
+export function retainedProviderCommandPersistence(
+  ...[db, scope, publish]: Parameters<typeof retainedProviderCommandState>
+) {
+  return {
+    ...retainedProviderCommandState(db, scope, publish),
+    rejectSupervisedLaunch: (command: ModalRouterProviderCommand) =>
+      rejectRetainedSupervisedLaunch(db, scope, command),
+  };
+}
+
+// Never expose the launch-rejection authority on the public generic settlement
+// input: ordinary lost callbacks must not become never-started evidence.
+async function settleRetainedProcessWithAuthority(
+  db: Database,
+  input: Parameters<typeof settleRetainedProcess>[1],
+  rejectedLaunch?: ModalRouterProviderCommand,
+): ReturnType<typeof settleRetainedProcess> {
   const reason = normalizeRetainedProcessSettlementReason(input.reason);
   const exitCode = input.outcome === "exited" ? (input.exitCode ?? null) : null;
   if (exitCode !== null && !Number.isSafeInteger(exitCode)) {
@@ -53076,6 +53606,41 @@ export async function settleRetainedProcess(
           "process_fenced",
           "Retained process settlement did not match the copied durable identity",
         );
+      }
+      if (rejectedLaunch) {
+        if (
+          input.outcome !== "lost" ||
+          reason !== "provider_start_rejected" ||
+          !isDeepStrictEqual(process.providerCommand, rejectedLaunch) ||
+          process.supervisionReceipt !== null ||
+          process.supervisionOutputCaptured ||
+          process.reconcileProofOutcome !== null ||
+          process.providerCommandInputIndex !== 0 ||
+          !Object.values(rejectedLaunch.streams).every(
+            (stream) =>
+              stream.byteOffset === 0 &&
+              stream.utf8Remainder === "" &&
+              !stream.eof &&
+              stream.exitCode === null,
+          ) ||
+          (process.state !== "active" &&
+            (process.state !== "lost" || process.settlementReason !== reason))
+        ) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Launch rejection requires the exact pristine retained invocation",
+          );
+        }
+        const [children] = await tx.execute<{ present: boolean }>(sql`
+          select exists(select 1 from sandbox_workspace_mutation_admissions
+            where account_id=${input.accountId} and workspace_id=${input.workspaceId}
+              and actor_kind='process' and actor_id=${input.processId}) as present
+        `);
+        if (children?.present)
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Launch rejection cannot retire admitted process input",
+          );
       }
       if (process.state !== "active") {
         if (process.state !== input.outcome || process.exitCode !== exitCode) {
@@ -53125,6 +53690,20 @@ export async function settleRetainedProcess(
         );
       }
       const durableProof = retainedProcessReconciliationProof(mapRetainedProcess(process));
+      if (
+        process.providerCommand?.kind === "modal-router-v1" &&
+        process.providerCommand.supervision &&
+        !rejectedLaunch &&
+        (input.outcome !== "exited" ||
+          !process.supervisionReceipt ||
+          !process.supervisionOutputCaptured ||
+          exitCode !== process.supervisionReceipt.leaderExitCode)
+      ) {
+        throw new SandboxWorkspaceMutationFencedError(
+          "process_fenced",
+          "Supervised command requires immutable quiescence, provider termination and captured output",
+        );
+      }
       if (
         durableProof &&
         (durableProof.outcome !== input.outcome || durableProof.exitCode !== exitCode)
@@ -53207,6 +53786,16 @@ export async function settleRetainedProcess(
             eq(schema.sandboxPtySessions.status, "open"),
           ),
         );
+      const [priorRejectionBinding] = rejectedLaunch
+        ? await tx.execute<{ value: string | null }>(sql`
+        select current_setting('opengeni.supervised_launch_rejection_binding', true) as value
+      `)
+        : [];
+      if (rejectedLaunch)
+        await tx.execute(sql`
+        select set_config('opengeni.supervised_launch_rejection_binding',
+          ${JSON.stringify({ processId: process.id, command: rejectedLaunch })}, true)
+      `);
       const [updated] = await tx
         .update(schema.sandboxRetainedProcesses)
         .set({
@@ -53232,6 +53821,10 @@ export async function settleRetainedProcess(
           ),
         )
         .returning();
+      if (rejectedLaunch)
+        await tx.execute(sql`
+        select set_config('opengeni.supervised_launch_rejection_binding', ${priorRejectionBinding?.value ?? ""}, true)
+      `);
       if (!updated) {
         throw new SandboxWorkspaceMutationFencedError(
           "process_fenced",
@@ -53328,6 +53921,18 @@ export async function settleRetainedProcess(
   );
 }
 
+/** Legacy containment never substitutes for native-supervisor terminal proof.
+ * Presence, not successful descriptor parsing, is the fail-closed boundary.
+ * Check the whole lease, including stale/already-enrolled process IDs. */
+function noActiveSupervisedProcesses(leaseId: SQL): SQL {
+  return sql`not exists (
+    select 1 from sandbox_retained_processes supervised_process
+    where supervised_process.lease_id = ${leaseId}
+      and supervised_process.state = 'active'
+      and coalesce(supervised_process.provider_command, '{}'::jsonb) ? 'supervision'
+  )`;
+}
+
 /** Read the exact generation a verified capture must later fold. This is a
  * preflight only: persistWarmSnapshot/persistDrainSnapshot repeat the full
  * epoch, provider, liveness, and generation CAS under the archive-fold lock. */
@@ -53355,6 +53960,7 @@ export async function readWorkspaceArchiveCapturePreflight(
         where lease.workspace_id = ${input.workspaceId}
           and lease.sandbox_group_id = ${input.sandboxGroupId}
           and lease.liveness = ${input.liveness}
+          and ${noActiveSupervisedProcesses(sql`lease.id`)}
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
           ${
@@ -53870,6 +54476,10 @@ export async function claimWorkspaceArchiveCapture(
       if (input.liveness === "draining" && row.reaper_hold_active) {
         return { status: "reaper_held" as const };
       }
+      const [supervision] = await scopedDb.execute<{ safe: boolean }>(sql`
+        select ${noActiveSupervisedProcesses(sql`${row.id}::uuid`)} as safe
+      `);
+      if (!supervision?.safe) return { status: "mutation_in_progress" as const };
       if (row.archive_capture_id !== null) {
         return { status: "capture_in_progress" as const };
       }
@@ -54153,6 +54763,7 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
           and lease.lease_epoch = ${input.expectedEpoch}
           and lease.instance_id = ${input.expectedInstanceId}
           and lease.archive_capture_id = ${input.priorCaptureId}::uuid
+          and ${noActiveSupervisedProcesses(sql`lease.id`)}
           and (
             lease.archive_capture_operation_id <> ${input.operationId}::uuid
             or lease.archive_capture_attempt < ${input.attempt}
@@ -55095,10 +55706,12 @@ export async function persistDrainSnapshot(
           current_checkpoint_artifact_id: string | null;
           previous_checkpoint_artifact_id: string | null;
           unsettled_mutation: boolean;
+          supervision_safe: boolean;
         }
       >(sql`
         select
           lease.*,
+          ${noActiveSupervisedProcesses(sql`lease.id`)} as supervision_safe,
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
           resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev,
           exists (
@@ -55130,7 +55743,7 @@ export async function persistDrainSnapshot(
         published?.workspaceArchiveRef,
         row?.resume_state,
       );
-      if (!row) {
+      if (!row || !row.supervision_safe) {
         return {
           wrote: false,
           archiveRevision: null,
@@ -55545,6 +56158,7 @@ async function foldWorkspaceArchiveOntoLease(
     where lease.workspace_id = ${input.workspaceId}
       and lease.sandbox_group_id = ${input.sandboxGroupId}
       and ${livenessGuard}
+      and ${noActiveSupervisedProcesses(sql`lease.id`)}
       and lease.lease_epoch = ${currentLeaseEpoch}
       and lease.instance_id is not distinct from ${currentInstanceId}
       and lease.workspace_generation = ${input.expectedWorkspaceGeneration}
@@ -58976,109 +59590,133 @@ export async function approveDeviceEnrollmentRequest(
   sandbox: SandboxRecord | null;
 }> {
   const now = input.now ?? new Date();
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await setSubjectRlsContext(scopedDb, input.approvedBySubjectId);
-      // Re-read FOR UPDATE under the txn so a concurrent approve / expiry can't race.
-      const [pending] = await scopedDb
-        .select()
-        .from(schema.deviceEnrollmentRequests)
-        .where(
-          and(
-            eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
-            eq(schema.deviceEnrollmentRequests.id, input.requestId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!pending) {
-        return { approved: false, enrollment: null, sandbox: null };
-      }
-      // Already approved → idempotent return of the exact existing rows. Do not run
-      // the finalize upsert again: that operation is the credential-generation
-      // rotation boundary for a genuinely new enrollment request.
-      if (pending.status === "approved") {
-        if (!pending.enrollmentId || !pending.sandboxId) {
-          throw new Error("Approved enrollment request is missing its finalized row ids");
-        }
-        const [existingEnrollment] = await scopedDb
+  const approveInScope = (database: Database) =>
+    withRlsContext(
+      database,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) => {
+        await setSubjectRlsContext(scopedDb, input.approvedBySubjectId);
+        // Re-read FOR UPDATE under the txn so a concurrent approve / expiry can't race.
+        const [pending] = await scopedDb
           .select()
-          .from(schema.enrollments)
+          .from(schema.deviceEnrollmentRequests)
           .where(
             and(
-              eq(schema.enrollments.workspaceId, input.workspaceId),
-              eq(schema.enrollments.id, pending.enrollmentId),
+              eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+              eq(schema.deviceEnrollmentRequests.id, input.requestId),
             ),
           )
+          .for("update")
           .limit(1);
-        const [existingSandbox] = await scopedDb
-          .select()
-          .from(schema.sandboxes)
-          .where(
-            and(
-              eq(schema.sandboxes.workspaceId, input.workspaceId),
-              eq(schema.sandboxes.id, pending.sandboxId),
-              eq(schema.sandboxes.enrollmentId, pending.enrollmentId),
-            ),
-          )
-          .limit(1);
-        if (!existingEnrollment || !existingSandbox) {
-          throw new Error("Approved enrollment request references missing finalized rows");
+        if (!pending) {
+          return { approved: false, enrollment: null, sandbox: null };
         }
-        return {
-          approved: true,
-          enrollment: mapEnrollment(existingEnrollment),
-          sandbox: mapSandbox(existingSandbox),
-        };
-      }
-      const expired = pending.expiresAt.getTime() <= now.getTime();
-      if (pending.status === "denied" || pending.status === "consumed") {
-        return { approved: false, enrollment: null, sandbox: null };
-      }
-      if (pending.status === "pending" && expired) {
-        return { approved: false, enrollment: null, sandbox: null };
-      }
+        // Already approved → idempotent return of the exact existing rows. Do not run
+        // the finalize upsert again: that operation is the credential-generation
+        // rotation boundary for a genuinely new enrollment request.
+        if (pending.status === "approved") {
+          if (!pending.enrollmentId || !pending.sandboxId) {
+            throw new Error("Approved enrollment request is missing its finalized row ids");
+          }
+          const [existingEnrollment] = await scopedDb
+            .select()
+            .from(schema.enrollments)
+            .where(
+              and(
+                eq(schema.enrollments.workspaceId, input.workspaceId),
+                eq(schema.enrollments.id, pending.enrollmentId),
+              ),
+            )
+            .limit(1);
+          const [existingSandbox] = await scopedDb
+            .select()
+            .from(schema.sandboxes)
+            .where(
+              and(
+                eq(schema.sandboxes.workspaceId, input.workspaceId),
+                eq(schema.sandboxes.id, pending.sandboxId),
+                eq(schema.sandboxes.enrollmentId, pending.enrollmentId),
+              ),
+            )
+            .limit(1);
+          if (!existingEnrollment || !existingSandbox) {
+            throw new Error("Approved enrollment request references missing finalized rows");
+          }
+          return {
+            approved: true,
+            enrollment: mapEnrollment(existingEnrollment),
+            sandbox: mapSandbox(existingSandbox),
+          };
+        }
+        const expired = pending.expiresAt.getTime() <= now.getTime();
+        if (pending.status === "denied" || pending.status === "consumed") {
+          return { approved: false, enrollment: null, sandbox: null };
+        }
+        if (pending.status === "pending" && expired) {
+          return { approved: false, enrollment: null, sandbox: null };
+        }
 
-      // The SHARED finalize core: upsert the enrollment (idempotent) + ensure a
-      // selfhosted sandbox. RLS is already set on scopedDb's session and this call
-      // runs INSIDE this FOR-UPDATE txn, so the re-read fence + the stamp below + the
-      // enrollment/sandbox writes all commit atomically (semantics unchanged from the
-      // pre-refactor inline block — acceptance #2 stays one machine). The headless
-      // token exchange (finalizeEnrollmentByToken) calls the SAME core.
-      const { enrollment, sandbox } = await finalizeEnrollmentInScope(scopedDb, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        ...(input.scope ? { scope: input.scope } : {}),
-        allowOrganization: input.allowOrganization === true,
-        pubkey: pending.pubkey,
-        hasDisplay: pending.canOfferDisplay,
-        allowScreenControl: input.allowScreenControl,
-        os: pending.os as EnrollmentOs,
-        arch: pending.arch,
-        sandboxName: input.sandboxName,
-        now,
-      });
-
-      // Stamp the request approved + the LOUD CONSENT record (who/when/what).
-      await scopedDb
-        .update(schema.deviceEnrollmentRequests)
-        .set({
-          status: "approved",
+        // The SHARED finalize core: upsert the enrollment (idempotent) + ensure a
+        // selfhosted sandbox. RLS is already set on scopedDb's session and this call
+        // runs INSIDE this FOR-UPDATE txn, so the re-read fence + the stamp below + the
+        // enrollment/sandbox writes all commit atomically (semantics unchanged from the
+        // pre-refactor inline block — acceptance #2 stays one machine). The headless
+        // token exchange (finalizeEnrollmentByToken) calls the SAME core.
+        const { enrollment, sandbox } = await finalizeEnrollmentInScope(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          ...(input.scope ? { scope: input.scope } : {}),
+          allowOrganization: input.allowOrganization === true,
+          pubkey: pending.pubkey,
+          hasDisplay: pending.canOfferDisplay,
           allowScreenControl: input.allowScreenControl,
-          approvedBySubjectId: input.approvedBySubjectId,
-          approvedBySubjectLabel: input.approvedBySubjectLabel ?? null,
-          approvedAt: now,
-          enrollmentId: enrollment.id,
-          sandboxId: sandbox.id,
-          updatedAt: now,
-        })
-        .where(eq(schema.deviceEnrollmentRequests.id, pending.id));
+          os: pending.os as EnrollmentOs,
+          arch: pending.arch,
+          sandboxName: input.sandboxName,
+          now,
+        });
 
-      return { approved: true, enrollment, sandbox };
-    },
-  );
+        // Stamp the request approved + the LOUD CONSENT record (who/when/what).
+        await scopedDb
+          .update(schema.deviceEnrollmentRequests)
+          .set({
+            status: "approved",
+            allowScreenControl: input.allowScreenControl,
+            approvedBySubjectId: input.approvedBySubjectId,
+            approvedBySubjectLabel: input.approvedBySubjectLabel ?? null,
+            approvedAt: now,
+            enrollmentId: enrollment.id,
+            sandboxId: sandbox.id,
+            updatedAt: now,
+          })
+          .where(eq(schema.deviceEnrollmentRequests.id, pending.id));
+
+        return { approved: true, enrollment, sandbox };
+      },
+    );
+  if (input.scope !== "user") return await approveInScope(db);
+  // Organization membership precedes the tenancy fence acquired by
+  // withRlsContext, then the pending request and enrollment rows. A Database
+  // can itself be a transaction holding locks: fail closed rather than wait
+  // on an unknown caller's reverse-order prefix. The SQL finalizer repeats
+  // this nonblocking check for direct callers and old binaries.
+  return await db.transaction(async (tx) => {
+    const database = tx as unknown as Database;
+    const [fence] = await rawRows<{ acquired: boolean }>(
+      database,
+      sql`
+      select pg_try_advisory_xact_lock(hashtextextended(
+        ${`organization-membership:${input.accountId}`}, 0
+      )) as acquired
+    `,
+    );
+    if (!fence?.acquired) {
+      throw Object.assign(new Error("Enrollment membership is changing; retry the transaction"), {
+        code: "55P03",
+      });
+    }
+    return await approveInScope(database);
+  });
 }
 
 // Mark a pending request DENIED (an explicit user "no" at the approve page).
@@ -65296,6 +65934,9 @@ function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(
 }
 
 export type ClaimSessionWorkForAttemptInput = {
+  /** Internal worker-build declaration, never request-derived or universally
+   * stamped by createDb. Only builds that always reconstruct the warning opt in. */
+  filesystemDiscontinuityProtocol?: 1;
   sessionId: string;
   workflowId: string;
   workflowRunId: string;
@@ -65663,6 +66304,33 @@ async function acknowledgeConsumedChildLifecycleNotices(
         where ${pins.acknowledgedSequence} < excluded.acknowledged_sequence
     `);
   });
+}
+
+/** Scope the worker-build declaration to registration, including nested claims. */
+async function withSandboxRecoveryWarningClaimProtocol<T>(
+  tx: Database,
+  version: 1 | undefined,
+  register: () => Promise<T>,
+): Promise<T> {
+  const [prior] = await rawRows<{ protocol: string }>(
+    tx,
+    sql`select coalesce(current_setting('opengeni.filesystem_discontinuity_protocol_v1', true), '') as protocol`,
+  );
+  await tx.execute(
+    sql`select set_config('opengeni.filesystem_discontinuity_protocol_v1', ${version === 1 ? "1" : ""}, true)`,
+  );
+  let completed = false;
+  try {
+    const result = await register();
+    completed = true;
+    return result;
+  } finally {
+    const restore = tx.execute(
+      sql`select set_config('opengeni.filesystem_discontinuity_protocol_v1', ${prior?.protocol ?? ""}, true)`,
+    );
+    if (completed) await restore;
+    else await restore.catch(() => undefined); // Claim savepoint rolls back a rejected INSERT.
+  }
 }
 
 /**
@@ -66563,24 +67231,30 @@ export async function claimSessionWorkForAttempt(
               );
             }
           }
-          const attempt = await registerSessionTurnAttemptClaim(tx as unknown as Database, {
-            id: input.attemptId,
-            accountId: session.accountId,
-            workspaceId,
-            sessionId,
-            turnId: turn.id,
-            executionGeneration: turn.executionGeneration,
-            temporalWorkflowId: workflowId,
-            temporalWorkflowRunId: input.workflowRunId,
-            temporalActivityId: input.dispatchId,
-            verifiedControlRevision: Number(workspaceControl.revision),
-            authorityEpoch: session.authorityEpoch,
-            authorityVisibility: session.visibility as "user_private" | "workspace_shared",
-            authorityOwnerOrganizationMembershipId: session.ownerOrganizationMembershipId ?? null,
-            personalResourceProtocolVersion: turn.personalResourceProtocolVersion,
-            mcpApprovalPolicies,
-            connectorActionPolicies: connectorPolicyRows,
-          });
+          const attempt = await withSandboxRecoveryWarningClaimProtocol(
+            tx,
+            input.filesystemDiscontinuityProtocol,
+            () =>
+              registerSessionTurnAttemptClaim(tx as unknown as Database, {
+                id: input.attemptId,
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                turnId: turn.id,
+                executionGeneration: turn.executionGeneration,
+                temporalWorkflowId: workflowId,
+                temporalWorkflowRunId: input.workflowRunId,
+                temporalActivityId: input.dispatchId,
+                verifiedControlRevision: Number(workspaceControl.revision),
+                authorityEpoch: session.authorityEpoch,
+                authorityVisibility: session.visibility as "user_private" | "workspace_shared",
+                authorityOwnerOrganizationMembershipId:
+                  session.ownerOrganizationMembershipId ?? null,
+                personalResourceProtocolVersion: turn.personalResourceProtocolVersion,
+                mcpApprovalPolicies,
+                connectorActionPolicies: connectorPolicyRows,
+              }),
+          );
           // Freeze governance only after this exact attempt is durably claimed,
           // while the claim transaction still owns the session/turn/attempt
           // locks. Later policy or preference activation applies to a future

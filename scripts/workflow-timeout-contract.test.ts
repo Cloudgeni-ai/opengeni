@@ -24,6 +24,13 @@ type Job = Readonly<{
 type Workflow = Readonly<{ jobs?: Readonly<Record<string, Job>> }>;
 
 const EXPECTED_CAPS = [
+  [
+    "agent-ci.yml",
+    "native-command-supervisor",
+    "Compile and exercise native protocol and failure cases",
+    5,
+    "run",
+  ],
   ["local-startup.yml", "docker", "Check startup ownership and prerequisite regressions", 2, "run"],
   ["local-startup.yml", "docker", "Verify the runner Docker dependency", 1, "run"],
   ["local-startup.yml", "docker", "Start the documented stack from a clean checkout", 50, "run"],
@@ -65,6 +72,7 @@ const EXPECTED_CAPS = [
 ] as const;
 
 const EXPECTED_JOB_BUDGETS = {
+  "agent-ci.yml:native-command-supervisor": { stepCaps: 5, needed: 6, jobCap: 6 },
   "local-startup.yml:docker": { stepCaps: 88, needed: 89, jobCap: 90 },
   "ci.yml:plan": { stepCaps: 11, needed: 12, jobCap: 15 },
   "ci.yml:source-contracts": { stepCaps: 27, needed: 28, jobCap: 35 },
@@ -95,7 +103,7 @@ function numericCap(value: unknown): number | null {
 }
 
 describe("workflow timeout contract", () => {
-  test("all jobs and the exact 22 run plus 4 action steps use static native caps", async () => {
+  test("all jobs and the exact 23 run plus 4 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
     const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
@@ -135,7 +143,7 @@ describe("workflow timeout contract", () => {
       right: readonly [string, string, string, number, "run" | "action"],
     ) => left.slice(0, 3).join("\0").localeCompare(right.slice(0, 3).join("\0"));
     expect(capped.toSorted(byIdentity)).toEqual(EXPECTED_CAPS.toSorted(byIdentity));
-    expect(capped.filter((row) => row[4] === "run")).toHaveLength(22);
+    expect(capped.filter((row) => row[4] === "run")).toHaveLength(23);
     expect(capped.filter((row) => row[4] === "action")).toHaveLength(4);
     for (const [job, expected] of Object.entries(EXPECTED_JOB_BUDGETS)) {
       expect(budgets[job], job).toEqual(expected);

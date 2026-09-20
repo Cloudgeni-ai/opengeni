@@ -1,5 +1,44 @@
 # Deployment
 
+## Consented sandbox recovery (0495)
+
+Fresh bootstrap may migrate before runtime roles exist. Migration 0495 grants
+read access to existing configured roles only; normal `db:provision-roles`
+converges newly created and later-added app roles to SELECT-only access on the
+rollout row. Re-provisioning revokes activation writes and PUBLIC access; it
+never enables consent. Do not precreate runtime roles merely to run migration.
+
+`0495_consented_sandbox_recovery.sql` is additive and rolling, but does not enable
+consent. Supply the runtime login list through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`),
+migrate and provision the normal application role. The owner-only
+`opengeni_private.sandbox_recovery_rollout` singleton defaults to disabled;
+runtime roles receive SELECT only. Database triggers reject new consent while
+disabled, regardless of API/UI configuration. Additive DDL may briefly wait for
+locks; rolling does not mean zero latency impact.
+
+Before deliberate activation, the deployment owner must verify immutable
+API/control/turn image digests, drain incompatible in-flight workers, and inspect
+all templates that can recreate them, including scaled-to-zero deployments and
+jobs. Record that verified release evidence when changing `consent_enabled` to
+true as the migration owner. This is an operator procedure, not a public API or
+an action performed by migration. Evidence text records attribution; it is not
+binary attestation. Never inject `opengeni.filesystem_discontinuity_protocol_v1`
+through role defaults, connection configuration or deployment settings.
+
+Before the first accepted consent, application rollback remains compatible with
+the additive schema. Afterwards, finalized consent receipts permanently require
+the warning-aware worker protocol at attempt INSERT, including conflicting-insert
+reattachment. Old workers fail closed only for affected sessions; repeated old
+claims can still harm availability. Disabling new consent does not erase this
+protection, invalidate exact receipt replay or interrupt accepted restoration.
+Rollback after use is limited to warning-compatible builds. Session deletion
+alone removes its warning receipt through the legitimate parent cascade.
+
+This adds canonical-human consent for singleton managed-home Modal recovery only.
+It does not enable automatic rollback, shared-group recovery, command replay,
+empty reset, or a new cancellation/reaper protocol. See [run lifecycle](run-lifecycle.md).
+
 ## Selective Knowledge source discovery (0469)
 
 `0469_knowledge_source_discovery.sql` requires maintenance. Stop every API,
