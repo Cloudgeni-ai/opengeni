@@ -88,9 +88,10 @@ beforeAll(async () => {
     CREATE TABLE session_turns (id uuid PRIMARY KEY, account_id uuid, workspace_id uuid, session_id uuid,
       active_attempt_id uuid, execution_generation integer, status text, initiator_kind text,
       initiator_subject_id text, initiating_human_subject_id text, scheduled_task_run_id uuid,
-      personal_connection_delegations jsonb DEFAULT '[]');
+      personal_connection_delegations jsonb DEFAULT '[]', source text);
     CREATE TABLE session_system_updates (id uuid DEFAULT gen_random_uuid(), account_id uuid, workspace_id uuid,
-      personal_connection_delegations jsonb DEFAULT '[]');
+      personal_connection_delegations jsonb DEFAULT '[]', session_id uuid, kind text,
+      lineage jsonb DEFAULT '{}', state text DEFAULT 'pending', delivered_turn_id uuid);
     CREATE TABLE session_system_update_outbox (id uuid DEFAULT gen_random_uuid(), account_id uuid, workspace_id uuid,
       source_session_id uuid, target_session_id uuid, dedupe_key text, kind text, classification text,
       source_id text, summary text, summary_codec_version integer, payload jsonb, payload_codec_version integer,
@@ -183,11 +184,12 @@ async function use(
     sessionId?: string;
     turnId?: string;
     attemptId?: string;
+    providerDomain?: string;
   } = {},
 ) {
   return (
     await db.query(
-      `SELECT * FROM resolve_accepted_connection_use($1,$2,$3,$4,$5,1,$6,$7,$8,$9,'mail.test','oauth2',$10,$11)`,
+      `SELECT * FROM resolve_accepted_connection_use($1,$2,$3,$4,$5,1,$6,$7,$8,$9,$12,'oauth2',$10,$11)`,
       [
         account,
         workspace,
@@ -200,6 +202,7 @@ async function use(
         options.connectionId ?? connection,
         options.scope ?? "workspace",
         options.owner ?? null,
+        options.providerDomain ?? "mail.test",
       ],
     )
   ).rows[0]!;
@@ -456,6 +459,216 @@ test("scheduled run bindings are immutable and copied exactly to scheduled turns
   );
 });
 
+for (const consumer of ["Git broker", "GitHub REST MCP"]) {
+  test(`${consumer} retains specialized sender authority with empty and nonempty generic bindings`, async () => {
+    for (const genericBindings of [[], [binding]]) {
+      const personalId = crypto.randomUUID();
+      const sessionId = crypto.randomUUID();
+      const turnId = crypto.randomUUID();
+      const attemptId = crypto.randomUUID();
+      const memberId = crypto.randomUUID();
+      const authorityId = crypto.randomUUID();
+      const specialized = {
+        serverId: "github:personal",
+        connectionId: personalId,
+        originWorkspaceId: workspace,
+        ownerSubjectId: "sender",
+        providerDomain: "github.com",
+        kind: "oauth2",
+        connectionType: "github_personal",
+      };
+      await db.query(
+        "INSERT INTO connections VALUES ($1,$2,$3,$3,'sender','user','active','github.com','oauth2',1,$4)",
+        [personalId, account, workspace, memberId],
+      );
+      await db.query(
+        `INSERT INTO sessions (id,account_id,workspace_id,active_turn_id,status,visibility,authority_epoch)
+        VALUES ($1,$2,$3,$4,'running','shared',1)`,
+        [sessionId, account, workspace, turnId],
+      );
+      await db.query(
+        `INSERT INTO session_turns (id,account_id,workspace_id,session_id,active_attempt_id,execution_generation,status,
+        initiator_kind,initiator_subject_id,initiating_human_subject_id,mcp_account_bindings,personal_connection_delegations)
+        VALUES ($1,$2,$3,$4,$5,1,'running','subject','sender','sender',$6::jsonb,$7::jsonb)`,
+        [
+          turnId,
+          account,
+          workspace,
+          sessionId,
+          attemptId,
+          JSON.stringify(genericBindings),
+          JSON.stringify([specialized]),
+        ],
+      );
+      await db.query(
+        "INSERT INTO session_turn_attempts VALUES ($1,$2,$3,$4,$5,1,'running',NULL,NULL,'shared',1,NULL)",
+        [attemptId, account, workspace, sessionId, turnId],
+      );
+      const request = {
+        sessionId,
+        turnId,
+        attemptId,
+        connectionId: personalId,
+        serverId: "github:personal",
+        providerDomain: "github.com",
+        scope: "subject",
+        owner: "sender",
+      };
+      // Neither a delegation alone nor a generic inventory enables this route.
+      expect((await use(request)).denial_reason).toBe("accepted_account_binding_required");
+      await db.query(
+        "INSERT INTO organization_memberships VALUES ($1,$2,'sender','active',NULL,1,$3)",
+        [memberId, account, workspace],
+      );
+      await db.query(
+        "INSERT INTO organization_user_resource_authorities VALUES ($1,$2,$3,'connection',$4,$5,1,'active',NULL)",
+        [authorityId, account, memberId, personalId, workspace],
+      );
+      await db.query(
+        `INSERT INTO turn_connection_authority_snapshots VALUES ($1,'github:personal',$2,$3,$4,'{}',digest(convert_to('{}','UTF8'),'sha256'),
+        $3,$5,'sender','sender','user','github.com','oauth2',$6,1,'shared',1,1,$7,1,NULL)`,
+        [turnId, account, workspace, sessionId, personalId, memberId, authorityId],
+      );
+      for (const phase of ["credential_resolution", "provider_request"]) {
+        expect((await use({ ...request, phase })).authorization_status).toBe("authorized");
+        for (const changed of [
+          { scope: "workspace", owner: null },
+          { owner: "teammate" },
+          { connectionId: otherConnection },
+          { serverId: "github:unbound" },
+        ]) {
+          expect((await use({ ...request, ...changed, phase })).authorization_status).toBe(
+            "denied",
+          );
+        }
+      }
+      await db.query("UPDATE connections SET status='revoked' WHERE id=$1", [personalId]);
+      expect((await use(request)).denial_reason).toBe("connection_status_inactive");
+      await db.query("UPDATE connections SET status='active' WHERE id=$1", [personalId]);
+      await db.query("UPDATE organization_memberships SET status='revoked' WHERE id=$1", [
+        memberId,
+      ]);
+      expect((await use(request)).denial_reason).toBe("owner_membership_inactive");
+    }
+  });
+}
+
+test("delivered causal carriers can be claimed after workspace revocation without regaining credential authority", async () => {
+  const scheduledRun = crypto.randomUUID();
+  await db.query(
+    "INSERT INTO scheduled_task_runs(id,account_id,workspace_id,accepted_execution_snapshot) VALUES ($1,$2,$3,$4::jsonb)",
+    [scheduledRun, account, workspace, JSON.stringify({ mcpAccountBindings: [binding] })],
+  );
+  for (const revision of [
+    { status: "revoked", generation: 1 },
+    { status: "active", generation: 2 },
+  ]) {
+    await db.query("UPDATE connections SET status=$2,authority_generation=$3 WHERE id=$1", [
+      connection,
+      revision.status,
+      revision.generation,
+    ]);
+    try {
+      for (const [kind, scheduledTaskRunId] of [
+        ["child_terminal_result", null],
+        ["background_command_result", null],
+        ["goal_continuation", null],
+        ["goal_continuation", scheduledRun],
+      ]) {
+        const successor = crypto.randomUUID();
+        const successorAttempt = crypto.randomUUID();
+        const updateId = crypto.randomUUID();
+        const lineage =
+          kind === "child_terminal_result" ? { parentTurnId: turn } : { causalTurnId: turn };
+        // The receipt travels through an outbox and pending update unchanged.
+        const outboxId = crypto.randomUUID();
+        await db.query(
+          `INSERT INTO session_system_update_outbox(id,account_id,workspace_id,source_session_id,target_session_id,kind,lineage,mcp_account_bindings)
+          VALUES ($1,$2,$3,$4,$4,$5,$6::jsonb,$7::jsonb)`,
+          [
+            outboxId,
+            account,
+            workspace,
+            session,
+            kind,
+            JSON.stringify(lineage),
+            JSON.stringify([binding]),
+          ],
+        );
+        const carrier = (
+          await db.query(
+            "SELECT mcp_account_bindings FROM session_system_update_outbox WHERE id=$1",
+            [outboxId],
+          )
+        ).rows[0]!;
+        await db.query(
+          `INSERT INTO session_system_updates(id,account_id,workspace_id,session_id,kind,lineage,mcp_account_bindings)
+          VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)`,
+          [
+            updateId,
+            account,
+            workspace,
+            session,
+            kind,
+            JSON.stringify(lineage),
+            JSON.stringify(carrier.mcp_account_bindings),
+          ],
+        );
+        const insertTurn = () =>
+          db.query(
+            `INSERT INTO session_turns(id,account_id,workspace_id,session_id,active_attempt_id,execution_generation,status,
+          source,initiator_kind,initiator_subject_id,initiating_human_subject_id,mcp_account_bindings,scheduled_task_run_id)
+          VALUES ($1,$2,$3,$4,$5,1,'running',$6,'service','internal-update','sender',$7::jsonb,$8)`,
+            [
+              successor,
+              account,
+              workspace,
+              session,
+              successorAttempt,
+              kind === "goal_continuation" ? "goal" : "system",
+              JSON.stringify([binding]),
+              scheduledTaskRunId,
+            ],
+          );
+        // Pending input alone is not a claim or inherited authority.
+        await expect(insertTurn()).rejects.toThrow("identity changed");
+        // Mirror claimSessionWorkForAttempt's transactional order: mark the
+        // batch delivered to the exact successor, then insert its running turn.
+        await db.query(
+          "UPDATE session_system_updates SET state='delivered',delivered_turn_id=$2 WHERE id=$1",
+          [updateId, successor],
+        );
+        await insertTurn();
+        expect(
+          (
+            await db.query("SELECT mcp_account_bindings FROM session_turns WHERE id=$1", [
+              successor,
+            ])
+          ).rows[0]!.mcp_account_bindings,
+        ).toEqual([binding]);
+        await db.query(
+          "INSERT INTO session_turn_attempts VALUES ($1,$2,$3,$4,$5,1,'running',NULL,NULL,'shared',1,NULL)",
+          [successorAttempt, account, workspace, session, successor],
+        );
+        await db.query("UPDATE sessions SET active_turn_id=$2 WHERE id=$1", [session, successor]);
+        for (const phase of ["credential_resolution", "provider_request"]) {
+          const result = await use({ turnId: successor, attemptId: successorAttempt, phase });
+          expect(result.denial_reason).toBe(
+            revision.status === "revoked"
+              ? "connection_status_inactive"
+              : "connection_generation_changed",
+          );
+        }
+        await db.query("UPDATE sessions SET active_turn_id=$2 WHERE id=$1", [session, turn]);
+      }
+    } finally {
+      await db.query("UPDATE connections SET status='active',authority_generation=1 WHERE id=$1", [
+        connection,
+      ]);
+    }
+  }
+});
+
 test("personal bindings retain sender proofs and live membership/resource revocation", async () => {
   const personalId = crypto.randomUUID();
   const sessionId = crypto.randomUUID();
@@ -565,6 +778,73 @@ test("personal bindings retain sender proofs and live membership/resource revoca
     [turnId],
   );
   expect((await use(selected)).authorization_status).toBe("authorized");
+});
+
+test("continuation inheritance rejects forged, mismatched and mixed receipt provenance", async () => {
+  await db.query("UPDATE connections SET status='revoked',authority_generation=2 WHERE id=$1", [
+    connection,
+  ]);
+  try {
+    for (const variant of [
+      "missing-origin",
+      "wrong-session",
+      "wrong-human",
+      "wrong-target",
+      "changed-receipt",
+      "mixed-batch",
+      "human-admission",
+    ]) {
+      const successor = crypto.randomUUID();
+      const copied =
+        variant === "changed-receipt"
+          ? [{ ...binding, accountLabel: "Changed after acceptance" }]
+          : [binding];
+      const lineage =
+        variant === "wrong-session"
+          ? { callerTurnId: turn, callerSessionId: crypto.randomUUID() }
+          : { causalTurnId: variant === "missing-origin" ? crypto.randomUUID() : turn };
+      await db.query(
+        `INSERT INTO session_system_updates(account_id,workspace_id,session_id,kind,lineage,state,delivered_turn_id,mcp_account_bindings)
+        VALUES ($1,$2,$3,$4,$5::jsonb,'delivered',$6,$7::jsonb)`,
+        [
+          account,
+          workspace,
+          session,
+          variant === "wrong-session" ? "agent_message" : "background_command_result",
+          JSON.stringify(lineage),
+          variant === "wrong-target" ? crypto.randomUUID() : successor,
+          JSON.stringify(copied),
+        ],
+      );
+      if (variant === "mixed-batch") {
+        await db.query(
+          `INSERT INTO session_system_updates(account_id,workspace_id,session_id,kind,lineage,state,delivered_turn_id,mcp_account_bindings)
+          VALUES ($1,$2,$3,'background_command_result',$4::jsonb,'delivered',$5,'[]')`,
+          [account, workspace, session, JSON.stringify(lineage), successor],
+        );
+      }
+      await expect(
+        db.query(
+          `INSERT INTO session_turns(id,account_id,workspace_id,session_id,status,source,initiator_kind,initiator_subject_id,
+        initiating_human_subject_id,mcp_account_bindings)
+        VALUES ($1,$2,$3,$4,'running',$5,'service','internal-update',$6,$7::jsonb)`,
+          [
+            successor,
+            account,
+            workspace,
+            session,
+            variant === "human-admission" ? "user" : "system",
+            variant === "wrong-human" ? "teammate" : "sender",
+            JSON.stringify(copied),
+          ],
+        ),
+      ).rejects.toThrow("identity changed");
+    }
+  } finally {
+    await db.query("UPDATE connections SET status='active',authority_generation=1 WHERE id=$1", [
+      connection,
+    ]);
+  }
 });
 
 test("non-owner runtime executes resolver but cannot call private validators or claim outbox before provisioning", async () => {

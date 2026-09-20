@@ -94,6 +94,7 @@ RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT A
 DECLARE document jsonb := to_jsonb(NEW); old_document jsonb; bindings jsonb; old_bindings jsonb;
   delegations jsonb; item jsonb; connection_row record; column_name text; run_bindings jsonb;
   visibility_cleanup boolean := false;
+  inherited_bindings boolean := false;
 BEGIN
   column_name := CASE WHEN TG_TABLE_NAME = 'sessions' THEN 'initial_mcp_account_bindings'
     ELSE 'mcp_account_bindings' END;
@@ -148,8 +149,51 @@ BEGIN
         RAISE EXCEPTION 'scheduled turn differs from accepted MCP account bindings' USING ERRCODE = '42501';
       END IF;
     END IF;
+    IF TG_TABLE_NAME = 'session_turns'
+      AND document ->> 'source' IN ('system','goal')
+      AND document ->> 'status' = 'running'
+    THEN
+      -- Claim marks the exact delivered batch before inserting its turn (the
+      -- delivery FK is deferred). A copied receipt is not new account admission.
+      -- Require both the delivered carrier and its immutable causal turn; a
+      -- caller-supplied lineage, actor, or matching account alone is insufficient.
+      SELECT EXISTS (
+        SELECT 1 FROM session_system_updates update_value
+        JOIN session_turns origin ON origin.account_id = NEW.account_id
+          AND origin.workspace_id = NEW.workspace_id
+          AND origin.id::text = CASE
+            WHEN update_value.kind IN ('agent_message','agent_steer_instruction')
+              THEN update_value.lineage ->> 'callerTurnId'
+            WHEN update_value.kind LIKE 'child_%'
+              THEN update_value.lineage ->> 'parentTurnId'
+            ELSE update_value.lineage ->> 'causalTurnId' END
+          AND origin.session_id::text = CASE
+            WHEN update_value.kind IN ('agent_message','agent_steer_instruction')
+              THEN update_value.lineage ->> 'callerSessionId'
+            ELSE document ->> 'session_id' END
+        WHERE update_value.account_id = NEW.account_id
+          AND update_value.workspace_id = NEW.workspace_id
+          AND update_value.session_id = NEW.session_id
+          AND update_value.state = 'delivered'
+          AND update_value.delivered_turn_id = NEW.id
+          AND update_value.mcp_account_bindings IS NOT DISTINCT FROM bindings
+          AND origin.mcp_account_bindings IS NOT DISTINCT FROM bindings
+          AND coalesce(origin.initiating_human_subject_id,
+            CASE WHEN origin.initiator_kind = 'subject' THEN origin.initiator_subject_id END)
+            IS NOT DISTINCT FROM coalesce(NEW.initiating_human_subject_id,
+              CASE WHEN NEW.initiator_kind = 'subject' THEN NEW.initiator_subject_id END)
+      ) AND NOT EXISTS (
+        SELECT 1 FROM session_system_updates update_value
+        WHERE update_value.account_id = NEW.account_id
+          AND update_value.workspace_id = NEW.workspace_id
+          AND update_value.session_id = NEW.session_id
+          AND update_value.state = 'delivered'
+          AND update_value.delivered_turn_id = NEW.id
+          AND update_value.mcp_account_bindings IS DISTINCT FROM bindings
+      ) INTO inherited_bindings;
+    END IF;
     FOR item IN SELECT value FROM jsonb_array_elements(bindings) LOOP
-      IF item ->> 'subjectScope' = 'workspace' THEN
+      IF item ->> 'subjectScope' = 'workspace' AND NOT inherited_bindings THEN
         SELECT c.* INTO connection_row FROM opengeni_private.read_sender_connection(
           NEW.account_id, NEW.workspace_id, (item ->> 'connectionId')::uuid, NULL) c;
         IF NOT FOUND THEN
@@ -217,6 +261,26 @@ DECLARE definition text; anchor text := E'  IF reason IS NULL THEN\n    SELECT a
         THEN reason := 'accepted_account_binding_changed';
         END IF;
       END IF;
+    ELSIF p_server_id = 'github:personal' AND p_subject_scope = 'subject'
+      AND lower(p_provider_domain) = 'github.com' AND p_connection_kind = 'oauth2'
+      AND EXISTS (
+        SELECT 1 FROM turn_connection_authority_snapshots specialized
+        WHERE specialized.account_id = p_account_id AND specialized.workspace_id = p_workspace_id
+          AND specialized.session_id = p_session_id AND specialized.turn_id = p_turn_id
+          AND specialized.server_id = p_server_id AND specialized.connection_id = p_connection_id
+          AND specialized.authority_source = 'sender' AND specialized.authority_scope = 'user'
+          AND specialized.owner_subject_id = p_owner_subject_id
+      ) AND EXISTS (
+        SELECT 1 FROM jsonb_array_elements(turn_row.personal_connection_delegations) selected
+        WHERE selected ->> 'connectionType' = 'github_personal'
+          AND selected ->> 'serverId' = p_server_id
+          AND selected ->> 'connectionId' = p_connection_id::text
+          AND selected ->> 'ownerSubjectId' = p_owner_subject_id
+      ) THEN
+      -- Git broker and GitHub REST use a separate repository-selection receipt,
+      -- not a generic MCP alias. Continue into the existing snapshot-only lane
+      -- below, including its digest, sender, membership and revocation checks.
+      NULL;
     ELSIF turn_row.mcp_account_bindings IS NOT NULL OR p_server_id ~ '^account-[0-9a-f]{64}$' THEN
       reason := 'accepted_account_binding_required';
     END IF;
