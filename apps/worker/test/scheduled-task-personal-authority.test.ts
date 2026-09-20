@@ -17,6 +17,7 @@ import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import {
   captureScheduledTaskRestoreState,
   defaultSessionMcpServerIds,
+  mcpAccountRouteId,
   resolveSessionToolPolicy,
   settingsWithEnabledCapabilityMcpServers,
   syncUpdatedScheduledTask,
@@ -72,6 +73,9 @@ beforeAll(async () => {
   shared = await acquireSharedTestDatabase("worker-scheduled-personal-authority");
   if (!shared) {
     available = false;
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+      throw new Error("Scheduled task authority verification requires PostgreSQL");
+    }
     console.warn("[worker-scheduled-personal-authority] PostgreSQL unavailable, skipping");
     return;
   }
@@ -648,11 +652,12 @@ describe("scheduled task personal MCP authority", () => {
       workspaceId: workspace.workspaceId,
       runId: run!.id,
     });
-    expect(accepted?.personalConnectionDelegations).toMatchObject([
+    expect(accepted?.personalConnectionDelegations).toEqual([
       {
-        serverId: "scheduled-common",
-        connectionId: connection.connection.id,
-        ownerSubjectId: workspace.subjectId,
+        ...connection.delegation,
+        serverId: mcpAccountRouteId("scheduled-common", connection.connection.id),
+        canonicalServerId: "scheduled-common",
+        connectionType: "mcp",
       },
     ]);
     expect(TurnExecutionPolicyV1.parse(accepted?.turnExecutionPolicy)).toMatchObject({
@@ -1978,7 +1983,14 @@ describe("scheduled task personal MCP authority", () => {
     if (!available) return;
     const workspace = await workspaceFixture();
     const common = await commonConnectionDelegationFixture(workspace);
-    const acceptedDelegations = [common.delegation];
+    const acceptedDelegations = [
+      {
+        ...common.delegation,
+        serverId: mcpAccountRouteId("scheduled-common", common.connection.id),
+        canonicalServerId: "scheduled-common",
+        connectionType: "mcp" as const,
+      },
+    ];
     const task = await createScheduledTask(client.db, {
       ...workspace,
       name: "freeze accepted occurrence",
