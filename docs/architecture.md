@@ -430,6 +430,17 @@ setup; capture fences every writer. Provider loss retires only the matching inst
 never licensing ambiguous replay. Agent execution keeps the lazy routing wrapper after
 provisioning; raw handles serve lifecycle setup/capture (`turn-sandbox-access.ts`).
 
+Stock Modal non-PTY commands without `runAs` can carry the versioned native
+subreaper supervision protocol. The supervisor starts idle; durable initial
+retention precedes release of user code. Invocation-authenticated quiescence
+receipts are persisted before ACK permits supervisor exit. Canonical database
+settlement additionally requires authenticated provider terminal evidence and
+atomic output capture, on natural completion as well as cancellation. Deadline
+cancellation intent is monotonic across reconciliation claims and fences new
+stdin; already admitted writes remain blockers until settled. Provider loss,
+missing proof, and descriptor-free legacy commands never become successful
+supervision. See [command supervision](command-supervision.md).
+
 Ordinary snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains
 and rotations may use `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` (unset inherits
 the ordinary budget). Boot admission reserves rotation headroom for the larger
