@@ -10,7 +10,11 @@ import {
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
 } from "@opengeni/db";
-import { sandboxOperationMetricObserver, withTraceContext } from "@opengeni/observability";
+import {
+  sandboxOperationMetricObserver,
+  turnExecutionTelemetryKey,
+  withTraceContext,
+} from "@opengeni/observability";
 import {
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
@@ -1729,15 +1733,28 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
   };
   return async (input: RunAgentTurnInput): Promise<RunAgentTurnResult> => {
     const resolvedServices = await services();
+    const correlationId = turnExecutionTelemetryKey(
+      input.workspaceId,
+      input.sessionId,
+      input.attemptId,
+    );
     const span = resolvedServices.observability.startSpan(
       "worker.run_agent_segment",
       {
         "opengeni.trigger_kind": input.trigger.kind,
+        correlationId,
       },
       { parent: null },
     );
     try {
-      return await withTraceContext(span, () => runAgentTurn(input, resolvedServices, span));
+      return await withTraceContext(span, () => {
+        try {
+          resolvedServices.observability.info("worker execution started", { correlationId });
+        } catch {
+          // Correlation diagnostics never affect execution or admission.
+        }
+        return runAgentTurn(input, resolvedServices, span);
+      });
     } catch (error) {
       span.end({ error });
       throw error;
