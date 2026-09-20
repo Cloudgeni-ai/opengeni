@@ -117,7 +117,7 @@ test("multiple schedule pairs round-trip without collapsing or duplicating accou
   );
 });
 
-test("native refs honor exact IDs, provider, kind and status; host refs are not native accounts", () => {
+test("native refs expose matching accounts across scopes; host refs are not native accounts", () => {
   const accounts = [
     account,
     { ...account, id: "other" },
@@ -136,7 +136,7 @@ test("native refs honor exact IDs, provider, kind and status; host refs are not 
     connectedAccountGroups(selectedNativeConnectorRefs([fixed]), accounts)[0]?.accounts.map(
       (value) => value.id,
     ),
-  ).toEqual(["other"]);
+  ).toEqual(["connection", "other"]);
   expect(
     connectedAccountGroups(
       selectedNativeConnectorRefs([
@@ -149,4 +149,31 @@ test("native refs honor exact IDs, provider, kind and status; host refs are not 
   expect(connectedAccountGroups(selectedNativeConnectorRefs([item, item]), accounts)).toHaveLength(
     1,
   );
+});
+
+test("account-specific resource restrictions do not transfer to sibling accounts", () => {
+  const accounts = [account, { ...account, id: "other" }] as ConnectionMetadata[];
+  const restricted = {
+    ...item,
+    connectionRef: {
+      ...item.connectionRef!,
+      connectionId: "connection",
+      selectedResources: [{ kind: "repository" as const, id: "repo-1" }],
+    },
+  };
+  expect(
+    connectedAccountGroups(selectedNativeConnectorRefs([restricted]), accounts)[0]?.accounts.map(
+      (value) => value.id,
+    ),
+  ).toEqual(["connection"]);
+  const resourceBound = {
+    ...item,
+    connectionRef: { ...item.connectionRef!, resource: "https://example.com/mcp/" },
+  };
+  expect(
+    connectedAccountGroups(selectedNativeConnectorRefs([resourceBound]), [
+      { ...account, metadata: { resource: "https://example.com/mcp" } },
+      { ...account, id: "other", metadata: { resource: "https://other.example/mcp" } },
+    ] as ConnectionMetadata[])[0]?.accounts.map((value) => value.id),
+  ).toEqual(["connection"]);
 });

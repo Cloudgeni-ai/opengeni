@@ -1213,6 +1213,7 @@ export async function validatedScheduledTaskUpdate(input: {
         )
         .map(({ serverId, connectionId }) => ({ serverId, connectionId })),
     ];
+    update.agentConfig = nextAgentConfig;
   }
   if (
     !materialExecutionChange &&

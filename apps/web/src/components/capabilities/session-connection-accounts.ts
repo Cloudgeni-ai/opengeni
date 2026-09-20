@@ -9,6 +9,17 @@ import type {
 
 import { normalizeProviderDomain } from "@/lib/capabilities";
 
+function canonicalResource(value: string): string {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    url.pathname = url.pathname.replace(/\/+$/u, "") || "/";
+    return url.toString();
+  } catch {
+    return value.trim();
+  }
+}
+
 function eligibleConnections(
   ref: NativeConnectorAccountRef["connectionRef"],
   connections: readonly ConnectionMetadata[],
@@ -21,7 +32,10 @@ function eligibleConnections(
       (entry.subjectId === null || entry.authorityId != null) &&
       entry.status === "active" &&
       (!ref.kind || entry.kind === ref.kind) &&
-      (!ref.connectionId || entry.id === ref.connectionId) &&
+      (!ref.selectedResources || entry.id === ref.connectionId) &&
+      (!ref.resource ||
+        (typeof entry.metadata?.resource === "string" &&
+          canonicalResource(entry.metadata.resource) === canonicalResource(ref.resource))) &&
       normalizeProviderDomain(entry.providerDomain) === normalizeProviderDomain(ref.providerDomain),
   );
   return matches;
@@ -41,7 +55,12 @@ export type NativeConnectorAccountRef = {
   name: string;
   connectionRef: Pick<
     McpServerConnectionRef,
-    "connectionId" | "authoritySource" | "providerDomain" | "subjectScope"
+    | "connectionId"
+    | "authoritySource"
+    | "providerDomain"
+    | "subjectScope"
+    | "resource"
+    | "selectedResources"
   > & { kind?: string };
 };
 

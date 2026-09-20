@@ -41,6 +41,13 @@ same Skill lifecycle. It does not rewrite accepted conversation context.
 Session `mcpApprovalPolicies` requires session-control authority. Claims freeze
 inherited approvals with catalog floors; policies grant neither capabilities nor credentials.
 
+Native MCP accounts are frozen separately from connector policy. Admission builds
+`mcpAccountBindings` in `packages/core/src/domain/mcp-account-bindings.ts`; each
+account retains its canonical connector identity and an account-qualified runtime
+route. Personal bindings remain sender-owned, while workspace bindings have no
+personal owner. Empty accepted sets never fall back to current defaults. See
+[`remote-mcp-credentials.md`](remote-mcp-credentials.md) for attachment semantics.
+
 ---
 
 ## 3. Core invariants

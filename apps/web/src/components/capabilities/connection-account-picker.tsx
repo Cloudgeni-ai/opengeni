@@ -23,7 +23,15 @@ export function connectionAccountLabel(account: ConnectionMetadata, fallback: st
       ? (metadata.workspace as Record<string, unknown>).name
       : metadata.workspace,
   ].find((value) => typeof value === "string" && value.trim());
-  return typeof label === "string" ? label.trim() : fallback;
+  const team = [
+    metadata.slackTeamName,
+    metadata.teamName,
+    metadata.workspaceName,
+    metadata.team_name,
+    metadata.workspace_name,
+  ].find((value) => typeof value === "string" && value.trim());
+  const name = typeof label === "string" ? label.trim() : fallback;
+  return typeof team === "string" && team.trim() !== name ? `${name} · ${team.trim()}` : name;
 }
 
 export type ConnectionAccountPickerProps = {
