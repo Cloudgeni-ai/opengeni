@@ -577,6 +577,23 @@ async function readFiniteResponseBytes(response: Response): Promise<ArrayBuffer>
   return bytes.buffer;
 }
 
+class ManagedActorResponse extends Response {
+  override async text(): Promise<string> {
+    // Gecko's native Body consumer reports an errored synthetic stream to the
+    // console even when its promise rejection is handled. Read this guarded
+    // stream directly so cancellation stays owned by the awaiting caller.
+    // Keep native Body's single-consumption/locked-stream contract.
+    if (this.bodyUsed || this.body?.locked) {
+      throw new TypeError("Response body is already used or locked");
+    }
+    return new TextDecoder().decode(await readFiniteResponseBytes(this));
+  }
+
+  override async json(): Promise<unknown> {
+    return JSON.parse(await this.text());
+  }
+}
+
 export function managedActorTrackedResponse(
   response: Response,
   signal: AbortSignal,
@@ -731,7 +748,7 @@ export function managedActorTrackedResponse(
   if (nativeLifetimeMs > 0 && abortNativeTransport) {
     lifetimeTimer = setTimeout(beginCleanSeam, nativeLifetimeMs);
   }
-  return new Response(body, {
+  return new ManagedActorResponse(body, {
     status: response.status,
     statusText: response.statusText,
     headers: response.headers,
