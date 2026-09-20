@@ -785,6 +785,18 @@ jobs:
             ./test/e2e/custom-api-control-center.browser.e2e.ts \
             ./test/e2e/source-packages-control-center.browser.e2e.ts
 
+      - name: Compact session-search header browser acceptance
+        if: ${{ matrix.lane == 'interaction' }}
+        id: session_search_header_browser
+        timeout-minutes: 8
+        env:
+          OPENGENI_REQUIRE_REAL_DB: "1"
+          OPENGENI_SESSION_SEARCH_ARTIFACT_DIR: /tmp/session-search-header-evidence
+        run: >-
+          bun test --max-concurrency=1 --timeout 300000
+          --test-name-pattern 'desktop expanded header keeps icon-only search inline'
+          ./test/e2e/session-search.browser.e2e.ts
+
       - name: Queue surface browser acceptance
         if: ${{ matrix.lane == 'interaction' }}
         id: queue_surface_browser
@@ -886,6 +898,18 @@ jobs:
             /tmp/sessionpin-session-pin-mobile-dark.png
             /tmp/sessionpin-session-pin-mobile-375-light.png
             /tmp/sessionpin-session-pin-mobile-375-dark.png
+
+      - name: Upload compact session-search header evidence
+        if: >-
+          ${{ always() && matrix.lane == 'interaction' &&
+          (steps.session_search_header_browser.outcome == 'success' ||
+          steps.session_search_header_browser.outcome == 'failure') }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: session-search-header-evidence
+          if-no-files-found: error
+          retention-days: 14
+          path: /tmp/session-search-header-evidence
 
       - name: Upload Codex quota visual evidence
         if: ${{ always() && matrix.lane == 'interaction' }}
