@@ -23,10 +23,11 @@ DECLARE
   descriptor jsonb;
   receipt jsonb;
   stream text;
+  loss_binding jsonb;
 BEGIN
   IF TG_OP = 'DELETE' THEN
     IF OLD.provider_command ? 'supervision' AND (
-      OLD.state = 'active' OR OLD.supervision_receipt IS NULL OR NOT OLD.supervision_output_captured
+      OLD.state = 'active' OR (OLD.state <> 'lost' AND (OLD.supervision_receipt IS NULL OR NOT OLD.supervision_output_captured))
     ) THEN
       RAISE EXCEPTION 'Unsettled supervised command evidence cannot be deleted' USING ERRCODE = '55000';
     END IF;
@@ -157,6 +158,52 @@ BEGIN
   ) IS TRUE) THEN
     RAISE EXCEPTION 'Supervised output capture is incomplete' USING ERRCODE = '55000';
   END IF;
+  IF NEW.state = 'lost' THEN
+    -- Missing provider is a distinct terminal truth, never successful tree
+    -- quiescence. The typed loss seam locks blockers then the exact lease and
+    -- opens this marker only after revalidating the original physical binding.
+    -- A deferred trigger below ALSO requires the loss-bearing cold successor
+    -- at commit, so merely forging a GUC cannot drop a live provider's blockers.
+    IF TG_OP <> 'UPDATE' OR NEW.exit_code IS NOT NULL OR NEW.settled_at IS NULL
+      OR ROW(NEW.provider_command, NEW.supervision_receipt, NEW.supervision_output_captured,
+             NEW.provider_command_input_index)
+         IS DISTINCT FROM ROW(OLD.provider_command, OLD.supervision_receipt, OLD.supervision_output_captured,
+             OLD.provider_command_input_index) THEN
+      RAISE EXCEPTION 'Supervised loss cannot fabricate execution or output proof' USING ERRCODE = '55000';
+    END IF;
+    IF NEW.settlement_reason = 'provider_start_rejected' THEN
+      -- A distinct authenticated "never started" response licenses only an
+      -- untouched retained launch, not a missing provider or failed supervisor.
+      loss_binding := nullif(current_setting('opengeni.supervised_launch_rejection_binding', true), '')::jsonb;
+      IF NEW.supervision_receipt IS NOT NULL OR NEW.supervision_output_captured
+        OR NEW.provider_command_input_index <> 0 OR NEW.reconcile_proof_outcome IS NOT NULL
+        OR NEW.provider_command->'streams' IS DISTINCT FROM
+          '{"stdout":{"byteOffset":0,"utf8Remainder":"","eof":false,"exitCode":null},"stderr":{"byteOffset":0,"utf8Remainder":"","eof":false,"exitCode":null}}'::jsonb
+        OR EXISTS (SELECT 1 FROM sandbox_workspace_mutation_admissions child
+          WHERE child.account_id=NEW.account_id AND child.workspace_id=NEW.workspace_id
+            AND child.actor_kind='process' AND child.actor_id=NEW.id)
+        OR (OLD.state = 'lost' AND OLD.settlement_reason IS DISTINCT FROM NEW.settlement_reason)
+        OR (OLD.state <> 'lost' AND (OLD.state <> 'active' OR loss_binding IS DISTINCT FROM
+          jsonb_build_object('processId', OLD.id, 'command', OLD.provider_command))) THEN
+        RAISE EXCEPTION 'Supervised launch rejection requires an exact pristine invocation' USING ERRCODE = '55000';
+      END IF;
+      RETURN NEW;
+    END IF;
+    loss_binding := nullif(current_setting('opengeni.supervised_provider_loss_binding', true), '')::jsonb;
+    IF NEW.settlement_reason IS DISTINCT FROM 'provider_instance_lost'
+      OR (OLD.state = 'lost' AND OLD.settlement_reason IS DISTINCT FROM NEW.settlement_reason)
+      OR (OLD.state <> 'lost' AND (
+        OLD.state <> 'active' OR loss_binding IS DISTINCT FROM jsonb_build_object(
+          'accountId', OLD.account_id, 'workspaceId', OLD.workspace_id,
+          'leaseId', OLD.lease_id, 'sandboxGroupId', OLD.sandbox_group_id,
+          'lostEpoch', OLD.lease_epoch, 'lostBackend', OLD.provider_backend,
+          'lostInstanceId', OLD.provider_instance_id
+        )
+      )) THEN
+      RAISE EXCEPTION 'Supervised loss requires the exact typed provider-loss transition' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+  END IF;
   IF receipt IS NOT NULL AND EXISTS (
     SELECT 1 FROM sandbox_workspace_mutation_admissions child
     WHERE child.account_id = NEW.account_id AND child.workspace_id = NEW.workspace_id
@@ -179,6 +226,33 @@ REVOKE ALL ON FUNCTION opengeni_private.supervised_command_guard() FROM PUBLIC;
 CREATE TRIGGER supervised_command_guard BEFORE INSERT OR UPDATE OR DELETE
   ON sandbox_retained_processes FOR EACH ROW EXECUTE FUNCTION opengeni_private.supervised_command_guard();
 
+CREATE FUNCTION opengeni_private.supervised_provider_loss_commit_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path FROM CURRENT AS $loss$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM sandbox_leases lease
+    WHERE lease.id = NEW.lease_id AND lease.account_id = NEW.account_id
+      AND lease.workspace_id = NEW.workspace_id AND lease.sandbox_group_id = NEW.sandbox_group_id
+      AND lease.backend = NEW.provider_backend AND lease.lease_epoch = NEW.lease_epoch + 1
+      AND lease.liveness = 'cold' AND lease.instance_id IS NULL
+      AND lease.resume_state #>> '{opengeniRecovery,provider,status}' = 'missing'
+      AND lease.resume_state #>> '{opengeniRecovery,provider,instanceId}' = NEW.provider_instance_id
+      AND lease.resume_state #>> '{opengeniRecovery,restore,status}' IN ('pending', 'degraded', 'unrecoverable')
+      AND lease.resume_state #>> '{opengeniRecovery,workspace,status}' IN ('not_ready', 'degraded', 'unrecoverable')
+    FOR SHARE OF lease
+  ) THEN
+    RAISE EXCEPTION 'Supervised loss requires matching cold missing-provider recovery truth' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END
+$loss$;
+REVOKE ALL ON FUNCTION opengeni_private.supervised_provider_loss_commit_guard() FROM PUBLIC;
+CREATE CONSTRAINT TRIGGER supervised_provider_loss_commit_guard AFTER UPDATE ON sandbox_retained_processes
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+  WHEN (OLD.state = 'active' AND NEW.state = 'lost' AND NEW.provider_command ? 'supervision'
+    AND NEW.settlement_reason = 'provider_instance_lost')
+  EXECUTE FUNCTION opengeni_private.supervised_provider_loss_commit_guard();
+
 CREATE FUNCTION opengeni_private.supervised_command_blocker_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $blockers$
 DECLARE p sandbox_retained_processes%ROWTYPE;
@@ -194,6 +268,9 @@ BEGIN
             RAISE EXCEPTION 'Supervised child admission evidence is immutable' USING ERRCODE = '55000';
           END IF;
           RETURN OLD;
+        END IF;
+        IF p.state = 'lost' AND OLD.settled_at IS NULL AND NEW.provider_outcome IS DISTINCT FROM 'rejected' THEN
+          RAISE EXCEPTION 'Lost provider child admission cannot resolve successfully' USING ERRCODE = '55000';
         END IF;
         IF
           (to_jsonb(NEW) - ARRAY['provider_outcome', 'settled_at']) IS DISTINCT FROM
@@ -238,6 +315,9 @@ BEGIN
     IF FOUND AND (TG_OP = 'DELETE' OR NEW IS DISTINCT FROM OLD) THEN
       IF p.state = 'active' THEN
         RAISE EXCEPTION 'Supervised parent admission remains retained' USING ERRCODE = '55000';
+      END IF;
+      IF TG_OP <> 'DELETE' AND p.state = 'lost' AND NEW.provider_outcome IS DISTINCT FROM 'rejected' THEN
+        RAISE EXCEPTION 'Lost provider parent admission cannot resolve successfully' USING ERRCODE = '55000';
       END IF;
     END IF;
   ELSE

@@ -6,6 +6,8 @@ import {
   createDb,
   createSession,
   getRetainedProcess,
+  markWarmLeaseInstanceLost,
+  rejectRetainedSupervisedLaunch,
   settleRetainedProcess,
   verifyRetainedProcessMutationSettlement,
   type DbClient,
@@ -548,4 +550,319 @@ test("nonzero supervisor exit remains readable but cannot settle even with quies
     shared.admin`update sandbox_retained_processes set state='exited', exit_code=7, settled_at=now(), settlement_reason='provider_exit_banner' where id=${f.scope.processId}`,
     "requires",
   );
+});
+
+async function providerLossFixture() {
+  const f = await fixture();
+  const archive = Buffer.from("older checkpoint").toString("base64");
+  const descriptor = {
+    version: 1,
+    revision: `wa1:1789776000000:${"a".repeat(64)}`,
+    archiveSha256: "a".repeat(64),
+    archiveBytes: Buffer.from(archive, "base64").length,
+    capturedAt: "2026-09-19T00:00:00.000Z",
+    workspace: {
+      algorithm: "sha256",
+      sha256: "b".repeat(64),
+      entryCount: 1,
+      fileCount: 1,
+      totalFileBytes: 16,
+    },
+  };
+  await shared.admin`update sandbox_leases set liveness='warm', refcount=1,
+    workspace_generation=2, archive_generation=1, resume_backend_id='modal',
+    resume_state=${shared.admin.json({ backendId: "modal", sessionState: { providerState: { sandboxId: "sb-test" }, workspaceArchive: archive, workspaceArchiveMeta: descriptor } })}
+    where id=${f.leaseId}`;
+  const lossInput = {
+    accountId,
+    workspaceId,
+    sandboxGroupId: f.process.sandbox_group_id,
+    expectedEpoch: 0,
+    expectedInstanceId: "sb-test",
+    expectedBackend: "modal",
+    diagnostic: "provider_not_found",
+  };
+  return { ...f, lossInput, descriptor, archive };
+}
+
+test("typed warm provider loss retires supervised blockers without fabricating checkpoint or quiescence", async () => {
+  const f = await providerLossFixture();
+  await shared.admin`insert into sandbox_workspace_mutation_admissions ${shared.admin(f.child)}`;
+  const result = await markWarmLeaseInstanceLost(client.db, f.lossInput);
+  expect(result.status).toBe("marked");
+  if (result.status !== "marked") throw new Error("Provider loss was unexpectedly stale");
+  expect(result.settlement).toMatchObject({
+    processesLost: 1,
+    admissionsRejected: 2,
+    processHoldersDeleted: 1,
+  });
+  expect(result.lease).toMatchObject({
+    liveness: "cold",
+    leaseEpoch: 1,
+    instanceId: null,
+    workspaceGeneration: 2,
+    archiveGeneration: 1,
+    archiveComplete: false,
+  });
+  expect(result.lease.recovery).toMatchObject({
+    provider: { status: "missing", instanceId: "sb-test" },
+    restore: { status: "degraded" },
+    workspace: { status: "degraded" },
+  });
+  expect(result.lease.recovery.archive.current?.revision).toBe(f.descriptor.revision);
+  const [process] =
+    await shared.admin`select state, exit_code, settlement_reason, supervision_receipt,
+    supervision_output_captured, provider_command from sandbox_retained_processes where id=${f.scope.processId}`;
+  expect(process).toMatchObject({
+    state: "lost",
+    exit_code: null,
+    settlement_reason: "provider_instance_lost",
+    supervision_receipt: null,
+    supervision_output_captured: false,
+    provider_command: f.command,
+  });
+  const admissions =
+    await shared.admin`select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+    where id in (${f.admissionId},${f.child.id})`;
+  expect(
+    admissions.every(
+      (admission) => admission.provider_outcome === "rejected" && admission.settled_at !== null,
+    ),
+  ).toBe(true);
+  expect(await f.persistence.loadSupervisionReceipt()).toBeNull();
+  await expect(f.persistence.recordSupervisionReceipt(f.receipt)).rejects.toThrow();
+  await expect(f.settle()).rejects.toThrow();
+  await rejects(
+    shared.admin`update sandbox_workspace_mutation_admissions set provider_outcome='resolved'
+    where id=${f.admissionId}`,
+    "cannot resolve successfully",
+  );
+});
+
+test("stale provider-loss observations cannot retire another backend, epoch or instance", async () => {
+  const f = await providerLossFixture();
+  for (const stale of [
+    { expectedBackend: "docker" },
+    { expectedEpoch: 1 },
+    { expectedInstanceId: "sb-other" },
+  ]) {
+    expect((await markWarmLeaseInstanceLost(client.db, { ...f.lossInput, ...stale })).status).toBe(
+      "stale",
+    );
+  }
+  const [process] =
+    await shared.admin`select state from sandbox_retained_processes where id=${f.scope.processId}`;
+  const [lease] =
+    await shared.admin`select liveness, instance_id from sandbox_leases where id=${f.leaseId}`;
+  expect(process!.state).toBe("active");
+  expect(lease).toMatchObject({ liveness: "warm", instance_id: "sb-test" });
+});
+
+test("two exact provider-loss observers commit one loss and preserve incomplete evidence", async () => {
+  const f = await providerLossFixture();
+  const results = await Promise.all([
+    markWarmLeaseInstanceLost(client.db, f.lossInput),
+    markWarmLeaseInstanceLost(client.db, f.lossInput),
+  ]);
+  expect(results.map((result) => result.status).sort()).toEqual(["marked", "stale"]);
+  const [process] =
+    await shared.admin`select state, supervision_receipt, supervision_output_captured
+    from sandbox_retained_processes where id=${f.scope.processId}`;
+  expect(process).toMatchObject({
+    state: "lost",
+    supervision_receipt: null,
+    supervision_output_captured: false,
+  });
+});
+
+test("raw lost SQL and a forged loss marker cannot release a still-warm provider", async () => {
+  const f = await providerLossFixture();
+  await rejects(
+    shared.admin`update sandbox_retained_processes set state='lost', exit_code=null,
+    settlement_reason='provider_instance_lost', settled_at=now() where id=${f.scope.processId}`,
+    "typed provider-loss",
+  );
+  const lossBinding = {
+    accountId,
+    workspaceId,
+    leaseId: f.leaseId,
+    sandboxGroupId: f.process.sandbox_group_id,
+    lostEpoch: 0,
+    lostBackend: "modal",
+    lostInstanceId: "sb-test",
+  };
+  await rejects(
+    shared.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.supervised_provider_loss_binding', ${JSON.stringify(lossBinding)}, true)`;
+      await tx`update sandbox_retained_processes set state='lost', exit_code=null,
+      settlement_reason='provider_instance_lost', settled_at=now() where id=${f.scope.processId}`;
+      await tx`update sandbox_workspace_mutation_admissions set provider_outcome='rejected', settled_at=now() where id=${f.admissionId}`;
+      await tx`delete from sandbox_lease_holders where lease_id=${f.leaseId}`;
+    }),
+    "cold missing-provider",
+  );
+  const [process] =
+    await shared.admin`select state from sandbox_retained_processes where id=${f.scope.processId}`;
+  const [holders] =
+    await shared.admin`select count(*)::int as n from sandbox_lease_holders where lease_id=${f.leaseId}`;
+  expect(process!.state).toBe("active");
+  expect(holders!.n).toBe(1);
+});
+
+test("provider loss rechecks identity after waiting on the original process row", async () => {
+  const f = await providerLossFixture();
+  const locked = Promise.withResolvers<number>(),
+    release = Promise.withResolvers<void>();
+  const holder = shared.admin.begin(async (tx) => {
+    await tx`select id from sandbox_retained_processes where id=${f.scope.processId} for update`;
+    const [backend] = await tx`select pg_backend_pid() as pid`;
+    locked.resolve(backend!.pid);
+    await release.promise;
+  });
+  const blockingPid = await locked.promise;
+  const losing = markWarmLeaseInstanceLost(client.db, f.lossInput);
+  try {
+    let waiting = false;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const [activity] = await shared.admin`select exists(select 1 from pg_stat_activity
+        where datname=current_database() and ${blockingPid} = any(pg_blocking_pids(pid))) as waiting`;
+      if (activity!.waiting) {
+        waiting = true;
+        break;
+      }
+      await Bun.sleep(10);
+    }
+    expect(waiting).toBe(true);
+    await shared.admin`update sandbox_leases set lease_epoch=1, instance_id='sb-successor' where id=${f.leaseId}`;
+  } finally {
+    release.resolve();
+    await holder;
+  }
+  expect((await losing).status).toBe("stale");
+  const [process] =
+    await shared.admin`select state from sandbox_retained_processes where id=${f.scope.processId}`;
+  expect(process!.state).toBe("active");
+});
+
+test("typed loss with no checkpoint remains unrecoverable and never fills output proof", async () => {
+  const f = await providerLossFixture();
+  await shared.admin`update sandbox_leases set archive_generation=null, resume_state=null where id=${f.leaseId}`;
+  const result = await markWarmLeaseInstanceLost(client.db, f.lossInput);
+  expect(result.status).toBe("marked");
+  if (result.status !== "marked") throw new Error("Unexpected stale provider loss");
+  expect(result.lease.recovery).toMatchObject({
+    provider: { status: "missing", instanceId: "sb-test" },
+    restore: { status: "unrecoverable" },
+    workspace: { status: "unrecoverable" },
+  });
+  expect(result.lease.archiveComplete).toBe(false);
+  expect(await f.persistence.loadSupervisionReceipt()).toBeNull();
+  const [process] =
+    await shared.admin`select state, exit_code, supervision_output_captured from sandbox_retained_processes where id=${f.scope.processId}`;
+  expect(process).toMatchObject({
+    state: "lost",
+    exit_code: null,
+    supervision_output_captured: false,
+  });
+});
+
+test("authenticated never-started launch rejection is exact, idempotent, and not provider disappearance", async () => {
+  const f = await providerLossFixture();
+  await Promise.all([
+    rejectRetainedSupervisedLaunch(client.db, f.scope, f.command),
+    rejectRetainedSupervisedLaunch(client.db, f.scope, f.command),
+  ]);
+  const [process] = await shared.admin`select state,exit_code,settlement_reason,supervision_receipt,
+    supervision_output_captured,provider_command from sandbox_retained_processes where id=${f.scope.processId}`;
+  expect(process).toMatchObject({
+    state: "lost",
+    exit_code: null,
+    settlement_reason: "provider_start_rejected",
+    supervision_receipt: null,
+    supervision_output_captured: false,
+    provider_command: f.command,
+  });
+  const [lease] =
+    await shared.admin`select lease_epoch,instance_id,workspace_generation,archive_generation,
+    resume_state,refcount from sandbox_leases where id=${f.leaseId}`;
+  expect(lease).toMatchObject({
+    lease_epoch: 0,
+    instance_id: "sb-test",
+    workspace_generation: 2,
+    archive_generation: 1,
+    refcount: 0,
+  });
+  expect(lease!.resume_state.opengeniRecovery?.provider?.status).not.toBe("missing");
+  const [parent] =
+    await shared.admin`select provider_outcome from sandbox_workspace_mutation_admissions where id=${f.admissionId}`;
+  const [background] =
+    await shared.admin`select state from session_background_commands where id=${f.scope.processId}`;
+  expect(parent!.provider_outcome).toBe("rejected");
+  expect(background!.state).toBe("lost");
+});
+
+test("generic SQL and public lost settlement cannot assert never-started launch rejection", async () => {
+  const f = await fixture();
+  const expected = (await getRetainedProcess(client.db, f.scope))!;
+  await expect(
+    settleRetainedProcess(client.db, {
+      ...f.scope,
+      expected,
+      outcome: "lost",
+      reason: "provider_start_rejected",
+      idleGraceMs: 0,
+    }),
+  ).rejects.toThrow("requires");
+  await rejects(
+    shared.admin`update sandbox_retained_processes set state='lost',exit_code=null,
+    settled_at=now(),settlement_reason='provider_start_rejected' where id=${f.scope.processId}`,
+    "pristine invocation",
+  );
+  await expect(
+    rejectRetainedSupervisedLaunch(client.db, f.scope, {
+      ...f.command,
+      execId: crypto.randomUUID(),
+    }),
+  ).rejects.toThrow("exact pristine");
+  await expect(
+    rejectRetainedSupervisedLaunch(client.db, f.scope, {
+      ...f.command,
+      supervision: { ...f.supervision, nonce: "b".repeat(64) },
+    }),
+  ).rejects.toThrow("exact pristine");
+  expect((await getRetainedProcess(client.db, f.scope))!.state).toBe("active");
+});
+
+test("never-started rejection refuses output, proof, admitted input, legacy and stale leases", async () => {
+  const output = await fixture();
+  const advanced = structuredClone(output.command);
+  advanced.streams.stdout.byteOffset = 1;
+  await captureRetainedRouterOutput(client.db, output.scope, {
+    expected: output.command,
+    command: advanced,
+    stdout: "x",
+    stderr: "",
+  });
+  await expect(rejectRetainedSupervisedLaunch(client.db, output.scope, advanced)).rejects.toThrow(
+    "pristine",
+  );
+  const proof = await fixture();
+  await proof.persistence.recordSupervisionReceipt(proof.receipt);
+  await expect(
+    rejectRetainedSupervisedLaunch(client.db, proof.scope, proof.command),
+  ).rejects.toThrow("pristine");
+  const input = await fixture();
+  await shared.admin`insert into sandbox_workspace_mutation_admissions ${shared.admin(input.child)}`;
+  await expect(
+    rejectRetainedSupervisedLaunch(client.db, input.scope, input.command),
+  ).rejects.toThrow("admitted process input");
+  const legacy = await fixture(false);
+  await expect(
+    rejectRetainedSupervisedLaunch(client.db, legacy.scope, legacy.command),
+  ).rejects.toThrow("requires supervision");
+  const stale = await providerLossFixture();
+  await shared.admin`update sandbox_leases set lease_epoch=1,instance_id='sb-successor' where id=${stale.leaseId}`;
+  await expect(
+    rejectRetainedSupervisedLaunch(client.db, stale.scope, stale.command),
+  ).rejects.toThrow("Superseded");
 });
