@@ -14,6 +14,7 @@ import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
+import { failedSessionCopy } from "@/lib/failed-session-copy";
 import {
   admissionRecheckControl,
   admissionControlNeedsRefresh,
@@ -1541,21 +1542,8 @@ function SessionChatPane(props: {
     [context.client, props.session.workspaceId],
   );
   const failureFallback = props.failure ? (
-    <div
-      role="alert"
-      className="mx-auto my-2 w-full max-w-3xl rounded-lg border border-status-failed/30 bg-status-failed/10 p-3 text-sm text-status-failed"
-    >
-      <p>
-        {props.creditExhausted
-          ? "This workspace is out of OpenGeni credits."
-          : "This session failed."}{" "}
-        {props.failure.reason ?? "No failure detail was recorded."}
-      </p>
-      <p className="mt-1 text-xs text-fg-muted">
-        {props.creditExhausted
-          ? "The conversation is preserved. Add organization credits or choose another available model below."
-          : "The conversation is preserved. You can keep working in the composer below."}
-      </p>
+    <div role="alert" className="mx-auto my-2 w-full max-w-3xl px-4 text-sm text-fg-muted sm:px-6">
+      {failedSessionCopy(props.failure, props.creditExhausted).reason}
     </div>
   ) : null;
   const terminal = isTerminalSessionStatus(props.session.status);
@@ -2062,6 +2050,13 @@ function SessionChatPane(props: {
   const [retryOperation, setRetryOperation] = useState<FailedSessionRetryInput | null>(null);
   const pendingRetryInput =
     retryOperation?.failureEventId === props.failure?.failureEventId ? retryOperation : null;
+  // A failure before a logical turn exists cannot preserve an original intent.
+  // Prefer detail evidence; paged timeline absence is not positive eligibility.
+  const retryHasRetainedTurn = Boolean(
+    props.session.failureDiagnostics?.eventId === props.failure?.failureEventId
+      ? props.session.failureDiagnostics?.turnId
+      : props.events.find((event) => event.id === props.failure?.failureEventId)?.turnId,
+  );
   const retryFailedSession = useMemo(
     () =>
       createFailedSessionRetry(
@@ -2420,6 +2415,9 @@ function SessionChatPane(props: {
                 <LazyFailedSessionBanner
                   key={props.session.id}
                   failure={props.failure}
+                  modelChanged={Boolean(
+                    composerPolicy && composerPolicy.model !== props.session.model,
+                  )}
                   creditExhausted={props.creditExhausted}
                   workspaceId={props.session.workspaceId}
                   canBuyCredits={
@@ -2440,12 +2438,12 @@ function SessionChatPane(props: {
                     failureId: props.failure.failureEventId,
                     retryInput: pendingRetryInput,
                     composerBlocker: composerSendBlocker(),
-                    repositoryError: repositories.error,
                     onRetry: async () => {
                       if (
                         composer.hasDraftContent() ||
                         composerSendBlocker() ||
                         !props.failure?.failureEventId ||
+                        !retryHasRetainedTurn ||
                         !composerPolicy ||
                         !workspacePermissions.includes("sessions:control") ||
                         admissionControl.state === "paused"
@@ -2477,15 +2475,10 @@ function SessionChatPane(props: {
                                 : composer.sending ||
                                     composer.draftLoading ||
                                     !hasComposerPolicy ||
+                                    !retryHasRetainedTurn ||
                                     !props.failure.failureEventId
                                   ? "loading"
                                   : null,
-                    onChooseModel: () => setModelPickerSession(props.session.id),
-                    modelDisabled:
-                      composer.sending ||
-                      composer.draftLoading ||
-                      !hasComposerPolicy ||
-                      Boolean(pendingRetryInput),
                   }}
                 />
               </Suspense>
@@ -2867,11 +2860,7 @@ function SessionChatPane(props: {
                   ? // "Send a message to revive" is a dead end without credits —
                     // the reply turn dies the same budget death.
                     "Out of OpenGeni credits — add credits to continue."
-                  : props.session.status === "failed"
-                    ? props.failure?.safetyRefusal
-                      ? "The model provider blocked the previous request."
-                      : "Send a new message, or use Try again above."
-                    : "Send a follow-up…"
+                  : "Send a follow-up…"
             }
             controls={
               <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
