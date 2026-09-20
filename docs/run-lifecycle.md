@@ -1546,7 +1546,7 @@ not claim restore success. Failed/stale public restores and a later loss after
 verified recovery remain explicit blockers requiring operator review; this slice
 does not introduce an abandon/reset or automatic re-consent operation.
 
-Migration `0494_consented_sandbox_recovery.sql` is additive with DB-default-off
+Migration `0495_consented_sandbox_recovery.sql` is additive with DB-default-off
 consent. Activation is owner-only and follows verified immutable API/control/turn
 images and worker templates; see [deployment](deployment.md). Disabling new consent
 does not interrupt accepted restoration or exact receipt replay. Finalized consent

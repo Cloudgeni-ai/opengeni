@@ -117,9 +117,11 @@ function ExternalActorInvalidation() {
 }
 
 export function BrowserAccountsSignedOutPanel(props: {
+  presentation?: "card" | "embedded";
   emptySetRegistrationPanel?: ReactNode;
   invitation?: OrganizationInvitationContinuation | null;
 }) {
+  const Heading = props.presentation === "embedded" ? "h2" : "h1";
   const accounts = useBrowserAccounts();
   const popup = useBrowserAccountPopup();
   const [registrationOpen, setRegistrationOpen] = useState(false);
@@ -154,20 +156,32 @@ export function BrowserAccountsSignedOutPanel(props: {
   }
 
   return (
-    <section className="flex flex-1 items-center justify-center px-4">
-      <div className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm forced-colors:border-[CanvasText]">
+    <section
+      className={
+        props.presentation === "embedded"
+          ? "w-full"
+          : "flex flex-1 items-center justify-center px-4"
+      }
+    >
+      <div
+        className={
+          props.presentation === "embedded"
+            ? "w-full"
+            : "w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm forced-colors:border-[CanvasText]"
+        }
+      >
         <div className="mb-4 flex items-start gap-3">
           <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand forced-colors:border forced-colors:border-[CanvasText]">
             <UserRoundPlusIcon className="size-5" />
           </span>
           <div>
-            <h1 className="text-base font-semibold">
+            <Heading className="text-base font-semibold">
               {invitation
                 ? "Continue your invitation"
                 : slots.length > 0
                   ? "Choose an account"
                   : "Sign in to OpenGeni"}
-            </h1>
+            </Heading>
             <p className="mt-1 text-sm text-fg-subtle">
               {invitation
                 ? `Use the account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`

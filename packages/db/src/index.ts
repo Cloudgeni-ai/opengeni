@@ -1,3 +1,4 @@
+import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
   SKILL_CATALOG_CONTEXT_PREFIX,
   SandboxRecoverySelection,
@@ -199,6 +200,7 @@ import type {
   OrganizationMember as OrganizationMemberType,
   WorkspaceMemberCandidate,
   McpPersonalConnectionDelegation,
+  McpConnectionAccountBinding,
   ModelContextContributionSummary,
   Permission,
   PersonalResourceAttachmentIntent,
@@ -6073,6 +6075,8 @@ export type EnableCapabilityInstallationInput = {
   workspaceId: string;
   capabilityId: string;
   kind: "mcp";
+  /** Automatic setup must preserve every existing installation, including disabled ones. */
+  onlyIfUninstalled?: boolean;
   config?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
 };
@@ -6291,6 +6295,7 @@ export type EnqueueSessionTurnInput = {
   initiator: TurnInitiator;
   initiatorContext?: TurnInitiatorContext;
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   /** Steer inserts before all waiting prompts; Send appends after them. */
   placement?: "head" | "tail";
@@ -6299,6 +6304,7 @@ export type EnqueueSessionTurnInput = {
 /** Worker-only turn projection with causal authority omitted from public APIs. */
 export type SessionTurnForExecution = SessionTurn & {
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
+  mcpAccountBindings: McpConnectionAccountBinding[] | null;
   /** Worker-only causal authority; never inferred from the current worker. */
   initiatingHumanSubjectId: string | null;
   scheduledTaskRunId: string | null;
@@ -9433,6 +9439,7 @@ export async function enableCapabilityInstallation(
         )
         .limit(1);
       if (existing) {
+        if (input.onlyIfUninstalled) return mapCapabilityInstallation(existing);
         const [row] = await scopedDb
           .update(schema.capabilityInstallations)
           .set({
@@ -9455,18 +9462,28 @@ export async function enableCapabilityInstallation(
         }
         return mapCapabilityInstallation(row);
       }
-      const [row] = await scopedDb
-        .insert(schema.capabilityInstallations)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          capabilityId: input.capabilityId,
-          kind: input.kind,
-          status: "active",
-          config: input.config ?? {},
-          metadata: input.metadata ?? {},
-        })
-        .returning();
+      const insert = scopedDb.insert(schema.capabilityInstallations).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        capabilityId: input.capabilityId,
+        kind: input.kind,
+        status: "active",
+        config: input.config ?? {},
+        metadata: input.metadata ?? {},
+      });
+      const [row] = await (
+        input.onlyIfUninstalled ? insert.onConflictDoNothing() : insert
+      ).returning();
+      if (!row && input.onlyIfUninstalled) {
+        // A concurrent installation won. Never turn a create-only completion
+        // into an update of its status, credentials, or restricted config.
+        const current = await getCapabilityInstallation(
+          scopedDb,
+          input.workspaceId,
+          input.capabilityId,
+        );
+        if (current) return current;
+      }
       if (!row) {
         throw new Error("Failed to enable capability installation");
       }
@@ -9853,6 +9870,7 @@ export function mcpServerIdForCapability(
 const connectionMetadataColumns = {
   id: schema.connections.id,
   authorityId: schema.connections.authorityId,
+  authorityGeneration: schema.connections.authorityGeneration,
   accountId: schema.connections.accountId,
   workspaceId: schema.connections.workspaceId,
   subjectId: schema.connections.subjectId,
@@ -32343,6 +32361,7 @@ export type SessionCreateInput = {
   };
   mcpServers?: CreateSessionMcpServerInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   initialXaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   maxNestedAgentDepthOverride?: number | null;
@@ -33065,6 +33084,7 @@ async function createSessionInTransaction(
             firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
             firstPartyMcpTools: input.firstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
             initialPersonalConnectionDelegations: input.personalConnectionDelegations ?? [],
+            initialMcpAccountBindings: parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
             initialPersonalResourceAttachmentIntent:
               input.initialPersonalResourceAttachmentIntent ?? null,
             visibility: createRequestedVisibility,
@@ -33962,6 +33982,71 @@ async function personalConnectionDelegationsForTurnInTransaction(
         `session_turns:${workspaceId}:${sessionId}:${turnId}`,
       )
     : [];
+}
+
+async function mcpAccountBindingsForTurnInTransaction(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<McpConnectionAccountBinding[] | null> {
+  const [row] = await db
+    .select({ bindings: schema.sessionTurns.mcpAccountBindings })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, sessionId),
+        eq(schema.sessionTurns.id, turnId),
+      ),
+    )
+    .limit(1);
+  if (!row) {
+    throw new SessionControlInvariantError(
+      `Accepted MCP account authority turn not found: ${sessionId}/${turnId}`,
+    );
+  }
+  return parseAcceptedMcpAccountBindings(row.bindings);
+}
+
+export async function getSessionTurnMcpAccountBindings(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<McpConnectionAccountBinding[] | null> {
+  return await withWorkspaceRls(
+    db,
+    workspaceId,
+    async (scopedDb) =>
+      await mcpAccountBindingsForTurnInTransaction(scopedDb, workspaceId, sessionId, turnId),
+  );
+}
+
+export async function getSessionParentMcpAccountBindings(
+  db: Database,
+  workspaceId: string,
+  childSessionId: string,
+): Promise<McpConnectionAccountBinding[] | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [child] = await scopedDb
+      .select({
+        parentSessionId: schema.sessions.parentSessionId,
+        parentTurnId: schema.sessions.parentTurnId,
+      })
+      .from(schema.sessions)
+      .where(
+        and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, childSessionId)),
+      )
+      .limit(1);
+    if (!child?.parentSessionId || !child.parentTurnId) return null;
+    return await mcpAccountBindingsForTurnInTransaction(
+      scopedDb,
+      workspaceId,
+      child.parentSessionId,
+      child.parentTurnId,
+    );
+  });
 }
 
 async function xaiProviderAccountAuthoritySnapshotForTurnInTransaction(
@@ -64361,6 +64446,7 @@ export async function materializeGoalContinuation(
           .select({
             id: schema.sessionTurns.id,
             personalConnectionDelegations: schema.sessionTurns.personalConnectionDelegations,
+            mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
             initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
             initiatorKind: schema.sessionTurns.initiatorKind,
             initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
@@ -64446,6 +64532,9 @@ export async function materializeGoalContinuation(
                     ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
                   },
                   personalConnectionDelegations,
+                  mcpAccountBindings: parseAcceptedMcpAccountBindings(
+                    causalTurn?.mcpAccountBindings,
+                  ),
                   xaiProviderAccountAuthoritySnapshot,
                   state: "pending",
                 },
@@ -65160,6 +65249,9 @@ export async function initializeSessionStartAtomically(
                   ...initiatorColumns(creator),
                   initiatingHumanSubjectId: initialTurnInitiatingHumanSubjectId,
                   personalConnectionDelegations: initialPersonalConnectionDelegations,
+                  mcpAccountBindings: parseAcceptedMcpAccountBindings(
+                    session.initialMcpAccountBindings,
+                  ),
                   xaiProviderAccountAuthoritySnapshot:
                     session.initialXaiProviderAccountAuthoritySnapshot,
                   createdAt: acceptedAt,
@@ -65481,6 +65573,7 @@ export async function enqueueSessionTurn(
                 }),
                 initiatingHumanSubjectId,
                 personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+                mcpAccountBindings: parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
                 xaiProviderAccountAuthoritySnapshot:
                   input.xaiProviderAccountAuthoritySnapshot ??
                   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -65535,6 +65628,7 @@ type BoundedSystemUpdate = Pick<
   | "payload"
   | "lineage"
   | "personalConnectionDelegations"
+  | "mcpAccountBindings"
   | "xaiProviderAccountAuthoritySnapshot"
   | "scheduledTaskRunId"
 >;
@@ -65572,6 +65666,7 @@ function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string 
   );
   return stableJson({
     personalConnectionDelegations,
+    mcpAccountBindings: parseAcceptedMcpAccountBindings(update.mcpAccountBindings),
     xai: frozenXaiExecutionAuthority(update),
     connectionAuthoritySubjectId:
       personalConnectionDelegations.length > 0
@@ -67714,6 +67809,7 @@ export async function claimSessionWorkForAttempt(
                         ? latestStarted.initiatorSubjectId
                         : null),
                     personalConnectionDelegations: [],
+                    mcpAccountBindings: [],
                     xaiProviderAccountAuthoritySnapshot:
                       latestStarted?.xaiProviderAccountAuthoritySnapshot ??
                       WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -68286,6 +68382,9 @@ export async function claimSessionWorkForAttempt(
                   ...initiatorColumns(internalInitiator),
                   initiatingHumanSubjectId,
                   personalConnectionDelegations: internalPersonalConnectionDelegations,
+                  mcpAccountBindings: parseAcceptedMcpAccountBindings(
+                    authorityUpdate.mcpAccountBindings,
+                  ),
                   scheduledTaskRunId,
                   xaiProviderAccountAuthoritySnapshot: internalXaiAuthority.snapshot,
                   startedAt: now,
@@ -70425,6 +70524,7 @@ async function settleSessionInputWaitInActivity(
           sessionId: input.sessionId,
           kind: "session_wait_timeout",
           personalConnectionDelegations: causalAuthority?.personalConnectionDelegations ?? [],
+          mcpAccountBindings: causalAuthority?.mcpAccountBindings ?? null,
           xaiProviderAccountAuthoritySnapshot:
             causalAuthority?.xaiProviderAccountAuthoritySnapshot ??
             WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -71661,6 +71761,7 @@ export async function recoverSessionWorkFailedBeforeAttemptClaim(
             .update(schema.sessionSystemUpdates)
             .set({
               personalConnectionDelegations: authority.personalConnectionDelegations,
+              mcpAccountBindings: authority.mcpAccountBindings,
               xaiProviderAccountAuthoritySnapshot: authority.xaiProviderAccountAuthoritySnapshot,
               lineage: { ...update.lineage, ...authority.lineage },
             })
@@ -75452,6 +75553,7 @@ async function parentOutboxAuthorityTx(
   session: ChildOutboxSession & { parentSessionId: string },
 ): Promise<{
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
+  mcpAccountBindings: McpConnectionAccountBinding[] | null;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
   lineage: Record<string, unknown>;
 }> {
@@ -75463,6 +75565,14 @@ async function parentOutboxAuthorityTx(
         session.parentTurnId,
       )
     : [];
+  const mcpAccountBindings = session.parentTurnId
+    ? await mcpAccountBindingsForTurnInTransaction(
+        tx,
+        workspaceId,
+        session.parentSessionId,
+        session.parentTurnId,
+      )
+    : null;
   const xaiProviderAccountAuthoritySnapshot = session.parentTurnId
     ? await xaiProviderAccountAuthoritySnapshotForTurnInTransaction(
         tx,
@@ -75505,6 +75615,7 @@ async function parentOutboxAuthorityTx(
   }
   return {
     personalConnectionDelegations,
+    mcpAccountBindings,
     xaiProviderAccountAuthoritySnapshot,
     lineage: {
       childSessionId: session.id,
@@ -75572,6 +75683,7 @@ async function enqueueChildLifecycleNoticeOutboxTx(
             payload: input.payload,
             lineage: { ...authority.lineage, ...(input.lineage ?? {}) },
             personalConnectionDelegations: authority.personalConnectionDelegations,
+            mcpAccountBindings: authority.mcpAccountBindings,
             xaiProviderAccountAuthoritySnapshot: authority.xaiProviderAccountAuthoritySnapshot,
           },
           "summary",
@@ -75863,6 +75975,7 @@ export type SessionSystemUpdateOutboxDelivery = {
   payload: ChildLifecycleOutboxPayload;
   lineage: Record<string, unknown>;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
+  mcpAccountBindings: McpConnectionAccountBinding[] | null;
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
 };
 
@@ -75895,6 +76008,7 @@ function mapSystemUpdateOutboxRow(row: {
   payload_codec_version: number | null;
   lineage: Record<string, unknown>;
   personal_connection_delegations: unknown;
+  mcp_account_bindings: unknown;
   xai_provider_account_authority_snapshot: unknown;
 }): SessionSystemUpdateOutboxDelivery {
   const typed = parseChildLifecycleOutboxPayload(
@@ -75919,6 +76033,7 @@ function mapSystemUpdateOutboxRow(row: {
       row.personal_connection_delegations,
       `session_system_update_outbox:${row.workspace_id}:${row.id}`,
     ),
+    mcpAccountBindings: parseAcceptedMcpAccountBindings(row.mcp_account_bindings),
     xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1.parse(
       row.xai_provider_account_authority_snapshot,
     ),
@@ -75971,6 +76086,7 @@ export async function getSessionSystemUpdateOutboxByDedupeKey(
           row.personalConnectionDelegations,
           `session_system_update_outbox:${row.workspaceId}:${row.id}`,
         ),
+        mcpAccountBindings: parseAcceptedMcpAccountBindings(row.mcpAccountBindings),
         xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1.parse(
           row.xaiProviderAccountAuthoritySnapshot,
         ),
@@ -75999,6 +76115,7 @@ export async function claimPendingSessionSystemUpdateOutbox(
     payload_codec_version: number | null;
     lineage: Record<string, unknown>;
     personal_connection_delegations: unknown;
+    mcp_account_bindings: unknown;
     xai_provider_account_authority_snapshot: unknown;
   }>(db, sql`select * from opengeni_private.claim_session_system_update_outbox(${limit})`);
   // One unparseable row (for example a kind this image does not understand, or
@@ -76573,6 +76690,7 @@ export async function getOrCreateSessionSystemUpdateOutbox(
               payload: input.payload,
               lineage: input.lineage,
               personalConnectionDelegations: input.personalConnectionDelegations,
+              mcpAccountBindings: input.mcpAccountBindings,
               xaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
             },
             "summary",
@@ -76606,6 +76724,12 @@ export async function getOrCreateSessionSystemUpdateOutbox(
       })
       .returning();
     if (!row) throw new Error("Failed to persist system-update outbox row");
+    if (
+      stableJson(parseAcceptedMcpAccountBindings(row.mcpAccountBindings)) !==
+      stableJson(parseAcceptedMcpAccountBindings(input.mcpAccountBindings))
+    ) {
+      throw new Error("System-update outbox replay changed its accepted MCP accounts");
+    }
     if (
       stableJson(
         XaiProviderAccountAuthoritySnapshotV1.parse(row.xaiProviderAccountAuthoritySnapshot),
@@ -76643,6 +76767,7 @@ export async function getOrCreateSessionSystemUpdateOutbox(
         row.personalConnectionDelegations,
         `session_system_update_outbox:${row.workspaceId}:${row.id}`,
       ),
+      mcpAccountBindings: parseAcceptedMcpAccountBindings(row.mcpAccountBindings),
       xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1.parse(
         row.xaiProviderAccountAuthoritySnapshot,
       ),
@@ -76728,6 +76853,7 @@ export type AddSessionSystemUpdateInput = {
   summary: string;
   lineage?: Record<string, unknown>;
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   scheduledTaskRunId?: string | null;
 } & SessionSystemUpdateInputVariant;
@@ -76830,6 +76956,12 @@ export async function addSessionSystemUpdateWithSourceMutation<
             )
             .limit(1);
           if (!existing) return null;
+          if (
+            stableJson(parseAcceptedMcpAccountBindings(existing.mcpAccountBindings)) !==
+            stableJson(parseAcceptedMcpAccountBindings(input.mcpAccountBindings))
+          ) {
+            throw new Error("System-update replay changed its accepted MCP accounts");
+          }
           const [pendingEvent] = await tx
             .select({ id: schema.sessionEvents.id })
             .from(schema.sessionEvents)
@@ -76901,6 +77033,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
                   payload: input.payload,
                   lineage,
                   personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+                  mcpAccountBindings: parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
                   xaiProviderAccountAuthoritySnapshot:
                     input.xaiProviderAccountAuthoritySnapshot ??
                     WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -77190,6 +77323,7 @@ async function sameSessionCausalAuthorityTx(
         ? { xaiAuthoritySubjectId: human }
         : {}),
     },
+    mcpAccountBindings: parseAcceptedMcpAccountBindings(turn.mcpAccountBindings),
   };
 }
 
@@ -77419,6 +77553,7 @@ function backgroundCommandTerminalMutation(input: {
                 summary,
                 payload,
                 personalConnectionDelegations: causalAuthority?.personalConnectionDelegations ?? [],
+                mcpAccountBindings: causalAuthority?.mcpAccountBindings ?? null,
                 xaiProviderAccountAuthoritySnapshot:
                   causalAuthority?.xaiProviderAccountAuthoritySnapshot ??
                   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -79715,6 +79850,7 @@ function mapSessionTurnForExecution(
 ): SessionTurnForExecution {
   return {
     ...mapSessionTurn(row),
+    mcpAccountBindings: parseAcceptedMcpAccountBindings(row.mcpAccountBindings),
     initiatingHumanSubjectId: row.initiatingHumanSubjectId ?? null,
     scheduledTaskRunId: row.scheduledTaskRunId ?? null,
     personalConnectionDelegations: parsedPersonalConnectionDelegations(
@@ -80125,6 +80261,7 @@ function projectInstallationConfig(config: Record<string, unknown>): Record<stri
 function mapConnectionMetadata(row: {
   id: string;
   authorityId?: string | null;
+  authorityGeneration: number;
   accountId: string;
   workspaceId: string;
   subjectId: string | null;
@@ -80155,6 +80292,7 @@ function mapConnectionMetadata(row: {
   return {
     id: row.id,
     ...(row.subjectId !== null && row.authorityId ? { authorityId: row.authorityId } : {}),
+    connectionAuthorityGeneration: row.authorityGeneration,
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     subjectId: row.subjectId,
@@ -80555,6 +80693,14 @@ function connectionRefConfig(value: unknown): McpServerConnectionRef | undefined
   }
   if (record.subjectScope === "workspace" || record.subjectScope === "subject") {
     ref.subjectScope = record.subjectScope;
+  }
+  if (
+    record.accountSelection === "all_eligible" &&
+    record.connectionId === undefined &&
+    record.authoritySource !== "host" &&
+    record.selectedResources === undefined
+  ) {
+    ref.accountSelection = "all_eligible";
   }
   return ref;
 }

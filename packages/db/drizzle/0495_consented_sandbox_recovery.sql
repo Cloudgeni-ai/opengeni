@@ -9,13 +9,13 @@ DO $roles$
 DECLARE roles jsonb := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
 BEGIN
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' THEN
-    RAISE EXCEPTION '0494 requires application database roles' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0495 requires application database roles' USING ERRCODE = '55000';
   END IF;
   IF jsonb_array_length(roles) NOT BETWEEN 1 AND 16 OR EXISTS (
     SELECT 1 FROM jsonb_array_elements(roles) item WHERE jsonb_typeof(item) <> 'string'
       OR btrim(item #>> '{}') = '' OR item #>> '{}' <> btrim(item #>> '{}')
       OR octet_length(item #>> '{}') > 63
-  ) THEN RAISE EXCEPTION '0494 invalid application roles' USING ERRCODE = '55000'; END IF;
+  ) THEN RAISE EXCEPTION '0495 invalid application roles' USING ERRCODE = '55000'; END IF;
 END
 $roles$;
 

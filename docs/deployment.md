@@ -1,14 +1,14 @@
 # Deployment
 
-## Consented sandbox recovery (0494)
+## Consented sandbox recovery (0495)
 
-Fresh bootstrap may migrate before runtime roles exist. Migration 0494 grants
+Fresh bootstrap may migrate before runtime roles exist. Migration 0495 grants
 read access to existing configured roles only; normal `db:provision-roles`
 converges newly created and later-added app roles to SELECT-only access on the
 rollout row. Re-provisioning revokes activation writes and PUBLIC access; it
 never enables consent. Do not precreate runtime roles merely to run migration.
 
-`0494_consented_sandbox_recovery.sql` is additive and rolling, but does not enable
+`0495_consented_sandbox_recovery.sql` is additive and rolling, but does not enable
 consent. Supply the runtime login list through
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`),
 migrate and provision the normal application role. The owner-only

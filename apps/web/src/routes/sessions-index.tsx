@@ -95,7 +95,6 @@ import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
-import { ConnectionAccountPicker } from "@/components/capabilities/connection-account-picker";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
@@ -1416,20 +1415,6 @@ function SessionsIndexRouteContent({
         ) : null}
 
         <div ref={composerRegionRef} className="mt-8 [&_textarea]:min-h-[calc(2lh+1rem)]">
-          <ConnectionAccountPicker
-            groups={connectionAccounts.accountGroups}
-            choices={connectionAccounts.accountChoices}
-            onChoose={connectionAccounts.selectAccount}
-            disabled={busy || newSessionDraft.loading}
-          />
-          {connectionAccounts.error ? (
-            <p role="alert" className="mb-2 text-sm text-fg-muted">
-              {connectionAccounts.error}{" "}
-              <Button variant="ghost" onClick={() => void connectionAccounts.refresh()}>
-                Retry
-              </Button>
-            </p>
-          ) : null}
           <ConsoleComposer
             workspaceId={workspaceId}
             composer={createComposer}
@@ -1440,6 +1425,17 @@ function SessionsIndexRouteContent({
             placeholder="Describe a task for the agent…"
             controlsLeading={
               <ComposerMobilePlus
+                connectorActions={{
+                  accountControls: {
+                    groups: connectionAccounts.accountGroups,
+                    choices: connectionAccounts.accountChoices,
+                    onChoose: connectionAccounts.selectAccount,
+                    loading: connectionAccounts.loading,
+                    error: connectionAccounts.error,
+                    onRefresh: () => void connectionAccounts.refresh(),
+                    disabled: busy || newSessionDraft.loading,
+                  },
+                }}
                 menuSide="bottom"
                 draftChatSettings={{
                   workspaceId,

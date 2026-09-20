@@ -46,7 +46,7 @@ Output remains readable during those failures.
 
 ## Durable settlement and deadline rotation
 
-Migration `0495` introduces canonical database fences for supervised processes.
+Migration `0496` introduces canonical database fences for supervised processes.
 The adapter's own terminal check is not the authority: natural completion,
 foreground reads, reconciliation, late callbacks, and old writers must all meet
 the same database gate before releasing the process, parent admission, or holder.

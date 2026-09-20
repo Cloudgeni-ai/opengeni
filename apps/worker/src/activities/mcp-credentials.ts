@@ -1,4 +1,5 @@
 import type { Settings } from "@opengeni/config";
+import { stableJson } from "@opengeni/contracts";
 import {
   buildConnectionTokenResolver,
   resolveAcceptedConnectionUse,
@@ -17,6 +18,8 @@ type TurnConnectionInput = {
   sessionId: string;
   attemptId: string;
   turn: SessionTurnForExecution;
+  /** Policy identities before account expansion; never used to select credentials. */
+  canonicalMcpServerIds?: readonly string[];
   authorizeAcceptedUse?: typeof resolveAcceptedConnectionUse;
 };
 
@@ -46,6 +49,10 @@ export function bindNativeConnectionCredentialsToTurn(
         server.operationRecovery !== undefined &&
         Object.keys(server.operationRecovery ?? {}).length > 0,
     );
+  const canonicalMcpServerIds = new Set(
+    input.canonicalMcpServerIds ??
+      input.settings.mcpServers.filter((server) => server.connectionRef).map((server) => server.id),
+  );
   return async (request) => {
     // Superseded host references must never fall through to native lookup,
     // even when their opaque identifier happens to be a valid native UUID.
@@ -64,6 +71,32 @@ export function bindNativeConnectionCredentialsToTurn(
         ...(request.connectionRef.selectedResources
           ? { selectedResources: request.connectionRef.selectedResources }
           : {}),
+      };
+    }
+    const accountBindings = input.turn.mcpAccountBindings ?? [];
+    const accountBinding = accountBindings.find((binding) => binding.serverId === request.serverId);
+    // Canonical policy identity cannot be invoked as a credential fallback once
+    // this turn selected explicit account routes for that connector.
+    if (
+      (input.turn.mcpAccountBindings != null &&
+        !accountBinding &&
+        canonicalMcpServerIds.has(request.serverId)) ||
+      (!accountBinding &&
+        accountBindings.some((binding) => binding.canonicalServerId === request.serverId)) ||
+      (accountBinding &&
+        (request.connectionRef.connectionId !== accountBinding.connectionId ||
+          request.connectionRef.providerDomain !== accountBinding.providerDomain ||
+          request.connectionRef.kind !== accountBinding.kind ||
+          request.connectionRef.subjectScope !== accountBinding.subjectScope ||
+          stableJson(request.connectionRef) !== stableJson(accountBinding.connectionRef) ||
+          (accountBinding.subjectScope === "subject" &&
+            request.subjectId !== accountBinding.ownerSubjectId)))
+    ) {
+      return {
+        status: "auth_needed",
+        reason: "personal_authority_unavailable",
+        providerDomain: request.connectionRef.providerDomain,
+        ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
       };
     }
     const acceptedDelegation = input.turn.personalConnectionDelegations.find(
@@ -174,10 +207,30 @@ export function bindNativeConnectionCredentialsToTurn(
         },
       };
     };
+    const { subjectId: requestSubjectId, ...requestWithoutSubject } = request;
     const result = await nativeResolver({
-      ...request,
+      ...requestWithoutSubject,
+      ...(accountBinding?.connectionAuthorityGeneration !== undefined
+        ? { expectedAuthorityGeneration: accountBinding.connectionAuthorityGeneration }
+        : {}),
+      // Workspace authority has no personal owner, even when the turn has a
+      // causal human. Do not pass that human as credential ownership context.
+      ...(accountBinding?.subjectScope !== "workspace" && requestSubjectId !== undefined
+        ? { subjectId: requestSubjectId }
+        : {}),
       connectionUseContext: credentialUseContext,
     });
+    if (
+      accountBinding &&
+      result.status === "ok" &&
+      result.connectionId !== accountBinding.connectionId
+    ) {
+      return {
+        status: "auth_needed",
+        reason: "personal_authority_unavailable",
+        providerDomain: accountBinding.providerDomain,
+      };
+    }
     return withProviderRequestAuthorization(result);
   };
 }

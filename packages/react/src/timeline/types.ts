@@ -451,6 +451,9 @@ export type AuthNeededItem = {
   turnId: string | null;
   /** The runtime surface that requested recovery, when the event is an MCP auth signal. */
   serverId: string | null;
+  /** Explicit recovery identity; never inferred from an opaque execution alias. */
+  canonicalServerId?: string | null;
+  connectionSubjectScope?: "workspace" | "subject" | null;
   /** Durable event family that produced this notice. */
   source?: "tool" | "credential" | "capability" | undefined;
   /** The connection's registrable domain, e.g. "linear.app". */

@@ -340,8 +340,7 @@ async function signUpAndVerify(page: Page, input: { name: string; email: string 
   expect(verificationUrl.startsWith(`${publicOrigin}/v1/auth/verify-email?`)).toBe(true);
   await page.goto(verificationUrl, { waitUntil: "domcontentloaded" });
   const authOrOnboarding = page
-    .locator("h1")
-    .filter({ hasText: /^(Sign in|Create your organization)$/ })
+    .getByRole("heading", { name: /^(Sign in|Create your organization)$/ })
     .first();
   await authOrOnboarding.waitFor();
   if ((await authOrOnboarding.textContent())?.trim() === "Sign in") {

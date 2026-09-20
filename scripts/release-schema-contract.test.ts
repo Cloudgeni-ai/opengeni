@@ -137,6 +137,9 @@ describe("release schema contract", () => {
 
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
+    const mcpAccountBindings = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0494_mcp_account_bindings.sql",
+    );
     const stoppingCommandErrorContainment = completeSourceContract.migrations.some(
       (migration) => migration.path === "0493_stopping_command_error_containment.sql",
     );
@@ -144,10 +147,10 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0492_codex_accepted_source_authority.sql",
     );
     const consentedRecovery = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0494_consented_sandbox_recovery.sql",
+      (migration) => migration.path === "0495_consented_sandbox_recovery.sql",
     );
     const supervisedCommandSettlement = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0495_supervised_command_settlement.sql",
+      (migration) => migration.path === "0496_supervised_command_settlement.sql",
     );
     const warmCaptureHolderReclamation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0491_warm_capture_holder_reclamation.sql",
@@ -340,6 +343,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (mcpAccountBindings ? 1 : 0) +
         (stoppingCommandErrorContainment ? 1 : 0) +
         (codexAcceptedSourceAuthority ? 1 : 0) +
         (consentedRecovery ? 1 : 0) +
@@ -565,81 +569,86 @@ describe("release schema contract", () => {
       ...(stoppingCommandErrorContainment
         ? { latestMigration: "0493_stopping_command_error_containment.sql" }
         : {}),
-      ...(consentedRecovery ? { latestMigration: "0494_consented_sandbox_recovery.sql" } : {}),
+      ...(mcpAccountBindings ? { latestMigration: "0494_mcp_account_bindings.sql" } : {}),
+      ...(consentedRecovery ? { latestMigration: "0495_consented_sandbox_recovery.sql" } : {}),
       ...(supervisedCommandSettlement
-        ? { latestMigration: "0495_supervised_command_settlement.sql" }
+        ? { latestMigration: "0496_supervised_command_settlement.sql" }
         : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
       path: supervisedCommandSettlement
-        ? "0495_supervised_command_settlement.sql"
+        ? "0496_supervised_command_settlement.sql"
         : consentedRecovery
-          ? "0494_consented_sandbox_recovery.sql"
-          : stoppingCommandErrorContainment
-            ? "0493_stopping_command_error_containment.sql"
-            : codexAcceptedSourceAuthority
-              ? "0492_codex_accepted_source_authority.sql"
-              : warmCaptureHolderReclamation
-                ? "0491_warm_capture_holder_reclamation.sql"
-                : periodicCaptureAttemptCadence
-                  ? "0490_periodic_capture_attempt_cadence.sql"
-                  : modalCommandByteOffsets
-                    ? "0489_modal_command_byte_offsets.sql"
-                    : permanentSkillRemoval
-                      ? "0488_permanent_skill_removal.sql"
-                      : skillCatalogMessageForks
-                        ? "0487_skill_catalog_message_forks.sql"
-                        : reasoningConfigurationMessageForks
-                          ? "0486_reasoning_configuration_message_forks.sql"
-                          : inheritedMcpApprovalPolicies
-                            ? "0485_inherited_mcp_approval_policies.sql"
-                            : insightsUsageProjection
-                              ? "0484_insights_usage_projection.sql"
-                              : preclaimAdmissionBlock
-                                ? "0483_preclaim_admission_block.sql"
-                                : packsRemoved
-                                  ? "0482_remove_packs.sql"
-                                  : personalConnectionVisibilityCleanup
-                                    ? "0481_personal_connection_visibility_cleanup.sql"
-                                    : privateSessionKeyAdministration
-                                      ? "0480_private_session_organization_key_administration.sql"
-                                      : connectionCreateIdempotency
-                                        ? "0479_connection_create_idempotency.sql"
-                                        : senderOwnedConnections
-                                          ? "0478_sender_owned_connections.sql"
-                                          : managedSignInMethods
-                                            ? "0477_managed_sign_in_methods.sql"
-                                            : sessionEventHistoryPolicyPlanning
-                                              ? "0476_session_event_history_policy_planning.sql"
-                                              : sessionEventHistoryStatistics
-                                                ? "0475_session_event_history_statistics.sql"
-                                                : goalReportRequirements
-                                                  ? "0474_goal_report_requirements.sql"
-                                                  : organizationUsageAnalyticalCapability
-                                                    ? "0473_organization_usage_analytical_capability.sql"
-                                                    : "0472_usage_events_workspace_recent_index.sql",
+          ? "0495_consented_sandbox_recovery.sql"
+          : mcpAccountBindings
+            ? "0494_mcp_account_bindings.sql"
+            : stoppingCommandErrorContainment
+              ? "0493_stopping_command_error_containment.sql"
+              : codexAcceptedSourceAuthority
+                ? "0492_codex_accepted_source_authority.sql"
+                : warmCaptureHolderReclamation
+                  ? "0491_warm_capture_holder_reclamation.sql"
+                  : periodicCaptureAttemptCadence
+                    ? "0490_periodic_capture_attempt_cadence.sql"
+                    : modalCommandByteOffsets
+                      ? "0489_modal_command_byte_offsets.sql"
+                      : permanentSkillRemoval
+                        ? "0488_permanent_skill_removal.sql"
+                        : skillCatalogMessageForks
+                          ? "0487_skill_catalog_message_forks.sql"
+                          : reasoningConfigurationMessageForks
+                            ? "0486_reasoning_configuration_message_forks.sql"
+                            : inheritedMcpApprovalPolicies
+                              ? "0485_inherited_mcp_approval_policies.sql"
+                              : insightsUsageProjection
+                                ? "0484_insights_usage_projection.sql"
+                                : preclaimAdmissionBlock
+                                  ? "0483_preclaim_admission_block.sql"
+                                  : packsRemoved
+                                    ? "0482_remove_packs.sql"
+                                    : personalConnectionVisibilityCleanup
+                                      ? "0481_personal_connection_visibility_cleanup.sql"
+                                      : privateSessionKeyAdministration
+                                        ? "0480_private_session_organization_key_administration.sql"
+                                        : connectionCreateIdempotency
+                                          ? "0479_connection_create_idempotency.sql"
+                                          : senderOwnedConnections
+                                            ? "0478_sender_owned_connections.sql"
+                                            : managedSignInMethods
+                                              ? "0477_managed_sign_in_methods.sql"
+                                              : sessionEventHistoryPolicyPlanning
+                                                ? "0476_session_event_history_policy_planning.sql"
+                                                : sessionEventHistoryStatistics
+                                                  ? "0475_session_event_history_statistics.sql"
+                                                  : goalReportRequirements
+                                                    ? "0474_goal_report_requirements.sql"
+                                                    : organizationUsageAnalyticalCapability
+                                                      ? "0473_organization_usage_analytical_capability.sql"
+                                                      : "0472_usage_events_workspace_recent_index.sql",
       deploymentMode: supervisedCommandSettlement
         ? "rolling"
         : consentedRecovery
           ? "rolling"
-          : stoppingCommandErrorContainment
-            ? "rolling"
-            : codexAcceptedSourceAuthority
-              ? "maintenance"
-              : warmCaptureHolderReclamation || periodicCaptureAttemptCadence
-                ? "rolling"
-                : modalCommandByteOffsets ||
-                    permanentSkillRemoval ||
-                    (!skillCatalogMessageForks &&
-                      !reasoningConfigurationMessageForks &&
-                      !inheritedMcpApprovalPolicies &&
-                      !insightsUsageProjection &&
-                      !preclaimAdmissionBlock &&
-                      (packsRemoved ||
-                        (!connectionCreateIdempotency &&
-                          (senderOwnedConnections || managedSignInMethods))))
-                  ? "maintenance"
-                  : "rolling",
+          : mcpAccountBindings
+            ? "maintenance"
+            : stoppingCommandErrorContainment
+              ? "rolling"
+              : codexAcceptedSourceAuthority
+                ? "maintenance"
+                : warmCaptureHolderReclamation || periodicCaptureAttemptCadence
+                  ? "rolling"
+                  : modalCommandByteOffsets ||
+                      permanentSkillRemoval ||
+                      (!skillCatalogMessageForks &&
+                        !reasoningConfigurationMessageForks &&
+                        !inheritedMcpApprovalPolicies &&
+                        !insightsUsageProjection &&
+                        !preclaimAdmissionBlock &&
+                        (packsRemoved ||
+                          (!connectionCreateIdempotency &&
+                            (senderOwnedConnections || managedSignInMethods))))
+                    ? "maintenance"
+                    : "rolling",
     });
     expect(
       completeSourceContract.migrations.find(
@@ -1731,6 +1740,9 @@ describe("release schema contract", () => {
 
   test("preserves published host-export history and appends the forward repair", async () => {
     const unfilteredSourceContract = await buildCompleteSchemaContract();
+    const mcpAccountBindings = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0494_mcp_account_bindings.sql",
+    );
     const stoppingCommandErrorContainment = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0493_stopping_command_error_containment.sql",
     );
@@ -1738,10 +1750,10 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0492_codex_accepted_source_authority.sql",
     );
     const consentedRecovery = unfilteredSourceContract.migrations.some(
-      (migration) => migration.path === "0494_consented_sandbox_recovery.sql",
+      (migration) => migration.path === "0495_consented_sandbox_recovery.sql",
     );
     const supervisedCommandSettlement = unfilteredSourceContract.migrations.some(
-      (migration) => migration.path === "0495_supervised_command_settlement.sql",
+      (migration) => migration.path === "0496_supervised_command_settlement.sql",
     );
     const warmCaptureHolderReclamation = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0491_warm_capture_holder_reclamation.sql",
@@ -2308,8 +2320,9 @@ describe("release schema contract", () => {
       "0491_warm_capture_holder_reclamation.sql",
       "0492_codex_accepted_source_authority.sql",
       "0493_stopping_command_error_containment.sql",
-      "0494_consented_sandbox_recovery.sql",
-      "0495_supervised_command_settlement.sql",
+      "0494_mcp_account_bindings.sql",
+      "0495_consented_sandbox_recovery.sql",
+      "0496_supervised_command_settlement.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2798,18 +2811,24 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0493_stopping_command_error_containment.sql",
       };
+    if (mcpAccountBindings)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0494_mcp_account_bindings.sql",
+      };
     if (consentedRecovery)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0494_consented_sandbox_recovery.sql",
+        latestMigration: "0495_consented_sandbox_recovery.sql",
       };
     if (supervisedCommandSettlement)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0495_supervised_command_settlement.sql",
+        latestMigration: "0496_supervised_command_settlement.sql",
       };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (mcpAccountBindings ? 1 : 0) +
         (stoppingCommandErrorContainment ? 1 : 0) +
         (codexAcceptedSourceAuthority ? 1 : 0) +
         (consentedRecovery ? 1 : 0) +
@@ -3237,9 +3256,10 @@ describe("release schema contract", () => {
       ...(stoppingCommandErrorContainment
         ? { latestMigration: "0493_stopping_command_error_containment.sql" }
         : {}),
-      ...(consentedRecovery ? { latestMigration: "0494_consented_sandbox_recovery.sql" } : {}),
+      ...(mcpAccountBindings ? { latestMigration: "0494_mcp_account_bindings.sql" } : {}),
+      ...(consentedRecovery ? { latestMigration: "0495_consented_sandbox_recovery.sql" } : {}),
       ...(supervisedCommandSettlement
-        ? { latestMigration: "0495_supervised_command_settlement.sql" }
+        ? { latestMigration: "0496_supervised_command_settlement.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(

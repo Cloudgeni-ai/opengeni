@@ -736,6 +736,7 @@ export type McpConnectionAccountSelection = {
 
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
+  accountSelection?: "all_eligible" | undefined;
   authoritySource?: "host" | undefined;
   /** accepted_turn is configuration-only; each accepted owner must select a grant. */
   hostBinding?:
@@ -2182,6 +2183,10 @@ export type SessionEventPage = {
 
 export type ToolAuthNeededPayload = {
   serverId: string;
+  /** Configured connector for recovery; serverId retains the execution alias. */
+  canonicalServerId?: string | undefined;
+  /** Scope of the exact failed account, not the canonical catalog default. */
+  connectionSubjectScope?: "workspace" | "subject" | undefined;
   toolName?: string | null | undefined;
   providerDomain: string;
   provider?: string | undefined;
@@ -6670,6 +6675,7 @@ export type CapabilityCatalogItem = {
   /** The connection backing this enabled installation, or null when none is involved. */
   connectionRef: {
     connectionId?: string | undefined;
+    accountSelection?: "all_eligible" | undefined;
     authoritySource?: "host" | undefined;
     providerDomain: string;
     kind: string;
@@ -6714,6 +6720,7 @@ export type CreateCapabilityCatalogItemRequest = {
 };
 
 export type EnableCapabilityRequest = {
+  onlyIfUninstalled?: boolean | undefined;
   config?: Record<string, unknown> | undefined;
   metadata?: Record<string, unknown> | undefined;
   connectionRef?: McpServerConnectionRef | undefined;

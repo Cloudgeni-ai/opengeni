@@ -9,6 +9,7 @@ import type {
   DraftTimelineAnnotation,
   FirstPartyMcpToolName,
   McpPersonalConnectionDelegation,
+  McpConnectionAccountBinding,
   PersonalResourceAttachmentIntent,
   PersonalResourceAttachmentSummary,
   Permission,
@@ -4548,6 +4549,9 @@ export const sessions = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    initialMcpAccountBindings: jsonb("initial_mcp_account_bindings").$type<
+      McpConnectionAccountBinding[] | null
+    >(),
     // Initial accepted-work staging only. The initializer consumes this inside
     // the same transaction that inserts the first logical turn and grant
     // snapshots; runtime never authorizes from the session field.
@@ -6768,6 +6772,7 @@ export const sessionTurns = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
     // Credential-free public summary of a turn-bound personal Variable
     // Set/Rig attachment. Exact resource and grant identity lives only in the
     // immutable accepted-work snapshot tables.
@@ -8172,6 +8177,7 @@ export const sessionSystemUpdates = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
     xaiProviderAccountAuthoritySnapshot: jsonb("xai_provider_account_authority_snapshot")
       .$type<XaiProviderAccountAuthoritySnapshotV1>()
       .notNull()
@@ -8271,6 +8277,7 @@ export const sessionSystemUpdateOutbox = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
     xaiProviderAccountAuthoritySnapshot: jsonb("xai_provider_account_authority_snapshot")
       .$type<XaiProviderAccountAuthoritySnapshotV1>()
       .notNull()

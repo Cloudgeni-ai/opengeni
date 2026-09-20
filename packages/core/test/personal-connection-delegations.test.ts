@@ -450,7 +450,12 @@ describe("personal MCP connection delegation", () => {
 
   test("freezes exact personal GitHub repository authority for a portable accepted turn", async () => {
     const blank = await acquireBlankTestDatabase("core-personal-github-repository-authority");
-    if (!blank) return;
+    if (!blank) {
+      if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+        throw new Error("Personal GitHub schedule authority verification requires PostgreSQL");
+      }
+      return;
+    }
     await migrate(blank.databaseUrl);
     const sql = postgres(blank.databaseUrl, { max: 2, onnotice: () => undefined });
     const client = createDb(blank.databaseUrl, { max: 2 });
@@ -785,22 +790,36 @@ describe("personal MCP connection delegation", () => {
       ).resolves.toMatchObject({
         agentConfig: { prompt: "materially changed instructions for the same repository" },
       });
-      await expect(
-        validatedScheduledTaskUpdate({
-          settings: testSettings({ githubPersonalOauthEnabled: true }),
-          db: client.db,
-          objectStorage: null,
-          grant: {
-            ...originGrant,
-            workspaceId: target!.id,
-            principalKind: "human_session",
-          },
-          existing: task,
-          payload: { connectionAccounts: [] },
-        }),
-      ).resolves.toMatchObject({
-        agentConfig: { connectionAccounts: [] },
+      const resetSelectionTask = await validatedScheduledTaskUpdate({
+        settings: testSettings({ githubPersonalOauthEnabled: true }),
+        db: client.db,
+        objectStorage: null,
+        grant: {
+          ...originGrant,
+          workspaceId: target!.id,
+          principalKind: "human_session",
+        },
+        existing: task,
+        payload: { connectionAccounts: [] },
       });
+      // Clearing an override re-resolves the still-selected repository, then
+      // stores its exact account for later occurrences; it is not an empty
+      // frozen snapshot and must not discard the repository's write boundary.
+      expect(resetSelectionTask.agentConfig.connectionAccounts).toEqual([authoritySelection]);
+      expect(resetSelectionTask.agentConfig.connectionAccountsFrozen).toBe(true);
+      expect(resetSelectionTask.agentConfig.resources).toEqual([resource]);
+      const freezeResetSchedule = () =>
+        freezePersonalConnectionDelegations({
+          db: client.db,
+          workspaceId: target!.id,
+          settings: { mcpServers: [], githubPersonalOauthEnabled: true },
+          tools: resetSelectionTask.agentConfig.tools,
+          resources: resetSelectionTask.agentConfig.resources,
+          source: { kind: "subject", subjectId, accountId: originGrant.accountId },
+          authoritySelections: resetSelectionTask.agentConfig.connectionAccounts,
+          authoritySelectionsFrozen: resetSelectionTask.agentConfig.connectionAccountsFrozen,
+        });
+      expect(await freezeResetSchedule()).toEqual(frozen);
 
       await replacePersonalGitHubRepositorySelections(client.db, {
         accountId: originGrant.accountId,
@@ -813,6 +832,9 @@ describe("personal MCP connection delegation", () => {
         repositories: [],
       });
       await expect(freeze()).rejects.toThrow(
+        "personal GitHub repository resource is outside the selected authority",
+      );
+      await expect(freezeResetSchedule()).rejects.toThrow(
         "personal GitHub repository resource is outside the selected authority",
       );
 

@@ -4181,6 +4181,8 @@ export const McpServerConnectionRef = z
   .object({
     /** Opaque host or standalone connection identifier. */
     connectionId: z.string().min(1).optional(),
+    /** Explicit native catalog selector. Never overrides an exact connection pin. */
+    accountSelection: z.literal("all_eligible").optional(),
     /** Host-owned credential authority; omission keeps OpenGeni's native connection authority. */
     authoritySource: z.literal("host").optional(),
     /** Durable fixed reference, or an explicit configuration-only selector.
@@ -4207,6 +4209,19 @@ export const McpServerConnectionRef = z
   })
   .strict()
   .superRefine((reference, context) => {
+    if (
+      reference.accountSelection &&
+      (reference.connectionId !== undefined ||
+        reference.authoritySource === "host" ||
+        reference.selectedResources !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["accountSelection"],
+        message:
+          "An all-eligible selector cannot contain an exact connection, host authority, or selected resources",
+      });
+    }
     const acceptedTurn = reference.hostBinding && "selection" in reference.hostBinding;
     if (
       acceptedTurn &&
@@ -4254,6 +4269,8 @@ export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
 export const McpPersonalConnectionDelegation = z
   .object({
     serverId: z.string().min(1).max(256),
+    /** Canonical policy/catalog identity when serverId is an account route. */
+    canonicalServerId: z.string().min(1).max(256).optional(),
     connectionId: z.string().uuid(),
     /**
      * Immutable physical workspace that owns an activated common-user
@@ -4407,6 +4424,67 @@ export const McpPersonalConnectionSummary = z
   .strict();
 export type McpPersonalConnectionSummary = z.infer<typeof McpPersonalConnectionSummary>;
 
+/** Internal, server-resolved account route frozen with accepted work. It is
+ * not a public credential grant and must never be accepted from a caller. */
+export const McpConnectionAccountBinding = z
+  .object({
+    serverId: z.string().min(1).max(256),
+    canonicalServerId: z.string().min(1).max(256),
+    connectionId: z.string().uuid(),
+    originWorkspaceId: z.string().uuid(),
+    subjectScope: z.enum(["workspace", "subject"]),
+    ownerSubjectId: z.string().min(1).max(512).nullable(),
+    accountLabel: z.string().min(1).max(512),
+    providerDomain: z.string().min(1).max(2048),
+    kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]),
+    connectionRef: McpServerConnectionRef,
+    connectionAuthorityGeneration: z.number().int().positive().optional(),
+  })
+  .strict()
+  .superRefine((binding, context) => {
+    if (
+      binding.connectionRef.authoritySource === "host" ||
+      binding.connectionRef.connectionId !== binding.connectionId ||
+      binding.connectionRef.subjectScope !== binding.subjectScope ||
+      binding.connectionRef.providerDomain !== binding.providerDomain ||
+      binding.connectionRef.kind !== binding.kind
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["connectionRef"],
+        message: "Account reference must match its frozen identity",
+      });
+    }
+    if ((binding.subjectScope === "subject") !== (binding.ownerSubjectId !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["ownerSubjectId"],
+        message: "Only personal account bindings retain an owner",
+      });
+    }
+  });
+export type McpConnectionAccountBinding = z.infer<typeof McpConnectionAccountBinding>;
+
+export const McpConnectionAccountBindings = z
+  .array(McpConnectionAccountBinding)
+  .max(128)
+  .superRefine((bindings, context) => {
+    const routes = new Set<string>();
+    const accounts = new Set<string>();
+    bindings.forEach((binding, index) => {
+      const account = JSON.stringify([binding.canonicalServerId, binding.connectionId]);
+      if (routes.has(binding.serverId) || accounts.has(account)) {
+        context.addIssue({
+          code: "custom",
+          path: [index],
+          message: "Account bindings require unique routes and connector-account pairs",
+        });
+      }
+      routes.add(binding.serverId);
+      accounts.add(account);
+    });
+  });
+
 /**
  * Account choice only. The authenticated sender supplies authority; selecting
  * an account never delegates it to another participant or conversation.
@@ -4424,15 +4502,30 @@ export const McpConnectionAccountSelections = z
   .max(128)
   .superRefine((selections, context) => {
     const seen = new Set<string>();
+    const specialized = new Set<string>();
     for (const [index, selection] of selections.entries()) {
-      if (seen.has(selection.serverId)) {
+      if (
+        selection.serverId === "github:personal" ||
+        selection.serverId === "google-drive-publishing"
+      ) {
+        if (specialized.has(selection.serverId)) {
+          context.addIssue({
+            code: "custom",
+            message: "This specialized surface accepts only one connection account",
+            path: [index, "serverId"],
+          });
+        }
+        specialized.add(selection.serverId);
+      }
+      const key = JSON.stringify([selection.serverId, selection.connectionId]);
+      if (seen.has(key)) {
         context.addIssue({
           code: "custom",
-          message: "connection authority selections must be unique by serverId",
+          message: "connection account selections must be unique by serverId and connectionId",
           path: [index, "serverId"],
         });
       }
-      seen.add(selection.serverId);
+      seen.add(key);
     }
   });
 
@@ -9267,8 +9360,9 @@ function refineScheduledTaskAgentConfig(
 export const ScheduledTaskAgentConfig = /* @__PURE__ */ z
   .object(scheduledTaskAgentConfigShape(false))
   .extend({
-    /** Account choices narrow the owner's current connections on each occurrence. */
+    /** Exact accepted choices when frozen; legacy omission retains historical selection. */
     connectionAccounts: McpConnectionAccountSelections.optional(),
+    connectionAccountsFrozen: z.literal(true).optional(),
   })
   .superRefine(refineScheduledTaskAgentConfig);
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
@@ -9511,6 +9605,7 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
       .strict()
       .nullable(),
     personalConnectionDelegations: McpPersonalConnectionDelegations,
+    mcpAccountBindings: McpConnectionAccountBindings.nullable().optional(),
     personalResourceAuthoritySubjectId: z.string().min(1).nullable(),
     /** One accepted human principal for every resource-bearing scheduled run. */
     causalHumanSubjectId: z.string().min(1).nullable().default(null),
@@ -10601,6 +10696,8 @@ export const ConnectionMetadata = z.object({
   id: z.string().uuid(),
   /** Opaque owner-only handle used to manage this personal connection's grants. */
   authorityId: z.string().uuid().optional(),
+  /** Credential-free generation fence for exact accepted account routing. */
+  connectionAuthorityGeneration: z.number().int().positive().optional(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   subjectId: z.string().nullable(),
@@ -10953,6 +11050,7 @@ export const CapabilityCatalogItem = z.object({
   connectionRef: z
     .object({
       connectionId: z.string().min(1).optional(),
+      accountSelection: z.literal("all_eligible").optional(),
       authoritySource: z.literal("host").optional(),
       providerDomain: z.string().min(1),
       kind: z.string().min(1),
@@ -11025,6 +11123,8 @@ export const CreateCapabilityCatalogItemRequest = z.object({
 export type CreateCapabilityCatalogItemRequest = z.infer<typeof CreateCapabilityCatalogItemRequest>;
 
 export const EnableCapabilityRequest = z.object({
+  /** Automatic setup may create a missing installation, never rewrite an existing one. */
+  onlyIfUninstalled: z.boolean().optional(),
   config: z.record(z.string(), z.unknown()).default({}),
   metadata: z.record(z.string(), z.unknown()).default({}),
   connectionRef: McpServerConnectionRef.optional(),
@@ -12773,6 +12873,10 @@ export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
 export const ToolAuthNeededPayload = z
   .object({
     serverId: z.string().min(1),
+    /** Exact configured connector for recovery; serverId remains the execution route. */
+    canonicalServerId: z.string().min(1).optional(),
+    /** Scope of the exact failed account, not the canonical catalog default. */
+    connectionSubjectScope: z.enum(["workspace", "subject"]).optional(),
     toolName: z.string().min(1).nullable().optional(),
     providerDomain: z.string().min(1),
     provider: z.string().min(1).max(128).optional(),

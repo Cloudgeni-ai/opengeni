@@ -3,6 +3,7 @@ import type { CapabilityCatalogItem, ConnectionMetadata, SkillUninstallPreview }
 import type { ConnectAction } from "./capability-detail-sheet";
 import {
   apiKeyConnectionRef,
+  catalogConnectionAccountSelection,
   capabilityConnectPlan,
   connectionToReuseForApiKey,
   createInputFromCatalogItem,
@@ -250,6 +251,7 @@ export async function performCapabilityAction(
           action.ownership,
           connection.id,
           connection.providerDomain,
+          catalogConnectionAccountSelection(item),
         ),
       });
     }
@@ -310,6 +312,7 @@ export async function performCapabilityAction(
         action.ownership,
         connection.id,
         connection.providerDomain,
+        catalogConnectionAccountSelection(item),
       ),
     });
     await refresh();

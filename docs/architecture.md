@@ -40,6 +40,9 @@ Accepted conversation context remains unchanged.
 Session `mcpApprovalPolicies` requires session-control authority. Claims freeze
 inherited approvals with catalog floors; policies grant neither capabilities nor credentials.
 
+Account isolation: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
+[`remote-mcp-credentials.md`](remote-mcp-credentials.md).
+
 ---
 
 ## 3. Core invariants
@@ -427,7 +430,7 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 Historical CURRENT recovery requires same-session managed-human consent,
 checkpoint/generation CAS, singleton fencing and durable model warnings; never replay.
 Authority: `packages/core/src/application/sandbox-recovery.ts`; lifecycle:
-`packages/db/src/index.ts`; membership/GC/protocol guards: migration 0494.
+`packages/db/src/index.ts`; membership/GC/protocol guards: migration 0495.
 Rolling activation defaults off; permanent worker-protocol fencing applies.
 Retry checks effective routes. See [run lifecycle](run-lifecycle.md).
 
@@ -450,19 +453,19 @@ missing proof, and descriptor-free legacy commands never become successful
 supervision. See [command supervision](command-supervision.md).
 
 Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
-may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot admission
-reserves the larger budget plus reaper period, including historical Modal leases
-after backend changes. Drain budgets include dispatch/capture/retry handoff within
-the lifecycle ceiling. Warm-capture reclamation and heartbeat cleanup preserve its holder until
-the original deadline despite turn closure: no drain takeover or extended authority.
+may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the
+larger budget plus reaper period, including historical Modal leases after backend
+changes. Drain budgets include dispatch/capture/retry within the lifecycle ceiling.
+Warm-capture reclamation/heartbeat cleanup preserve holders through the original
+deadline despite turn closure: no takeover or extended authority.
 
 Legacy stopping-error containment requires owner quiescence and cancellation grace.
 Supervision-key presence—even malformed—blocks enrollment/capture/publication/teardown.
 Observation failure never proves exit; uncancelled running commands stay excluded.
 
-Acquisition/mutation waiters extend once for the first durable capture deadline
-plus handoff grace, capped at one hour. Expired/replacement claims never replenish
-budgets; zero-wait probes stay immediate. Expiry grants no capture/writer authority.
+Acquisition/mutation waits extend once through the first durable capture deadline
+plus handoff grace (one-hour cap). Expired/replacement claims never replenish
+budgets; zero-wait probes remain immediate. Expiry grants no capture/writer authority.
 Policy: `packages/db/src/sandbox-transition-wait.ts`.
 
 A settled capture rejection releases only its exact unpublished claim, allowing
@@ -668,6 +671,7 @@ may embed API/core/worker packages, but the same domain and persistence
 boundaries still apply.
 
 Console appearance: `apps/web/src/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
+Managed/broker sign-in: `apps/web/src/components/signed-out-page.tsx`; authentication unchanged.
 Workspace management route classification lives in `apps/web/src/lib/workspace-management-location.ts`. The workspace route loads `components/settings/workspace-settings-shell.tsx` lazily only for management destinations, so session navigation does not import the settings interface.
 
 ---

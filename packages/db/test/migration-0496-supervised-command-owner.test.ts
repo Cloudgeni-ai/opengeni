@@ -1,11 +1,11 @@
-// Regression companion for 0495_supervised_command_settlement.sql.
+// Regression companion for 0496_supervised_command_settlement.sql.
 import { expect, test } from "bun:test";
 import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
 import { createDb } from "../src";
 import { migrate } from "../src/migrate";
 import { supervisedCommandProtocolReady } from "../src/retained-provider-commands";
 
-test("0495 rolling expansion applies under the non-bypass owner with FORCE RLS intact", async () => {
+test("0496 rolling expansion applies under the non-bypass owner with FORCE RLS intact", async () => {
   const owned = await acquireOwnerMigratedTestDatabase("supervised-command-owner");
   if (!owned) throw new Error("Supervised migration owner test requires PostgreSQL");
   try {

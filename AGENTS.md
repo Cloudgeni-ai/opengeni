@@ -357,14 +357,14 @@ Use [`docs/README.md`](docs/README.md) as the docs map. When you move or rename 
 
 ## Sandbox Notes
 
-Public historical checkpoint consent (0494) is canonical-managed-human-only,
+Public historical checkpoint consent (0495) is canonical-managed-human-only,
 singleton managed-home Modal only. Consent uses the exclusive workspace tenancy
 fence before a complete group census; a visible session count is not authority.
 The accepted operation protects membership, active route and CURRENT artifact
 until verified restoration or failed creation. Keep consent, restore completion
 and failed-turn Retry separate. Every later attempt reconstructs the filesystem
 discontinuity warning from the durable command receipt, outside compactable
-history. Migration 0494 is additive with DB-default-off consent. Activate only
+history. Migration 0495 is additive with DB-default-off consent. Activate only
 after verifying compatible immutable worker images/templates. Permanent consent
 receipts fence old inference claims, including reattachment, even after disabling
 new consent or replacing a lease. See `docs/run-lifecycle.md`.

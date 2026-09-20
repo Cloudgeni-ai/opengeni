@@ -52,7 +52,7 @@ export function NativeConnectSetup({
   workspaceId: string;
   request: NativeConnectRequest;
   onClose(): void;
-  onComplete(): void;
+  onComplete(attempt: ConnectAttempt): void;
 }) {
   const [controller, setController] = useState<ConnectController | null>(null);
   const [failed, setFailed] = useState(false);
@@ -67,6 +67,7 @@ export function NativeConnectSetup({
       : null,
   );
   const navigation = useRef<AbortController | null>(null);
+  const completedAttempt = useRef<string | null>(null);
   useEffect(() => {
     if (request.scope.workspaceId !== workspaceId || request.scope.transport !== transport) {
       setController(null);
@@ -115,11 +116,11 @@ export function NativeConnectSetup({
   }, [transport, workspaceId, request, retry]);
   useEffect(() => {
     if (!controller) return;
-    let notified = false;
     const notify = () => {
-      if (!notified && controller.getSnapshot().attempt?.state === "complete") {
-        notified = true;
-        onComplete();
+      const attempt = controller.getSnapshot().attempt;
+      if (attempt?.state === "complete" && completedAttempt.current !== attempt.id) {
+        completedAttempt.current = attempt.id;
+        onComplete(attempt);
       }
     };
     const unsubscribe = controller.subscribe(notify);

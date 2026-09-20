@@ -81,7 +81,7 @@ import {
   waitFor,
   type TestServices,
 } from "@opengeni/testing";
-import { prepareAgentTools } from "@opengeni/runtime";
+import { prefixedMcpToolName, prepareAgentTools } from "@opengeni/runtime";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { buildTimeline } from "../../packages/react/src/timeline";
 import { submitTestHumanPrompt } from "./helpers/session-control";
@@ -3218,7 +3218,11 @@ describe("API component integration", () => {
       const prepared = await prepareAgentTools(runtimeSettings, [{ kind: "mcp", id: mcpServerId }]);
       try {
         const tools = await prepared.mcpServers[0]!.listTools();
-        expect(tools.map((tool) => tool.name)).toContain(`${mcpServerId}__search_documents`);
+        expect(tools.map((tool) => tool.name).sort()).toEqual(
+          ["search_documents", "fetch_document"]
+            .map((name) => prefixedMcpToolName(mcpServerId, name))
+            .sort(),
+        );
       } finally {
         await prepared.close();
       }
@@ -3392,11 +3396,17 @@ describe("API component integration", () => {
           subjectScope: "workspace",
         });
         const tools = await prepared.mcpServers[0]!.listTools();
-        expect(tools.map((tool) => tool.name)).toContain(`${mcpServerId}__search_documents`);
-        const result = await prepared.mcpServers[0]!.callTool(`${mcpServerId}__search_documents`, {
-          query: "broker",
-        });
+        expect(tools.map((tool) => tool.name).sort()).toEqual(
+          ["search_documents", "fetch_document"]
+            .map((name) => prefixedMcpToolName(mcpServerId, name))
+            .sort(),
+        );
+        const result = await prepared.mcpServers[0]!.callTool(
+          prefixedMcpToolName(mcpServerId, "search_documents"),
+          { query: "broker" },
+        );
         expect(JSON.stringify(result)).toContain("found document for broker");
+        expect(mcp.calls.at(-1)).toEqual({ tool: "search_documents", args: { query: "broker" } });
       } finally {
         await prepared.close();
       }

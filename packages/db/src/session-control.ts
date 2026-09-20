@@ -2805,10 +2805,12 @@ async function insertChildOutboxRowInTransaction(
   }
   let personalConnectionDelegations: (typeof schema.sessionTurns.$inferSelect)["personalConnectionDelegations"] =
     [];
+  let mcpAccountBindings: (typeof schema.sessionTurns.$inferSelect)["mcpAccountBindings"] = null;
   if (input.childSession.parentTurnId) {
     const [parentTurn] = await db
       .select({
         delegations: schema.sessionTurns.personalConnectionDelegations,
+        mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
       })
       .from(schema.sessionTurns)
       .where(
@@ -2820,6 +2822,7 @@ async function insertChildOutboxRowInTransaction(
       )
       .limit(1);
     if (parentTurn) {
+      mcpAccountBindings = parentTurn.mcpAccountBindings;
       const parsed = McpPersonalConnectionDelegations.safeParse(parentTurn.delegations);
       if (!parsed.success) {
         throw new SessionControlInvariantError(
@@ -2856,6 +2859,7 @@ async function insertChildOutboxRowInTransaction(
               ...(input.lineage ?? {}),
             },
             personalConnectionDelegations,
+            mcpAccountBindings,
           },
           "summary",
           "summaryCodecVersion",

@@ -7,6 +7,13 @@ import type { McpServerOption } from "@/lib/session-tools";
 import "@/styles.css";
 import linearLogo from "../../../data/catalog/logos/linear-app-4b4a9f349c60.png";
 import slackLogo from "../../../data/catalog/logos/slack-com-5a15dccc0dc0.jpg";
+import type { ConnectionMetadata } from "@opengeni/sdk";
+import type { ConnectionAccountChoices } from "@/components/capabilities/session-connection-accounts";
+
+const accounts = [
+  { id: "personal-fixture", subjectId: "viewer", metadata: { email: "alex@example.com" } },
+  { id: "workspace-fixture", subjectId: null, metadata: { workspaceName: "Support team" } },
+] as unknown as ConnectionMetadata[];
 
 const initial: McpServerOption[] = [
   { id: "files", name: "Files" },
@@ -36,6 +43,7 @@ function Preview() {
   });
   const [connectorCustomizing, setConnectorCustomizing] = useState(false);
   const [status, setStatus] = useState("Preview connections use sample data.");
+  const [choices, setChoices] = useState<ConnectionAccountChoices>({});
   return (
     <main className="min-h-screen bg-bg px-6 text-fg">
       <div className="mx-auto flex min-h-screen max-w-2xl flex-col justify-center gap-6">
@@ -66,6 +74,12 @@ function Preview() {
               onConnectorCustomizingChange={setConnectorCustomizing}
               onToolSelectionChange={setSelection}
               connectorActions={{
+                accountControls: {
+                  groups: [{ serverId: "slack", name: "Slack", accounts }],
+                  choices,
+                  onChoose: (serverId, ids) =>
+                    setChoices((current) => ({ ...current, [serverId]: ids })),
+                },
                 onReconnect: (id) => {
                   setServers((current) =>
                     current.map((s) => (s.id === id ? { ...s, connectionStatus: "ready" } : s)),

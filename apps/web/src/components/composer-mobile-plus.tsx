@@ -46,12 +46,9 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { McpServerOption } from "@/lib/session-tools";
+import { isComposerConnector, type McpServerOption } from "@/lib/session-tools";
 
-import {
-  isComposerConnector,
-  type SessionConnectorsMenuProps,
-} from "@/components/session-connectors-menu-body";
+import type { SessionConnectorsMenuProps } from "@/components/session-connectors-menu-body";
 
 type Panel = "root" | "tools" | "repos" | "voice" | "variables" | "settings";
 
@@ -61,7 +58,7 @@ type Panel = "root" | "tools" | "repos" | "voice" | "variables" | "settings";
 export type ComposerPlusProps = {
   connectorActions?: Pick<
     SessionConnectorsMenuProps,
-    "onReconnect" | "loading" | "error" | "busyId"
+    "onReconnect" | "loading" | "error" | "busyId" | "accountControls"
   >;
   onOpenConnectors?: () => void;
   /** Centered composers need viewport-sized panels rather than trigger-side space. */

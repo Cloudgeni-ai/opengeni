@@ -1,4 +1,5 @@
 import { withLatestStartedSessionPolicy } from "./session-execution-policy";
+import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
@@ -14,6 +15,7 @@ import {
   stableJson,
   turnExecutionPolicyAuditMetadata,
   type McpPersonalConnectionDelegation,
+  type McpConnectionAccountBinding,
   type DraftTimelineAnnotation,
   type LatencyMode,
   type ReasoningEffort,
@@ -349,11 +351,13 @@ async function personalConnectionDelegationsForAgentActor(
   actor: Extract<SessionCommandActor, { type: "agent_attempt" }>,
 ): Promise<{
   delegations: McpPersonalConnectionDelegation[];
+  mcpAccountBindings: McpConnectionAccountBinding[] | null;
   connectionAuthoritySubjectId: string | null;
 }> {
   const [row] = await db
     .select({
       delegations: schema.sessionTurns.personalConnectionDelegations,
+      mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
       initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
     })
     .from(schema.sessionTurns)
@@ -378,8 +382,9 @@ async function personalConnectionDelegationsForAgentActor(
   }
   // New agent work inherits the exact originating turn's sender and accounts.
   const delegations = parsed.data.map((delegation) => ({ ...delegation }));
+  const mcpAccountBindings = parseAcceptedMcpAccountBindings(row.mcpAccountBindings);
   if (delegations.length === 0) {
-    return { delegations, connectionAuthoritySubjectId: null };
+    return { delegations, mcpAccountBindings, connectionAuthoritySubjectId: null };
   }
   const connectionAuthoritySubjectId = row.initiatingHumanSubjectId;
   if (!connectionAuthoritySubjectId) {
@@ -394,7 +399,7 @@ async function personalConnectionDelegationsForAgentActor(
       );
     }
   }
-  return { delegations, connectionAuthoritySubjectId };
+  return { delegations, mcpAccountBindings, connectionAuthoritySubjectId };
 }
 
 async function xaiAuthorityForAgentActor(
@@ -1746,6 +1751,7 @@ export async function submitHumanPromptInTransaction(
     /** Record the admitted run's durable usage fact in this transaction. */
     recordAgentRunUsage?: boolean;
     personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+    mcpAccountBindings?: McpConnectionAccountBinding[] | null;
     personalResourceAttachment?: PersonalResourceAttachmentIntent;
     mcpCredentialUpdates?: Array<{
       id: string;
@@ -1812,6 +1818,7 @@ export async function submitHumanPromptInTransaction(
     mirrorToRealtime: input.mirrorToRealtime ?? true,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
     personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+    mcpAccountBindings: input.mcpAccountBindings ?? null,
     personalResourceAttachment: input.personalResourceAttachment ?? null,
 
     ...(input.actor.type === "service"
@@ -2174,6 +2181,9 @@ export async function submitHumanPromptInTransaction(
           personalConnectionDelegations: editedSourceTurn
             ? editedSourceTurn.personalConnectionDelegations
             : (input.personalConnectionDelegations ?? []),
+          mcpAccountBindings: editedSourceTurn
+            ? editedSourceTurn.mcpAccountBindings
+            : parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
           xaiProviderAccountAuthoritySnapshot,
           createdAt: now,
           updatedAt: now,
@@ -2683,6 +2693,7 @@ export async function sendAgentMessageInTransaction(
               ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
             },
             personalConnectionDelegations,
+            mcpAccountBindings: inheritedConnectionAuthority.mcpAccountBindings,
             xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
             state: "pending",
           },
@@ -2971,6 +2982,7 @@ export async function steerAgentSessionInTransaction(
               ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
             },
             personalConnectionDelegations,
+            mcpAccountBindings: inheritedConnectionAuthority.mcpAccountBindings,
             xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
             state: "pending",
           },
