@@ -103,6 +103,20 @@ Session labels and fresh message drafts use those settings too. Before any turn
 starts, the initial session settings apply. Existing drafts, queued messages and
 historical turns retain their own settings.
 
+## Codex subscription source
+
+Workspace model settings let you connect Codex subscriptions even when the
+workspace inherits organization subscriptions. **Automatic** uses workspace
+subscriptions when connected, otherwise the organization's subscriptions.
+**This workspace only** and **Organization only** select one source explicitly;
+they do not combine the two pools.
+
+You can change this setting while work is in progress. New work uses the selected
+source; already-accepted turns keep their original source, including while
+recovering, awaiting an action, or waiting for capacity. Connecting an account
+does not change your selected mode: **Organization only** stays selected, and
+**Turn off Codex** stays off for new work.
+
 ## Voice input
 
 In workspace settings, **Voice input** lets you select the default transcription
