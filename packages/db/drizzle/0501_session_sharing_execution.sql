@@ -196,11 +196,11 @@ BEGIN
 END $sharing_execution$;
 
 -- Keep the visibility lifecycle body explicit; this is DDL, not a data backfill.
-CREATE OR REPLACE FUNCTION public.transition_session_visibility(p_account_id uuid, p_workspace_id uuid, p_session_id uuid, p_actor_subject_id text, p_target_visibility text, p_expected_authority_epoch integer, p_operation_key text, p_canonical_request_hash text, p_activation_version integer)
+CREATE OR REPLACE FUNCTION transition_session_visibility(p_account_id uuid, p_workspace_id uuid, p_session_id uuid, p_actor_subject_id text, p_target_visibility text, p_expected_authority_epoch integer, p_operation_key text, p_canonical_request_hash text, p_activation_version integer)
  RETURNS TABLE(operation_id uuid, event_id uuid, event_sequence integer, visibility text, authority_epoch integer, owner_organization_membership_id uuid, changed boolean, replay boolean, interrupted_attempt_count integer, cancelled_turn_count integer, cancelled_update_count integer, paused_goal_count integer, revoked_grant_count integer)
  LANGUAGE plpgsql
  SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'public', 'pg_temp'
+ SET search_path TO pg_catalog
 AS $function$
 DECLARE
   actor_membership organization_memberships%ROWTYPE;
@@ -421,11 +421,11 @@ $function$
 ;
 
 -- Existing machine receipts still require exact live grant and attempt authority.
-CREATE OR REPLACE FUNCTION public.assert_session_attempt_personal_machine(p_account_id uuid, p_workspace_id uuid, p_session_id uuid, p_turn_id uuid, p_attempt_id uuid, p_execution_generation integer, p_enrollment_id uuid, p_require_active_sandbox boolean)
+CREATE OR REPLACE FUNCTION assert_session_attempt_personal_machine(p_account_id uuid, p_workspace_id uuid, p_session_id uuid, p_turn_id uuid, p_attempt_id uuid, p_execution_generation integer, p_enrollment_id uuid, p_require_active_sandbox boolean)
  RETURNS boolean
  LANGUAGE plpgsql
  SECURITY DEFINER
- SET search_path TO 'public', 'pg_catalog', 'pg_temp'
+ SET search_path TO pg_catalog
 AS $function$
 DECLARE
   authorization_row session_attempt_connected_machine_authorizations%ROWTYPE;
@@ -581,3 +581,11 @@ EXCEPTION WHEN OTHERS THEN
 END
 $function$
 ;
+
+-- Pin the installation schema, including dedicated non-public deployments.
+DO $sharing_routine_paths$
+DECLARE target_schema text := current_schema();
+BEGIN
+  EXECUTE format('ALTER FUNCTION transition_session_visibility(uuid,uuid,uuid,text,text,integer,text,text,integer) SET search_path=pg_catalog,%I,pg_temp', target_schema);
+  EXECUTE format('ALTER FUNCTION assert_session_attempt_personal_machine(uuid,uuid,uuid,uuid,uuid,integer,uuid,boolean) SET search_path=pg_catalog,%I,pg_temp', target_schema);
+END $sharing_routine_paths$;
