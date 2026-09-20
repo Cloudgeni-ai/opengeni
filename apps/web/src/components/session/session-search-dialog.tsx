@@ -361,7 +361,7 @@ type SessionSearchPreviewProps = {
 };
 
 export function SessionSearchPreview(props: SessionSearchPreviewProps) {
-  const { search, setIndex } = props;
+  const { search, setIndex, onAccessDenied } = props;
   const matches = search.page?.matches ?? [];
   // -1 means land on the last occurrence when a previous batch arrives.
   const index = props.index < 0 ? Math.max(0, matches.length - 1) : props.index;
@@ -431,8 +431,8 @@ export function SessionSearchPreview(props: SessionSearchPreviewProps) {
     100,
   );
   useEffect(() => {
-    if (preview.accessDenied || search.accessDenied) props.onAccessDenied?.();
-  }, [preview.accessDenied, search.accessDenied, props.onAccessDenied]);
+    if (preview.accessDenied || search.accessDenied) onAccessDenied?.();
+  }, [preview.accessDenied, search.accessDenied, onAccessDenied]);
   if (preview.accessDenied || search.accessDenied)
     return <div role="alert">Search access is unavailable.</div>;
   const titleOnly = !!search.page && !search.page.hasMore && !matches.length;
