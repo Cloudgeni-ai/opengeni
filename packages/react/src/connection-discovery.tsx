@@ -41,7 +41,7 @@ function ScopedDiscovery({
   returnUrl,
   onConfigured,
 }: ConnectionDiscoveryProps) {
-  const [providers, setProviders] = useState<ConnectProvider[]>([]);
+  const [providers, setProviders] = useState<ConnectProvider[] | null>(null);
   const [accounts, setAccounts] = useState<ConnectAccount[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<ConnectProvider | null>(null);
   const [providerFailed, setProviderFailed] = useState(false);
@@ -54,29 +54,42 @@ function ScopedDiscovery({
   const [selected, setSelected] = useState<CapabilityCatalogItem | null>(null);
   const opener = useRef<HTMLElement | null>(null);
   useEffect(() => {
-    let current = true;
+    const abort = new AbortController();
     setFailed(false);
     setSelectedProvider(null);
-    setProviders([]);
+    setProviders(null);
+    setItems(null);
+    setConnections([]);
     setAccounts([]);
     setProviderFailed(false);
     if (controller)
-      void Promise.all([
-        controller.transport.catalog(workspaceId),
-        controller.transport.accounts(workspaceId),
-      ])
+      void Promise.resolve()
+        .then(() => {
+          abort.signal.throwIfAborted();
+          return Promise.all([
+            controller.transport.catalog(workspaceId, { signal: abort.signal }),
+            controller.transport.accounts(workspaceId, { signal: abort.signal }),
+          ]);
+        })
         .then(([catalog, inventory]) => {
-          if (current) {
+          if (!abort.signal.aborted) {
             setProviders(catalog.filter(isServiceConnectProvider));
             setAccounts(inventory);
           }
         })
         .catch(() => {
-          if (current) setProviderFailed(true);
+          if (!abort.signal.aborted) setProviderFailed(true);
         });
-    void Promise.all([client.listCapabilities(workspaceId), client.listConnections(workspaceId)])
+    void Promise.resolve()
+      .then(() => {
+        abort.signal.throwIfAborted();
+        return Promise.all([
+          client.listCapabilities(workspaceId),
+          client.listConnections(workspaceId),
+        ]);
+      })
       .then(([catalog, inventory]) => {
-        if (current) {
+        if (!abort.signal.aborted) {
           setConnections(inventory);
           setItems(
             catalog.items.filter(
@@ -89,10 +102,10 @@ function ScopedDiscovery({
         }
       })
       .catch(() => {
-        if (current) setFailed(true);
+        if (!abort.signal.aborted) setFailed(true);
       });
     return () => {
-      current = false;
+      abort.abort();
     };
   }, [client, controller, workspaceId, reload]);
   const matches =
@@ -101,11 +114,12 @@ function ScopedDiscovery({
         .toLocaleLowerCase()
         .includes(query.trim().toLocaleLowerCase()),
     ) ?? [];
-  const providerMatches = providers.filter(
+  const providerMatches = (providers ?? []).filter(
     (provider) =>
       !items?.some((item) => capabilityConnectProviderId(item) === provider.id) &&
       provider.label.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
   );
+  const loading = (!items && !failed) || Boolean(controller && !providers && !providerFailed);
   if (selectedProvider && controller)
     return (
       <section aria-label={`Connect ${selectedProvider.label}`}>
@@ -140,73 +154,66 @@ function ScopedDiscovery({
           }}
         />
       </label>
-      {providerFailed && (
+      {(providerFailed || failed) && (
         <p role="alert">
           Some services could not be loaded.{" "}
-          <button onClick={() => setReload((value) => value + 1)}>Retry</button>
+          <button type="button" onClick={() => setReload((value) => value + 1)}>
+            Retry
+          </button>
         </p>
       )}
-      <div className="og-connection-discovery-results" aria-busy={!items && !failed}>
-        {failed ? (
-          <p role="alert">
-            Services could not be loaded.{" "}
-            <button onClick={() => setReload((value) => value + 1)}>Retry</button>
-          </p>
-        ) : !items ? (
-          <ConnectionSkeleton rows={5} label="Loading services" />
-        ) : (
-          <>
-            <div>
-              {providerMatches.map((provider) => {
-                const connected = accounts.some(
-                  (account) => account.providerId === provider.id && account.status === "connected",
-                );
-                return (
-                  <CapabilityCatalogRow
-                    key={provider.id}
+      <div className="og-connection-discovery-results">
+        <div>
+          {providerMatches.map((provider) => {
+            const connected = accounts.some(
+              (account) => account.providerId === provider.id && account.status === "connected",
+            );
+            return (
+              <CapabilityCatalogRow
+                key={provider.id}
+                name={provider.label}
+                icon={
+                  <ConnectionLogo
                     name={provider.label}
-                    icon={
-                      <ConnectionLogo
-                        name={provider.label}
-                        src={connectionServicePresentation(provider).logo}
-                      />
-                    }
-                    status={connected ? "added" : "available"}
-                    statusLabel={connected ? "Connected" : "Connect"}
-                    showStatusLabel
-                    onOpen={() => setSelectedProvider(provider)}
+                    src={connectionServicePresentation(provider).logo}
                   />
-                );
-              })}
-              {matches.slice(0, limit).map((item) => {
-                const state = mcpConnectionDiscoveryState(item, connections);
-                return (
-                  <CapabilityCatalogRow
-                    key={item.id}
-                    name={item.name}
-                    description={item.description ?? undefined}
-                    icon={<ConnectionServiceLogo client={client} item={item} name={item.name} />}
-                    status={state.status}
-                    statusLabel={state.label}
-                    showStatusLabel
-                    onOpen={() => {
-                      opener.current =
-                        document.activeElement instanceof HTMLElement
-                          ? document.activeElement
-                          : null;
-                      setSelected(item);
-                    }}
-                  />
-                );
-              })}
-            </div>
-            {!matches.length && !providerMatches.length ? (
-              <p role="status">No services match your search.</p>
-            ) : null}
-            {matches.length > limit ? (
-              <button onClick={() => setLimit((value) => value + 12)}>Show more services</button>
-            ) : null}
-          </>
+                }
+                status={connected ? "added" : "available"}
+                statusLabel={connected ? "Connected" : "Connect"}
+                showStatusLabel
+                onOpen={() => setSelectedProvider(provider)}
+              />
+            );
+          })}
+          {matches.slice(0, limit).map((item) => {
+            const state = mcpConnectionDiscoveryState(item, connections);
+            return (
+              <CapabilityCatalogRow
+                key={item.id}
+                name={item.name}
+                description={item.description ?? undefined}
+                icon={<ConnectionServiceLogo client={client} item={item} name={item.name} />}
+                status={state.status}
+                statusLabel={state.label}
+                showStatusLabel
+                onOpen={() => {
+                  opener.current =
+                    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+                  setSelected(item);
+                }}
+              />
+            );
+          })}
+        </div>
+
+        {loading && <ConnectionSkeleton rows={3} label="Loading services" />}
+        {!loading && !failed && !providerFailed && !matches.length && !providerMatches.length && (
+          <p role="status">No services match your search.</p>
+        )}
+        {matches.length > limit && (
+          <button type="button" onClick={() => setLimit((value) => value + 12)}>
+            Show more services
+          </button>
         )}
       </div>
       {selected ? (
