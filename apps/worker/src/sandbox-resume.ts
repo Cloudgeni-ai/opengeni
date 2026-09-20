@@ -86,7 +86,7 @@ import {
   WorkspaceArchiveStorageError,
   type ObjectStorage,
 } from "@opengeni/storage";
-import type { Observability } from "@opengeni/observability";
+import { sandboxLeaseTelemetryKey, type Observability } from "@opengeni/observability";
 import { parseWorkspaceArchiveObjectRef } from "@opengeni/contracts";
 import {
   persistWorkspaceArchiveCandidate,
@@ -367,22 +367,21 @@ class SnapshotTimeoutError extends Error {
   }
 }
 
-export function safeSnapshotError(error: unknown): {
+type SafeSnapshotError = {
   errorClass: "SnapshotOperationError";
   errorCode: "snapshot_operation_failed";
   status?: number;
   origin: "sandbox-resume";
   causeName?: string;
   integrityCode?: string;
-} {
-  const fields: {
-    errorClass: "SnapshotOperationError";
-    errorCode: "snapshot_operation_failed";
-    status?: number;
-    origin: "sandbox-resume";
-    causeName?: string;
-    integrityCode?: string;
-  } = {
+  providerErrorName?: string;
+  providerGrpcCode?: number;
+  providerHttpStatus?: number;
+  providerRetryable?: boolean;
+};
+
+export function safeSnapshotError(error: unknown): SafeSnapshotError {
+  const fields: SafeSnapshotError = {
     errorClass: "SnapshotOperationError",
     errorCode: "snapshot_operation_failed",
     origin: "sandbox-resume",
@@ -412,6 +411,53 @@ export function safeSnapshotError(error: unknown): {
     // Public diagnostics are best-effort and must never replace the exact
     // internal snapshot failure.
   }
+  // Agents Extensions wraps the provider exception in SandboxProviderError
+  // and copies its structured classification into details (not Error.cause).
+  // Never project the free-form cause, request IDs, payloads or message. Keep
+  // reads independent: a hostile getter must not hide other safe fields.
+  const read = (value: unknown, key: string): unknown => {
+    try {
+      return value && typeof value === "object" ? Reflect.get(value, key) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const details = read(error, "details");
+  const providerName = read(details, "errorName");
+  if (
+    typeof providerName === "string" &&
+    [
+      "ClientError",
+      "TimeoutError",
+      "ConnectionError",
+      "AuthError",
+      "NotFoundError",
+      "InvalidError",
+      "RemoteError",
+      "AbortError",
+    ].includes(providerName)
+  ) {
+    fields.providerErrorName = providerName;
+  }
+  const grpcCode = read(details, "errorCode");
+  if (
+    providerName === "ClientError" &&
+    typeof grpcCode === "number" &&
+    Number.isInteger(grpcCode) &&
+    grpcCode >= 0 &&
+    grpcCode <= 16
+  ) {
+    fields.providerGrpcCode = grpcCode;
+  }
+  for (const key of ["status", "httpStatus", "responseStatus"]) {
+    const status = read(details, key);
+    if (typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599) {
+      fields.providerHttpStatus = status;
+      break;
+    }
+  }
+  const retryable = read(error, "retryable");
+  if (typeof retryable === "boolean") fields.providerRetryable = retryable;
   return fields;
 }
 
@@ -785,6 +831,19 @@ async function persistWarmWorkspaceSnapshot(
   registerOwnedContinuation: (continuation: Promise<void>) => void,
 ): Promise<boolean> {
   const { db, settings } = services;
+  const warnSnapshotFailure = (message: string, error: unknown): void => {
+    const fields = {
+      ...safeSnapshotError(error),
+      sandboxLeaseKey: sandboxLeaseTelemetryKey(ids.workspaceId, ids.sandboxGroupId),
+      leaseEpoch,
+    };
+    try {
+      if (services.observability) services.observability.warn(message, fields);
+      else console.warn(message, fields);
+    } catch {
+      // Diagnostics cannot change provider settlement or capture-gate cleanup.
+    }
+  };
   const intervalMs = settings.sandboxSnapshotIntervalMs;
   if (intervalMs <= 0 && !force) {
     return false;
@@ -1020,10 +1079,7 @@ async function persistWarmWorkspaceSnapshot(
           expectedInstanceId: instanceId,
         }).catch((error) => {
           captureOutcome = "failed";
-          console.error(
-            "mid-session workspace capture gate release failed",
-            safeSnapshotError(error),
-          );
+          warnSnapshotFailure("mid-session workspace capture gate release failed", error);
         });
         try {
           services.sandboxMetrics?.onWorkspaceCapture?.({
@@ -1039,10 +1095,7 @@ async function persistWarmWorkspaceSnapshot(
     const settled = captureAndPublish.then(
       (persisted) => ({ kind: "settled" as const, persisted }),
       (error) => {
-        console.error(
-          "mid-session workspace snapshot failed (turn unaffected)",
-          safeSnapshotError(error),
-        );
+        warnSnapshotFailure("mid-session workspace snapshot failed (turn unaffected)", error);
         return { kind: "settled" as const, persisted: false };
       },
     );
@@ -1077,10 +1130,7 @@ async function persistWarmWorkspaceSnapshot(
     // A failed snapshot does not fail the turn. Physical captures can still
     // fence commands until their exact gate settles; the caller timeout is not
     // permission to release that gate. The next eligible tick can retry.
-    console.error(
-      "mid-session workspace snapshot failed (turn unaffected)",
-      safeSnapshotError(error),
-    );
+    warnSnapshotFailure("mid-session workspace snapshot failed (turn unaffected)", error);
     return false;
   }
 }

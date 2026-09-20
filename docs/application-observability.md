@@ -20,6 +20,12 @@ under the physical attempt. Completed duration measurements are siblings, not
 claims that one completed operation caused another. Existing first-startup
 phase deduplication is unchanged; model-call and MCP timing are per invocation.
 
+Snapshot failure diagnostics preserve a closed provider
+error name, numeric gRPC code (only for a typed ClientError), numeric HTTP status,
+and boolean retryability from the SDK wrapper's structured details. They do not
+log provider messages, request identifiers, response bodies or free-form causes.
+Missing classification means unknown, not a timeout or a retryable failure.
+
 Workspace capture admission is measured on every routed operation, including
 operations after startup. `opengeni_sandbox_capture_wait_duration_seconds`
 separates durable admission and provider capture gates using closed `stage`
