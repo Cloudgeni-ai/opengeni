@@ -6,9 +6,11 @@ import {
   appendWorkspaceMemory,
   composeAgentInstructions,
   requestRemoteCompactionV2,
-  serializedToolsForRemoteCompaction,
+  preparedCompactionRequest,
+  queuePreparedCompaction,
+  compactionThresholdTokens,
+  CompactionNeededError,
   compactionProviderRejection,
-  EmptyCompactionSummaryError,
   SUMMARY_BUFFER_TOKENS,
   type ModelResponseUsage,
 } from "@opengeni/runtime";
@@ -54,9 +56,6 @@ import type {
 } from "./turn-context";
 
 export type RemoteCompactionPrefix = {
-  tools: Awaited<ReturnType<typeof serializedToolsForRemoteCompaction>>;
-  instructions: string;
-  toolsReady: boolean;
   agent: ReturnType<ActivityServices["runtime"]["buildAgent"]> | null;
 };
 
@@ -167,9 +166,6 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   } = deps;
 
   const remotePrefix: RemoteCompactionPrefix = {
-    tools: [],
-    instructions: "",
-    toolsReady: false,
     agent: null,
   };
 
@@ -235,46 +231,16 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     resolvedModel && billingState.isCodexTurn
       ? (s: Settings, m: Array<Record<string, unknown>>) =>
           withCodexRemoteCompaction(async () => {
-            // Lazily serialize tools here so EmptyCompactionSummaryError is
-            // thrown inside the compaction try/settlement handlers, not as a
-            // raw activity failure before maybeCompactContext runs.
-            if (!remotePrefix.instructions.trim()) {
-              throw new EmptyCompactionSummaryError({
-                stage: "remote_v2_instructions",
-                reason: "agent_missing_system_instructions",
-              });
-            }
-            if (!remotePrefix.toolsReady) {
-              if (!remotePrefix.agent) {
-                throw new EmptyCompactionSummaryError({
-                  stage: "remote_v2_tools",
-                  reason: "agent_missing_for_tools",
-                });
-              }
-              try {
-                remotePrefix.tools = await serializedToolsForRemoteCompaction(remotePrefix.agent);
-              } catch (error) {
-                // Tool schemas sit before instructions in the cache prefix.
-                // Failing open to [] would reintroduce a massive pre-compact
-                // cache bust — fail closed so we never send a tools mismatch
-                // on purpose.
-                throw new EmptyCompactionSummaryError({
-                  stage: "remote_v2_tools",
-                  reason: "serialize_tools_failed",
-                  error: String(error),
-                });
-              }
-              remotePrefix.toolsReady = true;
-            }
+            if (!remotePrefix.agent) throw new Error("Compaction agent is unavailable");
+            const preparedRequest = preparedCompactionRequest(remotePrefix.agent);
             return requestRemoteCompactionV2(s, m, {
               client: resolvedModel.client,
               provider: resolvedModel.provider,
               model: turnExecutionPolicy.upstreamModelId,
-              systemInstructions: remotePrefix.instructions,
-              reasoning: remotePrefix.agent?.modelSettings.reasoning,
+              preparedRequest,
+              captureAgent: remotePrefix.agent,
+              signal: cancellationSignal,
               onUsage: recordCompactionUsage,
-              tools: remotePrefix.tools,
-              ...(promptCacheKey ? { promptCacheKey } : {}),
             });
           })
       : undefined;
@@ -518,16 +484,25 @@ export async function runPostAgentCompaction(
     agentInstructions.trim() ? agentInstructions : undefined,
   );
   if (remoteCompactionRequester) {
-    // Exact byte match with the ordinary turn prefix (CLI base_instructions).
-    // Tools serialize lazily inside the requester so setup failures settle as
-    // compaction failures rather than raw activity crashes.
-    remotePrefix.instructions = agentInstructions;
+    // The prefix is captured only after this agent passes normal SDK preparation.
     remotePrefix.agent = agent;
   }
 
   if (compactionOnlyTurn) {
     const requested = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
     let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
+    if (requested && remoteCompactionRequester && session.codexCompactionMode === "remote_v2") {
+      queuePreparedCompaction(
+        agent,
+        new CompactionNeededError({
+          trigger: "operator",
+          signalSource: "operator",
+          signalTokens: session.lastInputTokens ?? 0,
+          thresholdTokens: compactionThresholdTokens(eventing.modelRunSettings),
+        }),
+      );
+      return { ok: { compactSummarizer } };
+    }
     if (requested) {
       try {
         outcome = await waitForTurnOperation(
@@ -633,6 +608,28 @@ export async function runPostAgentCompaction(
     control.turnMetricOutcome = "completed";
     control.activityStatus = "idle";
     return { exit: claimedResult({ status: "idle" }) };
+  }
+
+  if (remoteCompactionRequester && session.codexCompactionMode === "remote_v2") {
+    const forced = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+    const thresholdTokens = compactionThresholdTokens(eventing.modelRunSettings);
+    if (
+      forced ||
+      ((attempt.triggerType === "user.message" ||
+        attempt.triggerType === "system.update.delivered") &&
+        (session.lastInputTokens ?? 0) >= thresholdTokens)
+    ) {
+      queuePreparedCompaction(
+        agent,
+        new CompactionNeededError({
+          trigger: forced ? "operator" : "threshold",
+          signalSource: forced ? "operator" : "provider",
+          signalTokens: session.lastInputTokens ?? 0,
+          thresholdTokens,
+        }),
+      );
+    }
+    return { ok: { compactSummarizer } };
   }
 
   // Pre-turn durable context compaction. When the single Codex-parity

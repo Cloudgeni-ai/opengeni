@@ -79,10 +79,9 @@ Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 
 ### 3.2 Temporal coordinates; streams stay outside workflow history
 
-Temporal orchestrates workflows, activities, signals, timers and `continueAsNew`.
-Activities read Postgres obligations, never replaced by duplicate, delayed, lost
-or closing-run signals. Conversation, goals, queues, tokens, tool output and
-provider transcripts stay outside workflow history; streams use ordinary events.
+Temporal coordinates execution; activities read Postgres obligations, not signals.
+Conversation, goals, queues, usage and provider/tool transcripts stay outside
+workflow history; streams use ordinary events.
 
 Canonical: `apps/worker/src/workflows/session.ts` and
 [`run-lifecycle.md`](run-lifecycle.md).
@@ -108,7 +107,8 @@ preserving lineage. See [`run-lifecycle.md`](run-lifecycle.md).
 operations have external effects. Recovery is explicit and attempt-fenced.
 Provider work stays outside retries; retry only idempotent settlement.
 Replay: [notices/catalogs](run-lifecycle.md),
-[compaction](context-compaction.md).
+[compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`
+shares sandbox/lazy-tool-prepared requests with remote compaction, including before first inference.
 
 Failed-session retry differs from Pause/Resume and prompt admission.
 `packages/db/src/session-retry.ts` fences failure identity, reserves actor-scoped

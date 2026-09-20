@@ -26,12 +26,14 @@ export function settingsNavItemClass(selected: boolean) {
 
 export function SettingsSidebar({
   workspaceId,
+  backToWorkspaceSettings = false,
   label,
   identity,
   currentPage,
   children,
 }: {
   workspaceId?: string;
+  backToWorkspaceSettings?: boolean;
   label: string;
   identity: ReactNode;
   currentPage: string;
@@ -53,6 +55,17 @@ export function SettingsSidebar({
   }, []);
   useEffect(() => setOpen(false), [workspaceId, currentPage]);
 
+  const backTo = workspaceId
+    ? backToWorkspaceSettings
+      ? "/workspaces/$workspaceId/settings"
+      : "/workspaces/$workspaceId/sessions"
+    : "/";
+  const backLabel = workspaceId
+    ? backToWorkspaceSettings
+      ? "Back to workspace settings"
+      : "Back to sessions"
+    : "Back to OpenGeni";
+
   const sidebar = (
     <aside
       aria-label={label}
@@ -73,12 +86,12 @@ export function SettingsSidebar({
           OpenGeni
         </Link>
         <Link
-          to={workspaceId ? "/workspaces/$workspaceId/sessions" : "/"}
+          to={backTo}
           params={workspaceId ? { workspaceId } : undefined}
           className="mt-3 inline-flex h-8 shrink-0 items-center gap-2 rounded-md px-2 text-xs text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg lg:mt-5"
         >
           <ArrowLeftIcon aria-hidden="true" className="size-3.5" />
-          {workspaceId ? "Back to sessions" : "Back to OpenGeni"}
+          {backLabel}
         </Link>
         <div className="mt-4 min-w-0 px-2 lg:mt-6">
           <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">{label}</p>
@@ -92,9 +105,9 @@ export function SettingsSidebar({
   return (
     <header className="flex min-w-0 items-center gap-3 border-b border-border bg-surface/35 px-4 py-2">
       <Link
-        to={workspaceId ? "/workspaces/$workspaceId/sessions" : "/"}
+        to={backTo}
         params={workspaceId ? { workspaceId } : undefined}
-        aria-label={workspaceId ? "Back to sessions" : "Back to OpenGeni"}
+        aria-label={backLabel}
         className="flex size-10 shrink-0 items-center justify-center rounded-md text-fg-muted hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-brand"
       >
         <ArrowLeftIcon aria-hidden="true" className="size-4" />
