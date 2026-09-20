@@ -19,7 +19,10 @@ import {
 import { createRuntimeBatcher, currentActivityContext } from "../streaming";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import { maybePersistWarmWorkspaceSnapshot, type ResumedTurnSandbox } from "../../sandbox-resume";
-import { recordCreditMicros } from "../../observability-metrics";
+import {
+  recordCreditMicros,
+  runtimeMetricsHooksForObservability,
+} from "../../observability-metrics";
 import { ChannelAPartialMutationError } from "@opengeni/runtime/sandbox";
 
 import { safeErrorDiagnostic } from "./errors";
@@ -580,7 +583,12 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
         })
       ) {
         const snapshot = maybePersistWarmWorkspaceSnapshot(
-          { db, settings, objectStorage },
+          {
+            db,
+            settings,
+            objectStorage,
+            sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+          },
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,

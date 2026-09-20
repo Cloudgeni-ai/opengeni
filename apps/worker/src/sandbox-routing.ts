@@ -72,6 +72,7 @@ import {
   type RoutingMutationSettlementResult,
   type RoutingSandboxFirstOperationObserver,
   type RoutingSandboxOperationObserver,
+  type RoutingSandboxCaptureWaitObserver,
   type RoutingSandboxWaitObservation,
   type RoutingRetainedProcess,
   type RoutingRetainedProcessTerminalProof,
@@ -112,6 +113,7 @@ export type RoutingWiringServices = {
   onOp?: SelfhostedOpObserver;
   /** Every physical routed provider call, across cloud and selfhosted homes. */
   onSandboxOperation?: RoutingSandboxOperationObserver;
+  onSandboxCaptureWait?: RoutingSandboxCaptureWaitObserver;
   /** The op-stream durable-resume journal (the Temporal adaptation from
    *  op-journal.ts): attach generation + settled-frontier persistence. Absent ⇒
    *  the runtime defaults (generation "1", no persistence) — tests / non-turn
@@ -1027,6 +1029,7 @@ export function wrapTurnBoxWithRouting(
     },
     resolveActiveBackend: resolver,
     ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
+    ...(services.onSandboxCaptureWait ? { onCaptureWait: services.onSandboxCaptureWait } : {}),
     providerCommandHandle: admittedCommandHandle,
     ...(ids.workspaceMutationFence
       ? {
@@ -1283,6 +1286,7 @@ export function wrapLazyTurnBoxWithRouting(
       return routedResolver(pointer);
     },
     ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
+    ...(services.onSandboxCaptureWait ? { onCaptureWait: services.onSandboxCaptureWait } : {}),
     ...(args.onFirstOperation ? { onFirstOperation: args.onFirstOperation } : {}),
     providerCommandHandle: admittedCommandHandle,
     ...(ids.workspaceMutationFence

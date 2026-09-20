@@ -949,6 +949,8 @@ async function persistWarmWorkspaceSnapshot(
     // turn signal resolves first. Its finally block is the only normal release
     // of the exact admission gate; a late callback cannot release a successor.
     const captureAndPublish = (async (): Promise<boolean> => {
+      const captureStarted = performance.now();
+      let captureOutcome: "completed" | "failed" = "failed";
       let archive: VerifiedWorkspaceArchivePayload | undefined;
       let candidate: { id: string } | null = null;
       let publicationAttempted = false;
@@ -999,6 +1001,7 @@ async function persistWarmWorkspaceSnapshot(
         if (!wrote && candidate) {
           await abandonCandidate(candidate.id, "snapshot_publication_fenced");
         }
+        if (wrote) captureOutcome = "completed";
         return wrote;
       } catch (error) {
         if (candidate && !publicationAttempted)
@@ -1016,11 +1019,21 @@ async function persistWarmWorkspaceSnapshot(
           expectedEpoch: leaseEpoch,
           expectedInstanceId: instanceId,
         }).catch((error) => {
+          captureOutcome = "failed";
           console.error(
             "mid-session workspace capture gate release failed",
             safeSnapshotError(error),
           );
         });
+        try {
+          services.sandboxMetrics?.onWorkspaceCapture?.({
+            backend: lease.backend,
+            outcome: captureOutcome,
+            durationSeconds: Math.max(0, performance.now() - captureStarted) / 1_000,
+          });
+        } catch {
+          // A completed capture and released gate cannot depend on telemetry.
+        }
       }
     })();
     const settled = captureAndPublish.then(
@@ -1061,8 +1074,9 @@ async function persistWarmWorkspaceSnapshot(
     // exact claim cleanup, so it cannot leak an unhandled promise or artifact.
     return outcome.kind === "settled" ? outcome.persisted : false;
   } catch (error) {
-    // Protection, not a dependency: a failed snapshot must never fail (or slow
-    // down retrying) the turn. The next heartbeat/turn-end tick retries.
+    // A failed snapshot does not fail the turn. Physical captures can still
+    // fence commands until their exact gate settles; the caller timeout is not
+    // permission to release that gate. The next eligible tick can retry.
     console.error(
       "mid-session workspace snapshot failed (turn unaffected)",
       safeSnapshotError(error),

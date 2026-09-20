@@ -294,6 +294,68 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     ).toBeLessThanOrEqual(observations[0]!.durationMs + 2);
   });
 
+  test("observes capture admission waits after startup without counting them as provider calls", async () => {
+    const backend = new FakeBackend("capture-wait");
+    const observations: Parameters<NonNullable<RoutingSandboxSessionDeps["onCaptureWait"]>>[0][] =
+      [];
+    let providerCalls = 0;
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async ({ onCaptureWait }) => {
+        onCaptureWait?.({ durationMs: 54_600, outcome: "completed" });
+        return "admitted";
+      },
+      afterMutation: async () => undefined,
+      onCaptureWait: (observation) => observations.push(observation),
+      onOperation: () => {
+        providerCalls += 1;
+      },
+    });
+    await proxy.exec({ cmd: "first" });
+    await proxy.exec({ cmd: "second" });
+    expect(observations.filter((o) => o.captureWaitStage === "admission")).toEqual([
+      {
+        backend: "modal",
+        op: "exec",
+        outcome: "ok",
+        durationMs: 54_600,
+        captureWaitStage: "admission",
+      },
+      {
+        backend: "modal",
+        op: "exec",
+        outcome: "ok",
+        durationMs: 54_600,
+        captureWaitStage: "admission",
+      },
+    ]);
+    expect(providerCalls).toBe(2);
+  });
+
+  test("failed capture wait and throwing observer preserve admission rejection", async () => {
+    let called = false;
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: new FakeBackend("blocked"),
+        sandboxId: null,
+        kind: "modal",
+      }),
+      beforeMutation: async ({ onCaptureWait }) => {
+        onCaptureWait?.({ durationMs: 100, outcome: "failed" });
+        throw new Error("capture gate rejected");
+      },
+      onCaptureWait: (observation) => {
+        called = true;
+        expect(observation).toMatchObject({ captureWaitStage: "admission", outcome: "failed" });
+        throw new Error("observer unavailable");
+      },
+    });
+    await expect(proxy.exec({ cmd: "never-run" })).rejects.toThrow("capture gate rejected");
+    expect(called).toBe(true);
+  });
+
   test("omits first-operation phases that never ran after route resolution fails", async () => {
     const observations: Parameters<
       NonNullable<RoutingSandboxSessionDeps["onFirstOperation"]>

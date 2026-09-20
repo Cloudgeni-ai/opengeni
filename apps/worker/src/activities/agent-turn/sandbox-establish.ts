@@ -6,7 +6,10 @@ import {
   assertPersonalMachineForAttempt,
   type SandboxRecord,
 } from "@opengeni/db";
-import { sandboxOperationMetricObserver } from "@opengeni/observability";
+import {
+  sandboxOperationMetricObserver,
+  sandboxCaptureWaitMetricObserver,
+} from "@opengeni/observability";
 import {
   withRunCredentialsSession,
   runOwnedSandboxSetup,
@@ -444,6 +447,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
             bus,
             onOp: machineOpObserver.observer,
             onSandboxOperation: sandboxOperationObserver,
+            onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
             opJournal,
           },
           {
@@ -515,6 +519,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               opJournal,
               onOp: machineOpObserver.observer,
               onSandboxOperation: sandboxOperationObserver,
+              onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
               onHomeSandboxRebound,
               ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
             },
@@ -755,6 +760,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               bus,
               opJournal,
               onSandboxOperation: sandboxOperationObserver,
+              onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
               onHomeSandboxLost: publishSandboxLost,
               onHomeSandboxRebound,
               ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),
@@ -1123,6 +1129,7 @@ export async function bindLazySandboxProvisioner(
         opJournal,
         onOp: machineOpObserver.observer,
         onSandboxOperation: sandboxOperationObserver,
+        onSandboxCaptureWait: sandboxCaptureWaitMetricObserver(observability),
         onHomeSandboxLost: publishSandboxLost,
         onHomeSandboxRebound,
         ...(runtimeCancellationSignal ? { waitSignal: runtimeCancellationSignal } : {}),

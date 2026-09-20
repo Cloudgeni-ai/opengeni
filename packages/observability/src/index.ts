@@ -1140,6 +1140,45 @@ export function sandboxOperationMetricObserver(
   };
 }
 
+/** Capture waits remain separate from physical provider-call accounting. */
+export function sandboxCaptureWaitMetricObserver(observability: Observability) {
+  return (observation: {
+    backend: string;
+    op: string;
+    outcome: "ok" | "failed";
+    durationMs: number;
+    captureWaitStage: "admission" | "provider";
+  }): void => {
+    const stage = observation.captureWaitStage;
+    if (stage !== "admission" && stage !== "provider") return;
+    if (!Number.isFinite(observation.durationMs) || observation.durationMs < 0) return;
+    const backend = SANDBOX_OPERATION_BACKENDS.has(observation.backend)
+      ? observation.backend
+      : "unknown";
+    const op = SANDBOX_OPERATION_NAMES.has(observation.op) ? observation.op : "unknown";
+    const outcome = observation.outcome === "ok" ? "completed" : "failed";
+    try {
+      observability.observeHistogram({
+        name: "opengeni_sandbox_capture_wait_duration_seconds",
+        help: "Workspace capture gate wait duration across every routed operation, not only startup.",
+        labels: { backend, op, stage, outcome },
+        value: observation.durationMs / 1_000,
+      });
+      observability
+        .startSpan(
+          `sandbox.capture_wait.${stage}`,
+          { backend, outcome },
+          {
+            startTimeMs: Date.now() - observation.durationMs,
+          },
+        )
+        .end({ ...(outcome === "failed" ? { error: true } : {}) });
+    } catch {
+      // Diagnostics never alter capture admission or physical settlement.
+    }
+  };
+}
+
 export type InteractionOperationMetricObservation = {
   resource: string;
   operation: string;

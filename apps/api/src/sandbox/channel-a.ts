@@ -51,6 +51,7 @@ import {
   recordTenancyCompatibilityLaneUse,
   sandboxLeaseTelemetryKey,
   sandboxOperationMetricObserver,
+  sandboxCaptureWaitMetricObserver,
   type Observability,
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
@@ -531,6 +532,9 @@ async function withChannelAOperation<T>(
   const onSandboxOperation = services.observability
     ? sandboxOperationMetricObserver(services.observability)
     : undefined;
+  const onSandboxCaptureWait = services.observability
+    ? sandboxCaptureWaitMetricObserver(services.observability)
+    : undefined;
   const { accountId, workspaceId, session } = ctx;
 
   if (session.sandboxBackend === "none") {
@@ -753,6 +757,7 @@ async function withChannelAOperation<T>(
           settings,
           bus,
           ...(onSandboxOperation ? { onSandboxOperation } : {}),
+          ...(onSandboxCaptureWait ? { onSandboxCaptureWait } : {}),
           ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
         },
         {
@@ -1060,6 +1065,7 @@ async function withChannelAOperation<T>(
           settings,
           bus,
           ...(onSandboxOperation ? { onSandboxOperation } : {}),
+          ...(onSandboxCaptureWait ? { onSandboxCaptureWait } : {}),
           ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
         },
         {
