@@ -61,7 +61,7 @@ type Panel = "root" | "tools" | "repos" | "voice" | "variables" | "settings";
 export type ComposerPlusProps = {
   connectorActions?: Pick<
     SessionConnectorsMenuProps,
-    "onReconnect" | "loading" | "error" | "busyId" | "accountControls"
+    "onReconnect" | "onAddAccount" | "loading" | "error" | "busyId" | "accountControls"
   >;
   onOpenConnectors?: () => void;
   /** Centered composers need viewport-sized panels rather than trigger-side space. */

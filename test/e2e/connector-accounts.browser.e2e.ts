@@ -85,6 +85,8 @@ describe("composer connector account controls (local fixture)", () => {
         const menu = await page.getByRole("menu").boundingBox();
         expect(menu!.x).toBeGreaterThanOrEqual(0);
         expect(menu!.x + menu!.width).toBeLessThanOrEqual(viewport.width);
+        await page.getByRole("menuitem", { name: "Connect another account" }).click();
+        await page.getByText("Account setup opened (simulated).").waitFor();
       } finally {
         await page.close();
       }

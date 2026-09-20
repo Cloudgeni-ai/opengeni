@@ -5,6 +5,7 @@ import {
   Loader2Icon,
   Settings2Icon,
   ChevronLeftIcon,
+  PlusIcon,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import {
@@ -34,6 +35,8 @@ export type SessionConnectorsMenuProps = {
   onCustomizingChange?: (customizing: boolean) => void;
   leading?: ReactNode;
   onReconnect?: (serverId: string) => void;
+  /** Opens human-reviewed setup; never reauthorizes an existing account. */
+  onAddAccount?: (serverId: string) => void;
   loading?: boolean;
   error?: string | null;
   busyId?: string | null;
@@ -55,7 +58,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
     return (
       <>
         <ComposerMenuHeader
-          title={`${settingsServer.name} accounts`}
+          title={settingsServer.name}
           leading={
             <button
               type="button"
@@ -68,6 +71,7 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
           }
         />
         <div className="min-h-0 overflow-y-auto overscroll-contain p-2">
+          <p className="px-2 pb-2 text-xs text-fg-muted">Connected accounts</p>
           {accounts.loading ? (
             <p role="status" className="p-2 text-xs text-fg-muted">
               Loading accounts…
@@ -84,18 +88,30 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
               {accounts.error}
             </p>
           ) : null}
-          {accounts.onRefresh ? (
+          {accounts.error && accounts.onRefresh ? (
             <ConnectorAction
               presentation={props.presentation}
               keepOpen
-              label="Refresh accounts"
+              label="Retry accounts"
               onAction={accounts.onRefresh}
               disabled={accounts.loading}
             >
-              <RefreshCwIcon className="size-4" /> Refresh accounts
+              <RefreshCwIcon className="size-4" /> Retry accounts
             </ConnectorAction>
           ) : null}
         </div>
+        {props.onAddAccount ? (
+          <div className="shrink-0 border-t border-border p-2">
+            <ConnectorAction
+              presentation={props.presentation}
+              className="min-h-11 gap-3 rounded-md px-2 py-2 text-sm"
+              disabled={accounts.disabled || props.busyId === settingsServer.id}
+              onAction={() => props.onAddAccount?.(settingsServer.id)}
+            >
+              <PlusIcon className="size-4" /> Connect another account
+            </ConnectorAction>
+          </div>
+        ) : null}
       </>
     );
   }

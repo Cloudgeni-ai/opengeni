@@ -67,6 +67,8 @@ const accounts = [
 ] as unknown as ConnectionMetadata[];
 
 test("connector settings attach multiple readable personal/workspace accounts without closing", async () => {
+  const addAccount = mock();
+  const reconnect = mock();
   function Preview() {
     const [choices, setChoices] = useState<ConnectionAccountChoices>({});
     return (
@@ -76,6 +78,8 @@ test("connector settings attach multiple readable personal/workspace accounts wi
         firstPartyTools={[]}
         selection={{ mcpServerIds: new Set(["mail"]), firstPartyToolIds: new Set() }}
         onChange={() => {}}
+        onAddAccount={addAccount}
+        onReconnect={reconnect}
         accountControls={{
           groups: [{ serverId: "mail", name: "Mail", accounts }],
           choices,
@@ -109,6 +113,17 @@ test("connector settings attach multiple readable personal/workspace accounts wi
     container.querySelector<HTMLButtonElement>('[aria-label="Back to connectors"]')!.click(),
   );
   expect(container.textContent).not.toContain("alex@example.com");
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('[aria-label="Mail account settings"]')!.click(),
+  );
+  expect(container.textContent).toContain("Connected accounts");
+  const add = [...container.querySelectorAll<HTMLButtonElement>("button")].filter(
+    (button) => button.textContent?.trim() === "Connect another account",
+  );
+  expect(add).toHaveLength(1);
+  await act(async () => add[0]!.click());
+  expect(addAccount).toHaveBeenCalledWith("mail");
+  expect(reconnect).not.toHaveBeenCalled();
 });
 
 test("account labels use readable metadata and never fall back to a raw connection ID", () => {
