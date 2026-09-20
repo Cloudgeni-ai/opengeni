@@ -5,8 +5,25 @@ import type { SharedTestDatabase } from "@opengeni/testing";
 import { requireCanary } from "./sandbox-rotation-canary-evidence";
 
 export const NATIVE_CANARY_DATABASE_OPT_IN = "LOCAL_DISPOSABLE_55434";
+const CANARY_DATABASE_PREFIX = "og_rotation_canary_";
 const NATIVE_ROOT = "postgres://postgres@127.0.0.1:55434/postgres";
 export type CanaryDatabase = SharedTestDatabase & { appRole: string };
+
+export function requireCanaryDatabaseAttribution(adminUrl: string): void {
+  const url = new URL(adminUrl);
+  const name = url.pathname.slice(1);
+  requireCanary(
+    url.protocol === "postgres:" &&
+      url.hostname === "127.0.0.1" &&
+      url.port === "55434" &&
+      url.username === "postgres" &&
+      url.search === "" &&
+      url.hash === "" &&
+      name.startsWith(CANARY_DATABASE_PREFIX) &&
+      /^[a-f0-9]{32}$/.test(name.slice(CANARY_DATABASE_PREFIX.length)),
+    "unexpected database attribution",
+  );
+}
 
 /** Never accepts a database URL. This endpoint is the explicit disposable local
  * PG17 fixture authorized for Sandbox rotation, not a generic provider/database target. */
@@ -24,7 +41,7 @@ export async function acquireCanaryDatabase(
     "native database opt-in must name LOCAL_DISPOSABLE_55434",
   );
   const suffix = crypto.randomUUID().replaceAll("-", "");
-  const databaseName = `og_rotation_canary_${suffix}`;
+  const databaseName = `${CANARY_DATABASE_PREFIX}${suffix}`;
   const appRole = `sandbox_rotation_app_${suffix}`;
   const password = crypto.randomUUID().replaceAll("-", "");
   const adminUrl = `postgres://postgres@127.0.0.1:55434/${databaseName}`;

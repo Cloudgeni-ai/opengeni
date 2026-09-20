@@ -75,7 +75,10 @@ import {
   canaryConfiguration,
   requireCanary,
 } from "./sandbox-rotation-canary-evidence";
-import { acquireCanaryDatabase } from "./sandbox-rotation-canary-database";
+import {
+  acquireCanaryDatabase,
+  requireCanaryDatabaseAttribution,
+} from "./sandbox-rotation-canary-database";
 import { runCanaryCleanupStages, withCanaryFixture } from "./sandbox-rotation-canary-cleanup";
 import { verifyCanaryImageProvenance } from "./sandbox-rotation-canary-provenance";
 import {
@@ -108,11 +111,7 @@ test.skipIf(!live)(
     const imageProvenance = await verifyCanaryImageProvenance(config.sourceSha, config.image);
     const runId = crypto.randomUUID();
     const markerHashes = await withCanaryFixture(acquireCanaryDatabase, async (shared, defer) => {
-      requireCanary(
-        new URL(shared.adminUrl).hostname === "127.0.0.1" &&
-          new URL(shared.adminUrl).pathname.startsWith("/og_sandbox_rotation_rotation_canary_"),
-        "unexpected database attribution",
-      );
+      requireCanaryDatabaseAttribution(shared.adminUrl);
       const client = createDb(shared.appUrl);
       defer("application client", () => client.close());
       const { db } = client;

@@ -5,8 +5,27 @@ import { supervisedCommandProtocolReady } from "@opengeni/db/retained-provider-c
 import {
   acquireCanaryDatabase,
   NATIVE_CANARY_DATABASE_OPT_IN,
+  requireCanaryDatabaseAttribution,
 } from "./sandbox-rotation-canary-database";
 import { withCanaryFixture } from "./sandbox-rotation-canary-cleanup";
+
+test("live attribution accepts only the exact disposable local database shape", () => {
+  const valid = `postgres://postgres@127.0.0.1:55434/og_rotation_canary_${"a".repeat(32)}`;
+  expect(() => requireCanaryDatabaseAttribution(valid)).not.toThrow();
+  for (const invalid of [
+    valid.replace("127.0.0.1", "example.invalid"),
+    valid.replace("55434", "5432"),
+    valid.replace("postgres@", "application@"),
+    valid.replace("og_rotation_canary_", "other_fixture_"),
+    valid.slice(0, -1),
+    `${valid}extra`,
+    `${valid}?options=unsafe`,
+    `${valid}#fragment`,
+  ])
+    expect(() => requireCanaryDatabaseAttribution(invalid)).toThrow(
+      "unexpected database attribution",
+    );
+});
 
 test("canary DB rejects a caller-supplied target before connecting", async () => {
   await expect(
@@ -41,6 +60,7 @@ test.skipIf(
           OPENGENI_SANDBOX_ROTATION_NATIVE_POSTGRES: NATIVE_CANARY_DATABASE_OPT_IN,
         }),
       async (fixture, defer) => {
+        expect(() => requireCanaryDatabaseAttribution(fixture.adminUrl)).not.toThrow();
         const fixtureDatabaseName = new URL(fixture.adminUrl).pathname.slice(1);
         const app = postgres(fixture.appUrl, { max: 1 });
         defer("fixture test app client", () => app.end());
