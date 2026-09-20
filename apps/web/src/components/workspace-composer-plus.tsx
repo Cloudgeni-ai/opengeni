@@ -163,7 +163,6 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
       connectorActions={{
         ...props.connectorActions,
         onReconnect: (id) => void reconnect(id),
-        onAddAccount: manage,
         loading,
         error,
         busyId,
