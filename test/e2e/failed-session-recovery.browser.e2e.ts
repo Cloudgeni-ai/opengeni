@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
-import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
+import { OPENGENI_API_CONTRACT_REVISION, type SandboxRecoveryProjection } from "@opengeni/sdk";
 import { fakeCapabilities } from "../../packages/react/test/sandbox-fixtures";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -259,8 +259,16 @@ test("permission-disabled model picker never receives recovery guidance", async 
     const picker = page.getByRole("button", { name: "Model and effort", exact: true });
     await picker.waitFor();
     expect(await picker.isDisabled()).toBe(true);
-    expect(await banner.textContent()).toBe("This model isn’t available.");
-    expect(await banner.getByRole("button").count()).toBe(0);
+    await banner.getByRole("alert").waitFor();
+    expect(await banner.textContent()).toContain("This model isn’t available.");
+    expect(await banner.textContent()).not.toContain("Choose another below");
+    expect(await banner.textContent()).toContain(
+      "You do not have permission to recover this sandbox.",
+    );
+    expect(await banner.getByRole("alert").textContent()).toBe(
+      "Could not check checkpoint recovery. No new recovery request was sent.",
+    );
+    expect(await banner.getByRole("button").allTextContents()).toEqual(["Check recovery status"]);
     if (evidenceDir)
       await page.screenshot({
         path: `${evidenceDir}/permission-disabled-desktop.png`,
@@ -436,6 +444,21 @@ async function installApi(
     if (path.endsWith("/sessions"))
       return json({ sessions: [session], pinned: [], pinnedTruncated: false, nextCursor: null });
     if (path.endsWith(`/sessions/${sessionId}`)) return json(session);
+    if (
+      request.method() === "GET" &&
+      path === `/v1/workspaces/${workspaceId}/sessions/${sessionId}/sandbox-recovery`
+    ) {
+      // Recovery reads require session control. This fixture has no sandbox,
+      // so an authorized read reports unsupported, never checkpoint eligibility.
+      if (!canControl) return json({ error: "Permission denied" }, 403);
+      return json({
+        version: 1,
+        status: "unsupported",
+        reason: "managed_modal_home_required",
+        checkpoint: null,
+        operationId: null,
+      } satisfies SandboxRecoveryProjection);
+    }
     if (path.endsWith("/events/stream"))
       return route.fulfill({ contentType: "text/event-stream", body: ": fixture\n\n" });
     if (path.endsWith("/events")) return json([event]);
