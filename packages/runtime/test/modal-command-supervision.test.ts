@@ -12,7 +12,11 @@ import {
   ProviderCommandStartRejectedError,
 } from "../src/sandbox/provider-command-session";
 import { installModalCommandSession } from "../src/sandbox/providers/modal-command-session";
-import { RoutingSandboxSession } from "../src/sandbox/routing/routing-session";
+import {
+  RoutingSandboxSession,
+  RoutingBackendRecoveryRequiredError,
+} from "../src/sandbox/routing/routing-session";
+import { isProviderSandboxGoneDuringRoutedOperation } from "../src/sandbox/provider-errors";
 
 function fixture() {
   const invocationId = randomUUID();
@@ -307,6 +311,7 @@ test("an incompatible warm instance fails before admission without legacy fallba
     throw new Error("native helper missing");
   };
   let admitted = false;
+  let classified = 0;
   const backend = { session: f.session, sandboxId: null, kind: "modal", activeEpoch: 0 } as const;
   const routed = new RoutingSandboxSession({
     defaultResolved: backend,
@@ -319,11 +324,87 @@ test("an incompatible warm instance fails before admission without legacy fallba
       admitted = true;
     },
     afterMutation: async () => {},
+    onDefaultBackendError: async ({ error, kind }) => {
+      classified++;
+      expect(isProviderSandboxGoneDuringRoutedOperation(kind, error)).toBe(false);
+      return null;
+    },
   });
   await expect(routed.execCommand({ cmd: "never" })).rejects.toThrow("helper missing");
   expect(admitted).toBe(false);
   expect(f.actions).toEqual([]);
+  expect(classified).toBe(1);
 });
+
+for (const op of ["exec", "execCommand"] as const) {
+  test(`${op} preflight provider loss uses exact recovery authority before admission and invalidates the stale route`, async () => {
+    const f = fixture();
+    const missing = Object.assign(new Error("exact sandbox disappeared"), {
+      code: "SANDBOX_NOT_FOUND",
+    });
+    f.session.verifyCommandSupervisionCapability = async () => {
+      throw missing;
+    };
+    let admissions = 0;
+    let losses = 0;
+    let resolutions = 0;
+    const backend = {
+      session: f.session,
+      sandboxId: null,
+      kind: "modal",
+      activeEpoch: 0,
+      leaseEpoch: 7,
+      providerInstanceId: f.command.sandboxId,
+    } as const;
+    const routed = new RoutingSandboxSession({
+      defaultResolved: backend,
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => {
+        resolutions++;
+        if (resolutions === 1) return backend;
+        throw new Error("fresh route resolution");
+      },
+      providerSupervisionReady: async () => true,
+      providerCommandHandle: () => 41,
+      providerCommandPersistence: () => f.persistence,
+      beforeMutation: async () => {
+        admissions++;
+      },
+      afterMutation: async () => {
+        throw new Error("No admission may be settled");
+      },
+      onDefaultBackendError: async (input) => {
+        expect(input.error).toBe(missing);
+        expect(input.op).toBe(op);
+        expect(input.backend).toMatchObject({
+          leaseEpoch: 7,
+          providerInstanceId: f.command.sandboxId,
+        });
+        expect(isProviderSandboxGoneDuringRoutedOperation(input.kind, input.error)).toBe(true);
+        losses++;
+        return { leaseEpoch: 8, recovery: "degraded" };
+      },
+    });
+    await expect(routed[op]({ cmd: "never" })).rejects.toBeInstanceOf(
+      RoutingBackendRecoveryRequiredError,
+    );
+    expect({ admissions, losses, resolutions }).toEqual({
+      admissions: 0,
+      losses: 1,
+      resolutions: 1,
+    });
+    expect(f.actions).toEqual([]);
+    // The failed call was not replayed. Only the next separate call resolves
+    // again, rather than reusing the cached missing instance's preflight.
+    await expect(routed[op]({ cmd: "later" })).rejects.toThrow("fresh route resolution");
+    expect({ admissions, losses, resolutions }).toEqual({
+      admissions: 0,
+      losses: 1,
+      resolutions: 2,
+    });
+    expect(f.actions).toEqual([]);
+  });
+}
 
 test("authenticated never-started rejection settles its reservation without quiescence or running receipt", async () => {
   const f = fixture();

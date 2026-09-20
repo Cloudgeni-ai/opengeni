@@ -1497,6 +1497,28 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     }
   }
 
+  /** Classify loss on the copied backend, including read-only preflight. This
+   * path never admits work or retries the failed operation on a new route. */
+  private async throwProviderError(
+    op: string,
+    backend: ResolvedActiveBackend,
+    error: unknown,
+  ): Promise<never> {
+    if (!isFenceError(error) && backend.sandboxId === null && this.deps.onDefaultBackendError) {
+      const loss = await this.deps.onDefaultBackendError({
+        op,
+        error,
+        kind: backend.kind,
+        backend,
+      });
+      if (loss) {
+        this.invalidate(backend);
+        throw new RoutingBackendRecoveryRequiredError(op, loss.leaseEpoch, loss.recovery);
+      }
+    }
+    throw error;
+  }
+
   private async dispatchWithRetries<T>(
     op: string,
     mutatesWorkspace: boolean,
@@ -1538,7 +1560,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           throw new Error(
             "Supervised command requires exact-instance verification and durable reservation wiring",
           );
-        verifiedSupervision = await backend.session.verifyCommandSupervisionCapability();
+        try {
+          verifiedSupervision = await backend.session.verifyCommandSupervisionCapability();
+        } catch (error) {
+          // A missing helper is merely an incompatible instance. Only the
+          // existing sandbox-scoped classifier may retire a missing provider.
+          return await this.throwProviderError(op, backend, error);
+        }
         if (
           backend.providerInstanceId &&
           verifiedSupervision.sandboxId !== backend.providerInstanceId
@@ -1722,23 +1750,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           );
         }
         if (!isFenceError(error)) {
-          if (backend.sandboxId === null && this.deps.onDefaultBackendError) {
-            const loss = await this.deps.onDefaultBackendError({
-              op,
-              error,
-              kind: backend.kind,
-              backend,
-            });
-            if (loss) {
-              // Never replay an operation after provider disappearance. Even a
-              // read may race a route change, and a mutation's provider outcome
-              // is ambiguous. The next independently-admitted call observes the
-              // advanced epoch and elected recovery state.
-              this.invalidate(backend);
-              throw new RoutingBackendRecoveryRequiredError(op, loss.leaseEpoch, loss.recovery);
-            }
-          }
-          throw error;
+          return await this.throwProviderError(op, backend, error);
         }
         this.invalidate(backend);
         if (mutatesWorkspace) {
