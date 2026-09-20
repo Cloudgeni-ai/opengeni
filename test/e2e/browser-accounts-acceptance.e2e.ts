@@ -4452,6 +4452,13 @@ describe("provider-neutral browser account acceptance", () => {
         await captureResponsiveEvidence(context, engine);
       }
 
+      // Responsive/focus work can let a background POST search start after the
+      // earlier bootstrap checkpoint. POSTs retain actor mutation leases even
+      // for read-only search, so that unrelated request can correctly reject
+      // BOTH selects. Establish the intended two-mutation race precondition
+      // again; keep both selects concurrent and the one-winner assertion exact.
+      await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems]);
+
       const stopRaceAuthorityObservation = await Promise.all(
         [page, secondTab].map((observedPage) =>
           observeChromiumNeutralSessionSetRequestAuthority(observedPage, publicOrigin),
