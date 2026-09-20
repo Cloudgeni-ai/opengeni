@@ -213,6 +213,46 @@ test("runtime cannot mint capabilities or forge them with GUCs; hostile defaults
   expect(ids(await inventory(app))).toEqual([...expected].sort());
 });
 
+test("column-only capability grants are detected and reprovisioned closed", async () => {
+  for (const privilege of ["SELECT", "INSERT", "UPDATE"] as const) {
+    await fixture.admin.unsafe(
+      `GRANT ${privilege} (backend_pid,transaction_id,data_schema) ON opengeni_private.modal_inventory_read_capabilities TO "${appRole}"`,
+    );
+    const [permissions] = await app`select
+      has_table_privilege(current_user,'opengeni_private.modal_inventory_read_capabilities',${privilege}) as table_allowed,
+      has_any_column_privilege(current_user,'opengeni_private.modal_inventory_read_capabilities',${privilege}) as column_allowed`;
+    expect(permissions).toEqual({ table_allowed: false, column_allowed: true });
+    expect(await inventoryPostureViolations()).toHaveLength(1);
+    if (privilege === "INSERT") {
+      const rollback = new Error("rollback column-only capability probe");
+      await expect(
+        app.begin(async (tx) => {
+          await tx`insert into opengeni_private.modal_inventory_read_capabilities values(pg_backend_pid(),pg_current_xact_id(),'public')`;
+          expect(
+            (await tx`select modal_inventory_read_capability_active() as active`)[0]!.active,
+          ).toBe(true);
+          throw rollback;
+        }),
+      ).rejects.toBe(rollback);
+    }
+    await provisionRoles(fixture.adminUrl, roleOptions);
+    expect(await inventoryPostureViolations()).toEqual([]);
+    expect(
+      (
+        await app`select has_any_column_privilege(current_user,'opengeni_private.modal_inventory_read_capabilities',${privilege}) as allowed`
+      )[0]!.allowed,
+    ).toBe(false);
+    await expect(
+      Promise.resolve(
+        app`insert into opengeni_private.modal_inventory_read_capabilities values(pg_backend_pid(),pg_current_xact_id(),'public')`,
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+  }
+  expect(
+    await fixture.admin`select * from opengeni_private.modal_inventory_read_capabilities`,
+  ).toHaveLength(0);
+});
+
 test("materialization failure cleans up and nested owner calls preserve only pre-existing authority", async () => {
   await app.begin(async (tx) => {
     await expect(

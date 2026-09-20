@@ -1971,9 +1971,17 @@ export async function inspectRuntimeDatabasePosture(
             c.relforcerowsecurity as rls_forced,
             row_security_active(c.oid) as rls_active,
             (select count(*)::int from pg_policy policy where policy.polrelid = c.oid) as policy_count,
-            has_table_privilege(current_user, c.oid, 'SELECT') as can_select,
-            has_table_privilege(current_user, c.oid, 'INSERT') as can_insert,
-            has_table_privilege(current_user, c.oid, 'UPDATE') as can_update,
+            -- Column-only grants on the inventory stamp are also unsafe; in
+            -- particular INSERT can mint authority without a table grant.
+            (has_table_privilege(current_user, c.oid, 'SELECT') or
+              (c.relname = 'modal_inventory_read_capabilities' and
+                has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
+            (has_table_privilege(current_user, c.oid, 'INSERT') or
+              (c.relname = 'modal_inventory_read_capabilities' and
+                has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
+            (has_table_privilege(current_user, c.oid, 'UPDATE') or
+              (c.relname = 'modal_inventory_read_capabilities' and
+                has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
