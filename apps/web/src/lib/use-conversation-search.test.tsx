@@ -171,6 +171,7 @@ test("committed edits abort the old request, preserve literal whitespace, and cl
 
 test("transient continuation failures preserve matches and retry the last successful boundary", async () => {
   const cursors: Array<string | undefined> = [];
+  const resumed = deferred<ConversationSearchPage>();
   let fail = true;
   const view = await harness(async (_workspace, request) => {
     cursors.push(request.cursor);
@@ -188,12 +189,7 @@ test("transient continuation failures preserve matches and retry the last succes
       });
     if (fail) throw new OpenGeniApiError(503, "sensitive diagnostics");
     expect(request.limit).toBe(49);
-    return page({
-      matches: [hit("two")],
-      scannedMessages: 80,
-      matchedMessageCount: 2,
-      matchedOccurrenceCount: 2,
-    });
+    return resumed.promise;
   });
   try {
     await flush();
@@ -202,10 +198,24 @@ test("transient continuation failures preserve matches and retry the last succes
     expect(view.state().error).not.toContain("sensitive");
     expect(view.state().accessDenied).toBe(false);
     fail = false;
+    view.commits.length = 0;
     await act(async () => view.state().retry());
+    expect(view.commits[0]?.page?.matches.map((match) => match.eventId)).toEqual(["one"]);
     expect(view.state().page?.matches).toHaveLength(1);
     await flush();
     expect(cursors).toEqual([undefined, "empty", "partial", "partial"]);
+    expect(view.state()).toMatchObject({ loading: true, error: null });
+    expect(view.state().page?.matches).toHaveLength(1);
+    await act(async () =>
+      resumed.resolve(
+        page({
+          matches: [hit("two")],
+          scannedMessages: 80,
+          matchedMessageCount: 2,
+          matchedOccurrenceCount: 2,
+        }),
+      ),
+    );
     expect(view.state().page?.matches.map((match) => match.eventId)).toEqual(["one", "two"]);
     expect(view.state().error).toBeNull();
     expect(view.state().scanned).toBe(80);
@@ -245,27 +255,42 @@ test.each([400, 401, 403, 404, 410])(
 
 test("scope changes hide old hits immediately and reject late responses even if transport ignores abort", async () => {
   const old = deferred<ConversationSearchPage>();
-  const next = deferred<ConversationSearchPage>();
+  const fresh = deferred<ConversationSearchPage>();
   const archived = deferred<ConversationSearchPage>();
-  const responses = [old, next, archived];
+  const signals: AbortSignal[] = [];
   let reads = 0;
-  const view = await harness(async () => responses[reads++]!.promise);
+  const view = await harness(async (_workspace, request, options) => {
+    reads++;
+    signals.push(options!.signal!);
+    if (request.query === "needle") return old.promise;
+    return request.archiveStatus === "archived" ? archived.promise : fresh.promise;
+  });
   try {
     await flush();
+    view.commits.length = 0;
     await view.render({ authority: "b", query: "different" });
     expect(view.query()).toBe("different");
+    // Async act may include the request timer. Keep its response pending and
+    // inspect the first layout commit, not the scheduler-dependent final render.
+    expect(view.commits[0]).toMatchObject({ page: null, loading: true, scanned: 0 });
     expect(view.state().page).toBeNull();
     await flush();
-    await act(async () => old.resolve(page({ matches: [hit("old")] })));
+    expect(reads).toBe(2);
+    expect(signals[0]!.aborted).toBe(true);
     expect(view.state().page).toBeNull();
-    await act(async () => next.resolve(page({ matches: [hit("new")] })));
+    await act(async () => fresh.resolve(page({ matches: [hit("new")] })));
     expect(view.state().page?.matches.map((match) => match.eventId)).toEqual(["new"]);
-    const scopeChangeCommit = view.commits.length;
+    await act(async () => old.resolve(page({ matches: [hit("old")] })));
+    expect(view.state().page?.matches.map((match) => match.eventId)).toEqual(["new"]);
+    view.commits.length = 0;
     await view.render({ authority: "b", query: "different", archiveStatus: "archived" });
+    expect(view.commits[0]).toMatchObject({ page: null, loading: true, scanned: 0 });
     expect(view.state().page).toBeNull();
     await flush();
     expect(reads).toBe(3);
-    expect(view.commits.slice(scopeChangeCommit).every((state) => state.page === null)).toBe(true);
+    expect(view.commits.every((state) => state.page === null)).toBe(true);
+    expect(signals[1]!.aborted).toBe(true);
+    expect(view.state().page).toBeNull();
     await act(async () => archived.resolve(page({ matches: [hit("archived")] })));
     expect(view.state().page?.matches.map((match) => match.eventId)).toEqual(["archived"]);
   } finally {
