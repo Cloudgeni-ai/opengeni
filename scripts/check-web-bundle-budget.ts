@@ -471,6 +471,10 @@ const effectiveBudgets = {
     // 2,439,754 raw / 684,860 gzip, 39 files (Bun 1.4, macOS/arm64).
     // Preserve the established platform/configuration variance allowance.
     wholeKibEnvelope(2_439_754, 1.5 * kib),
+    // Unified connection discovery plus native OAuth recovery metadata measures
+    // 2,442,346 raw / 689,953 gzip across 34 files in Linux/x64 browser CI.
+    // Keep the existing headroom policy; compressed and unrelated caps stay fixed.
+    wholeKibEnvelope(2_442_346, 1.5 * kib),
     wholeKibEnvelope(2_354_899),
     wholeKibEnvelope(2_326_478),
     wholeKibEnvelope(2_333_912),
