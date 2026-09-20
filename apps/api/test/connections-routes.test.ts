@@ -1855,7 +1855,12 @@ describe("connections routes", () => {
   );
 
   test("external generic MCP OAuth preserves exact return and rechecks key authority before exchange and persistence", async () => {
-    if (!available) return;
+    if (!available) {
+      if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+        throw new Error("External MCP OAuth authority verification requires PostgreSQL");
+      }
+      return;
+    }
     const workspace = await freshWorkspace();
     const token = randomUUID();
     const key = await createOrganizationApiKey(client.db, {
@@ -2077,19 +2082,22 @@ describe("connections routes", () => {
       expect(admitted.id).toBeString();
       expect(admitted.initialTurnId).toBeString();
       const acceptedRouteId = mcpAccountRouteId("provisioned", provisionedBody.connection.id);
+      const acceptedDelegation = {
+        serverId: acceptedRouteId,
+        canonicalServerId: "provisioned",
+        connectionId: provisionedBody.connection.id,
+        originWorkspaceId: provisionedBody.connection.workspaceId,
+        ownerSubjectId: identity.subjectId,
+        providerDomain: "provisioned-mcp.example",
+        kind: "oauth2",
+        connectionType: "mcp",
+      };
       const capturedOAuth = await shared!.admin`
         select personal_connection_delegations, mcp_account_bindings from session_turns
         where workspace_id = ${workspace.workspaceId} and session_id = ${admitted.id}
           and id = ${admitted.initialTurnId}
       `;
-      expect(capturedOAuth[0]?.personal_connection_delegations).toMatchObject([
-        {
-          serverId: acceptedRouteId,
-          canonicalServerId: "provisioned",
-          connectionId: provisionedBody.connection.id,
-          ownerSubjectId: identity.subjectId,
-        },
-      ]);
+      expect(capturedOAuth[0]?.personal_connection_delegations).toEqual([acceptedDelegation]);
       expect(capturedOAuth[0]?.mcp_account_bindings).toMatchObject([
         {
           serverId: acceptedRouteId,
@@ -2107,14 +2115,7 @@ describe("connections routes", () => {
           admitted.id,
           admitted.initialTurnId,
         ),
-      ).toMatchObject([
-        {
-          serverId: acceptedRouteId,
-          canonicalServerId: "provisioned",
-          connectionId: provisionedBody.connection.id,
-          ownerSubjectId: identity.subjectId,
-        },
-      ]);
+      ).toEqual([acceptedDelegation]);
       const retries = await Promise.all([provision(), provision()]);
       const continued = await sessionApi.request(
         `/v1/workspaces/${workspace.workspaceId}/sessions/${admitted.id}/events`,
@@ -2135,14 +2136,7 @@ describe("connections routes", () => {
       `;
       expect(continuedCaptures).toHaveLength(2);
       for (const captured of continuedCaptures) {
-        expect(captured.personal_connection_delegations).toMatchObject([
-          {
-            serverId: acceptedRouteId,
-            canonicalServerId: "provisioned",
-            connectionId: provisionedBody.connection.id,
-            ownerSubjectId: identity.subjectId,
-          },
-        ]);
+        expect(captured.personal_connection_delegations).toEqual([acceptedDelegation]);
         expect(captured.mcp_account_bindings).toEqual(capturedOAuth[0]?.mcp_account_bindings);
       }
       for (const runMode of ["existing_session", "new_session_per_run"] as const) {
@@ -2219,6 +2213,14 @@ describe("connections routes", () => {
       );
       expect(otherProvision.status).toBe(201);
       const otherConnection = (await otherProvision.json()).connection;
+      const otherDelegation = {
+        ...acceptedDelegation,
+        serverId: mcpAccountRouteId("provisioned", otherConnection.id),
+        connectionId: otherConnection.id,
+        originWorkspaceId: otherConnection.workspaceId,
+        ownerSubjectId: otherUser.subjectId,
+      };
+      expect(otherDelegation.serverId).not.toBe(acceptedRouteId);
       const otherGrant = await api.request(
         `/v1/workspaces/${workspace.workspaceId}/connection-authorities/${otherConnection.authorityId}/grants`,
         {
@@ -2252,11 +2254,7 @@ describe("connections routes", () => {
       `;
       expect(sharedCaptures).toHaveLength(3);
       expect(sharedCaptures.map((row) => row.personal_connection_delegations)).toContainEqual([
-        expect.objectContaining({
-          serverId: "provisioned",
-          connectionId: otherConnection.id,
-          ownerSubjectId: otherUser.subjectId,
-        }),
+        otherDelegation,
       ]);
       const draftPath = `/v1/workspaces/${workspace.workspaceId}/sessions/${admitted.id}/composer-draft`;
       const currentDraftResponse = await sessionApi.request(draftPath, { headers: otherHeaders });
@@ -2299,10 +2297,12 @@ describe("connections routes", () => {
       `;
       expect(composerCaptures).toHaveLength(4);
       expect(
-        composerCaptures.filter(
-          (row) => row.personal_connection_delegations[0]?.connectionId === otherConnection.id,
-        ),
-      ).toHaveLength(2);
+        composerCaptures
+          .filter(
+            (row) => row.personal_connection_delegations[0]?.connectionId === otherConnection.id,
+          )
+          .map((row) => row.personal_connection_delegations),
+      ).toEqual([[otherDelegation], [otherDelegation]]);
       expect((await provision()).status).toBe(201);
       const grantsAfterReplay = await shared!.admin`
         select id, context, status from organization_user_resource_grants
