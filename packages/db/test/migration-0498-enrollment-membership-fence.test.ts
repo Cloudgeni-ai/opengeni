@@ -1,9 +1,14 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireOwnerMigratedTestDatabase,
+  type OwnerMigratedTestDatabase,
+} from "@opengeni/testing";
 import postgres from "postgres";
 import { readFile } from "node:fs/promises";
 import { sql } from "drizzle-orm";
 import type { Database } from "../src/database";
+import { migrate } from "../src/migrate";
+import { provisionRoles } from "../src/provision-roles";
 import {
   approveDeviceEnrollmentRequest,
   createDeviceEnrollmentRequest,
@@ -11,20 +16,54 @@ import {
   finalizeEnrollmentByToken,
 } from "../src/index";
 
-let shared: SharedTestDatabase;
+let shared: OwnerMigratedTestDatabase;
 let app: postgres.Sql;
 let client: ReturnType<typeof createDb>;
+const appRole = `enrollment_app_${crypto.randomUUID().replaceAll("-", "")}`;
+const password = crypto.randomUUID();
 beforeAll(async () => {
-  shared = (await acquireSharedTestDatabase("enrollment-membership-fence"))!;
-  if (!shared) throw new Error("Real PostgreSQL is required");
-  app = postgres(shared.appUrl, { max: 4 });
-  client = createDb(shared.appUrl);
+  const acquired = await acquireOwnerMigratedTestDatabase("enrollment-membership-fence");
+  if (!acquired) throw new Error("Real non-bypass owner PostgreSQL is required");
+  shared = acquired;
+  // Shared template clones retain the superuser migration owner. Exercise the
+  // SECURITY DEFINER functions with the production-style non-bypass owner.
+  await migrate(shared.ownerUrl, "public", { applicationDatabaseRoles: [appRole] });
+  await provisionRoles(shared.adminUrl, {
+    appRole,
+    appPassword: password,
+    rlsStrategy: "force",
+    artifactOutboxDispatcherPassword: "",
+    artifactMaterializerPassword: "",
+    hostExportPassword: "",
+    temporalPassword: "",
+    temporalDatabases: [],
+  });
+  const appUrl = new URL(shared.adminUrl);
+  appUrl.username = appRole;
+  appUrl.password = password;
+  app = postgres(appUrl.toString(), { max: 4 });
+  client = createDb(appUrl.toString());
 }, 180_000);
 afterAll(async () => {
-  await client?.close();
-  await app?.end();
-  await shared?.release();
-});
+  try {
+    try {
+      await client?.close();
+    } finally {
+      await app?.end();
+    }
+  } finally {
+    if (shared) {
+      try {
+        if ((await shared.admin`select 1 from pg_roles where rolname=${appRole}`).length) {
+          await shared.admin`DROP OWNED BY ${shared.admin(appRole)}`;
+          await shared.admin`DROP ROLE ${shared.admin(appRole)}`;
+        }
+      } finally {
+        await shared.release();
+      }
+    }
+  }
+}, 60_000);
 
 async function fixture() {
   const subject = `member:${crypto.randomUUID()}`;
