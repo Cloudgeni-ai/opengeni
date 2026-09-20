@@ -50769,6 +50769,12 @@ async function lockWorkspaceMutationAuthorityTx(
   if (process.state !== "active") {
     throw new SandboxRetainedProcessTerminalError(process.state, process.exitCode);
   }
+  if (process.cancellationRequestedAt || process.supervisionReceipt) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Workspace mutation rejected because retained command input is closed",
+    );
+  }
   if (session.sandboxGroupId !== process.sandboxGroupId) {
     throw new SandboxWorkspaceMutationFencedError(
       "process_fenced",
@@ -52584,6 +52590,19 @@ export async function settleRetainedProcess(
         );
       }
       const durableProof = retainedProcessReconciliationProof(mapRetainedProcess(process));
+      if (
+        process.providerCommand?.kind === "modal-router-v1" &&
+        process.providerCommand.supervision &&
+        (input.outcome !== "exited" ||
+          !process.supervisionReceipt ||
+          !process.supervisionOutputCaptured ||
+          exitCode !== process.supervisionReceipt.leaderExitCode)
+      ) {
+        throw new SandboxWorkspaceMutationFencedError(
+          "process_fenced",
+          "Supervised command requires immutable quiescence, provider termination and captured output",
+        );
+      }
       if (
         durableProof &&
         (durableProof.outcome !== input.outcome || durableProof.exitCode !== exitCode)

@@ -1,8 +1,9 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { isDeepStrictEqual } from "node:util";
 import {
   SandboxProviderCommand,
   ModalRouterProviderCommand,
+  CommandSupervisionReceipt,
   type SessionEvent,
 } from "@opengeni/contracts";
 import { withRlsContext, withSessionActivityRlsContext, type Database } from "./database";
@@ -10,7 +11,7 @@ import { lockSessionEventWriteRows } from "./session-control";
 import { appendSessionCommandOutput } from "./session-command-output";
 import * as schema from "./schema";
 
-type ProcessScope = {
+export type ProcessScope = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
@@ -24,6 +25,12 @@ export function retainedProviderCommandPersistence(
   publish?: (events: SessionEvent[]) => Promise<void>,
 ) {
   return {
+    recordSupervisionReceipt: (receipt: SupervisionReceipt) =>
+      recordRetainedSupervisionReceipt(db, scope, receipt),
+    loadSupervisionReceipt: () => loadRetainedSupervisionReceipt(db, scope),
+    requestCancellation: (reason: "provider_deadline" | "explicit_stop") =>
+      requestRetainedProcessCancellation(db, scope, reason),
+    cancellationRequested: () => retainedProcessCancellationRequested(db, scope),
     load: () => getRetainedProviderCommand(db, scope),
     acknowledge: (command: SandboxProviderCommand) =>
       acknowledgeRetainedProviderOutput(db, scope, command),
@@ -52,7 +59,8 @@ function sameExecution(a: SandboxProviderCommand, b: SandboxProviderCommand): bo
     a.sandboxId === b.sandboxId &&
     a.taskId === b.taskId &&
     a.execId === b.execId &&
-    Boolean(a.pty) === Boolean(b.pty)
+    Boolean(a.pty) === Boolean(b.pty) &&
+    isDeepStrictEqual(supervisionDescriptor(a), supervisionDescriptor(b))
   );
 }
 
@@ -241,10 +249,29 @@ export async function captureRetainedRouterOutput(
           })),
         );
     }
+    if (supervisionDescriptor(page.command)) {
+      await tx.execute(
+        sql`select set_config('opengeni.supervised_output_capture_process_id', ${scope.processId}, true)`,
+      );
+    }
     await tx
       .update(schema.sandboxRetainedProcesses)
-      .set({ providerCommand: page.command })
+      .set({
+        providerCommand: page.command,
+        ...(supervisionDescriptor(page.command) &&
+        page.command.streams.stdout.eof &&
+        page.command.streams.stderr.eof &&
+        page.command.streams.stdout.exitCode === 0 &&
+        page.command.streams.stderr.exitCode === 0
+          ? { supervisionOutputCaptured: true }
+          : {}),
+      })
       .where(processWhere(scope));
+    if (supervisionDescriptor(page.command)) {
+      await tx.execute(
+        sql`select set_config('opengeni.supervised_output_capture_process_id', '', true)`,
+      );
+    }
     return { command: page.command, events, captured: true };
   });
 }
@@ -265,6 +292,8 @@ export async function reserveRetainedProviderInput(
       .limit(1);
     if (!row?.providerCommand || row.state !== "active")
       throw new Error("Active retained provider command is unavailable");
+    if (row.cancellationRequestedAt || row.supervisionReceipt)
+      throw new Error("Retained command input is closed");
     const router = row.providerCommand.kind === "modal-router-v1";
     if (router && (!Number.isSafeInteger(byteLength) || byteLength! <= 0))
       throw new Error("Byte-offset stdin requires a positive byte reservation");
@@ -275,5 +304,139 @@ export async function reserveRetainedProviderInput(
       .set({ providerCommandInputIndex: index })
       .where(processWhere(scope));
     return router ? row.providerCommandInputIndex : index;
+  });
+}
+
+export type SupervisionReceipt = CommandSupervisionReceipt;
+
+function supervisionDescriptor(command: SandboxProviderCommand) {
+  return command.kind === "modal-router-v1" ? command.supervision : undefined;
+}
+
+/** Fail before provider start, not after discovering an unprotected DB at retention. */
+export async function supervisedCommandProtocolReady(db: Database): Promise<boolean> {
+  const [row] = await db.execute<{ ready: boolean }>(sql`
+    select count(*) = 3 as ready from pg_catalog.pg_trigger
+    where (tgrelid, tgname) in (
+      ('sandbox_retained_processes'::regclass, 'supervised_command_guard'),
+      ('sandbox_workspace_mutation_admissions'::regclass, 'supervised_command_admission_guard'),
+      ('sandbox_lease_holders'::regclass, 'supervised_command_holder_guard')
+    ) and tgenabled in ('O', 'A') and not tgisinternal
+  `);
+  return row?.ready === true;
+}
+
+/** Only an authenticated control-channel receipt; never parsed stdout/stderr.
+ * ACK the supervisor only after this transaction returns successfully. */
+export async function recordRetainedSupervisionReceipt(
+  db: Database,
+  scope: ProcessScope,
+  receipt: SupervisionReceipt,
+): Promise<void> {
+  const proof = CommandSupervisionReceipt.parse(receipt);
+  await withRlsContext(db, scope, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(schema.sandboxRetainedProcesses)
+      .where(processWhere(scope))
+      .for("update")
+      .limit(1);
+    if (!row?.providerCommand || !supervisionDescriptor(row.providerCommand))
+      throw new Error("Supervised retained command is unavailable");
+    // Trigger validates invocation binding, immutable replay and unsettled input.
+    await tx
+      .update(schema.sandboxRetainedProcesses)
+      .set({ supervisionReceipt: proof })
+      .where(processWhere(scope));
+  });
+}
+
+export async function loadRetainedSupervisionReceipt(
+  db: Database,
+  scope: ProcessScope,
+): Promise<SupervisionReceipt | null> {
+  return withRlsContext(db, scope, async (tx) => {
+    const [row] = await tx
+      .select({ receipt: schema.sandboxRetainedProcesses.supervisionReceipt })
+      .from(schema.sandboxRetainedProcesses)
+      .where(processWhere(scope))
+      .limit(1);
+    if (!row) throw new Error("Retained command is unavailable");
+    return row.receipt ? CommandSupervisionReceipt.parse(row.receipt) : null;
+  });
+}
+
+export async function requestRetainedProcessCancellation(
+  db: Database,
+  scope: ProcessScope,
+  reason: "provider_deadline" | "explicit_stop",
+): Promise<void> {
+  if (reason !== "provider_deadline" && reason !== "explicit_stop")
+    throw new Error("Invalid cancellation reason");
+  await withRlsContext(db, scope, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(schema.sandboxRetainedProcesses)
+      .where(processWhere(scope))
+      .for("update")
+      .limit(1);
+    if (!row) throw new Error("Retained command is unavailable");
+    if (row.cancellationRequestedAt || row.state !== "active") return;
+    await tx
+      .update(schema.sandboxRetainedProcesses)
+      .set({ cancellationRequestedAt: new Date(), cancellationReason: reason })
+      .where(processWhere(scope));
+  });
+}
+
+export async function retainedProcessCancellationRequested(
+  db: Database,
+  scope: ProcessScope,
+): Promise<boolean> {
+  return withRlsContext(db, scope, async (tx) => {
+    const [row] = await tx
+      .select({ at: schema.sandboxRetainedProcesses.cancellationRequestedAt })
+      .from(schema.sandboxRetainedProcesses)
+      .where(processWhere(scope))
+      .limit(1);
+    if (!row) throw new Error("Retained command is unavailable");
+    return row.at !== null;
+  });
+}
+
+/** Called by the reaper for an exact retained command. Ordinary completed turns
+ * are intentionally irrelevant. Lock order remains process -> lease. */
+export async function requestRetainedProcessDeadlineCancellation(
+  db: Database,
+  scope: ProcessScope,
+): Promise<boolean> {
+  return withRlsContext(db, scope, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(schema.sandboxRetainedProcesses)
+      .where(processWhere(scope))
+      .for("update")
+      .limit(1);
+    if (
+      !row ||
+      row.state !== "active" ||
+      !row.providerCommand ||
+      !supervisionDescriptor(row.providerCommand)
+    )
+      return false;
+    const [lease] = await tx.execute<{ id: string }>(sql`
+      select id from sandbox_leases where id = ${row.leaseId}
+        and account_id = ${row.accountId} and workspace_id = ${row.workspaceId}
+        and sandbox_group_id = ${row.sandboxGroupId} and lease_epoch = ${row.leaseEpoch}
+        and backend = ${row.providerBackend} and instance_id = ${row.providerInstanceId}
+        and rotation_requested_at is not null and rotation_reason = 'provider_deadline' for update
+    `);
+    if (!lease) return false;
+    if (!row.cancellationRequestedAt)
+      await tx
+        .update(schema.sandboxRetainedProcesses)
+        .set({ cancellationRequestedAt: new Date(), cancellationReason: "provider_deadline" })
+        .where(processWhere(scope));
+    return true;
   });
 }
