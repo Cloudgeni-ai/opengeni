@@ -764,7 +764,9 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         labels: { workspace_key: codexWorkspaceKey, outcome: "completed" },
       });
       const now = new Date();
-      const before = await listCodexAccountStatuses(db, input.workspaceId).catch(() => []);
+      const before = await listCodexAccountStatuses(db, input.workspaceId, attempt.turnId).catch(
+        () => [],
+      );
       const servingCached = before.find(
         (account) => account.id === providerTurn.effectiveCodexCredentialId,
       );
@@ -932,7 +934,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       }
       let accounts: Awaited<ReturnType<typeof listCodexAccountStatuses>>;
       try {
-        accounts = await listCodexAccountStatuses(db, input.workspaceId);
+        accounts = await listCodexAccountStatuses(db, input.workspaceId, attempt.turnId);
       } catch (metadataError) {
         // Current account health/cooldown metadata is still required after
         // quarantine. Operational database failures re-enter the existing

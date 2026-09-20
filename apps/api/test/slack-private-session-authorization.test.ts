@@ -195,6 +195,17 @@ async function fixture() {
 }
 
 describe("private Slack session authorization without an embedding-host port", () => {
+  test("Codex account projection cannot expose a private session to another workspace member", async () => {
+    if (!available) return;
+    const value = await fixture();
+    for (const sessionId of [value.root.id, value.child.id]) {
+      const path = `/v1/workspaces/${value.owner.workspaceId}/sessions/${sessionId}/codex-accounts`;
+      expect((await app().request(path, { headers: headers(value.otherBearer) })).status).toBe(404);
+      const own = await app().request(path, { headers: headers(value.ownerBearer) });
+      expect(own.status).toBe(200);
+      expect(await own.json()).toMatchObject({ accounts: [], currentAccount: null });
+    }
+  });
   test("session_get explicit IDs retain private-session rejection in both detail modes", async () => {
     if (!available) return;
     const value = await fixture();

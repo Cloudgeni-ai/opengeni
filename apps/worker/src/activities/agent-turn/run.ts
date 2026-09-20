@@ -557,6 +557,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     runSettings,
                     input.workspaceId,
                     providerTurn.effectiveCodexCredentialId ?? "",
+                    undefined,
+                    {
+                      turnId: turn.id,
+                      holderId: leases.codex.holderId!,
+                      generation: leases.codex.generation!,
+                    },
                   );
                   const resolveTrackedToken = async (
                     resolve: () => ReturnType<typeof resolver.getToken>,

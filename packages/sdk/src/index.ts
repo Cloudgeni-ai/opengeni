@@ -609,6 +609,7 @@ export type {
   CodexAccount,
   CodexAccountOverview,
   CodexAccountsResponse,
+  SessionCodexAccountsResponse,
   OrganizationCodexAccountsResponse,
   CodexAllocatorUpdate,
   CodexAccountSwitchedPayload,

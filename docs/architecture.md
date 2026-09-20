@@ -964,33 +964,34 @@ organization-owned BYOK products. Organization products use dedicated encrypted
 FORCE-RLS storage, inherit only into same-organization shared workspaces, and
 retain organization payer identity through admission and execution; no rail
 implicitly falls back to another key.
-Provider-refusal cooldowns carry separate provenance and revision authority so
-fresh usage repairs only an older quota refusal, never generic backpressure or
-a concurrently newer refusal. All-capped admission and durable capacity waits
-run that reconciliation through bounded control-plane refreshes.
-Every Codex turn owns one durable credential lease before provider work. The
-lease protocol is unconditional execution fencing; `rotation_enabled` only
-decides whether a new or recovered turn may leave the active account. Rotation
-off therefore waits on a capped active account instead of using a healthy
-alternate, while rotation on may recover the same checkpointed turn elsewhere.
-The first allocator decision also atomically records a bounded
-`codexCredentialPolicySnapshotV1` in the durable turn metadata, including a
-new turn's no-credential result before it enters a capacity wait. The snapshot
-freezes the effective workspace/organization/disabled allocator source as well
-as active-pointer, rotation, effective strategy, and pin state. Re-acquisition
-and definitive-failure settlement reuse that accepted policy while reading current
-account health/cooldowns; a
-missing or expired last database-confirmed lease deadline fails closed before
-provider dispatch and follows the existing lease-loss recovery path.
-Heartbeat renewal is fail-closed as well: a response that arrives after the
-prior worker-confirmed deadline is discarded, while expiry-sensitive lease SQL
-uses execution-time database time after its relevant locks are acquired.
-An effective workspace/organization source transition is a serialized hard
-cutover: the source advisory lock rejects it while a Codex turn is running,
-awaiting action, recovering, waiting for capacity, or still holds a live lease.
-This keeps a capacity waiter from resuming against an obsolete allocator pool;
-same-source pointer, rotation, allocator, and health mutations may wake and
-re-evaluate the immutable accepted snapshot.
+Provider-refusal cooldowns retain provenance and revisions: fresh usage repairs
+older quota refusals, never generic backpressure or newer refusals. All-capped
+admission and capacity waits reconcile through bounded refreshes.
+
+Every Codex turn requires a durable credential lease. `rotation_enabled` controls
+leaving the active account, not leasing: off waits on a capped account; on allows
+same-turn recovery elsewhere. First allocation atomically freezes source,
+active-pointer, rotation, strategy, and pin in `codexCredentialPolicySnapshotV1`,
+even before a no-credential wait. Recovery reuses this policy with current
+health/cooldowns. Missing/expired confirmed lease deadlines fail closed; late
+heartbeats are discarded. Expiry SQL reads database time after acquiring locks.
+
+Source changes serialize under the source advisory lock without requiring idle
+turns. Accepted work retains its pool through allocation, recovery, capacity
+checks, and token materialization. A content-free guarded capture records legacy
+turns' pre-change source in immutable `codex_turn_source_bindings`; it never
+rewrites history. New work uses the new setting. Connecting accounts preserves
+the selected mode; Automatic prefers connected local accounts. Token loading and
+refresh require the exact live lease. Workspace lists use current pools;
+authorized session pickers use accepted pools for waits and current pools for new work.
+Wakes follow accepted pools even after source changes. Membership, ownership,
+health, token-family CAS, and live-lease disconnect fences remain enforced.
+
+Migration 0492 requires maintenance: drain API/control/turn processes, supply all
+runtime logins, migrate, provision roles, and start compatible binaries only.
+Before/after guards reject live runtime database sessions. Preserve checkpoints
+and recover accepted turns; do not cancel them. Never restart pre-0492 binaries.
+See the lifecycle and deployment guides for details.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`model-providers.md`](model-providers.md),

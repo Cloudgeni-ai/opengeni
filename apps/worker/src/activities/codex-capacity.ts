@@ -240,8 +240,9 @@ export async function armAndReconcileCodexCapacityWait(
 async function refreshCapacityMetadata(
   services: ControlActivityServices,
   workspaceId: string,
+  turnId: string,
 ): Promise<void> {
-  const accounts = await listCodexAccountStatuses(services.db, workspaceId).catch(() => []);
+  const accounts = await listCodexAccountStatuses(services.db, workspaceId, turnId).catch(() => []);
   const now = new Date();
   const stale = accounts.filter(
     (account) =>
@@ -252,7 +253,14 @@ async function refreshCapacityMetadata(
   await refreshCodexUsageAndRepairCapacityWaiters(
     stale.map(
       (account) => () =>
-        fetchCodexUsageForAccount(services.db, services.settings, workspaceId, account.id),
+        fetchCodexUsageForAccount(
+          services.db,
+          services.settings,
+          workspaceId,
+          account.id,
+          undefined,
+          turnId,
+        ),
     ),
     () => signalPendingCodexCapacityWakeTargets(services, workspaceId),
   );
@@ -359,7 +367,7 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
     if (boundedRefreshAttempted) {
       // This is a bounded secret-safe control-plane quota refresh. It creates no
       // turn, model call, user message, schedule, or entitlement action.
-      await refreshCapacityMetadata(resolved, input.workspaceId);
+      await refreshCapacityMetadata(resolved, input.workspaceId, current.blockedTurnId);
     }
     const result = await reconcileCodexCapacityWaitDb(
       resolved.db,

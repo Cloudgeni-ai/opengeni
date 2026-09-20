@@ -173,10 +173,17 @@ export async function selectCodexTurnCapacity(
         );
       if (leased.decision.kind === "allCapped") {
         // Bounded self-heal of stale usage cache, then ONE new atomic selection.
-        await refreshCappedCodexUsageRows(db, settings, input.workspaceId, leased.accounts, {
-          signalCodexCapacityWorkflow,
-          wakeSessionWorkflow,
-        });
+        await refreshCappedCodexUsageRows(
+          db,
+          settings,
+          input.workspaceId,
+          leased.accounts,
+          {
+            signalCodexCapacityWorkflow,
+            wakeSessionWorkflow,
+          },
+          turn.id,
+        );
         leaseAcquisitionStartedAtMs = performance.now();
         leased = await acquireCodexCredentialLease(
           db,
