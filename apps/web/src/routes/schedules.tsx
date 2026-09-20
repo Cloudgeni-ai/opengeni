@@ -1,5 +1,6 @@
 import { ConnectionAccountPicker } from "@/components/capabilities/connection-account-picker";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
+import { connectionAccountChoices } from "@/components/capabilities/session-connection-accounts";
 import { AgentLearningDraftEditor } from "@/components/knowledge/agent-learning-settings";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
@@ -1360,12 +1361,7 @@ function ScheduledTaskForm(props: {
       selectedIds,
     },
     context.workspaceCapabilityCatalog,
-    Object.fromEntries(
-      (props.initialState.connectionAccounts ?? []).map((choice) => [
-        choice.serverId,
-        choice.connectionId,
-      ]),
-    ),
+    connectionAccountChoices(props.initialState.connectionAccounts ?? []),
   );
   const [learningOpen, setLearningOpen] = useState(false);
   const learningScope = scheduledLearningScope(
@@ -1888,9 +1884,7 @@ function ScheduledTaskForm(props: {
           onClick={() =>
             props.onSubmit({
               ...form,
-              connectionAccounts: connectionAccounts.selections.filter(
-                (choice) => connectionAccounts.accountChoices[choice.serverId],
-              ),
+              connectionAccounts: connectionAccounts.selections,
             })
           }
           disabled={

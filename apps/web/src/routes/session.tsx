@@ -1,6 +1,5 @@
 import { retainedImageId } from "@opengeni/react";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
-import { ConnectionAccountPicker } from "@/components/capabilities/connection-account-picker";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
 import {
   attachSessionCapability,
@@ -2728,24 +2727,6 @@ function SessionChatPane(props: {
 
       <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
-          <ConnectionAccountPicker
-            groups={connectionAccounts.accountGroups}
-            choices={connectionAccounts.accountChoices}
-            onChoose={connectionAccounts.selectAccount}
-            disabled={terminal || composer.sending}
-          />
-          {connectionAccounts.error ? (
-            <p role="alert" className="mb-2 text-xs text-fg-muted">
-              Personal connection access could not be checked.{" "}
-              <button
-                type="button"
-                className="text-brand underline"
-                onClick={() => void connectionAccounts.refresh()}
-              >
-                Retry
-              </button>
-            </p>
-          ) : null}
           <PersonalResourceAttachmentSurface
             controller={personalAttachment}
             disabled={terminal || composer.sending}
@@ -2771,6 +2752,17 @@ function SessionChatPane(props: {
             controlsLeading={
               <>
                 <ComposerMobilePlus
+                  connectorActions={{
+                    accountControls: {
+                      groups: connectionAccounts.accountGroups,
+                      choices: connectionAccounts.accountChoices,
+                      onChoose: connectionAccounts.selectAccount,
+                      loading: connectionAccounts.loading,
+                      error: connectionAccounts.error,
+                      onRefresh: () => void connectionAccounts.refresh(),
+                      disabled: terminal || composer.sending,
+                    },
+                  }}
                   chatSettings={{
                     workspaceId: props.session.workspaceId,
                     sessionId: props.session.id,
