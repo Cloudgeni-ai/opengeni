@@ -155,8 +155,12 @@ describe("composer connector account controls (local fixture)", () => {
         const menu = await page.getByRole("menu").boundingBox();
         expect(menu!.x).toBeGreaterThanOrEqual(0);
         expect(menu!.x + menu!.width).toBeLessThanOrEqual(viewport.width);
-        await page.getByRole("menuitem", { name: "Connect another account" }).click();
-        await page.getByText("Account setup opened (simulated).").waitFor();
+        expect(await page.getByRole("menuitem", { name: "Connect another account" }).count()).toBe(
+          0,
+        );
+        expect(await page.getByRole("menuitemcheckbox").count()).toBe(2);
+        // No setup action replaces the removed footer in the account list.
+        expect(await page.getByRole("menuitem").count()).toBe(0);
       } finally {
         await page.close();
       }

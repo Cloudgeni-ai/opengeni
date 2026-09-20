@@ -74,7 +74,6 @@ function Preview() {
               onConnectorCustomizingChange={setConnectorCustomizing}
               onToolSelectionChange={setSelection}
               connectorActions={{
-                onAddAccount: () => setStatus("Account setup opened (simulated)."),
                 accountControls: {
                   groups: [{ serverId: "slack", name: "Slack", accounts }],
                   choices,

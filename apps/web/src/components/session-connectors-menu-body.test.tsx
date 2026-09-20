@@ -168,7 +168,6 @@ const accounts = [
 ] as unknown as ConnectionMetadata[];
 
 test("connector settings attach multiple readable personal/workspace accounts without closing", async () => {
-  const addAccount = mock();
   const reconnect = mock();
   function Preview() {
     const [choices, setChoices] = useState<ConnectionAccountChoices>({});
@@ -179,7 +178,6 @@ test("connector settings attach multiple readable personal/workspace accounts wi
         firstPartyTools={[]}
         selection={{ mcpServerIds: new Set(["mail"]), firstPartyToolIds: new Set() }}
         onChange={() => {}}
-        onAddAccount={addAccount}
         onReconnect={reconnect}
         accountControls={{
           groups: [{ serverId: "mail", name: "Mail", accounts }],
@@ -218,12 +216,10 @@ test("connector settings attach multiple readable personal/workspace accounts wi
     container.querySelector<HTMLButtonElement>('[aria-label="Mail account settings"]')!.click(),
   );
   expect(container.textContent).toContain("Connected accounts");
-  const add = [...container.querySelectorAll<HTMLButtonElement>("button")].filter(
-    (button) => button.textContent?.trim() === "Connect another account",
-  );
-  expect(add).toHaveLength(1);
-  await act(async () => add[0]!.click());
-  expect(addAccount).toHaveBeenCalledWith("mail");
+  expect(container.textContent).not.toContain("Connect another account");
+  // Healthy chat settings contain only navigation and account attachment controls.
+  expect(container.querySelectorAll("button")).toHaveLength(3);
+  expect(container.querySelectorAll('[role="switch"]')).toHaveLength(2);
   expect(reconnect).not.toHaveBeenCalled();
 });
 

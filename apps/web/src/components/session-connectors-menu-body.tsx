@@ -5,7 +5,6 @@ import {
   Loader2Icon,
   Settings2Icon,
   ChevronLeftIcon,
-  PlusIcon,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import {
@@ -35,8 +34,6 @@ export type SessionConnectorsMenuProps = {
   onCustomizingChange?: (customizing: boolean) => void;
   leading?: ReactNode;
   onReconnect?: (serverId: string) => void;
-  /** Opens human-reviewed setup; never reauthorizes an existing account. */
-  onAddAccount?: (serverId: string) => void;
   loading?: boolean;
   error?: string | null;
   busyId?: string | null;
@@ -96,18 +93,6 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
             </ConnectorAction>
           ) : null}
         </div>
-        {props.onAddAccount ? (
-          <div className="shrink-0 border-t border-border p-2">
-            <ConnectorAction
-              presentation={props.presentation}
-              className="min-h-11 gap-3 rounded-md px-2 py-2 text-sm"
-              disabled={accounts.disabled || props.busyId === settingsServer.id}
-              onAction={() => props.onAddAccount?.(settingsServer.id)}
-            >
-              <PlusIcon className="size-4" /> Connect another account
-            </ConnectorAction>
-          </div>
-        ) : null}
       </>
     );
   }
