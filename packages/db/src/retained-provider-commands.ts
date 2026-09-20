@@ -10,7 +10,6 @@ import { withRlsContext, withSessionActivityRlsContext, type Database } from "./
 import { lockSessionEventWriteRows } from "./session-control";
 import { appendSessionCommandOutput } from "./session-command-output";
 import * as schema from "./schema";
-import { rejectRetainedSupervisedLaunch } from "./index";
 
 export type ProcessScope = {
   accountId: string;
@@ -26,8 +25,6 @@ export function retainedProviderCommandPersistence(
   publish?: (events: SessionEvent[]) => Promise<void>,
 ) {
   return {
-    rejectSupervisedLaunch: (command: ModalRouterProviderCommand) =>
-      rejectRetainedSupervisedLaunch(db, scope, command),
     recordSupervisionReceipt: (receipt: SupervisionReceipt) =>
       recordRetainedSupervisionReceipt(db, scope, receipt),
     loadSupervisionReceipt: () => loadRetainedSupervisionReceipt(db, scope),

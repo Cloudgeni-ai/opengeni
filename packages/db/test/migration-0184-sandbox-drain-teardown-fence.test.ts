@@ -70,6 +70,12 @@ const withheldMigrationNames = [
   "0482_remove_packs.sql",
   // Patches the exact Skill lifecycle rewritten by 0461; replay after it.
   "0488_permanent_skill_removal.sql",
+  // 0491 reads the publication column introduced by withheld 0184; 0494 patches
+  // withheld 0478, and 0496 installs a capture guard using the same 0184 column.
+  // Replay the real migrations after their prerequisites, never fake columns.
+  "0491_warm_capture_holder_reclamation.sql",
+  "0494_mcp_account_bindings.sql",
+  "0496_supervised_command_settlement.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

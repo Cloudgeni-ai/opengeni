@@ -15,11 +15,11 @@ import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/confi
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import {
   createProviderCommandRetainer,
-  retainedProviderCommandPersistence,
   supervisedCommandProtocolReady,
 } from "@opengeni/db/retained-provider-commands";
 import {
   advanceWorkspaceGenerationForDirectRequest,
+  retainedProviderCommandPersistence,
   advanceWorkspaceGenerationForRetainedProcess,
   getLiveEnrollmentConnection,
   getRetainedProcess,

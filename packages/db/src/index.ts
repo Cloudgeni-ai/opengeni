@@ -17,7 +17,12 @@ import {
 } from "@opengeni/codex";
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
-export * from "./session-retry";
+import { createRetryFailedSessionInTransaction } from "./session-retry";
+export { SessionRetryConflictError, getSessionRetryReceiptInTransaction } from "./session-retry";
+import { retainedProviderCommandPersistence as retainedProviderCommandState } from "./retained-provider-commands";
+export const retryFailedSessionInTransaction = createRetryFailedSessionInTransaction(
+  sessionEffectiveSandboxRecoveryBlocked,
+);
 import { unresolvedCodexCredentialFailures } from "./codex-failure-eligibility";
 import {
   CODEX_CAPACITY_RECOVERY_KEY,
@@ -53517,6 +53522,18 @@ export async function rejectRetainedSupervisedLaunch(
     },
     expectedCommand,
   );
+}
+
+/** Compose the leaf cursor/proof persistence with canonical settlement. The
+ * leaf subpath cannot import this root without reversing the DB boundary. */
+export function retainedProviderCommandPersistence(
+  ...[db, scope, publish]: Parameters<typeof retainedProviderCommandState>
+) {
+  return {
+    ...retainedProviderCommandState(db, scope, publish),
+    rejectSupervisedLaunch: (command: ModalRouterProviderCommand) =>
+      rejectRetainedSupervisedLaunch(db, scope, command),
+  };
 }
 
 // Never expose the launch-rejection authority on the public generic settlement

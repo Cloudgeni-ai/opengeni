@@ -1,6 +1,6 @@
 ---
 "@opengeni/db": patch
-"@opengeni/worker": patch
+"@opengeni/worker-bundle": patch
 ---
 
 Keep supervised commands out of legacy observation-error containment, including

@@ -33,7 +33,6 @@ import postgres from "postgres";
 import {
   captureRetainedRouterOutput,
   createProviderCommandRetainer,
-  retainedProviderCommandPersistence,
 } from "@opengeni/db/retained-provider-commands";
 import {
   backgroundCommandActivityForSessions,
@@ -43,6 +42,7 @@ import {
 import { getSettings, type Settings } from "@opengeni/config";
 import {
   acquireLease,
+  retainedProviderCommandPersistence,
   appendSessionEvents,
   authorizeHistoricalSandboxCheckpointRecovery,
   registerSandboxCheckpointArtifact,

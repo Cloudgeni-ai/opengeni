@@ -17,15 +17,13 @@ import { warnDrainSnapshotFailure } from "../sandbox-snapshot-diagnostics";
 import { warnRetainedProcessProofFailure } from "../retained-process-diagnostics";
 
 import { createHash, randomUUID } from "node:crypto";
-import {
-  retainedProviderCommandPersistence,
-  requestRetainedProcessDeadlineCancellation,
-} from "@opengeni/db/retained-provider-commands";
+import { requestRetainedProcessDeadlineCancellation } from "@opengeni/db/retained-provider-commands";
 import type { ProviderCommandPersistence, ProviderCommandSession } from "@opengeni/runtime";
 import { Context } from "@temporalio/activity";
 import { OpLostReason, OpState, type OpStatus } from "@opengeni/agent-proto";
 import {
   accrueWarmSeconds,
+  retainedProviderCommandPersistence,
   adoptLegacyModalCheckpointArtifact,
   confirmDrainCold,
   appendSessionEventToSandboxGroup,

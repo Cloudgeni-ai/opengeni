@@ -8,6 +8,7 @@ import {
   getRetainedProcess,
   markWarmLeaseInstanceLost,
   rejectRetainedSupervisedLaunch,
+  retainedProviderCommandPersistence,
   settleRetainedProcess,
   verifyRetainedProcessMutationSettlement,
   type DbClient,
@@ -15,7 +16,6 @@ import {
 import {
   captureRetainedRouterOutput,
   getRetainedProviderCommand,
-  retainedProviderCommandPersistence,
   requestRetainedProcessDeadlineCancellation,
   supervisedCommandProtocolReady,
   type SupervisionReceipt,
@@ -804,7 +804,7 @@ test("typed loss with no checkpoint remains unrecoverable and never fills output
 test("authenticated never-started launch rejection is exact, idempotent, and not provider disappearance", async () => {
   const f = await providerLossFixture();
   await Promise.all([
-    rejectRetainedSupervisedLaunch(client.db, f.scope, f.command),
+    f.persistence.rejectSupervisedLaunch(f.command),
     rejectRetainedSupervisedLaunch(client.db, f.scope, f.command),
   ]);
   const [process] = await shared.admin`select state,exit_code,settlement_reason,supervision_receipt,
