@@ -1,3 +1,4 @@
+import { connectionServicePresentation } from "./connection-service-presentation";
 import { ConnectionCatalog } from "./connection-catalog";
 import { ConnectionLogo } from "./connection-logo";
 import { useEffect, useState, type FormEvent } from "react";
@@ -14,6 +15,8 @@ export type ConnectChooserProps = {
   customOnly?: boolean;
   providerOnly?: boolean;
   compact?: boolean;
+  /** Select a service from the unified discovery list. */
+  initialProviderId?: string;
 };
 
 /** Catalog readiness is supplied by the authenticated backend, never inferred
@@ -39,6 +42,7 @@ function ScopedChooser({
   customOnly = false,
   providerOnly = false,
   compact = false,
+  initialProviderId = "",
 }: ConnectChooserProps) {
   const view = useConnect(controller);
   const [catalog, setCatalog] = useState<ConnectProvider[] | null>(null);
@@ -46,14 +50,14 @@ function ScopedChooser({
   const [failed, setFailed] = useState(false);
   const [load, setLoad] = useState(0);
   const [query, setQuery] = useState("");
-  const [providerId, setProviderId] = useState("");
+  const [providerId, setProviderId] = useState(initialProviderId);
   const [ownership, setOwnership] = useState("");
   useEffect(() => {
     const abort = new AbortController();
     setCatalog(null);
     setAccounts([]);
     setFailed(false);
-    setProviderId("");
+    setProviderId(initialProviderId);
     setOwnership("");
     // Promise boundary also handles a synchronously throwing injected transport.
     void Promise.resolve()
@@ -88,13 +92,23 @@ function ScopedChooser({
             ),
           );
           setAccounts(structuredClone(inventory));
+          const initial = providers.find((entry) => entry.id === initialProviderId);
+          if (initial)
+            setOwnership(
+              initial.ownership.includes("personal") &&
+                ["google", "microsoft"].includes(initial.family)
+                ? "personal"
+                : initial.ownership.includes("workspace")
+                  ? "workspace"
+                  : (initial.ownership[0] ?? ""),
+            );
         }
       })
       .catch(() => {
         if (!abort.signal.aborted) setFailed(true);
       });
     return () => abort.abort();
-  }, [controller, load, presentation, customOnly, providerOnly]);
+  }, [controller, load, presentation, customOnly, providerOnly, initialProviderId]);
   const provider = catalog?.find((entry) => entry.id === providerId);
   const canBegin =
     provider?.readiness === "available" &&
@@ -185,7 +199,12 @@ function ScopedChooser({
                         return {
                           id: entry.id,
                           name: entry.label,
-                          logo: <ConnectionLogo src={null} name={entry.label} />,
+                          logo: (
+                            <ConnectionLogo
+                              src={connectionServicePresentation(entry).logo}
+                              name={entry.label}
+                            />
+                          ),
                           options: [
                             {
                               id: entry.id,
@@ -236,7 +255,7 @@ function ScopedChooser({
                 ) && <p role="status">No services match your search.</p>}
               </>
             ) : null}
-            {presentation === "catalog" && provider ? (
+            {presentation === "catalog" && provider && !initialProviderId ? (
               <button
                 type="button"
                 onClick={() => {
@@ -281,7 +300,7 @@ function ScopedChooser({
                   </p>
                 )}
                 <label>
-                  Ownership
+                  Who can use this connection?
                   <select
                     required
                     value={ownership}
@@ -292,9 +311,7 @@ function ScopedChooser({
                     </option>
                     {provider.ownership.map((choice) => (
                       <option key={choice} value={choice}>
-                        {choice === "personal"
-                          ? "Personal — owned by you"
-                          : "Workspace — shared connection"}
+                        {choice === "personal" ? "Only me" : "Everyone in this workspace"}
                       </option>
                     ))}
                   </select>
@@ -306,7 +323,7 @@ function ScopedChooser({
               type="submit"
               disabled={!canBegin}
             >
-              Start setup
+              Continue
             </button>
           </fieldset>
         </form>

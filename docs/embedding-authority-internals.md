@@ -213,3 +213,12 @@ The web Capabilities route owns tabs, global search, and curated ordering.
 `apps/web/src/components/capabilities/connection-services.ts` groups explicit
 provider identities without merging their independent authorization options.
 Northstar demonstrates the same SDK catalogue with its existing API proxy.
+
+In catalog mode, `ConnectPanel` presents available provider adapters and MCP
+services through one searchable `ConnectionDiscovery` list. The optional custom
+connection chooser remains separate. Service presentation is shared by discovery
+and account rows; personal credentials do not need a workspace installation
+reference to display their service name and logo. Display matching never selects
+a credential or changes ownership. Curated API integrations retain the explicit
+tool-selection step after OAuth; authorizing an account alone does not install
+its operations.
