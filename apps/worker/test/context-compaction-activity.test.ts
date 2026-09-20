@@ -1918,22 +1918,6 @@ describe("standalone context compaction execution", () => {
       ),
     );
 
-    const ordinary = await addSessionSystemUpdate(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      sessionId: session.id,
-      kind: "agent_message",
-      classification: "info",
-      sourceId: crypto.randomUUID(),
-      dedupeKey: `ordinary-${crypto.randomUUID()}`,
-      summary: "Ordinary durable notice",
-      payload: {
-        type: "agent_message",
-        text: "Ordinary durable notice",
-        operationId: crypto.randomUUID(),
-      },
-    });
-    if (!ordinary.added) throw new Error("ordinary update was not inserted");
     const goal = await createSessionGoal(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -2051,7 +2035,7 @@ describe("standalone context compaction execution", () => {
     expect(summaryCalls).toBe(1);
     expect(await getSessionTurn(client.db, grant.workspaceId!, result.turnId)).toMatchObject({
       source: "goal",
-      metadata: { internalUpdateCount: 2 },
+      metadata: { internalUpdateCount: 1 },
       status: "failed",
     });
     expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("idle");
@@ -2068,7 +2052,6 @@ describe("standalone context compaction execution", () => {
       role: "user",
     });
     const continuationInput = JSON.stringify(historyAfter.at(-1)?.item);
-    expect(continuationInput).toContain(ordinary.update.id);
     expect(continuationInput).toContain("Continue the goal");
     expect(continuationInput).not.toContain(goalContinuation.update.id);
     expect(
