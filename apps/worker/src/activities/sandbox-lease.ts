@@ -16,7 +16,10 @@
 import { warnDrainSnapshotFailure } from "../sandbox-snapshot-diagnostics";
 
 import { createHash, randomUUID } from "node:crypto";
-import { retainedProviderCommandPersistence } from "@opengeni/db/retained-provider-commands";
+import {
+  retainedProviderCommandPersistence,
+  requestRetainedProcessDeadlineCancellation,
+} from "@opengeni/db/retained-provider-commands";
 import type { ProviderCommandPersistence, ProviderCommandSession } from "@opengeni/runtime";
 import { Context } from "@temporalio/activity";
 import { OpLostReason, OpState, type OpStatus } from "@opengeni/agent-proto";
@@ -1410,6 +1413,47 @@ async function reconcileTerminalRetainedProcesses(
     let process = claim.process;
     const expected = retainedProcessSettlementIdentity(process);
     let proof = retainedProcessReconciliationProof(process);
+    const processScope = {
+      accountId: process.accountId,
+      workspaceId: process.workspaceId,
+      sessionId: process.sessionId,
+      processId: process.id,
+    };
+    const storedCommandPersistence = retainedProviderCommandPersistence(
+      db,
+      processScope,
+      bus ? (events) => bus.publish(process.workspaceId, process.sessionId, events) : undefined,
+    );
+    const commandPersistence = {
+      ...storedCommandPersistence,
+      requestCancellation: async (reason: "provider_deadline" | "explicit_stop") => {
+        if (reason === "provider_deadline") {
+          await requestRetainedProcessDeadlineCancellation(db, processScope);
+          if (!(await storedCommandPersistence.cancellationRequested()))
+            throw new Error(
+              "Supervised deadline cancellation no longer owns its original rotating lease",
+            );
+        } else await storedCommandPersistence.requestCancellation(reason);
+      },
+    };
+    if (proof && process.providerBackend === "modal") {
+      try {
+        const command = await commandPersistence.load();
+        if (
+          command?.kind === "modal-router-v1" &&
+          command.supervision &&
+          (!(await commandPersistence.loadSupervisionReceipt()) ||
+            ![command.streams.stdout, command.streams.stderr].every(
+              (stream) => stream.eof && stream.exitCode === 0,
+            ))
+        )
+          proof = null;
+      } catch {
+        // An earlier terminal observation cannot make missing control/output
+        // proof unreachable. Reprobe the original binding; DB remains the gate.
+        proof = null;
+      }
+    }
     if (!proof) {
       let observation: RetainedProcessProbeResult | null = null;
 
@@ -1519,18 +1563,6 @@ async function reconcileTerminalRetainedProcesses(
           }
         } else {
           try {
-            const commandPersistence = retainedProviderCommandPersistence(
-              db,
-              {
-                accountId: process.accountId,
-                workspaceId: process.workspaceId,
-                sessionId: process.sessionId,
-                processId: process.id,
-              },
-              bus
-                ? (events) => bus.publish(process.workspaceId, process.sessionId, events)
-                : undefined,
-            );
             const command = await commandPersistence.load();
             const supervised = command?.kind === "modal-router-v1" && Boolean(command.supervision);
             const supervisionMetric = (outcome: string) =>

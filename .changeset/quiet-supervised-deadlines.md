@@ -4,6 +4,7 @@
 "@opengeni/db": patch
 "@opengeni/core": patch
 "@opengeni/config": patch
+"@opengeni/worker-bundle": patch
 ---
 
 Add durable native supervision for supported stock Modal non-PTY commands. Retain

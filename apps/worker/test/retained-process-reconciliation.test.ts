@@ -281,6 +281,7 @@ async function promoteTurnProcess(
     providerSessionId?: number;
     backgroundCommand?: string;
     providerCommand?: boolean;
+    supervised?: boolean;
     providerCommandSandboxId?: string;
   } = {},
 ): Promise<ProcessFixture> {
@@ -307,18 +308,36 @@ async function promoteTurnProcess(
   });
   const processId = crypto.randomUUID();
   const providerSessionId = input.providerSessionId ?? 71;
-  const command: SandboxProviderCommand | null = input.providerCommand
+  const invocationId = crypto.randomUUID();
+  const command: SandboxProviderCommand | null = input.supervised
     ? {
-        kind: "modal-control-v1",
-        sandboxId: input.providerCommandSandboxId ?? instanceId,
+        kind: "modal-router-v1",
+        sandboxId: instanceId,
         taskId: "ta-test",
-        execId: `tp-${crypto.randomUUID()}`,
+        execId: crypto.randomUUID(),
+        supervision: {
+          protocol: "native-subreaper-v1",
+          invocationId,
+          nonce: "a".repeat(64),
+          controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
+        },
         streams: {
-          stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
-          stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+          stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+          stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
         },
       }
-    : null;
+    : input.providerCommand
+      ? {
+          kind: "modal-control-v1",
+          sandboxId: input.providerCommandSandboxId ?? instanceId,
+          taskId: "ta-test",
+          execId: `tp-${crypto.randomUUID()}`,
+          streams: {
+            stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+            stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+          },
+        }
+      : null;
   const process = await retainWorkspaceProviderCommand(db, {
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
@@ -551,6 +570,52 @@ afterAll(async () => {
 }, 180_000);
 
 describe("retained-process terminal-owner reconciliation", () => {
+  test("supervised background command survives turn completion and settles only after deadline dual proof", async () => {
+    const fixture = await promoteTurnProcess({
+      supervised: true,
+      outcome: "completed",
+      backgroundCommand: "preview",
+    });
+    let observations = 0;
+    await runReaper(async (_settings, _lease, _process, _mode, _capture, persistence) => {
+      observations++;
+      expect(await persistence!.cancellationRequested!()).toBe(false);
+      return { status: "deferred", reason: "provider_running" };
+    });
+    expect(observations).toBe(1);
+    expect((await durableProcess(fixture)).state).toBe("active");
+    await admin`update sandbox_leases set rotation_requested_at=now(), rotation_reason='provider_deadline' where id=${fixture.leaseId}`;
+    await admin`update sandbox_retained_processes set reconcile_after=now()-interval '1 second' where id=${fixture.process.id}`;
+    await runReaper(async (_settings, _lease, _process, _mode, _capture, persistence) => {
+      observations++;
+      expect(await persistence!.cancellationRequested!()).toBe(true);
+      const command = await persistence!.load();
+      if (command?.kind !== "modal-router-v1" || !command.supervision)
+        throw new Error("Expected supervised command");
+      await persistence!.recordSupervisionReceipt!({
+        protocol: "native-subreaper-v1",
+        invocationId: command.supervision.invocationId,
+        receiptId: crypto.randomUUID(),
+        leaderExitCode: 7,
+      });
+      const terminal = structuredClone(command);
+      for (const stream of ["stdout", "stderr"] as const)
+        terminal.streams[stream] = { ...terminal.streams[stream], eof: true, exitCode: 0 };
+      await persistence!.captureRouterPage!({
+        expected: command,
+        command: terminal,
+        stdout: "",
+        stderr: "",
+      });
+      return {
+        status: "proved",
+        proof: { outcome: "exited", exitCode: 7, reason: "provider_exit_banner" },
+      };
+    });
+    expect(observations).toBe(2);
+    expect(await durableProcess(fixture)).toMatchObject({ state: "exited", exitCode: 7 });
+  }, 60_000);
+
   test("a completed attempt's final provider mutation re-arms the cleanup wake", async () => {
     if (!available) throw new Error("PostgreSQL is required for cleanup admission proof");
     const ids = await freshWorkspace();
