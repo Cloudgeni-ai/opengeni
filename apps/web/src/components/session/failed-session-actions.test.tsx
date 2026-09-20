@@ -199,6 +199,43 @@ test("definitive unsafe retry rejection removes the action", async () => {
   );
 });
 
+for (const code of ["RETRY_PAUSED", "RETRY_EXECUTION_UNRESOLVED"] as const) {
+  test(`${code} allows explicit retry after the same failure's transient blocker clears`, async () => {
+    let sends = 0;
+    const onRetry = async () => {
+      if (++sends === 1) throw new OpenGeniApiError(409, "Blocked", { code });
+      return true;
+    };
+    const container = await render(
+      <FailedSessionActions failureId="same-failure" retryBlocker={null} onRetry={onRetry} />,
+    );
+    await act(async () => container.querySelector("button")!.click());
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe(
+      code === "RETRY_PAUSED" ? "This session is paused." : "Earlier work is still settling.",
+    );
+    await act(async () =>
+      root!.render(
+        <FailedSessionActions
+          failureId="same-failure"
+          retryBlocker={code === "RETRY_PAUSED" ? "paused" : "queued"}
+          onRetry={onRetry}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionActions failureId="same-failure" retryBlocker={null} onRetry={onRetry} />,
+      ),
+    );
+    expect(sends).toBe(1);
+    await act(async () => container.querySelector("button")!.click());
+    expect(sends).toBe(2);
+    expect(container.querySelector("button")).toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+}
+
 test("unsupported model directs to existing picker; a changed model permits recovery", async () => {
   const unavailable = {
     ...failure,

@@ -2402,88 +2402,6 @@ function SessionChatPane(props: {
       ) : null}
       {
         <>
-          {/* Credit death also surfaces on an IDLE session: a budget_exhausted
-              turn completes "cleanly", so waiting for status === "failed" would
-              hide the one banner that explains why nothing works anymore. It
-              hides again while a turn is actually running (someone topped up
-              and is trying), so the recovery turn isn't shadowed by it. */}
-          {props.failure &&
-          (props.session.status === "failed" ||
-            (props.creditExhausted && props.session.status === "idle")) ? (
-            <FailureRecoveryBoundary key={props.session.id} fallback={failureFallback}>
-              <Suspense fallback={failureFallback}>
-                <LazyFailedSessionBanner
-                  key={props.session.id}
-                  failure={props.failure}
-                  modelChanged={Boolean(
-                    composerPolicy && composerPolicy.model !== props.session.model,
-                  )}
-                  creditExhausted={props.creditExhausted}
-                  workspaceId={props.session.workspaceId}
-                  canBuyCredits={
-                    context.clientConfig.billingMode === "stripe" &&
-                    Boolean(workspaceAccountId) &&
-                    hasAccountPermission(
-                      context.accessContext,
-                      workspaceAccountId ?? "",
-                      "billing:manage",
-                    )
-                  }
-                  canConnectModel={hasWorkspacePermission(
-                    context.accessContext,
-                    props.session.workspaceId,
-                    "connections:write",
-                  )}
-                  actions={{
-                    failureId: props.failure.failureEventId,
-                    retryInput: pendingRetryInput,
-                    composerBlocker: composerSendBlocker(),
-                    onRetry: async () => {
-                      if (
-                        composer.hasDraftContent() ||
-                        composerSendBlocker() ||
-                        !props.failure?.failureEventId ||
-                        !retryHasRetainedTurn ||
-                        !composerPolicy ||
-                        !workspacePermissions.includes("sessions:control") ||
-                        admissionControl.state === "paused"
-                      )
-                        return false;
-                      try {
-                        return await retryFailedSession(
-                          props.failure.failureEventId,
-                          composerPolicy,
-                        );
-                      } finally {
-                        await Promise.allSettled([props.onReloadSession(), props.queue.refresh()]);
-                      }
-                    },
-                    retryBlocker: !workspacePermissions.includes("sessions:control")
-                      ? "permission"
-                      : admissionControl.state === "paused"
-                        ? "paused"
-                        : composer.hasDraftContent()
-                          ? "draft"
-                          : failedOptimisticMessageCount > 0
-                            ? "unsent"
-                            : (optimisticMessages ?? []).some(
-                                  (message) => !acceptedClientEventIds.has(message.clientEventId),
-                                )
-                              ? "delivery"
-                              : props.session.activeTurnId !== null || props.queue.queue.length > 0
-                                ? "queued"
-                                : composer.sending ||
-                                    composer.draftLoading ||
-                                    !hasComposerPolicy ||
-                                    !retryHasRetainedTurn ||
-                                    !props.failure.failureEventId
-                                  ? "loading"
-                                  : null,
-                  }}
-                />
-              </Suspense>
-            </FailureRecoveryBoundary>
-          ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <KnowledgeActivityProvider
               onInspect={props.onMemoryClick}
@@ -2500,6 +2418,111 @@ function SessionChatPane(props: {
               }
             >
               <MessageTimeline
+                trailingState={
+                  <>
+                    {/* Recovery follows the failed request, only in the latest history window.
+                        Credit exhaustion also surfaces on idle sessions. */}
+                    {!props.hasNewer &&
+                    props.failure &&
+                    (props.session.status === "failed" ||
+                      (props.creditExhausted && props.session.status === "idle")) ? (
+                      <FailureRecoveryBoundary key={props.session.id} fallback={failureFallback}>
+                        <Suspense fallback={failureFallback}>
+                          <LazyFailedSessionBanner
+                            key={props.session.id}
+                            failure={props.failure}
+                            modelChanged={Boolean(
+                              composerPolicy && composerPolicy.model !== props.session.model,
+                            )}
+                            creditExhausted={props.creditExhausted}
+                            workspaceId={props.session.workspaceId}
+                            canBuyCredits={
+                              context.clientConfig.billingMode === "stripe" &&
+                              Boolean(workspaceAccountId) &&
+                              hasAccountPermission(
+                                context.accessContext,
+                                workspaceAccountId ?? "",
+                                "billing:manage",
+                              )
+                            }
+                            canConnectModel={hasWorkspacePermission(
+                              context.accessContext,
+                              props.session.workspaceId,
+                              "connections:write",
+                            )}
+                            actions={{
+                              failureId: props.failure.failureEventId,
+                              retryInput: pendingRetryInput,
+                              composerBlocker: composerSendBlocker(),
+                              onRetry: async () => {
+                                if (
+                                  composer.hasDraftContent() ||
+                                  composerSendBlocker() ||
+                                  !props.failure?.failureEventId ||
+                                  !retryHasRetainedTurn ||
+                                  !composerPolicy ||
+                                  !workspacePermissions.includes("sessions:control") ||
+                                  admissionControl.state === "paused"
+                                )
+                                  return false;
+                                try {
+                                  return await retryFailedSession(
+                                    props.failure.failureEventId,
+                                    composerPolicy,
+                                  );
+                                } finally {
+                                  await Promise.allSettled([
+                                    props.onReloadSession(),
+                                    props.queue.refresh(),
+                                  ]);
+                                }
+                              },
+                              retryBlocker: !workspacePermissions.includes("sessions:control")
+                                ? "permission"
+                                : admissionControl.state === "paused"
+                                  ? "paused"
+                                  : composer.hasDraftContent()
+                                    ? "draft"
+                                    : failedOptimisticMessageCount > 0
+                                      ? "unsent"
+                                      : (optimisticMessages ?? []).some(
+                                            (message) =>
+                                              !acceptedClientEventIds.has(message.clientEventId),
+                                          )
+                                        ? "delivery"
+                                        : props.session.activeTurnId !== null ||
+                                            props.queue.queue.length > 0
+                                          ? "queued"
+                                          : composer.sending ||
+                                              composer.draftLoading ||
+                                              !hasComposerPolicy ||
+                                              !retryHasRetainedTurn ||
+                                              !props.failure.failureEventId
+                                            ? "loading"
+                                            : null,
+                            }}
+                          />
+                        </Suspense>
+                      </FailureRecoveryBoundary>
+                    ) : null}
+                    {props.humanInput.requests.length > 0 &&
+                    props.session.status === "requires_action" ? (
+                      <div className="pb-1" data-human-input-timeline-surface="">
+                        <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
+                          <HumanInputSurface
+                            loadSkillReview={loadSkillReview}
+                            requests={props.humanInput.requests}
+                            respondingRequestId={props.humanInput.respondingRequestId}
+                            error={props.humanInput.mutationError?.message}
+                            onSubmit={(requestId, response) =>
+                              props.humanInput.respond(requestId, response).then(() => undefined)
+                            }
+                          />
+                        </Suspense>
+                      </div>
+                    ) : null}
+                  </>
+                }
                 turnSummary={{ rolling: true }}
                 key={props.session.id}
                 className="h-full"
@@ -2532,24 +2555,6 @@ function SessionChatPane(props: {
                   await props.onJumpToStart();
                 }}
                 onJumpToLatest={props.onJumpToLatest}
-                trailingState={
-                  props.humanInput.requests.length > 0 &&
-                  props.session.status === "requires_action" ? (
-                    <div className="pb-1" data-human-input-timeline-surface="">
-                      <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
-                        <HumanInputSurface
-                          loadSkillReview={loadSkillReview}
-                          requests={props.humanInput.requests}
-                          respondingRequestId={props.humanInput.respondingRequestId}
-                          error={props.humanInput.mutationError?.message}
-                          onSubmit={(requestId, response) =>
-                            props.humanInput.respond(requestId, response).then(() => undefined)
-                          }
-                        />
-                      </Suspense>
-                    </div>
-                  ) : undefined
-                }
                 emptyState={
                   props.queue.stoppingPreviousAttempt ? (
                     <EmptyState

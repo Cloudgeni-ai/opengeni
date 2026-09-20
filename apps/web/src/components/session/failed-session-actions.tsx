@@ -62,12 +62,12 @@ function FailureActionsAttempt({
         setSubmitted(true);
       } else setError("Could not retry this session.");
     } catch (failure) {
+      // Pause and unsettled execution are transient; each explicit retry still
+      // passes backend admission. Only a definitively unsafe failure is latched.
       if (
         failure instanceof OpenGeniApiError &&
         !failure.outcomeUnknown &&
-        ["RETRY_UNSUPPORTED_FAILURE", "RETRY_PAUSED", "RETRY_EXECUTION_UNRESOLVED"].includes(
-          failure.code ?? "",
-        )
+        failure.code === "RETRY_UNSUPPORTED_FAILURE"
       ) {
         setRejected(true);
       }

@@ -107,11 +107,39 @@ for (const unsupported of [true, false]) {
       expect(dimensions.height).toBeLessThanOrEqual(40);
       expect(dimensions.background).toBe("rgba(0, 0, 0, 0)");
       expect(dimensions.overflow).toBeLessThanOrEqual(1);
+      const request = page.getByText("Review the implementation and verify the tests.", {
+        exact: true,
+      });
+      await request.waitFor();
+      expect(
+        await banner.evaluate((node) => Boolean(node.closest("[data-og-timeline-trailing-state]"))),
+      ).toBe(true);
+      const requestBox = await request.boundingBox();
+      const bannerBox = await banner.boundingBox();
+      const pickerBox = await picker.boundingBox();
+      expect(bannerBox!.y).toBeGreaterThanOrEqual(requestBox!.y + requestBox!.height);
+      expect(bannerBox!.y + bannerBox!.height).toBeLessThanOrEqual(pickerBox!.y);
+      expect(
+        await banner.evaluate((node) => getComputedStyle(node.parentElement!).position),
+      ).not.toBe("sticky");
       if (evidenceDir)
         await page.screenshot({
           path: `${evidenceDir}/${unsupported ? "unsupported-model" : "retry"}-desktop.png`,
           fullPage: true,
         });
+      if (unsupported) {
+        await picker.click();
+        await page.getByTestId("model-picker-choice-supported-model").click();
+        const retry = banner.getByRole("button", { name: "Retry", exact: true });
+        await retry.waitFor();
+        expect(await banner.getByRole("button").count()).toBe(1);
+        expect(await request.textContent()).toBe("Review the implementation and verify the tests.");
+        expect(retries).toHaveLength(0);
+        await retry.click();
+        await banner.getByRole("button", { name: "Check retry", exact: true }).waitFor();
+        expect(retries[0]).toMatchObject({ model: "supported-model", failureEventId: failureId });
+        expect(await picker.isDisabled()).toBe(true);
+      }
       if (!unsupported) {
         const retry = banner.getByRole("button", { name: "Retry", exact: true });
         const composer = page.getByPlaceholder("Send a follow-up…");
@@ -356,7 +384,27 @@ async function installApi(
     if (path.endsWith("/lineage")) return json({ ancestors: [], children: [], truncated: false });
     if (path.endsWith("/human-input-requests")) return json({ requests: [] });
     if (path.endsWith("/background-commands")) return json({ commands: [] });
-    if (path.endsWith("/models") || path.endsWith("/model-catalog")) return json({ models: [] });
+    if (path.endsWith("/models") || path.endsWith("/model-catalog"))
+      return json({
+        models: [
+          {
+            id: "supported-model",
+            label: "Supported model",
+            provider: "openai",
+            providerLabel: "OpenAI",
+            api: "responses",
+            source: "opengeni",
+            cost: "credits",
+            credentialReadiness: {
+              status: "ready",
+              reason: null,
+              basis: "configuration",
+              checkedAt: null,
+            },
+            availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+          },
+        ],
+      });
     if (path.endsWith("/stream-capabilities"))
       return json(
         fakeCapabilities({
