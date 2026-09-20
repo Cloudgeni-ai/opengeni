@@ -73,9 +73,9 @@ describe("writesTable", () => {
 });
 
 describe("analyzeMigrationRlsBackfills", () => {
-  test("0493 resolver patch is runtime source while real snapshot preflights remain guarded", () => {
+  test("0494 resolver patch is runtime source while real snapshot preflights remain guarded", () => {
     const migration = readFileSync(
-      new URL("../packages/db/drizzle/0493_mcp_account_bindings.sql", import.meta.url),
+      new URL("../packages/db/drizzle/0494_mcp_account_bindings.sql", import.meta.url),
       "utf8",
     );
     const patch = migration.match(/DO \$resolver\$[\s\S]*?END \$resolver\$;/)![0];

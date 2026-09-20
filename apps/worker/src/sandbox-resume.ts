@@ -27,6 +27,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { randomUUID } from "node:crypto";
+import { retainsHolderForWarmCapture } from "./warm-capture-holder";
 import {
   acquireLease,
   adoptLegacyModalCheckpointArtifact,
@@ -1249,7 +1250,16 @@ export async function resumeBoxForTurn(
   // provider operation may still be mutating /workspace. Both loops therefore
   // converge on "holder alive -> never release"; finalization performs the
   // proof-bearing release.
-  const releaseDeadHolder = (reason: string): void => {
+  const releaseDeadHolder = async (reason: string): Promise<void> => {
+    // Logical closure deliberately fences heartbeat authority. It is not proof
+    // that the already-admitted capture has physically settled: the finalizer
+    // owns that wait and the original deadline bounds dead-worker recovery.
+    // Match the reaper's retention rule without touching holder/lease TTLs.
+    if (reason === "holder_gone" && kind === "turn" && holderLeaseHeartbeat) {
+      const expectedEpoch = holderLeaseHeartbeat.expectedEpoch;
+      const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
+      if (retainsHolderForWarmCapture(lease, expectedEpoch)) return;
+    }
     const message = "sandbox resume holder released: holder no longer live";
     const fields = {
       workspaceId: ids.workspaceId,
@@ -1274,13 +1284,13 @@ export async function resumeBoxForTurn(
         expectedEpoch: heartbeat.expectedEpoch,
         leaseTtlMs: heartbeat.leaseTtlMs,
       })
-        .then((status) => {
+        .then(async (status) => {
           if (heartbeat !== holderLeaseHeartbeat) return;
           if (!status.holderAlive) {
             // Reaped, released, or its exact attempt is no longer the active
             // writer. Stop this otherwise-unbounded provider operation and
             // idempotently drop any remaining holder state.
-            releaseDeadHolder(status.fence);
+            await releaseDeadHolder(status.fence);
             return;
           }
           if (status.fence === "epoch") {
@@ -1289,7 +1299,7 @@ export async function resumeBoxForTurn(
             // instance replaced, re-established by a later turn). The holder
             // row is stale authority for an instance that no longer exists;
             // drop it promptly instead of pinning a successor's lease.
-            releaseDeadHolder(status.fence);
+            await releaseDeadHolder(status.fence);
             return;
           }
           // The box is still serving this live holder: keep the provider TTL
@@ -1311,13 +1321,13 @@ export async function resumeBoxForTurn(
       kind,
       holderId,
     })
-      .then((touched) => {
+      .then(async (touched) => {
         if (heartbeat !== holderLeaseHeartbeat) return;
         // A canonical turn holder is rejected once its exact attempt is no
         // longer the active writer (touch is attempt-fenced only; it never
         // consults lease authority, so false here always means holder death).
         if (!touched) {
-          releaseDeadHolder("holder_gone");
+          await releaseDeadHolder("holder_gone");
           return;
         }
         void maybeRenewProviderExpiration().catch(() => undefined);

@@ -452,12 +452,21 @@ export function withCurrentUserAttachmentRefs(
   refs: FileResourceRef[],
 ): Array<Record<string, unknown>> {
   if (refs.length === 0) return historyItems;
+  // Compaction can put a catalog after the triggering user message. A ref
+  // already retained anywhere in canonical history must not be copied onto
+  // that older catalog (and then disappear when the next turn replays it).
+  const retainedIds = new Set(
+    historyItems.flatMap((item) => attachmentRefsFromItem(item).map((ref) => ref.fileId)),
+  );
+  const missing = refs.filter((ref) => !retainedIds.has(ref.fileId));
+  if (missing.length === 0) return historyItems;
   for (let index = historyItems.length - 1; index >= 0; index -= 1) {
     const item = historyItems[index]!;
+    if (item[MODEL_ATTACHMENT_CATALOG_MARKER] === true) continue;
     if (item.type !== "message" || item.role !== "user") continue;
     const existing = attachmentRefsFromItem(item);
     const existingIds = new Set(existing.map((ref) => ref.fileId));
-    const additions = refs.filter((ref) => !existingIds.has(ref.fileId));
+    const additions = missing.filter((ref) => !existingIds.has(ref.fileId));
     if (additions.length === 0) return historyItems;
     const projected = [...historyItems];
     projected[index] = { ...item, [MODEL_ATTACHMENT_REFS_FIELD]: [...existing, ...additions] };

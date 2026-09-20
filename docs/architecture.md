@@ -440,9 +440,14 @@ and rotations may use `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` (unset inheri
 the ordinary budget). Boot admission reserves rotation headroom for the larger
 budget plus a reaper period, including historical Modal leases after a backend
 change. Explicit drain budgets must fit dispatch, capture and retry handoff
-inside the lifecycle ceiling. Reclamation preserves a warm capture's sole holder
+inside the lifecycle ceiling. Reclamation and heartbeat cleanup retain its holder
 until its original deadline despite logical turn closure, preventing drain
 takeover without extending execution authority.
+
+Explicitly stopping managed commands with repeated provider observation errors
+use the existing idle checkpoint-before-termination containment only after
+owner quiescence and cancellation grace. Observation failure is never exit
+proof, and running commands without cancellation remain excluded.
 
 Acquisition/mutation waiters may extend their configured budget once for the
 first observed durable capture deadline plus handoff grace, capped at one hour.

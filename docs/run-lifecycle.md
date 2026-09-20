@@ -1509,6 +1509,11 @@ the sweep could adopt a still-running finalizer's snapshot with the longer drain
 budget. This bounded reclamation exception grants no execution or heartbeat
 authority; settlement restores ordinary idle grace, and deadline expiry still
 permits dead-worker capture recovery.
+The worker's holder-liveness loop applies that same bounded physical-retention
+rule when heartbeat authority rejects a closed attempt. It does not refresh the
+closed holder, renew execution authority, or extend the capture deadline; the
+finalizer releases after physical settlement. Epoch replacement and expired
+captures still release promptly.
 Boot validation requires the larger configured capture budget and one reaper
 period to fit strictly inside provider-deadline rotation headroom even when the
 default backend is no longer Modal, because historical Modal leases remain
@@ -1766,6 +1771,14 @@ durable wake remain owned by the existing lifecycle. Unknown commands settle
 lost, never successful; a real exit arriving during drain retains its exit code.
 Failed checkpoints retain the provider and command holders for retry. Filesystem
 snapshots preserve neither running processes nor application transaction state.
+
+The same containment path covers an explicitly stopping managed command after
+at least five provider-error observations. Its cancellation request and owner
+quiescence must both predate idle grace; an absent quiescence receipt is not
+accepted for this path. Provider errors alone never enroll a running command.
+All sandbox-group activity, other-holder and child-admission exclusions remain
+in force, and only verified provider termination settles an unknown result as
+lost. A failed checkpoint leaves the provider and holders intact for retry.
 
 Historical containment cannot reconstruct an execution ID the old adapter never
 retained. A command whose owner cannot recover its terminal receipt remains a visible capture blocker;
@@ -2583,3 +2596,8 @@ directory. Resolving, losing, or renaming live file metadata does not rewrite
 that text. Active image bytes still require current authorized metadata and
 checksum-valid content; compacted attachment catalogs remain receipt-only.
 The receipt-format change incurs a one-time prefix change for existing histories.
+
+Service turns without a human file subject read shared attachments under an explicit
+null subject, clearing inherited private-file authority for that lookup. The reader
+restores the caller’s scope afterward; private and Drive-protected files still
+require their independent authority.

@@ -6723,7 +6723,22 @@ export async function getFilesForSubject(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+      // A service continuation has no human file authority. Its ambient actor
+      // (for example service:agent-turn) must not disagree with the explicit null
+      // passed to the file ACL function, or ordinary shared files disappear.
+      const [previousScope] =
+        input.subjectId === null
+          ? await scopedDb.execute<{ subject: string | null; owner: string | null }>(sql`
+            select current_setting('opengeni.subject_id', true) as subject,
+                   current_setting('opengeni.private_file_owner', true) as owner`)
+          : [];
+      if (input.subjectId === null) {
+        await scopedDb.execute(sql`select
+          set_config('opengeni.subject_id', '', true),
+          set_config('opengeni.private_file_owner', '', true)`);
+      } else {
+        await setSubjectRlsContext(scopedDb, input.subjectId);
+      }
       const subjectIdSql = input.subjectId === null ? sql`NULL::text` : sql`${input.subjectId}`;
       const rows = await scopedDb
         .select()
@@ -6744,6 +6759,16 @@ export async function getFilesForSubject(
             )`,
           ),
         );
+
+      // withRlsContext can be a savepoint on a caller's transaction. Restore
+      // its actor scope so this read cannot change later authorization.
+      // On query failure, savepoint rollback restores scope; do not mask the
+      // original SQLSTATE by issuing SQL in an aborted transaction.
+      if (input.subjectId === null) {
+        await scopedDb.execute(sql`select
+            set_config('opengeni.subject_id', ${previousScope?.subject ?? ""}, true),
+            set_config('opengeni.private_file_owner', ${previousScope?.owner ?? ""}, true)`);
+      }
       return rows.map(mapFile);
     },
   );
@@ -49717,8 +49742,25 @@ export async function enrollUnobservableCommandIdleDrain(
         (process.lease_epoch = ${initial.leaseEpoch}
           and process.provider_instance_id = ${initial.instanceId}
           and process.provider_backend = 'modal' and process.route_target_id is null
-          and process.last_reconcile_outcome in ('process_observation_unavailable',
-            'quarantined_process_observation_unavailable')
+          and (
+            process.last_reconcile_outcome in ('process_observation_unavailable',
+              'quarantined_process_observation_unavailable')
+            or (
+              process.last_reconcile_outcome = 'provider_error'
+              and process.reconcile_attempts >= 5
+              and attempt.quiesced_at is not null
+              and exists (
+                select 1 from session_background_commands command
+                where command.retained_process_id = process.id
+                  and command.workspace_id = process.workspace_id
+                  and command.session_id = process.session_id
+                  and command.provider = 'managed'
+                  and command.state = 'stopping'
+                  and command.cancel_requested_at < now() -
+                    (${input.idleGraceMs}::bigint * interval '1 millisecond')
+              )
+            )
+          )
           and attempt.state = 'closed'
           and greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at), process.started_at) < now() -
             (${input.idleGraceMs}::bigint * interval '1 millisecond')) as eligible

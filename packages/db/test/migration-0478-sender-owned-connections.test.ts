@@ -7,9 +7,9 @@ import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
 const migration = "0478_sender_owned_connections.sql";
-// 0493 patches the installed 0478 resolver, so it must wait until this fixture
+// 0494 patches the installed 0478 resolver, so it must wait until this fixture
 // has actually applied the sender cutover rather than merely marked it applied.
-const accountBindingsMigration = "0493_mcp_account_bindings.sql";
+const accountBindingsMigration = "0494_mcp_account_bindings.sql";
 let database: OwnerMigratedTestDatabase | null = null;
 
 beforeAll(async () => {
