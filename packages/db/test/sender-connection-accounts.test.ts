@@ -56,7 +56,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-test("workspace-only agent messages claim revoked receipts without inventing a human", async () => {
+test("workspace-connection agent messages retain their causal human without reviving revoked receipts", async () => {
   if (!shared) return;
   const sql = shared.admin;
   for (const change of ["revoked", "generation"] as const) {
@@ -188,8 +188,8 @@ test("workspace-only agent messages claim revoked receipts without inventing a h
     const [turn] =
       await sql`select initiator_kind,initiating_human_subject_id,personal_connection_delegations,mcp_account_bindings from session_turns where id=${claimedTarget.turn.id}`;
     expect(turn).toMatchObject({
-      initiator_kind: "service",
-      initiating_human_subject_id: null,
+      initiator_kind: "subject",
+      initiating_human_subject_id: human,
       personal_connection_delegations: [],
       mcp_account_bindings: [binding],
     });
