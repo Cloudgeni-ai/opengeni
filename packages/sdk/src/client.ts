@@ -6128,11 +6128,11 @@ export class OpenGeniClient {
   async getFile(
     workspaceId: string,
     fileId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions & { sessionId?: string | undefined } = {},
   ): Promise<FileAsset> {
     return await this.requestJson<FileAsset>(
       "GET",
-      `/v1/workspaces/${workspaceId}/files/${fileId}`,
+      `/v1/workspaces/${workspaceId}/files/${fileId}${options.sessionId ? `?sessionId=${encodeURIComponent(options.sessionId)}` : ""}`,
       undefined,
       {},
       options,
@@ -6348,11 +6348,11 @@ export class OpenGeniClient {
   async createFileDownloadUrl(
     workspaceId: string,
     fileId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions & { sessionId?: string | undefined } = {},
   ): Promise<FileDownloadUrlResponse> {
     return await this.requestJson<FileDownloadUrlResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/files/${fileId}/download-url`,
+      `/v1/workspaces/${workspaceId}/files/${fileId}/download-url${options.sessionId ? `?sessionId=${encodeURIComponent(options.sessionId)}` : ""}`,
       undefined,
       {},
       options,

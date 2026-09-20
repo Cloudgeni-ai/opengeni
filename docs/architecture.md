@@ -919,10 +919,9 @@ ordering are canonical in [`variable-sets.md`](variable-sets.md).
 ### 5.6 Files, knowledge, and artifacts
 
 A file attached to a human prompt is eager model/compute input only for that
-accepted turn. Later turns retain a durable file receipt and retrieve the bytes
-explicitly when needed. Generated images and video follow paid-operation and
-artifact-retention fences; provider bytes do not become permanent prompt
-history.
+accepted turn. Accepted private uploads gain session read grants; original ownership
+and Drive ACLs remain unchanged. Browser and agent reads enforce session access.
+See `docs/session-attachments.md`. Generated media follows paid-operation and retention fences.
 
 Knowledge is the product destination for retained sources and findings, with
 Files, Instructions and Skills as persistent tabs on the Agent Knowledge page.

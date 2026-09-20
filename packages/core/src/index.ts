@@ -1,3 +1,4 @@
+export { readSessionAttachmentFiles } from "./domain/session-file-access";
 export * from "./domain/skills";
 export * from "./domain/mcp-account-bindings";
 export * from "./domain/organization-integration-catalog";

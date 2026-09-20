@@ -1,3 +1,4 @@
+import { acceptSessionFileAttachments } from "./session-file-attachments";
 import { withLatestStartedSessionPolicy } from "./session-execution-policy";
 import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
@@ -33,7 +34,12 @@ import {
   type PersonalResourceAttachmentIntent,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
-import { setSubjectRlsContext, type Database, type SessionActivityDatabase } from "./database";
+import {
+  withSessionRlsActorContext,
+  setSubjectRlsContext,
+  type Database,
+  type SessionActivityDatabase,
+} from "./database";
 import {
   fromPostgresLosslessJson,
   fromPostgresLosslessText,
@@ -2406,6 +2412,24 @@ export async function submitHumanPromptInTransaction(
     .insert(schema.sessionEvents)
     .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
     .returning();
+  // Shared acceptance boundary covers ordinary Send/Steer and realtime. Only the
+  // verified human command can share original uploads; inherited agent identity
+  // is deliberately insufficient. Events must exist before grant provenance is checked.
+  if (input.actor.type === "human" && input.actor.subjectId === input.subjectId) {
+    await withSessionRlsActorContext(
+      { subjectId: input.subjectId, privateFileOwnerSubjectId: input.subjectId },
+      () =>
+        acceptSessionFileAttachments(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          subjectId: input.subjectId,
+          resources: [...ResourceRef.array().parse(session.resources), ...input.resources],
+        }),
+    );
+  }
+
   if (input.actor.type === "human" && input.mirrorToRealtime !== false) {
     await mirrorSessionRealtimeContextInTransaction(db, {
       accountId: input.accountId,
