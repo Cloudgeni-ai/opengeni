@@ -30,7 +30,10 @@ export function FailedSessionBanner({
   modelChanged?: boolean;
   canChooseModel?: boolean;
   actions?: ComponentProps<typeof FailedSessionActions>;
-  sandboxRecovery?: Omit<SandboxRecoveryActionsProps, "structuralFailure" | "children">;
+  sandboxRecovery?: Omit<
+    SandboxRecoveryActionsProps,
+    "structuralFailure" | "children" | "retryActions"
+  >;
 }) {
   const structuralFailure = Boolean(failure.structuralSandboxFailure);
   const billingFailure = creditExhausted && !structuralFailure;
@@ -42,7 +45,6 @@ export function FailedSessionBanner({
   );
   const retryActions =
     actions &&
-    !structuralFailure &&
     !failure.safetyRefusal &&
     (!unavailableModel || modelChanged || actions.retryInput) ? (
       <FailedSessionActions {...actions} />
@@ -78,12 +80,16 @@ export function FailedSessionBanner({
             </Button>
           ) : null
         ) : sandboxRecovery ? (
-          <SandboxRecoveryActions {...sandboxRecovery} structuralFailure={structuralFailure}>
-            {retryActions}
+          <SandboxRecoveryActions
+            {...sandboxRecovery}
+            structuralFailure={structuralFailure}
+            retryActions={retryActions}
+          >
+            {!structuralFailure ? retryActions : null}
           </SandboxRecoveryActions>
-        ) : (
+        ) : !structuralFailure ? (
           retryActions
-        )}
+        ) : null}
       </div>
     </div>
   );

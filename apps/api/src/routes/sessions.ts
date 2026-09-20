@@ -3153,6 +3153,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
     const parsed = SandboxRecoveryRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "invalid checkpoint consent" });
+    let consentCommitted = false;
     try {
       const receipt = await consentManagedHumanSandboxRecovery(
         deps,
@@ -3161,6 +3162,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
         parsed.data,
       );
+      consentCommitted = true;
       const projection = await getManagedHumanSandboxRecovery(
         deps,
         authorization,
@@ -3197,6 +3199,20 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         recovery: await getManagedHumanSandboxRecovery(deps, authorization, workspaceId, sessionId),
       });
     } catch (error) {
+      if (consentCommitted) {
+        // A later authorization/read failure cannot revoke the committed
+        // receipt. Return no session state, checkpoint or provider details.
+        return c.json(
+          {
+            code: "upstream_unavailable",
+            message:
+              "Recovery status could not be confirmed. Check status without resubmitting consent.",
+            outcomeUnknown: true,
+            retryable: false,
+          },
+          503,
+        );
+      }
       if (error instanceof SandboxRecoveryConflictError)
         return c.json({ code: error.code, message: error.message }, 409);
       if (error instanceof SessionCommandIdempotencyError) return commandConflictResponse(c, error);

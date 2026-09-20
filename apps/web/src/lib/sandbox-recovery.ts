@@ -54,6 +54,8 @@ export function sandboxRecoveryBlocker(reason: string): string {
   const messages: Record<string, string> = {
     recovery_not_enabled: "Checkpoint recovery has not been enabled by your operator.",
     managed_modal_home_required: "Recovery supports only this session's managed Modal home.",
+    connected_machine_selected:
+      "This session now uses a Connected Machine. Check prior execution outcomes before retrying.",
     singleton_required: "This sandbox is shared with another session and cannot be recovered here.",
     checkpoint_unavailable: "No recoverable checkpoint is available.",
     registered_current_checkpoint_required:
@@ -180,7 +182,10 @@ export function createSandboxRecoveryController(
             error instanceof OpenGeniApiError &&
             !error.outcomeUnknown &&
             error.status >= 400 &&
-            error.status < 500;
+            error.status < 500 &&
+            // An older API may return access denial from a post-commit read.
+            // Losing access is not evidence that the consent was rolled back.
+            ![401, 403, 404].includes(error.status);
           update({
             projection: null,
             request: rejected ? null : request,

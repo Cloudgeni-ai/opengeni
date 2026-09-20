@@ -1529,6 +1529,15 @@ an unchanged authoritative blocked effective route; selecting another model does
 not repair it, while a healthy selected Connected Machine is not blocked by its
 managed home's condition.
 
+After verified restoration, or a current selected Connected Machine projection,
+the failure UI offers the existing exact failed-turn Retry as an explicit human
+action, subject to its control and unknown-effect fences. Historical failure
+classification and the retained recovery operation ID do not hide that action.
+Model switching is not offered as a filesystem repair. A post-consent observation
+or authorization failure returns only an unknown-outcome envelope, never newly
+unauthorized session state or a false rejection. The browser retains its immutable
+request, performs read-only status checks, and never resubmits automatically.
+
 Every later agent build reads the durable consent receipt and includes its exact
 filesystem-discontinuity warning in session instructions. This warning is outside
 compactable transcript state and is reconstructed after worker restart. Prior tool

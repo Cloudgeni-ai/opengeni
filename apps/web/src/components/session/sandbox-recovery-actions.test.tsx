@@ -13,6 +13,7 @@ try {
 }
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const { SandboxRecoveryActions } = await import("./sandbox-recovery-actions");
+const { FailedSessionActions } = await import("./failed-session-actions");
 let root: Root | undefined;
 afterEach(async () => {
   await act(async () => root?.unmount());
@@ -39,7 +40,12 @@ const eligible: SandboxRecoveryProjection = {
     capturedAt: "2026-09-20T08:00:00.000Z",
   },
 };
-async function render(client: SandboxRecoveryClient, structuralFailure = true, canControl = true) {
+async function render(
+  client: SandboxRecoveryClient,
+  structuralFailure = true,
+  canControl = true,
+  retryOptions: { onRetry?: () => Promise<boolean>; retryBlocker?: "paused" | null } = {},
+) {
   const container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -51,6 +57,12 @@ async function render(client: SandboxRecoveryClient, structuralFailure = true, c
         workspaceId="workspace"
         canControl={canControl}
         structuralFailure={structuralFailure}
+        retryActions={
+          <FailedSessionActions
+            onRetry={retryOptions.onRetry ?? (async () => true)}
+            retryBlocker={retryOptions.retryBlocker ?? null}
+          />
+        }
       >
         <button>Try again</button>
         <button>Choose another model</button>
@@ -281,7 +293,95 @@ test.each(["restoring", "restored"] as const)(
     expect(container.textContent).toContain(
       status === "restoring" ? "Restoration has not completed" : "Checkpoint restored",
     );
-    expect(container.textContent).not.toContain("Try again");
+    expect(container.textContent?.includes("Retry")).toBe(status === "restored");
+    expect(container.textContent).not.toContain("Choose another model");
     expect(container.textContent).not.toContain("Review checkpoint recovery");
   },
 );
+
+test.each(["restored", "connected_machine"] as const)(
+  "%s offers explicit Retry despite historical failure/receipt, never automatic replay or model switching",
+  async (route) => {
+    let retries = 0;
+    let writes = 0;
+    const container = await render(
+      {
+        getSandboxRecovery: async () =>
+          route === "restored"
+            ? { ...eligible, status: "restored", operationId: "durable-operation" }
+            : {
+                ...eligible,
+                status: "unsupported",
+                reason: "connected_machine_selected",
+                checkpoint: null,
+              },
+        recoverSandbox: async () => {
+          writes++;
+          throw new Error("No recovery mutation expected");
+        },
+      },
+      true,
+      true,
+      {
+        onRetry: async () => {
+          retries++;
+          return true;
+        },
+      },
+    );
+    expect(retries).toBe(0);
+    expect(writes).toBe(0);
+    expect(container.textContent).not.toContain("Choose another model");
+    expect(container.textContent).not.toContain("Review checkpoint recovery");
+    await click("Retry");
+    expect(retries).toBe(1);
+    expect(container.textContent).toContain("Retry requested.");
+    expect(container.querySelector("button")).toBeNull();
+    expect(writes).toBe(0);
+  },
+);
+
+test("verified restoration retains Pause and permission fences", async () => {
+  let retries = 0;
+  await render(
+    {
+      getSandboxRecovery: async () => ({
+        ...eligible,
+        status: "restored",
+        operationId: "durable-operation",
+      }),
+      recoverSandbox: async () => {
+        throw new Error("No mutation expected");
+      },
+    },
+    true,
+    true,
+    {
+      retryBlocker: "paused",
+      onRetry: async () => {
+        retries++;
+        return true;
+      },
+    },
+  );
+  expect(document.querySelector("button")).toBeNull();
+  expect(retries).toBe(0);
+});
+
+test("verified restoration does not offer Retry without control permission", async () => {
+  const container = await render(
+    {
+      getSandboxRecovery: async () => ({
+        ...eligible,
+        status: "restored",
+        operationId: "durable-operation",
+      }),
+      recoverSandbox: async () => {
+        throw new Error("No mutation expected");
+      },
+    },
+    true,
+    false,
+  );
+  expect(container.textContent).not.toContain("Retry");
+});

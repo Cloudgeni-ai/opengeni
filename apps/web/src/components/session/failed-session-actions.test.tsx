@@ -192,6 +192,93 @@ test("sandbox projection gates compact Retry and structural failures override bi
   expect(container.querySelector("button")!.textContent).toBe("Check recovery status");
 });
 
+test.each(["restored", "connected_machine"] as const)(
+  "%s projection exposes only explicit compact Retry through the structural banner",
+  async (route) => {
+    let retries = 0;
+    const sandboxRecovery = {
+      workspaceId: "workspace-a",
+      sessionId: "session-a",
+      canControl: true,
+      client: {
+        getSandboxRecovery: async () => ({
+          version: 1 as const,
+          status: route === "restored" ? ("restored" as const) : ("unsupported" as const),
+          reason: route === "restored" ? null : "connected_machine_selected",
+          operationId: route === "restored" ? "durable-operation" : null,
+          checkpoint: null,
+        }),
+        recoverSandbox: async () => {
+          throw new Error("Current route must not submit consent");
+        },
+      },
+    };
+    const failureProps = { ...failure, structuralSandboxFailure: true };
+    const retryProps = {
+      ...actions,
+      onRetry: async () => {
+        retries++;
+        return true;
+      },
+    };
+    const container = await render(
+      <FailedSessionBanner
+        failure={failureProps}
+        actions={retryProps}
+        sandboxRecovery={sandboxRecovery}
+      />,
+    );
+    expect(retries).toBe(0);
+    expect(container.querySelectorAll("button")).toHaveLength(1);
+    expect(container.querySelector("button")!.textContent).toBe("Retry");
+    expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
+    expect(container.textContent).not.toContain("Choose another model");
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={failureProps}
+          actions={{ ...retryProps, retryBlocker: "paused" }}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={{ ...failureProps, safetyRefusal: true }}
+          actions={retryProps}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={{ ...failureProps, reason: "The model is unavailable" }}
+          actions={retryProps}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={failureProps}
+          actions={retryProps}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(retries).toBe(0);
+    await act(async () => container.querySelector("button")!.click());
+    expect(retries).toBe(1);
+    expect(container.querySelector("button")).toBeNull();
+  },
+);
+
 test("local non-submission remains retryable", async () => {
   const container = await render(<FailedSessionActions {...actions} onRetry={async () => false} />);
   await act(async () => container.querySelector("button")!.click());

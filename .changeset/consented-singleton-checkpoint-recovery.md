@@ -14,3 +14,5 @@ without blocking an independently selected Connected Machine. Additive migration
 0492 keeps consent DB-disabled until operator-verified compatible rollout; permanent
 consent receipts reject old inference claims even after disabling consent or lease
 replacement. Only the warning-aware worker declares the scoped protocol.
+Preserve explicit failed-turn Retry after verified recovery or Connected Machine
+selection, and retain consent identity when post-accept status reads lose access.

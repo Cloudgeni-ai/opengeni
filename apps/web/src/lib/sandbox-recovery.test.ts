@@ -146,6 +146,47 @@ describe("checkpoint recovery consent", () => {
     expect(requests[0]!.operationId).not.toBe(requests[1]!.operationId);
   });
 
+  test.each([401, 403, 404, 503])(
+    "post-accept observation failure %s retains immutable consent without resending",
+    async (status) => {
+      const requests: SandboxRecoveryRequest[] = [];
+      let denied = false;
+      const controller = createSandboxRecoveryController(
+        {
+          getSandboxRecovery: async () => {
+            if (denied) throw new OpenGeniApiError(404, "Session not found");
+            return projection();
+          },
+          recoverSandbox: async (_workspaceId, _sessionId, request) => {
+            requests.push(request);
+            denied = true;
+            // 401/403/404 reproduce older APIs' post-commit authorization race.
+            throw new OpenGeniApiError(
+              status,
+              JSON.stringify({
+                code: "upstream_unavailable",
+                message: "Status unavailable",
+                ...(status === 503 ? { outcomeUnknown: true, retryable: false } : {}),
+              }),
+              { mutation: true },
+            );
+          },
+        },
+        "workspace",
+        "session",
+      );
+      expect(await controller.consent(selection)).toBe(false);
+      expect(controller.getSnapshot().request).toBe(requests[0]!);
+      expect(controller.getSnapshot().uncertain).toBe(true);
+      expect(controller.getSnapshot().error).not.toContain("not accepted");
+      await controller.refresh();
+      expect(await controller.consent(selection)).toBe(false);
+      expect(controller.getSnapshot().request).toBe(requests[0]!);
+      expect(controller.getSnapshot().projection).toBeNull();
+      expect(requests).toHaveLength(1);
+    },
+  );
+
   test("read errors remove stale eligibility but never discard unresolved consent", async () => {
     let failRead = false;
     const controller = createSandboxRecoveryController(

@@ -15,6 +15,7 @@ export type SandboxRecoveryActionsProps = {
   sessionId: string;
   canControl: boolean;
   structuralFailure: boolean;
+  retryActions?: ReactNode;
   children?: ReactNode;
 };
 
@@ -40,6 +41,7 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
       projection.reason === "historical_checkpoint_not_required");
   if (
     recoveryNotRequired &&
+    projection?.reason !== "connected_machine_selected" &&
     !props.structuralFailure &&
     !state.request &&
     !projection?.operationId
@@ -53,6 +55,15 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
   );
   const pending = projection?.status === "consent_accepted" || projection?.status === "restoring";
   const restored = projection?.status === "restored";
+  // Current route/restore truth supersedes the historical failure. These are
+  // ordinary explicit Retry controls, not consent-driven continuation; the
+  // Retry endpoint still owns exact failure, control and unknown-effect fences.
+  const retryAvailable =
+    !state.uncertain &&
+    !state.submitting &&
+    props.canControl &&
+    (restored ||
+      (projection?.status === "unsupported" && projection.reason === "connected_machine_selected"));
   const canConsent = eligible && props.canControl && !state.request && !state.submitting;
 
   return (
@@ -92,7 +103,7 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
         >
           Review checkpoint recovery
         </Button>
-      ) : !pending && !restored && !state.submitting ? (
+      ) : !pending && !restored && !retryAvailable && !state.submitting ? (
         <Button
           type="button"
           size="sm"
@@ -109,6 +120,7 @@ export function SandboxRecoveryActions(props: SandboxRecoveryActionsProps) {
           {state.error}
         </p>
       ) : null}
+      {retryAvailable ? props.retryActions : null}
       <ConfirmDialog
         open={selection !== null}
         onOpenChange={(open) => {
