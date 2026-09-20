@@ -1132,14 +1132,11 @@ Canonical: [`../agent/README.md`](../agent/README.md) and
 `apps/api` owns HTTP concerns: middleware, request/response translation,
 cookies and bearer extraction, route composition, SSE, callbacks, and API-side
 control adapters. `@opengeni/core` owns reusable access, domain, billing, and
-admission behavior. A route should not create a second implementation of a
-domain rule already used by MCP, workers, or embedded hosts.
+admission behavior. Routes reuse domain rules shared with MCP, workers, and embedded hosts.
 
-Composer draft submission is one shared application command in
-`packages/core/src/application/composer-submit.ts`. The stock HTTP route and
-in-process embedding hosts call that command so validation, draft rotation,
-event append, turn routing, receipt/replay behavior, and the response contract
-have one owner.
+Composer submission's shared command, `packages/core/src/application/composer-submit.ts`,
+serves stock HTTP and in-process embedding hosts, owning validation, draft rotation,
+event append, turn routing, receipt/replay behavior, and the response contract.
 
 Canonical: `apps/api/src/app.ts`, `apps/api/src/routes/`, and
 `packages/core/src/`.
@@ -1570,10 +1567,10 @@ subjects cannot supply human authority. See [`skills-lifecycle.md`](skills-lifec
   choose arbitrary credential destinations.
 - **Connected Machine transport is tenant-scoped.** NATS credentials, subjects,
   enrollment generation, connection instance, operation identity, and relay
-  tokens prevent one machine or viewer from crossing workspaces or epochs.
-- **Sandbox credentials are least-lived and least-scoped.** Host preparation
-  profiles and explicit allowlists are the only way ambient credentials enter
-  managed sandboxes. Connected Machines retain their own environment.
+  tokens prevent machine/viewer access across workspaces or epochs.
+- **Sandbox credentials are least-lived and least-scoped.** Ambient credentials enter
+  managed sandboxes only through host preparation profiles and explicit allowlists.
+  Connected Machines retain their environment.
 
 Canonical: [`../SECURITY.md`](../SECURITY.md),
 [`credentials.md`](credentials.md), [`variable-sets.md`](variable-sets.md),
@@ -1587,12 +1584,12 @@ Canonical: [`../SECURITY.md`](../SECURITY.md),
 
 Production npm availability reconciles independently of acceptance; see `reconcile-production-packages.yml`.
 
-The stack uses Bun/strict TypeScript and Cargo for the Rust agent/relay.
+Toolchains: Bun/strict TypeScript; Cargo for the Rust agent/relay.
 Unit tests and typechecking are infrastructure-free; integration, end-to-end,
 browser, artifact-runtime, and live lanes explicitly add required services/credentials.
 
-Evidence-bound publication covers npm packages, container images, Helm, the
-Rust agent, and retained source identity. Package manifests, Changesets, CI,
+Evidence-bound publication covers npm packages, container images, Helm,
+Rust agent, and retained source identity. Manifests, Changesets, CI,
 and release scripts own closure/procedure. Web assets compile natively for both CPU targets.
 
 Commands:
@@ -1603,12 +1600,12 @@ Toolchain: [`toolchain.md`](toolchain.md).
 
 ## 12. Deployment
 
-Standalone and embedded deployments use typed `@opengeni/deployment` profiles
-to derive validated environment requirements, preflights, stack plans, and runtime artifacts.
+Typed `@opengeni/deployment` profiles derive standalone/embedded deployments'
+validated environment requirements, preflights, stack plans, and runtime artifacts.
 
 Helm owns application components and integration resources; cloud Terraform
 roots/stack wrappers compose external infrastructure. Bundled Postgres, Temporal,
-NATS, and object-storage templates are development, CI, conformance, or documented
+NATS, and object-storage templates serve development, CI, conformance, or documented
 single-machine fixtures—not production defaults.
 
 Procedures, provider requirements, activation boundaries, and recovery:
