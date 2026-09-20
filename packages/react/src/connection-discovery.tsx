@@ -55,22 +55,22 @@ function ScopedDiscovery({
   const opener = useRef<HTMLElement | null>(null);
   useEffect(() => {
     const abort = new AbortController();
+    // Capture each read independently: even a synchronously throwing transport
+    // is captured by Promise.all, and cannot strand another read's rejection.
+    const read = async <T,>(operation: () => Promise<T>): Promise<T> => {
+      abort.signal.throwIfAborted();
+      return operation();
+    };
     setFailed(false);
     setSelectedProvider(null);
     setProviders(null);
     setItems(null);
-    setConnections([]);
-    setAccounts([]);
     setProviderFailed(false);
     if (controller)
-      void Promise.resolve()
-        .then(() => {
-          abort.signal.throwIfAborted();
-          return Promise.all([
-            controller.transport.catalog(workspaceId, { signal: abort.signal }),
-            controller.transport.accounts(workspaceId, { signal: abort.signal }),
-          ]);
-        })
+      void Promise.all([
+        read(() => controller.transport.catalog(workspaceId, { signal: abort.signal })),
+        read(() => controller.transport.accounts(workspaceId, { signal: abort.signal })),
+      ])
         .then(([catalog, inventory]) => {
           if (!abort.signal.aborted) {
             setProviders(catalog.filter(isServiceConnectProvider));
@@ -80,14 +80,10 @@ function ScopedDiscovery({
         .catch(() => {
           if (!abort.signal.aborted) setProviderFailed(true);
         });
-    void Promise.resolve()
-      .then(() => {
-        abort.signal.throwIfAborted();
-        return Promise.all([
-          client.listCapabilities(workspaceId),
-          client.listConnections(workspaceId),
-        ]);
-      })
+    void Promise.all([
+      read(() => client.listCapabilities(workspaceId)),
+      read(() => client.listConnections(workspaceId)),
+    ])
       .then(([catalog, inventory]) => {
         if (!abort.signal.aborted) {
           setConnections(inventory);
@@ -163,48 +159,46 @@ function ScopedDiscovery({
         </p>
       )}
       <div className="og-connection-discovery-results">
-        <div>
-          {providerMatches.map((provider) => {
-            const connected = accounts.some(
-              (account) => account.providerId === provider.id && account.status === "connected",
-            );
-            return (
-              <CapabilityCatalogRow
-                key={provider.id}
-                name={provider.label}
-                icon={
-                  <ConnectionLogo
-                    name={provider.label}
-                    src={connectionServicePresentation(provider).logo}
-                  />
-                }
-                status={connected ? "added" : "available"}
-                statusLabel={connected ? "Connected" : "Connect"}
-                showStatusLabel
-                onOpen={() => setSelectedProvider(provider)}
-              />
-            );
-          })}
-          {matches.slice(0, limit).map((item) => {
-            const state = mcpConnectionDiscoveryState(item, connections);
-            return (
-              <CapabilityCatalogRow
-                key={item.id}
-                name={item.name}
-                description={item.description ?? undefined}
-                icon={<ConnectionServiceLogo client={client} item={item} name={item.name} />}
-                status={state.status}
-                statusLabel={state.label}
-                showStatusLabel
-                onOpen={() => {
-                  opener.current =
-                    document.activeElement instanceof HTMLElement ? document.activeElement : null;
-                  setSelected(item);
-                }}
-              />
-            );
-          })}
-        </div>
+        {providerMatches.map((provider) => {
+          const connected = accounts.some(
+            (account) => account.providerId === provider.id && account.status === "connected",
+          );
+          return (
+            <CapabilityCatalogRow
+              key={provider.id}
+              name={provider.label}
+              icon={
+                <ConnectionLogo
+                  name={provider.label}
+                  src={connectionServicePresentation(provider).logo}
+                />
+              }
+              status={connected ? "added" : "available"}
+              statusLabel={connected ? "Connected" : "Connect"}
+              showStatusLabel
+              onOpen={() => setSelectedProvider(provider)}
+            />
+          );
+        })}
+        {matches.slice(0, limit).map((item) => {
+          const state = mcpConnectionDiscoveryState(item, connections);
+          return (
+            <CapabilityCatalogRow
+              key={item.id}
+              name={item.name}
+              description={item.description ?? undefined}
+              icon={<ConnectionServiceLogo client={client} item={item} name={item.name} />}
+              status={state.status}
+              statusLabel={state.label}
+              showStatusLabel
+              onOpen={() => {
+                opener.current =
+                  document.activeElement instanceof HTMLElement ? document.activeElement : null;
+                setSelected(item);
+              }}
+            />
+          );
+        })}
 
         {loading && <ConnectionSkeleton rows={3} label="Loading services" />}
         {!loading && !failed && !providerFailed && !matches.length && !providerMatches.length && (

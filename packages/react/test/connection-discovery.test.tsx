@@ -192,3 +192,19 @@ test("actor replacement aborts provider reads and ignores late catalogs from eit
     current.dispose();
   }
 });
+
+test("simultaneous async catalog rejection and sync inventory failure are both contained", async () => {
+  const connect = controller(async () => Promise.reject(new Error("Catalog failed")));
+  connect.transport.accounts = () => {
+    throw new Error("Inventory failed");
+  };
+  const view = await renderComponent(discovery(client(), connect));
+  try {
+    expect(view.container.textContent).toContain("Gmail");
+    expect(view.container.textContent).toContain("Some services could not be loaded");
+    expect(view.container.textContent).not.toContain("Inventory failed");
+  } finally {
+    await view.unmount();
+    connect.dispose();
+  }
+});
