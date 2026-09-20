@@ -1463,23 +1463,20 @@ transitions use owner-only FORCE-RLS inventory and canonically ordered workspace
 fences before mutation visibility. Healthy interactions have no independent age
 limit. See `docs/run-lifecycle.md` for rotation and capture ordering.
 
-Modal command output uses authenticated task-router byte offsets. The exact
-retained process owns the locator; output events and cursor advancement commit
-atomically under an expected-cursor fence. Concurrent readers reread after a
-lost fence instead of duplicating output or settling an uncaptured tail. Router
-credentials stay in memory, never in command records or sandbox files. The
-explicit legacy batch reader exists only to drain already-launched commands;
-its locators are never reinterpreted as byte offsets.
+Modal commands use authenticated task-router byte offsets owned by the retained
+process. Output and cursor commit atomically under an expected-cursor fence;
+losing readers reread without duplicating output or settling uncaptured tails.
+Router credentials remain in memory. Legacy batch readers only drain existing
+commands; their locators are never reinterpreted as offsets.
 
 Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;
 unobserved outcomes become lost. Command backoff never suppresses rotation's
 provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
 
-Desktop/browser capabilities layer onto compute; their images and daemons have
-separate release lifecycles. Desktop/terminal data use the relay; authority remains
-in the control plane. Large edits use capability-gated transactional transfers,
-verified receipts, and no blind replay.
+Desktop/browser images and daemons release separately. Desktop/terminal data
+use the relay; the control plane retains authority. Large edits require
+capability-gated transactional transfers and verified receipts, never blind replay.
 
 Canonical: `packages/runtime/src/sandbox/`,
 `apps/worker/src/activities/sandbox-lease.ts`,
