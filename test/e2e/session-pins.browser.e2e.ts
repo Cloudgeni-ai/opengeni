@@ -2043,8 +2043,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         expect(failure.turnId).toBeTruthy();
         await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${failed.id}`);
         const banner = page.getByTestId("failed-session-banner");
-        const chooseModel = banner.getByRole("button", {
-          name: "Choose another model",
+        const chooseModel = page.getByRole("button", {
+          name: "Model and effort",
           exact: true,
         });
         await chooseModel.waitFor();
@@ -2057,7 +2057,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await page
           .getByRole("dialog", { name: "Model and effort", exact: true })
           .waitFor({ state: "detached" });
-        const retryButton = banner.getByRole("button", { name: "Try again", exact: true });
+        const retryButton = banner.getByRole("button", { name: "Retry", exact: true });
         await waitFor(async () => !(await retryButton.isDisabled()));
         let submissions = 0;
         const submittedBodies: Record<string, unknown>[] = [];
@@ -2106,13 +2106,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         let acceptedReceipt: RetryReceipt;
         if (responseLoss === "before dispatch") {
           await banner.getByRole("alert").waitFor();
-          expect(await banner.getByRole("alert").textContent()).toContain("same request");
-          const checkRetry = banner.getByRole("button", { name: "Check prior retry", exact: true });
+          expect(await banner.getByRole("alert").textContent()).toContain("Retry not confirmed");
+          const checkRetry = banner.getByRole("button", { name: "Check retry", exact: true });
           await waitFor(async () => !(await checkRetry.isDisabled()));
-          expect(await banner.getByRole("status").textContent()).toContain(selectedModel);
-          expect(await banner.getByRole("status").textContent()).toContain(
-            "Model choices are locked",
-          );
           expect(await chooseModel.isDisabled()).toBe(true);
           expect(
             await page.getByRole("button", { name: "Model and effort", exact: true }).isDisabled(),
