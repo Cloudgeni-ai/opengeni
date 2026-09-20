@@ -590,6 +590,7 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
             settings,
             objectStorage,
             sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+            observability,
           },
           {
             accountId: input.accountId,

@@ -27,6 +27,12 @@ heartbeat. The configured interval is a start-to-start cadence, not a maximum
 recovery-point age. Forced finalization/recovery bypasses this cadence only; all
 ownership, active-capture and possible-writer fences still apply.
 
+Snapshot failure diagnostics preserve a closed provider
+error name, numeric gRPC code (only for a typed ClientError), numeric HTTP status,
+and boolean retryability from the SDK wrapper's structured details. They do not
+log provider messages, request identifiers, response bodies or free-form causes.
+Missing classification means unknown, not a timeout or a retryable failure.
+
 Workspace capture admission is measured on every routed operation, including
 operations after startup. `opengeni_sandbox_capture_wait_duration_seconds`
 separates durable admission and provider capture gates using closed `stage`
