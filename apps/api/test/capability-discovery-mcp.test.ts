@@ -274,7 +274,7 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         await Promise.all([mcp.close(), server.close()]);
       }
     });
-  test("enabled personal Gmail requires consent unless this exact attempt exposes its tools", async () => {
+  test("legacy missing tools do not manufacture reconnect requests; explicit empty account selection requests setup", async () => {
     if (!shared) throw new Error("Real PostgreSQL fixture required");
     const capabilityId = "mcp:gmail-consent-test";
     const serverId = "gmail-consent-test";
@@ -303,8 +303,10 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         },
       },
     });
-    for (const exposed of ["none", "other-server", serverId]) {
-      const attempt = await seedAttempt();
+    for (const exposed of ["none", "other-server", serverId, "no-accepted-account"]) {
+      const knownEmpty = exposed === "no-accepted-account";
+      const attempt = await seedAttempt(knownEmpty);
+      const ready = exposed === serverId;
       if (exposed !== "none") {
         await persistAttemptToolCatalog(
           client.db,
@@ -364,12 +366,11 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         expect(
           body.matches.find((entry) => entry.capabilityId === capabilityId)?.setup,
         ).toMatchObject({
-          status: exposed === serverId ? "ready" : "authorization_required",
-          action: exposed === serverId ? null : "connect",
-          nextAction:
-            exposed === serverId
-              ? null
-              : { toolName: "capability_authorization_request", capabilityId },
+          status: ready ? "ready" : knownEmpty ? "authorization_required" : "unavailable",
+          action: knownEmpty ? "connect" : null,
+          nextAction: knownEmpty
+            ? { toolName: "capability_authorization_request", capabilityId }
+            : null,
         });
         const request = await mcp.callTool({
           name: "capability_authorization_request",
@@ -377,12 +378,12 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         });
         expect(request.isError).not.toBe(true);
         expect(mcpJson(request)).toMatchObject({
-          status: exposed === serverId ? "ready" : "authorization_requested",
+          status: ready ? "ready" : knownEmpty ? "authorization_requested" : "unavailable",
         });
         const events = await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId);
         const notices = events.filter((event) => event.type === "tool.auth_needed");
-        expect(notices).toHaveLength(exposed === serverId ? 0 : 1);
-        if (exposed !== serverId)
+        expect(notices).toHaveLength(knownEmpty ? 1 : 0);
+        if (knownEmpty)
           expect(notices[0]).toMatchObject({
             turnId: attempt.turnId,
             turnAttemptId: attempt.attemptId,
@@ -410,7 +411,7 @@ function mcpJson(result: Awaited<ReturnType<Client["callTool"]>>): unknown {
   return JSON.parse(item.text) as unknown;
 }
 
-async function seedAttempt(): Promise<{
+async function seedAttempt(knownEmpty = false): Promise<{
   sessionId: string;
   turnId: string;
   attemptId: string;
@@ -435,12 +436,12 @@ async function seedAttempt(): Promise<{
     INSERT INTO session_turns (
       account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
       status, position, prompt, model, reasoning_effort, sandbox_backend,
-      execution_generation, initiator_kind, initiator_subject_id, initiator_context
+      execution_generation, initiator_kind, initiator_subject_id, initiator_context, mcp_account_bindings
     ) VALUES (
       ${workspace.accountId}, ${workspace.workspaceId}, ${session.id}, gen_random_uuid(),
       ${`capability-wf-${crypto.randomUUID()}`}, 'running', 0, 'Use GitHub',
       'gpt-5.6-sol', 'medium', 'none', ${executionGeneration}, 'subject',
-      ${workspace.subjectId}, '{"accepted":true}'::jsonb
+      ${workspace.subjectId}, '{"accepted":true}'::jsonb, ${knownEmpty ? shared!.admin.json([]) : null}::jsonb
     ) RETURNING id`;
   const attemptId = crypto.randomUUID();
   await shared!.admin.begin(async (tx) => {

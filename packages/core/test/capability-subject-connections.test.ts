@@ -193,6 +193,7 @@ describe("subject-owned capability connection references", () => {
     });
     const projected = catalog.items.find((entry) => entry.id === capabilityId)!;
     expect(projected.enabled).toBe(true);
+    expect(projected.authKind).toBe("oauth2");
     expect(projected.connectionRef).toMatchObject({
       accountSelection: "all_eligible",
       providerDomain: "slack.com",

@@ -9,6 +9,7 @@ import {
   setSessionChannel,
 } from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
+import { capabilityAccountReadiness } from "./capability-account-readiness";
 import {
   prepareWorkspaceArtifactUpload,
   prepareWorkspaceArtifactPublication,
@@ -94,6 +95,7 @@ import {
   getSessionMcpMonitoringSummary,
   getSessionQueueSnapshot,
   getSessionTurn,
+  getSessionTurnMcpAccountBindings,
   getOrCreatePreferenceRegistrySnapshot,
   getPreferenceRegistryFullContent,
   getVariableSet,
@@ -5778,7 +5780,9 @@ function registerCapabilityDiscoveryTools(
   // This is a readiness projection, never credential resolution or a new grant.
   const setupProjections = async (items: CapabilityCatalogItem[]) => {
     const availableServerIds = new Set<string>();
-    if (items.some((item) => item.enabled && item.connectionRef?.subjectScope === "subject")) {
+    const acceptedServerIds = new Set<string>();
+    let accountSelectionKnown = false;
+    if (items.some((item) => item.enabled && item.connectionRef)) {
       const claims = exactAgentCommandContext(grant, sessionId);
       const attemptCatalog = await getAttemptToolCatalog(deps.db, {
         accountId: grant.accountId,
@@ -5791,11 +5795,28 @@ function registerCapabilityDiscoveryTools(
         attemptCatalog.executionGeneration === claims.callerExecutionGeneration
       ) {
         for (const entry of attemptCatalog.entries) availableServerIds.add(entry.identity.serverId);
+        const bindings = await getSessionTurnMcpAccountBindings(
+          deps.db,
+          grant.workspaceId,
+          sessionId,
+          claims.callerTurnId,
+        );
+        accountSelectionKnown = bindings !== null;
+        const readiness = capabilityAccountReadiness(availableServerIds, bindings);
+        for (const id of readiness.available) availableServerIds.add(id);
+        for (const id of readiness.accepted) acceptedServerIds.add(id);
       }
     }
     return await Promise.all(
       items.map((item) =>
-        capabilitySetupProjection(deps, grant.workspaceId, item, availableServerIds),
+        capabilitySetupProjection(
+          deps,
+          grant.workspaceId,
+          item,
+          availableServerIds,
+          acceptedServerIds,
+          accountSelectionKnown,
+        ),
       ),
     );
   };
@@ -5927,6 +5948,8 @@ async function capabilitySetupProjection(
   workspaceId: string,
   item: CapabilityCatalogItem,
   availableServerIds: ReadonlySet<string>,
+  acceptedServerIds: ReadonlySet<string>,
+  accountSelectionKnown: boolean,
 ): Promise<CapabilitySetupProjection> {
   if (item.id === "api:github-app" || item.surfaceType === "first_party_github") {
     const missing = githubAppMissingSettings(deps.settings);
@@ -5967,7 +5990,7 @@ async function capabilitySetupProjection(
           detail: "A workspace admin must designate an authorized Codex Apps subscription.",
         };
   }
-  if (item.enabled && item.connectionRef?.subjectScope === "subject") {
+  if (item.enabled && item.connectionRef) {
     if (item.runtime.mcpServerId && availableServerIds.has(item.runtime.mcpServerId)) {
       return {
         status: "ready",
@@ -5975,11 +5998,22 @@ async function capabilitySetupProjection(
         detail: "This capability has tools available in this turn.",
       };
     }
+    if (
+      !accountSelectionKnown ||
+      (item.runtime.mcpServerId && acceptedServerIds.has(item.runtime.mcpServerId))
+    ) {
+      return {
+        status: "unavailable",
+        action: null,
+        detail:
+          "This integration's tools are unavailable in this execution. Check its connection or setup failure before requesting reconnection; missing tools alone do not establish an authorization failure.",
+      };
+    }
     return {
       status: "authorization_required",
       action: "connect",
       detail:
-        "This capability is enabled, but its personal account is not available in this turn. The account owner must review access using Use in this conversation, then send a new message. Shared conversations require acknowledgement that results are visible to workspace members.",
+        "This integration is enabled in the workspace, but no account was selected for this execution. Connect or select an account available to the sender, then send a new message.",
     };
   }
   if (item.enabled) {
