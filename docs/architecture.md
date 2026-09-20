@@ -138,9 +138,8 @@ never history; running reads do not. Failed/cancelled sessions retain audit only
 Fanout is replaceable and post-commit. Conversation history remains separate:
 sequence cursors bound traversal, and `packages/db/src/session-event-slices.ts`
 transfers large message scalars in bounded slices, not whole histories.
-Full-history Find (`packages/db/src/session-message-search.ts`) coalesces bounded
-scalar windows in the authorized transaction. Browsers receive snippets and
-cursors, not complete histories. See
+Full-history Find (`packages/db/src/session-message-search.ts`) coalesces authorized
+scalar windows, returning bounded snippets/cursors, not histories. See
 [`session-message-search.md`](session-message-search.md).
 
 Docker/local SDK processes expose turn-scoped handles after a bounded wait.
@@ -1377,11 +1376,11 @@ joins interleaved chunks by provider identity without merging distinct messages.
 Pre-transfer metadata planning bounds database batches to 256 events and the
 default 1 MiB full-payload page budget.
 
-The rail's lazy dialog and route's lazy Find bar search retained user and completed
-assistant text through the browser SDK—not DOM, tool output, reasoning or
-unfinished delta-only messages. Rail providers retain dialog state across session
-navigation, including collapsed/mobile rails. Links carry query, event sequence
-and original UTF-16 offset. `useSessionEvents.jumpToSequence` loads cancellable,
+The lazy rail dialog and Find bar search retained user/completed-assistant text
+through the browser SDK—not DOM, tools, reasoning or unfinished deltas. Rail
+providers retain dialog state across session navigation and collapsed/mobile rails.
+Links carry query, event sequence and original UTF-16 offset.
+`useSessionEvents.jumpToSequence` loads cancellable,
 bounded target windows; `MessageTimeline.searchTarget` owns disclosure/occurrence
 navigation. Browser batches/scan continuations are bounded; counts remain
 provisional until traversal ends. Labeled, bounded Markdown source excerpts
