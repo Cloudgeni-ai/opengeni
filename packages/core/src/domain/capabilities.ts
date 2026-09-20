@@ -843,7 +843,7 @@ export function apiIntegrationsMatchingDelegations(
   const exact = new Set(
     delegations.map((delegation) =>
       [
-        delegation.serverId,
+        delegation.canonicalServerId ?? delegation.serverId,
         delegation.connectionId,
         delegation.providerDomain.toLowerCase(),
         delegation.kind ?? "",

@@ -358,9 +358,9 @@ export async function createValidatedScheduledTask(input: {
         });
   const { personalConnectionDelegations, mcpAccountBindings } = acceptedConnections;
   if (!knowledgeAction) {
-    const boundRoutes = new Set(mcpAccountBindings.map((binding) => binding.serverId));
+    const boundRoutes = new Set((mcpAccountBindings ?? []).map((binding) => binding.serverId));
     agentConfig.connectionAccounts = [
-      ...mcpAccountBindings.map(({ canonicalServerId, connectionId }) => ({
+      ...(mcpAccountBindings ?? []).map(({ canonicalServerId, connectionId }) => ({
         serverId: canonicalServerId,
         connectionId,
       })),
@@ -1194,13 +1194,15 @@ export async function validatedScheduledTaskUpdate(input: {
       ...scheduledConnectionSurfaceEligibility(runtimeSettings, nextTarget),
     });
     const routeIds = new Set(
-      acceptedConnections.mcpAccountBindings.map((binding) => binding.serverId),
+      (acceptedConnections.mcpAccountBindings ?? []).map((binding) => binding.serverId),
     );
     nextAgentConfig.connectionAccounts = [
-      ...acceptedConnections.mcpAccountBindings.map(({ canonicalServerId, connectionId }) => ({
-        serverId: canonicalServerId,
-        connectionId,
-      })),
+      ...(acceptedConnections.mcpAccountBindings ?? []).map(
+        ({ canonicalServerId, connectionId }) => ({
+          serverId: canonicalServerId,
+          connectionId,
+        }),
+      ),
       ...acceptedConnections.personalConnectionDelegations
         .filter(
           (item) =>

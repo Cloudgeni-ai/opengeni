@@ -133,6 +133,7 @@ export function personalDelegationsForAccountBindings(
       ? [
           {
             serverId: binding.serverId,
+            canonicalServerId: binding.canonicalServerId,
             connectionId: binding.connectionId,
             originWorkspaceId: binding.originWorkspaceId,
             ownerSubjectId: binding.ownerSubjectId,

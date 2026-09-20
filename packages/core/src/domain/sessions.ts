@@ -861,7 +861,7 @@ export async function createAndStartSessionWithOutcome(input: {
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy>;
   sessionMcpServers?: SessionMcpServerMetadata[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
-  mcpAccountBindings?: McpConnectionAccountBinding[];
+  mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   // The manager session spawning this worker (a worker-signed sessionId claim
@@ -1084,7 +1084,7 @@ export async function createAndStartSessionWithOutcome(input: {
       mcpServers: input.mcpServers ?? [],
       mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
       personalConnectionDelegations: input.personalConnectionDelegations ?? [],
-      mcpAccountBindings: input.mcpAccountBindings ?? [],
+      mcpAccountBindings: input.mcpAccountBindings ?? null,
       initialPersonalResourceAttachmentIntent:
         input.initialPersonalResourceAttachmentIntent ?? null,
       ...(input.xaiProviderAccountAuthoritySnapshot
@@ -1180,7 +1180,7 @@ export async function createAndStartSessionWithOutcome(input: {
       mcpServers: input.mcpServers ?? [],
       mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
       personalConnectionDelegations: input.personalConnectionDelegations ?? [],
-      mcpAccountBindings: input.mcpAccountBindings ?? [],
+      mcpAccountBindings: input.mcpAccountBindings ?? null,
       initialPersonalResourceAttachmentIntent:
         input.initialPersonalResourceAttachmentIntent ?? null,
       ...(input.xaiProviderAccountAuthoritySnapshot
@@ -1576,7 +1576,7 @@ type PostUserMessageTurnInput = {
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
-  mcpAccountBindings?: McpConnectionAccountBinding[];
+  mcpAccountBindings?: McpConnectionAccountBinding[] | null;
 
   captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
@@ -1785,7 +1785,7 @@ export async function postUserMessageTurn(
                 ? { recordAgentRunUsage: input.recordAgentRunUsage }
                 : {}),
               personalConnectionDelegations: input.personalConnectionDelegations ?? [],
-              mcpAccountBindings: input.mcpAccountBindings ?? [],
+              mcpAccountBindings: input.mcpAccountBindings ?? null,
 
               ...(input.captureTurnAuthority
                 ? { captureTurnAuthority: input.captureTurnAuthority }

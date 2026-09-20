@@ -4254,6 +4254,8 @@ export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
 export const McpPersonalConnectionDelegation = z
   .object({
     serverId: z.string().min(1).max(256),
+    /** Canonical policy/catalog identity when serverId is an account route. */
+    canonicalServerId: z.string().min(1).max(256).optional(),
     connectionId: z.string().uuid(),
     /**
      * Immutable physical workspace that owns an activated common-user
@@ -9573,7 +9575,7 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
       .strict()
       .nullable(),
     personalConnectionDelegations: McpPersonalConnectionDelegations,
-    mcpAccountBindings: McpConnectionAccountBindings.default([]),
+    mcpAccountBindings: McpConnectionAccountBindings.nullable().default(null),
     personalResourceAuthoritySubjectId: z.string().min(1).nullable(),
     /** One accepted human principal for every resource-bearing scheduled run. */
     causalHumanSubjectId: z.string().min(1).nullable().default(null),

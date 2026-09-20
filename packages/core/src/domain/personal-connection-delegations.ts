@@ -690,6 +690,7 @@ export function personalConnectionDelegationsEqual(
     const other = byServer.get(delegation.serverId);
     return (
       other?.connectionId === delegation.connectionId &&
+      other.canonicalServerId === delegation.canonicalServerId &&
       other.originWorkspaceId === delegation.originWorkspaceId &&
       other.ownerSubjectId === delegation.ownerSubjectId &&
       sameProviderDomain(other.providerDomain, delegation.providerDomain) &&
@@ -802,7 +803,7 @@ export function withFrozenPersonalConnectionDelegations(input: {
 export async function freezeConnectionAccounts(
   input: Parameters<typeof freezePersonalConnectionDelegations>[0] & { accountId: string },
 ): Promise<{
-  mcpAccountBindings: McpConnectionAccountBinding[];
+  mcpAccountBindings: McpConnectionAccountBinding[] | null;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
 }> {
   const selectedIds = new Set(input.tools.map((tool) => tool.id));
@@ -826,9 +827,9 @@ export async function freezeConnectionAccounts(
       input.source.sessionId,
       input.source.turnId,
     );
-    if (inherited.length === 0) {
+    if (inherited === null) {
       return {
-        mcpAccountBindings: [],
+        mcpAccountBindings: null,
         personalConnectionDelegations: await freezePersonalConnectionDelegations(input),
       };
     }
