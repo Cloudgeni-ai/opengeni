@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import { workspaceArchiveObjectKey, type WorkspaceArchiveObjectRef } from "@opengeni/contracts";
@@ -439,6 +440,26 @@ async function seedLiveCanonicalAttempt(input: {
 }
 
 describe("archive object publication binding and disposition", () => {
+  test("warm capture reclamation migration replay preserves the exact function definition", async () => {
+    if (!available) return;
+    const definition = async () => {
+      const [row] = await admin`select pg_get_functiondef(
+        'opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)'::regprocedure
+      ) as definition`;
+      return String(row!.definition);
+    };
+    const before = await definition();
+    expect(before).toContain("0491 bounded warm capture holder");
+    const migration = await readFile(
+      new URL("../drizzle/0491_warm_capture_holder_reclamation.sql", import.meta.url),
+      "utf8",
+    );
+    await admin.begin(async (tx) => {
+      await tx.unsafe(migration);
+    });
+    expect(await definition()).toBe(before);
+  }, 60_000);
+
   async function fixture(liveness: "warm" | "draining") {
     const ids = await freshWorkspace();
     const sessionId = crypto.randomUUID();
@@ -452,6 +473,7 @@ describe("archive object publication binding and disposition", () => {
       ...scope,
       kind: "turn",
       holderId: attempt.holderId,
+      subjectId: sessionId,
       backend: "modal",
       leaseTtlMs: 45_000,
     });
@@ -508,6 +530,89 @@ describe("archive object publication binding and disposition", () => {
         ? persistWarmSnapshot(db, { ...input, workspaceArchiveRef: ref, ...overrides })
         : persistDrainSnapshotRaw(db, { ...input, workspaceArchiveRef: ref, ...overrides });
     return { ids, scope, source, input, descriptor, publish };
+  }
+
+  for (const sweep of ["workspace", "global"] as const) {
+    for (const settlement of ["settles", "expires"] as const) {
+      test(`closed turn's warm capture survives ${sweep} reclamation until it ${settlement}`, async () => {
+        if (!available) return;
+        const f = await fixture("warm");
+        await admin.begin(async (tx) => {
+          await tx`
+            update session_turn_attempts set state = 'closed', outcome = 'completed',
+              closed_at = now(), updated_at = now()
+            where id = ${f.input.attemptId}`;
+          await tx`
+            update session_turns set status = 'completed', active_attempt_id = null,
+              updated_at = now() where id = ${f.input.turnId}`;
+          // Even a dead owner's holder survives only this already-admitted
+          // bounded capture window; logical closure must not trigger takeover.
+          await tx`update sandbox_lease_holders
+            set last_heartbeat_at = now() - interval '3 minutes'
+            where lease_id = ${f.source.id} and holder_id = ${f.input.holderId}`;
+        });
+        const reap = async () => {
+          const input = {
+            viewerHolderTtlMs: 90_000,
+            turnHolderTtlMs: 90_000,
+            idleGraceMs: 900_000,
+          };
+          return sweep === "global"
+            ? await reapStaleLeaseHoldersGlobal(db, input)
+            : (await reapStaleLeaseHolders(db, { ...input, workspaceId: f.ids.workspaceId }))
+                .drained;
+        };
+        expect((await reap()).some((row) => row.sandboxGroupId === f.ids.groupId)).toBe(false);
+        expect(await readRow(f.ids.workspaceId, f.ids.groupId)).toMatchObject({
+          liveness: "warm",
+          refcount: 1,
+          turn_holders: 1,
+        });
+        expect((await readLease(db, f.ids.workspaceId, f.ids.groupId))?.archiveCapture?.id).toBe(
+          f.input.captureId,
+        );
+        // The retention exception is NOT permission to keep executing/touching
+        // a closed attempt. Ordinary authority and heartbeat fencing stay exact.
+        expect(
+          await touchLeaseHolder(db, {
+            ...f.scope,
+            kind: "turn",
+            holderId: f.input.holderId,
+          }),
+        ).toBe(false);
+        if (settlement === "settles") {
+          expect(
+            await releaseWorkspaceArchiveCapture(db, {
+              ...f.scope,
+              captureId: f.input.captureId,
+              expectedEpoch: f.source.leaseEpoch,
+              expectedInstanceId: f.source.instanceId!,
+            }),
+          ).toBe(true);
+          // With no capture, the closed holder is immediately reclaimable, but
+          // its ordinary idle grace is preserved instead of a forced drain.
+          expect((await reap()).some((row) => row.sandboxGroupId === f.ids.groupId)).toBe(false);
+          const after = await readRow(f.ids.workspaceId, f.ids.groupId);
+          expect(after).toMatchObject({ liveness: "draining", refcount: 0, turn_holders: 0 });
+          expect(after!.expires_at.getTime()).toBeGreaterThan(Date.now() + 800_000);
+        } else {
+          await admin`update sandbox_leases
+            set archive_capture_started_at = now() - interval '2 minutes',
+                archive_capture_deadline_at = now() - interval '1 minute'
+            where id = ${f.source.id}`;
+          expect((await reap()).some((row) => row.sandboxGroupId === f.ids.groupId)).toBe(true);
+          expect(await readRow(f.ids.workspaceId, f.ids.groupId)).toMatchObject({
+            liveness: "draining",
+            refcount: 0,
+            turn_holders: 0,
+          });
+          // Recovery, not the sweep, owns the physical operation and its claim.
+          expect((await readLease(db, f.ids.workspaceId, f.ids.groupId))?.archiveCapture?.id).toBe(
+            f.input.captureId,
+          );
+        }
+      }, 60_000);
+    }
   }
 
   test("a released drain retry cannot reuse a snapshot from before intervening writes", async () => {
