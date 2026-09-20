@@ -45,6 +45,16 @@ owner posture. Its list/rig/attach consumers—including `list_scoped_enrollment
 Successful enrollment does not establish a complete Connected Machine availability
 fix or prove that those downstream paths work.
 
+Device-code lookup is another unresolved boundary: the migration-0025
+`opengeni_private.resolve_device_enrollment_request` SECURITY DEFINER resolver can
+return no row under the tested non-bypass owner/FORCE-RLS posture because it lacks
+the required context. Independent tests reproduced the same three
+`getDeviceEnrollmentRequestByDeviceCode` failures before and after 0498. The legacy
+suite's historical 0025 replay recreates this resolver through a superuser, so a
+pass after that replay does not validate non-bypass device-code lookup. The 0498
+approval/finalization tests do not certify end-to-end device-flow availability;
+this migration does not repair the resolver.
+
 This guide is embedder-facing: it shows how to create a session on a machine,
 discover the enrolled machines and their metrics, swap a session's active
 sandbox, connect a machine (zero-click token or the interactive device flow), and
