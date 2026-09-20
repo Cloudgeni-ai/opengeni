@@ -8,6 +8,9 @@
  *   OPENGENI_OPE534_NATIVE_POSTGRES=LOCAL_DISPOSABLE_55434. Both allocate a unique
  *   fully migrated database; native also allocates a unique restricted app role.
  *   No arbitrary external DB override is accepted.
+ * - integrated supervision readiness migration and compatible readers deployed
+ *   before launching: this isolated Settings object explicitly enables
+ *   OPENGENI_MODAL_COMMAND_SUPERVISION_ENABLED; no shared config is changed.
  * - reviewed integrated git HEAD, no tracked modifications; exact anonymous-
  *   pull sandbox image digest built from that candidate (with native supervisor).
  * - pre-provisioned dedicated Modal environment ope534-canary-<unique suffix>;
@@ -64,6 +67,7 @@ import {
 import { wrapTurnBoxWithRouting } from "../src/sandbox-routing";
 import {
   assertRotationEvidence,
+  assertSupervisedCanaryCommand,
   canaryConfiguration,
   requireCanary,
 } from "./ope534-rotation-canary-evidence";
@@ -98,31 +102,37 @@ test.skipIf(!live)(
     const client = createDb(shared.appUrl);
     const { db } = client;
     const admin = shared.admin;
-    const settings = testSettings({
-      databaseUrl: shared.appUrl,
-      runtimeDatabaseRole: shared.appRole,
-      deploymentRevision: config.sourceSha,
-      sandboxBackend: "modal",
-      sandboxOwnershipEnabled: true,
-      modalAppName: `ope534-canary-${runId}`,
-      modalEnvironment: config.environment,
-      modalTokenId: process.env.MODAL_TOKEN_ID!,
-      modalTokenSecret: process.env.MODAL_TOKEN_SECRET!,
-      modalImageRef: config.image,
-      modalWorkspacePersistence: "snapshot_filesystem",
-      modalTimeoutSeconds: LIFETIME_SECONDS,
-      modalIdleTimeoutSeconds: LIFETIME_SECONDS,
-      sandboxRotationLeadMs: ROTATION_LEAD_MS,
-      sandboxLeaseReaperPeriodMs: REAPER_MS,
-      sandboxIdleGraceMs: 30_000,
-      sandboxSnapshotTimeoutMs: 60_000,
-      sandboxDrainSnapshotTimeoutMs: 60_000,
-      sandboxSnapshotIntervalMs: 0,
-      sandboxDesktopEnabled: false,
-      sandboxTerminalEnabled: false,
-      sandboxPreparationProfiles: "none",
-      sandboxEnvAllowlist: "",
-    });
+    const settings = {
+      ...testSettings({
+        databaseUrl: shared.appUrl,
+        runtimeDatabaseRole: shared.appRole,
+        deploymentRevision: config.sourceSha,
+        sandboxBackend: "modal",
+        sandboxOwnershipEnabled: true,
+        modalAppName: `ope534-canary-${runId}`,
+        modalEnvironment: config.environment,
+        modalTokenId: process.env.MODAL_TOKEN_ID!,
+        modalTokenSecret: process.env.MODAL_TOKEN_SECRET!,
+        modalImageRef: config.image,
+        modalWorkspacePersistence: "snapshot_filesystem",
+        modalTimeoutSeconds: LIFETIME_SECONDS,
+        modalIdleTimeoutSeconds: LIFETIME_SECONDS,
+        sandboxRotationLeadMs: ROTATION_LEAD_MS,
+        sandboxLeaseReaperPeriodMs: REAPER_MS,
+        sandboxIdleGraceMs: 30_000,
+        sandboxSnapshotTimeoutMs: 60_000,
+        sandboxDrainSnapshotTimeoutMs: 60_000,
+        sandboxSnapshotIntervalMs: 0,
+        sandboxDesktopEnabled: false,
+        sandboxTerminalEnabled: false,
+        sandboxPreparationProfiles: "none",
+        sandboxEnvAllowlist: "",
+      }),
+      // Structural overlay keeps this harness independently typecheckable on
+      // its pre-integration base. The integrated launch path additionally
+      // enforces DB readiness; old/legacy launches fail the descriptor check.
+      modalCommandSupervisionEnabled: true,
+    };
     const observability = createObservability(settings, { component: "ope534-isolated-canary" });
     const services = { db, settings, observability, objectStorage: null };
     const activities = createSandboxLeaseActivities(
@@ -349,7 +359,18 @@ test.skipIf(!live)(
           retained.provider_command && retained.provider_command.pty !== true,
           "server is not a durable nonTTY provider command",
         );
+        const supervisionIdentity = assertSupervisedCanaryCommand(retained.provider_command);
         await current.complete();
+        const [afterCompletedTurn] =
+          await admin`select p.state,b.state as background_state,b.cancel_requested_at
+          from sandbox_retained_processes p join session_background_commands b on b.retained_process_id=p.id
+          where p.id=${retained.id}`;
+        requireCanary(
+          afterCompletedTurn?.state === "active" &&
+            afterCompletedTurn.background_state === "running" &&
+            afterCompletedTurn.cancel_requested_at === null,
+          "completed originating turn cancelled its adopted server",
+        );
         current = await turn();
         requireCanary(
           current.resumed.leaseEpoch === baseline.leaseEpoch,
@@ -435,6 +456,7 @@ test.skipIf(!live)(
         );
         const receipt = {
           cycle,
+          supervision: supervisionIdentity,
           predecessor: before.instanceId,
           successor: after.instanceId,
           predecessorEpoch: before.leaseEpoch,

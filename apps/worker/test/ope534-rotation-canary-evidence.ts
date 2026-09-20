@@ -3,6 +3,48 @@ export function requireCanary(condition: unknown, message: string): asserts cond
   if (!condition) throw new Error(`OPE534 canary: ${message}`);
 }
 
+/** Only non-secret descriptor identity may enter canary output. The nonce is a
+ * control capability, not evidence to print. This test assertion intentionally
+ * works before/after parent integration of the new contract export. */
+export function assertSupervisedCanaryCommand(value: unknown): {
+  protocol: "native-subreaper-v1";
+  invocationId: string;
+} {
+  requireCanary(value && typeof value === "object", "retained provider command is missing");
+  const command = value as Record<string, unknown>;
+  requireCanary(
+    command.kind === "modal-router-v1" && command.pty !== true,
+    "canary requires the stock Modal nonTTY router protocol",
+  );
+  const supervision = command.supervision;
+  requireCanary(
+    supervision && typeof supervision === "object",
+    "retained command has no supervision descriptor",
+  );
+  const descriptor = supervision as Record<string, unknown>;
+  requireCanary(
+    descriptor.protocol === "native-subreaper-v1",
+    "wrong command supervision protocol",
+  );
+  requireCanary(
+    typeof descriptor.invocationId === "string" &&
+      /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(
+        descriptor.invocationId,
+      ),
+    "missing durable supervision invocation identity",
+  );
+  requireCanary(
+    typeof descriptor.nonce === "string" && /^[a-f0-9]{64}$/.test(descriptor.nonce),
+    "missing supervision control capability",
+  );
+  requireCanary(
+    typeof descriptor.controlPath === "string" &&
+      /^\/tmp\/opengeni-supervision\/[a-f0-9-]{36}\.sock$/.test(descriptor.controlPath),
+    "invalid supervisor control endpoint",
+  );
+  return { protocol: "native-subreaper-v1", invocationId: descriptor.invocationId };
+}
+
 export function canaryConfiguration(env: Record<string, string | undefined>) {
   requireCanary(env.OPENGENI_OPE534_CANARY === "1", "explicit live opt-in is required");
   requireCanary(

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   assertRotationEvidence,
+  assertSupervisedCanaryCommand,
   canaryConfiguration,
   type RotationEvidence,
 } from "./ope534-rotation-canary-evidence";
@@ -39,6 +40,47 @@ const valid = (): RotationEvidence => ({
   captureReleased: true,
   expectedHashes: { baseline: "a".repeat(64), later: "b".repeat(64) },
   restoredHashes: { baseline: "a".repeat(64), later: "b".repeat(64) },
+});
+
+describe("OPE534 supervision admission", () => {
+  const invocationId = "809b79db-cc2b-4b65-9fa3-89e2f4735665";
+  const supervision = {
+    protocol: "native-subreaper-v1",
+    invocationId,
+    nonce: "b".repeat(64),
+    controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
+  };
+  test("accepts durable nonTTY descriptor and returns no control capability", () => {
+    const receipt = assertSupervisedCanaryCommand({ kind: "modal-router-v1", supervision });
+    expect(receipt).toEqual({ protocol: "native-subreaper-v1", invocationId });
+    expect(JSON.stringify(receipt)).not.toContain(supervision.nonce);
+    expect(JSON.stringify(receipt)).not.toContain(supervision.controlPath);
+  });
+  for (const [name, command] of [
+    ["missing command", null],
+    ["legacy command", { kind: "modal-control-v1", supervision }],
+    ["PTY", { kind: "modal-router-v1", pty: true, supervision }],
+    ["missing descriptor", { kind: "modal-router-v1" }],
+    [
+      "wrong protocol",
+      { kind: "modal-router-v1", supervision: { ...supervision, protocol: "pgid" } },
+    ],
+    [
+      "missing invocation",
+      { kind: "modal-router-v1", supervision: { ...supervision, invocationId: "" } },
+    ],
+    ["missing nonce", { kind: "modal-router-v1", supervision: { ...supervision, nonce: "" } }],
+    [
+      "workspace control path",
+      {
+        kind: "modal-router-v1",
+        supervision: { ...supervision, controlPath: "/workspace/control.sock" },
+      },
+    ],
+  ] as const)
+    test(`rejects ${name}`, () => {
+      expect(() => assertSupervisedCanaryCommand(command)).toThrow("OPE534 canary:");
+    });
 });
 
 describe("OPE534 isolated canary admission", () => {
