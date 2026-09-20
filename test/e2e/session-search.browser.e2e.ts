@@ -143,6 +143,80 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
     await shared?.release();
   }, 60_000);
 
+  test("desktop expanded header keeps icon-only search inline and opens its dialog by mouse and keyboard", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      await workspaceFromPage(page);
+      const search = page.getByRole("button", { name: "Search sessions", exact: true });
+      await search.waitFor();
+      expect(await search.count()).toBe(1);
+      expect(await search.innerText()).toBe("");
+      expect(await search.getAttribute("aria-haspopup")).toBe("dialog");
+      expect(await search.locator('svg[aria-hidden="true"]').count()).toBe(1);
+
+      const header = search.locator("..");
+      const title = header.getByText("Browse sessions", { exact: true });
+      const project = header.getByRole("button", { name: "New project", exact: true });
+      const filter = header.getByRole("button", { name: "Session view, customized", exact: true });
+      await project.waitFor();
+      const searchBox = (await search.boundingBox())!;
+      for (const control of [title, project, filter]) {
+        const box = await control.boundingBox();
+        expect(box).not.toBeNull();
+        expect(
+          Math.abs(box!.y + box!.height / 2 - (searchBox.y + searchBox.height / 2)),
+        ).toBeLessThan(2);
+      }
+      expect(searchBox.width).toBeLessThanOrEqual(32);
+      expect(searchBox.height).toBeLessThanOrEqual(32);
+      // The heading is immediately followed by the list, not a second search row.
+      expect(
+        await header.evaluate((element) => element.nextElementSibling?.getAttribute("role")),
+      ).toBe("region");
+      await page.screenshot({ path: `${artifactDir}/session-search-compact-header-desktop.png` });
+
+      const dialog = await openSearchDialog(page);
+      await page.keyboard.press("Escape");
+      await dialog.waitFor({ state: "hidden" });
+      for (const key of ["Enter", "Space"]) {
+        await search.focus();
+        await page.keyboard.press(key);
+        await dialog
+          .getByRole("searchbox", { name: "Search session titles and messages", exact: true })
+          .waitFor();
+        await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "hidden" });
+      }
+
+      await filter.click();
+      await page.getByRole("menuitem", { name: "Status Active" }).hover();
+      await page.getByRole("menuitemradio", { name: "Archived", exact: true }).click();
+      const customized = header.getByRole("button", {
+        name: "Session view, customized",
+        exact: true,
+      });
+      await customized.waitFor();
+      await page.mouse.move(1000, 700);
+      await customized.blur();
+      expect(await customized.locator(".bg-brand").count()).toBe(1);
+      await waitFor(
+        async () =>
+          (await customized.evaluate((element) => getComputedStyle(element).backgroundColor)) ===
+          "rgba(0, 0, 0, 0)",
+      );
+      await page.screenshot({
+        path: `${artifactDir}/session-search-compact-header-filter-desktop.png`,
+      });
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("finds titles, user messages, and completed assistant messages, then opens the exact occurrence", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
