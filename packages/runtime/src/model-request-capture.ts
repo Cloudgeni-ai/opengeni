@@ -1,3 +1,4 @@
+import { rememberPreparedModelRequest } from "./prepared-compaction-request";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Model, ModelProvider, ModelRequest, StreamEvent } from "@openai/agents";
 
@@ -132,11 +133,13 @@ export class ModelRequestCaptureModel implements Model {
   constructor(private readonly inner: Model) {}
 
   async getResponse(request: ModelRequest) {
+    rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
     return this.inner.getResponse(request);
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
     yield* this.inner.getStreamedResponse(request);
   }

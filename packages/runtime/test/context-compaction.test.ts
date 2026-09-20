@@ -1611,7 +1611,14 @@ describe("Codex remote compaction v2 helpers", () => {
       requestRemoteCompactionV2(testSettings(), [user("hi")], {
         client,
         model: "gpt-5.6-sol",
-        systemInstructions: "   ",
+        preparedRequest: {
+          systemInstructions: "   ",
+          modelSettings: {},
+          tools: [],
+          outputType: "text",
+          handoffs: [],
+          tracing: false,
+        },
       }),
     ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
   });
@@ -1634,7 +1641,14 @@ describe("Codex remote compaction v2 helpers", () => {
     await requestRemoteCompactionV2(testSettings(), [user("hi")], {
       client,
       model: "gpt-5.6-sol",
-      systemInstructions: padded,
+      preparedRequest: {
+        systemInstructions: padded,
+        modelSettings: {},
+        tools: [],
+        outputType: "text",
+        handoffs: [],
+        tracing: false,
+      },
     });
     // Ordinary turns keep leading/trailing whitespace via normalizeInstructions;
     // compact must not `.trim()` the payload or the cache prefix diverges.
@@ -1698,8 +1712,14 @@ test("remote compaction preserves explicitly selected reasoning instructions on 
     await requestRemoteCompactionV2(testSettings(), [user("hi")], {
       client,
       model: "gpt-5.6-sol",
-      systemInstructions: "stable",
-      reasoning: { effort, summary: "detailed" },
+      preparedRequest: {
+        systemInstructions: "stable",
+        modelSettings: { reasoning: { effort, summary: "detailed" } },
+        tools: [],
+        outputType: "text",
+        handoffs: [],
+        tracing: false,
+      },
     });
     expect(body.reasoning).toEqual({ effort, summary: "detailed" });
   }

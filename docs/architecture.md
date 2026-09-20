@@ -105,7 +105,7 @@ preserving lineage. See [`run-lifecycle.md`](run-lifecycle.md).
 operations have external effects. Recovery is explicit and attempt-fenced.
 Provider work stays outside retries; retry only idempotent settlement.
 Replay: [notices/catalogs](run-lifecycle.md),
-[compaction](context-compaction.md).
+[compaction](context-compaction.md). Remote compaction reuses the actual model request after sandbox and lazy-tool preparation; `packages/runtime/src/prepared-compaction-request.ts` owns this boundary, including stops before first inference.
 
 Failed-session retry differs from Pause/Resume and prompt admission.
 `packages/db/src/session-retry.ts` fences failure identity, reserves actor-scoped

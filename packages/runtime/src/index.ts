@@ -1,3 +1,8 @@
+import {
+  withPreparedCompactionRequest,
+  deferCompactionToModelBoundary,
+} from "./prepared-compaction-request";
+export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {
@@ -343,6 +348,7 @@ import {
 import {
   ModelRequestCaptureModel,
   ModelRequestCaptureProvider,
+  notifyModelRequestCapture,
   withModelRequestCapture,
   type ModelRequestCapture,
   nextModelContextCaptureIndex,
@@ -1267,10 +1273,9 @@ function serializeToolForRemoteCompaction(tool: Tool): SerializedTool | null {
  * exactly one `{ type: "compaction", encrypted_content }` output item.
  * Must run inside Codex ALS with `remote_compaction_v2` beta + turn metadata.
  *
- * Prompt-cache critical: `systemInstructions` and `tools` must match the
- * ordinary agent turn prefix (Codex CLI sends `base_instructions` +
- * `model_visible_specs` on the compact call). An empty instructions string
- * busts the shared tools→instructions prefix and is rejected here.
+ * Reuse the complete prepared ordinary request, after sandbox and lazy-tool
+ * preparation. Never reconstruct its prefix from Agent configuration. Empty
+ * instructions are rejected.
  *
  * Tools are schema context only. This is a single `_fetchResponse` (no tool
  * loop), and extract still requires exactly one compaction item, so a
@@ -1283,60 +1288,41 @@ export async function requestRemoteCompactionV2(
     client: OpenAI;
     provider?: ResolvedModelProvider;
     model: string;
-    /**
-     * Exact agent system instructions for this session/turn. Required and
-     * non-blank — must match the prior ordinary model call for cache prefix.
-     */
-    systemInstructions: string;
-    promptCacheKey?: string;
-    /** Preserve the ordinary request’s effective model-side reasoning instructions. */
-    reasoning?: ModelRequest["modelSettings"]["reasoning"];
-    /** Model-visible tool schemas for the compact request (CLI parity). */
-    tools?: readonly SerializedTool[];
+    preparedRequest: Omit<ModelRequest, "input">;
+    captureAgent?: object;
+    signal?: AbortSignal | undefined;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
   },
 ): Promise<Record<string, unknown>> {
-  // Match Agents SDK `normalizeInstructions`: reject blank after trim, but send
-  // the original bytes. Trimming here would diverge from ordinary turns that
-  // keep leading/trailing whitespace and bust the tools→instructions prefix.
-  if (options.systemInstructions.trim() === "") {
+  const { signal: _priorSignal, ...prefix } = options.preparedRequest;
+  if (!prefix.systemInstructions?.trim()) {
     throw new EmptyCompactionSummaryError({
       stage: "remote_v2_instructions",
       reason: "empty_system_instructions",
     });
   }
-  const systemInstructions = options.systemInstructions;
-  const promptInput = buildRemoteCompactionV2PromptInput(input);
-  const tools = options.tools ? [...options.tools] : [];
+  // Reuse the complete prepared request. New SDK/model settings flow through
+  // automatically; only history and the transient compaction marker differ.
   const request: ModelRequest = {
-    systemInstructions,
-    input: promptInput as AgentInputItem[],
-    modelSettings: {
-      reasoning: options.reasoning ?? {
-        effort: settings.openaiReasoningEffort,
-        summary: "detailed",
-      },
-      // Azure rejects store:false; Codex transport enforces store:false itself.
-      ...(settings.openaiProvider === "azure" ? {} : { store: false }),
-      ...(options.promptCacheKey
-        ? { providerData: { prompt_cache_key: options.promptCacheKey } }
-        : {}),
-    },
-    tools,
-    toolsExplicitlyProvided: true,
-    outputType: "text",
-    handoffs: [],
-    tracing: false,
+    ...prefix,
+    input: buildRemoteCompactionV2PromptInput(input) as AgentInputItem[],
+    // The stopped inference stream may have aborted its per-call signal.
+    // Compaction uses the still-active turn cancellation signal instead.
+    ...(options.signal ? { signal: options.signal } : {}),
   };
   let response: unknown;
   try {
     const provider = options.provider ?? configuredProviders(settings)[0];
     if (!provider) throw new Error("Built-in model provider is unavailable");
-    response = await new CompactionResponsesModel(
-      options.client,
-      options.model,
-      provider,
-    ).fetchResponse(request);
+    response = await withModelRequestCapture(
+      options.captureAgent ? agentModelContextCaptures.get(options.captureAgent) : undefined,
+      async () => {
+        void notifyModelRequestCapture(request);
+        return new CompactionResponsesModel(options.client, options.model, provider).fetchResponse(
+          request,
+        );
+      },
+    );
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
@@ -7498,11 +7484,16 @@ function measuredModelInputFilter(
   };
 }
 
+const agentModelContextCaptures = new WeakMap<object, ModelRequestCapture>();
+
 function bindModelVisibleContextCapture(
   agent: Agent<any, any>,
   onCapture: RunAgentStreamOptions["onModelVisibleContext"],
 ): ModelRequestCapture | undefined {
-  if (!onCapture) return undefined;
+  if (!onCapture) {
+    agentModelContextCaptures.delete(agent);
+    return undefined;
+  }
   const capture: ModelRequestCapture = async (request) => {
     const requestIndex = nextModelContextCaptureIndex(agent);
     await onCapture(
@@ -7527,6 +7518,7 @@ function bindModelVisibleContextCapture(
       }),
     );
   };
+  agentModelContextCaptures.set(agent, capture);
   return capture;
 }
 
@@ -7555,7 +7547,9 @@ export async function runAgentStream(
   const scope = gate?.beginStream(overrides.signal);
   try {
     if (scope) agent.toolUseBehavior = scope.toolUseBehavior;
-    const stream = await runAgentStreamInternal(agent, input, settings, overrides, scope);
+    const stream = await withPreparedCompactionRequest(agent, () =>
+      runAgentStreamInternal(agent, input, settings, overrides, scope),
+    );
     // Observe the SDK's own settlement promise before exposing the stream. Do
     // not wrap/replace SDK history, errors, cancellation, or stream iteration.
     // In particular a fatal sibling tool error must not leave admission open
@@ -7596,7 +7590,7 @@ async function runAgentStreamInternal(
     agent,
     overrides.onModelVisibleContext,
   );
-  if (modelRequestCapture) installNonLazyModelRequestCapture(agent);
+  installNonLazyModelRequestCapture(agent);
   if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
     throw new Error("runCredentialSessionId is required when run credential setup is enabled");
   }
@@ -7760,19 +7754,21 @@ async function runAgentStreamInternal(
         ),
         measuredModelInputFilter(
           "input_filter_context",
-          contextRobustnessFilterForSettings(settings, {
-            throwOnCompactionNeeded: Boolean(
-              overrides.contextCompactionSignal || overrides.contextCompactionRequested,
-            ),
-            ...(overrides.contextCompactionSignal
-              ? { contextCompactionSignal: overrides.contextCompactionSignal }
-              : {}),
-            ...(overrides.contextCompactionRequested
-              ? {
-                  contextCompactionRequested: overrides.contextCompactionRequested,
-                }
-              : {}),
-          }),
+          deferCompactionToModelBoundary(
+            contextRobustnessFilterForSettings(settings, {
+              throwOnCompactionNeeded: Boolean(
+                overrides.contextCompactionSignal || overrides.contextCompactionRequested,
+              ),
+              ...(overrides.contextCompactionSignal
+                ? { contextCompactionSignal: overrides.contextCompactionSignal }
+                : {}),
+              ...(overrides.contextCompactionRequested
+                ? {
+                    contextCompactionRequested: overrides.contextCompactionRequested,
+                  }
+                : {}),
+            }),
+          ),
         ),
         // Seal admission before any provider preparation/transport awaits.
         inputWaitYield?.modelDispatchFilter,
@@ -7916,19 +7912,21 @@ async function runAgentStreamInternal(
       ),
       measuredModelInputFilter(
         "input_filter_context",
-        contextRobustnessFilterForSettings(settings, {
-          throwOnCompactionNeeded: Boolean(
-            overrides.contextCompactionSignal || overrides.contextCompactionRequested,
-          ),
-          ...(overrides.contextCompactionSignal
-            ? { contextCompactionSignal: overrides.contextCompactionSignal }
-            : {}),
-          ...(overrides.contextCompactionRequested
-            ? {
-                contextCompactionRequested: overrides.contextCompactionRequested,
-              }
-            : {}),
-        }),
+        deferCompactionToModelBoundary(
+          contextRobustnessFilterForSettings(settings, {
+            throwOnCompactionNeeded: Boolean(
+              overrides.contextCompactionSignal || overrides.contextCompactionRequested,
+            ),
+            ...(overrides.contextCompactionSignal
+              ? { contextCompactionSignal: overrides.contextCompactionSignal }
+              : {}),
+            ...(overrides.contextCompactionRequested
+              ? {
+                  contextCompactionRequested: overrides.contextCompactionRequested,
+                }
+              : {}),
+          }),
+        ),
       ),
       inputWaitYield?.modelDispatchFilter,
     ].filter((f): f is CallModelInputFilter => Boolean(f)),
