@@ -30,26 +30,50 @@ export type CapabilityResumeEvidence = {
   reads: CapabilityResumeRead[];
 };
 
-export function consumeCapabilityResumeRead(
+export type CapabilityResumeExpected = {
+  url: string;
+  actorEpoch: string;
+  authorityHash: string | null;
+  phase: string;
+};
+export type CapabilityResumeDecision = {
+  requestId: string | null;
+  reason:
+    | "eligible"
+    | "document"
+    | "visibility"
+    | "expected-identity"
+    | "window"
+    | "resume-count"
+    | "read-count"
+    | "hidden-grace-window"
+    | "read-contract"
+    | "resume-dispatch-window";
+};
+
+export function evaluateCapabilityResumeRead(
   evidence: CapabilityResumeEvidence,
-  expected: { url: string; actorEpoch: string; authorityHash: string | null; phase: string },
-  consumedRequestIds: Set<string>,
-): string | null {
+  expected: CapabilityResumeExpected,
+  consumedRequestIds: ReadonlySet<string>,
+): CapabilityResumeDecision {
+  const rejected = (reason: CapabilityResumeDecision["reason"]): CapabilityResumeDecision => ({
+    requestId: null,
+    reason,
+  });
+  if (!evidence.sameDocument) return rejected("document");
+  if (evidence.ambiguousVisibility || evidence.pageshows.length !== 0)
+    return rejected("visibility");
+  if (expected.phase !== PHASE || !expected.authorityHash || !expected.actorEpoch)
+    return rejected("expected-identity");
   if (
-    !evidence.sameDocument ||
-    evidence.ambiguousVisibility ||
-    evidence.pageshows.length !== 0 ||
-    expected.phase !== PHASE ||
-    !expected.authorityHash ||
-    !expected.actorEpoch ||
     !Number.isFinite(evidence.openedAt) ||
     !Number.isFinite(evidence.closedAt) ||
-    evidence.closedAt < evidence.openedAt ||
-    evidence.resumes.length !== 1 ||
-    evidence.reads.length !== 3 ||
-    new Set(evidence.reads.map((read) => read.id)).size !== 3
+    evidence.closedAt < evidence.openedAt
   )
-    return null;
+    return rejected("window");
+  if (evidence.resumes.length !== 1) return rejected("resume-count");
+  if (evidence.reads.length !== 3 || new Set(evidence.reads.map((read) => read.id)).size !== 3)
+    return rejected("read-count");
   const resume = evidence.resumes[0]!;
   if (
     !Number.isFinite(resume.hiddenAt) ||
@@ -58,7 +82,7 @@ export function consumeCapabilityResumeRead(
     resume.visibleAt > evidence.closedAt ||
     resume.visibleAt - resume.hiddenAt < HIDDEN_GRACE_MS
   )
-    return null;
+    return rejected("hidden-grace-window");
   if (
     !evidence.reads.every(
       (read) =>
@@ -80,16 +104,24 @@ export function consumeCapabilityResumeRead(
         read.finishedAt <= evidence.closedAt,
     )
   )
-    return null;
+    return rejected("read-contract");
   const afterResume = evidence.reads.filter((read) => read.startedAt >= resume.visibleAt);
   if (
     afterResume.length !== 1 ||
     afterResume[0]!.startedAt - resume.visibleAt > RESUME_REQUEST_WINDOW_MS
   )
-    return null;
-  const id = afterResume[0]!.id;
-  consumedRequestIds.add(id);
-  return id;
+    return rejected("resume-dispatch-window");
+  return { requestId: afterResume[0]!.id, reason: "eligible" };
+}
+
+export function consumeCapabilityResumeRead(
+  evidence: CapabilityResumeEvidence,
+  expected: CapabilityResumeExpected,
+  consumedRequestIds: Set<string>,
+): string | null {
+  const decision = evaluateCapabilityResumeRead(evidence, expected, consumedRequestIds);
+  if (decision.requestId !== null) consumedRequestIds.add(decision.requestId);
+  return decision.requestId;
 }
 
 /** Observe only: no routing, request substitution, visibility changes, or retries. */

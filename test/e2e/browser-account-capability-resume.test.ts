@@ -4,6 +4,7 @@ import { runInNewContext } from "node:vm";
 import type { Page } from "playwright";
 import {
   consumeCapabilityResumeRead,
+  evaluateCapabilityResumeRead,
   observeCapabilityResume,
   type CapabilityResumeEvidence,
 } from "./browser-account-capability-resume";
@@ -46,6 +47,30 @@ function evidence(): CapabilityResumeEvidence {
 
 test("one bounded resumed negotiation explains exactly one extra denied read", () => {
   expect(permitsCapabilityResumeRead(evidence(), expected)).toBe(true);
+});
+
+test("diagnostic evaluation is pure and precedes single-use consumption", () => {
+  const input = evidence();
+  const before = JSON.stringify(input);
+  const consumed = new Set<string>();
+  expect(evaluateCapabilityResumeRead(input, expected, consumed)).toEqual({
+    requestId: "request-2641",
+    reason: "eligible",
+  });
+  expect(consumed.size).toBe(0);
+  expect(JSON.stringify(input)).toBe(before);
+  expect(consumeCapabilityResumeRead(input, expected, consumed)).toBe("request-2641");
+  expect(evaluateCapabilityResumeRead(input, expected, consumed)).toEqual({
+    requestId: null,
+    reason: "read-contract",
+  });
+  const noResume = evidence();
+  noResume.resumes = [];
+  noResume.reads.pop();
+  expect(evaluateCapabilityResumeRead(noResume, expected, new Set())).toEqual({
+    requestId: null,
+    reason: "resume-count",
+  });
 });
 
 test("the matched request is single-use and pageshow timer resets fail closed", () => {
