@@ -175,6 +175,65 @@ for (const unsupported of [true, false]) {
   }, 60_000);
 }
 
+for (const uncertainFirst of [false, true]) {
+  test(`Clear view preserves recovery ${uncertainFirst ? "after an uncertain response" : "before retry"}`, async () => {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+    const retries: unknown[] = [];
+    try {
+      await installApi(page, false, retries);
+      await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
+      const banner = page.getByTestId("failed-session-banner");
+      const composer = page.getByPlaceholder("Send a follow-up…");
+      const picker = page.getByRole("button", { name: "Model and effort", exact: true });
+      const retry = banner.getByRole("button", { name: "Retry", exact: true });
+      const check = banner.getByRole("button", { name: "Check retry", exact: true });
+      await retry.waitFor();
+      if (uncertainFirst) {
+        await retry.click();
+        await check.waitFor();
+        expect(await picker.isDisabled()).toBe(true);
+      }
+      await composer.fill("/clear-view");
+      await composer.press("Enter");
+      await page
+        .getByText("Review the implementation and verify the tests.", { exact: true })
+        .waitFor({ state: "detached" });
+      await (uncertainFirst ? check : retry).waitFor();
+      expect(await banner.count()).toBe(1);
+      expect(await banner.textContent()).toContain("Connection interrupted.");
+      expect(retries).toHaveLength(uncertainFirst ? 1 : 0);
+      expect(await picker.isDisabled()).toBe(uncertainFirst);
+
+      await composer.fill("Keep this draft after Clear view");
+      await banner.getByRole("button").waitFor({ state: "detached" });
+      expect(await composer.inputValue()).toBe("Keep this draft after Clear view");
+      expect(await banner.textContent()).toContain("Connection interrupted.");
+      expect(retries).toHaveLength(uncertainFirst ? 1 : 0);
+      await composer.fill("");
+      await (uncertainFirst ? check : retry).waitFor();
+      if (evidenceDir)
+        await page.screenshot({
+          path: `${evidenceDir}/clear-view-${uncertainFirst ? "uncertain" : "retry"}-desktop.png`,
+          fullPage: true,
+        });
+      if (!uncertainFirst) {
+        await retry.click();
+        await check.waitFor();
+      }
+      expect(await picker.isDisabled()).toBe(true);
+      await check.click();
+      await banner.getByRole("status").waitFor();
+      expect(retries).toHaveLength(2);
+      expect(retries[1]).toEqual(retries[0]);
+      expect(retries[0]).toMatchObject({ failureEventId: failureId, model: "gpt-5.6-sol" });
+      expect(await banner.getByRole("button").count()).toBe(0);
+      expect(await composer.inputValue()).toBe("");
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+}
+
 test("a failure without a retained logical turn never offers Retry", async () => {
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
   try {

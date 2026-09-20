@@ -2367,6 +2367,82 @@ function SessionChatPane(props: {
     [props.onOpenSandboxFile, props.session.workspaceId, renderInteractiveBlock, renderImage],
   );
 
+  const failureRecovery =
+    !props.hasNewer &&
+    props.failure &&
+    (props.session.status === "failed" ||
+      (props.creditExhausted && props.session.status === "idle")) ? (
+      <FailureRecoveryBoundary key={props.session.id} fallback={failureFallback}>
+        <Suspense fallback={failureFallback}>
+          <LazyFailedSessionBanner
+            key={props.session.id}
+            failure={props.failure}
+            canChooseModel={canChooseRecoveryModel}
+            modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
+            creditExhausted={props.creditExhausted}
+            workspaceId={props.session.workspaceId}
+            canBuyCredits={
+              context.clientConfig.billingMode === "stripe" &&
+              Boolean(workspaceAccountId) &&
+              hasAccountPermission(
+                context.accessContext,
+                workspaceAccountId ?? "",
+                "billing:manage",
+              )
+            }
+            canConnectModel={hasWorkspacePermission(
+              context.accessContext,
+              props.session.workspaceId,
+              "connections:write",
+            )}
+            actions={{
+              failureId: props.failure.failureEventId,
+              retryInput: pendingRetryInput,
+              composerBlocker: composerSendBlocker(),
+              onRetry: async () => {
+                if (
+                  composer.hasDraftContent() ||
+                  composerSendBlocker() ||
+                  !props.failure?.failureEventId ||
+                  !retryHasRetainedTurn ||
+                  !composerPolicy ||
+                  !workspacePermissions.includes("sessions:control") ||
+                  admissionControl.state === "paused"
+                )
+                  return false;
+                try {
+                  return await retryFailedSession(props.failure.failureEventId, composerPolicy);
+                } finally {
+                  await Promise.allSettled([props.onReloadSession(), props.queue.refresh()]);
+                }
+              },
+              retryBlocker: !workspacePermissions.includes("sessions:control")
+                ? "permission"
+                : admissionControl.state === "paused"
+                  ? "paused"
+                  : composer.hasDraftContent()
+                    ? "draft"
+                    : failedOptimisticMessageCount > 0
+                      ? "unsent"
+                      : (optimisticMessages ?? []).some(
+                            (message) => !acceptedClientEventIds.has(message.clientEventId),
+                          )
+                        ? "delivery"
+                        : props.session.activeTurnId !== null || props.queue.queue.length > 0
+                          ? "queued"
+                          : composer.sending ||
+                              composer.draftLoading ||
+                              !hasComposerPolicy ||
+                              !retryHasRetainedTurn ||
+                              !props.failure.failureEventId
+                            ? "loading"
+                            : null,
+            }}
+          />
+        </Suspense>
+      </FailureRecoveryBoundary>
+    ) : null;
+
   return createElement(
     LightboxProvider,
     null,
@@ -2432,90 +2508,7 @@ function SessionChatPane(props: {
                   <>
                     {/* Recovery follows the failed request, only in the latest history window.
                         Credit exhaustion also surfaces on idle sessions. */}
-                    {!props.hasNewer &&
-                    props.failure &&
-                    (props.session.status === "failed" ||
-                      (props.creditExhausted && props.session.status === "idle")) ? (
-                      <FailureRecoveryBoundary key={props.session.id} fallback={failureFallback}>
-                        <Suspense fallback={failureFallback}>
-                          <LazyFailedSessionBanner
-                            key={props.session.id}
-                            failure={props.failure}
-                            canChooseModel={canChooseRecoveryModel}
-                            modelChanged={Boolean(
-                              composerPolicy && composerPolicy.model !== props.session.model,
-                            )}
-                            creditExhausted={props.creditExhausted}
-                            workspaceId={props.session.workspaceId}
-                            canBuyCredits={
-                              context.clientConfig.billingMode === "stripe" &&
-                              Boolean(workspaceAccountId) &&
-                              hasAccountPermission(
-                                context.accessContext,
-                                workspaceAccountId ?? "",
-                                "billing:manage",
-                              )
-                            }
-                            canConnectModel={hasWorkspacePermission(
-                              context.accessContext,
-                              props.session.workspaceId,
-                              "connections:write",
-                            )}
-                            actions={{
-                              failureId: props.failure.failureEventId,
-                              retryInput: pendingRetryInput,
-                              composerBlocker: composerSendBlocker(),
-                              onRetry: async () => {
-                                if (
-                                  composer.hasDraftContent() ||
-                                  composerSendBlocker() ||
-                                  !props.failure?.failureEventId ||
-                                  !retryHasRetainedTurn ||
-                                  !composerPolicy ||
-                                  !workspacePermissions.includes("sessions:control") ||
-                                  admissionControl.state === "paused"
-                                )
-                                  return false;
-                                try {
-                                  return await retryFailedSession(
-                                    props.failure.failureEventId,
-                                    composerPolicy,
-                                  );
-                                } finally {
-                                  await Promise.allSettled([
-                                    props.onReloadSession(),
-                                    props.queue.refresh(),
-                                  ]);
-                                }
-                              },
-                              retryBlocker: !workspacePermissions.includes("sessions:control")
-                                ? "permission"
-                                : admissionControl.state === "paused"
-                                  ? "paused"
-                                  : composer.hasDraftContent()
-                                    ? "draft"
-                                    : failedOptimisticMessageCount > 0
-                                      ? "unsent"
-                                      : (optimisticMessages ?? []).some(
-                                            (message) =>
-                                              !acceptedClientEventIds.has(message.clientEventId),
-                                          )
-                                        ? "delivery"
-                                        : props.session.activeTurnId !== null ||
-                                            props.queue.queue.length > 0
-                                          ? "queued"
-                                          : composer.sending ||
-                                              composer.draftLoading ||
-                                              !hasComposerPolicy ||
-                                              !retryHasRetainedTurn ||
-                                              !props.failure.failureEventId
-                                            ? "loading"
-                                            : null,
-                            }}
-                          />
-                        </Suspense>
-                      </FailureRecoveryBoundary>
-                    ) : null}
+                    {failureRecovery}
                     {props.humanInput.requests.length > 0 &&
                     props.session.status === "requires_action" ? (
                       <div className="pb-1" data-human-input-timeline-surface="">
@@ -2567,7 +2560,9 @@ function SessionChatPane(props: {
                 }}
                 onJumpToLatest={props.onJumpToLatest}
                 emptyState={
-                  props.queue.stoppingPreviousAttempt ? (
+                  // Clear view hides history, not the retained failure or retry operation.
+                  failureRecovery ??
+                  (props.queue.stoppingPreviousAttempt ? (
                     <EmptyState
                       className="min-h-[24rem]"
                       icon={
@@ -2604,7 +2599,7 @@ function SessionChatPane(props: {
                       title={timelineEmptyStateCopy.title}
                       description={timelineEmptyStateCopy.description}
                     />
-                  )
+                  ))
                 }
               />
             </KnowledgeActivityProvider>
