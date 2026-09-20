@@ -63,6 +63,10 @@ describe("Codex subscription source", () => {
       await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
       const select = container.querySelector<HTMLSelectElement>("select")!;
       expect(select.value).toBe("automatic");
+      expect(container.textContent).toContain("Changes apply to new work.");
+      expect(container.textContent).toContain(
+        "Work already in progress keeps its subscription source.",
+      );
       expect(change).not.toHaveBeenCalled();
       await act(async () => {
         select.value = "workspace";
@@ -130,6 +134,77 @@ for (const provider of ["Codex", "SuperGrok"] as const) {
   });
 }
 
+for (const mode of ["automatic", "organization", "disabled"] as const) {
+  for (const canManage of [true, false]) {
+    test(`workspace connect is independent of ${mode} source (canManage: ${canManage})`, async () => {
+      const connect = mock(async () => {
+        // Stop before opening an external authentication window or starting a poll.
+        throw new Error("Device authorization unavailable in fixture");
+      });
+      const changeSource = mock(async () => {});
+      const client = {
+        listCodexAccounts: async () => ({
+          accounts: [],
+          activeAccountId: null,
+          source: {
+            ...source,
+            mode,
+            effectiveSource: mode === "disabled" ? "disabled" : "organization",
+          },
+          settings: { rotationEnabled: false },
+        }),
+        codexConnectStart: connect,
+        requestJson: changeSource,
+      } as unknown as OpenGeniBrowserClient;
+      const route = createRootRoute({
+        component: () => (
+          <CodexSubscriptionsCardWithClient
+            client={client}
+            workspaceId="workspace-a"
+            canManage={canManage}
+          />
+        ),
+      });
+      const router = createRouter({
+        routeTree: route,
+        history: createMemoryHistory({ initialEntries: ["/"] }),
+      });
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      try {
+        await act(async () => {
+          await router.load();
+          root.render(<RouterProvider router={router} />);
+        });
+        const button = container.querySelector<HTMLButtonElement>(
+          '[data-analytics-action="connect_codex"]',
+        );
+        if (canManage) {
+          expect(button?.textContent).toContain("Connect workspace account");
+          expect(button?.disabled).toBe(false);
+          expect(container.textContent).toContain(
+            mode === "disabled"
+              ? "Connecting an account keeps Codex turned off."
+              : mode === "automatic"
+                ? "Connect a workspace account to use it for new work."
+                : "Organization subscriptions remain selected.",
+          );
+          await act(async () => button!.click());
+          expect(connect).toHaveBeenCalledWith("workspace-a");
+          expect(changeSource).not.toHaveBeenCalled();
+        } else {
+          expect(button).toBeNull();
+          expect(connect).not.toHaveBeenCalled();
+        }
+      } finally {
+        await act(async () => root.unmount());
+        container.remove();
+      }
+    });
+  }
+}
+
 for (const includeSource of [true, false]) {
   test(`inherited Codex accounts do not request workspace access settings (source metadata: ${includeSource})`, async () => {
     const requestJson = mock(async () => {
@@ -175,6 +250,9 @@ for (const includeSource of [true, false]) {
         (button) => button.textContent === "Team plan",
       );
       expect(details).toBeDefined();
+      expect(
+        container.querySelector('[data-analytics-action="connect_codex"]')?.textContent,
+      ).toContain(includeSource ? "Connect workspace account" : "Connect another account");
       await act(async () => details!.click());
       expect(container.textContent).not.toContain("Choose what this connection can be used for");
       expect(requestJson).not.toHaveBeenCalled();

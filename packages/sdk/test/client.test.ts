@@ -67,6 +67,27 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
 }
 
 describe("OpenGeniClient", () => {
+  test("listSessionCodexAccounts uses the session-authorized projection without a caller-selected source", async () => {
+    const response = {
+      accounts: [],
+      currentAccount: null,
+      currentSelection: null,
+      pinnedAccountId: null,
+      lastAccountId: null,
+      activeAccountId: null,
+      settings: {
+        rotationEnabled: false,
+        rotationStrategy: "sharded" as const,
+        activeCredentialId: null,
+      },
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    expect(await client.listSessionCodexAccounts(WORKSPACE_ID, SESSION_ID)).toEqual(response);
+    expect(requests[0]!.method).toBe("GET");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/codex-accounts`,
+    );
+  });
   test("retrySession preserves the exact failure and selected policy without a message", async () => {
     const request = {
       clientEventId: crypto.randomUUID(),

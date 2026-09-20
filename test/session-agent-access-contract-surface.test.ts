@@ -166,6 +166,9 @@ describe("agent-access scope stays enforced at every session entry point", () =>
     );
     const routes = sessionRoutes(source);
     expect(routes.length).toBeGreaterThan(60);
+    expect(
+      routes.some((route) => route.method === "GET" && route.path.endsWith("/codex-accounts")),
+    ).toBe(true);
     for (const route of routes) {
       expect(
         route.index,

@@ -1460,6 +1460,56 @@ describe("SessionChrome compact actions", () => {
 });
 
 describe("compact activity navigation", () => {
+  test("the collapsed activity button shows a neutral pulsing command count and opens commands first", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [], pendingInputs: [pendingInput()] })}
+        agentsSignal={{ count: 2 }}
+        agentsPanel={<div>Agent body</div>}
+        commandsCount={1}
+        commandsPanel={<div>Command body</div>}
+      />,
+    );
+    const activity = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Session activity"]',
+    )!;
+    expect(activity.getAttribute("aria-expanded")).toBe("false");
+    expect(activity.textContent).toContain("1 command");
+    expect(activity.textContent).not.toContain("1 commands");
+    const description = document.getElementById(activity.getAttribute("aria-describedby")!);
+    expect(description?.textContent).toBe("1 command");
+    const dot = activity.querySelector(".animate-og-pulse");
+    expect(dot?.classList.contains("bg-og-fg-muted")).toBe(true);
+    expect(dot?.classList.contains("motion-reduce:animate-none")).toBe(true);
+    expect(dot?.getAttribute("aria-hidden")).toBe("true");
+    expect(activity.querySelector(".bg-og-accent")).not.toBeNull();
+    expect(mounted.container.textContent).not.toContain("Command body");
+    await act(async () => activity.click());
+    expect(mounted.container.textContent).toContain("Command body");
+    expect(mounted.container.textContent).not.toContain("Agent body");
+  });
+
+  test("command count updates and clears without hiding other session activity", async () => {
+    const render = (commandsCount: number) => (
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        agentsSignal={{ count: 1 }}
+        commandsCount={commandsCount}
+        commandsPanel={<div>Command body</div>}
+      />
+    );
+    mounted = await renderComponent(render(2));
+    const activity = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Session activity"]',
+    )!;
+    expect(activity.textContent).toContain("2 commands");
+    await mounted.rerender(render(0));
+    expect(activity.textContent).not.toContain("command");
+    expect(activity.querySelector(".animate-og-pulse")).toBeNull();
+    expect(activity.hasAttribute("aria-describedby")).toBe(false);
+    expect(activity.isConnected).toBe(true);
+  });
+
   test("activity opens content, selected tab stays open, and queue hides activity navigation", async () => {
     mounted = await renderComponent(
       <SessionChrome
@@ -1474,8 +1524,8 @@ describe("compact activity navigation", () => {
     await act(async () => activity.click());
     expect(activity.getAttribute("aria-expanded")).toBe("true");
     expect(mounted.container.textContent).toContain("Command body");
-    const tab = Array.from(mounted.container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("1 command"),
+    const tab = Array.from(mounted.container.querySelectorAll("button")).find(
+      (button) => button !== activity && button.textContent?.includes("1 command"),
     )!;
     await act(async () => tab.click());
     expect(tab.getAttribute("aria-expanded")).toBe("true");

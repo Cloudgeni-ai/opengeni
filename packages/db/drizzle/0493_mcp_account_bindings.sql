@@ -250,7 +250,7 @@ DECLARE definition text; anchor text := E'  IF reason IS NULL THEN\n    SELECT a
   insertion text;
 BEGIN
   insertion := $gate$
-  -- 0492 exact accepted account gate, inside the canonical lifecycle locks.
+  -- 0493 exact accepted account gate, inside the canonical lifecycle locks.
   IF reason IS NULL THEN
     SELECT value INTO exact_binding FROM jsonb_array_elements(turn_row.mcp_account_bindings)
     WHERE value ->> 'serverId' = p_server_id;
@@ -305,7 +305,7 @@ BEGIN
   definition := pg_get_functiondef('resolve_accepted_connection_use(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,uuid,text,text,text,text)'::regprocedure);
   IF (length(definition)-length(replace(definition,anchor,'')))/length(anchor) <> 1
     OR strpos(definition,'  scheduled_run_id uuid;') = 0 THEN
-    RAISE EXCEPTION '0492 connection resolver prerequisite drift' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0493 connection resolver prerequisite drift' USING ERRCODE = '55000';
   END IF;
   definition := replace(definition,'  scheduled_run_id uuid;',E'  scheduled_run_id uuid;\n  exact_binding jsonb;');
   EXECUTE replace(definition,anchor,insertion);
@@ -319,7 +319,7 @@ BEGIN
   definition := pg_get_functiondef('opengeni_private.claim_session_system_update_outbox(integer)'::regprocedure);
   IF strpos(definition,'personal_connection_delegations jsonb') = 0
     OR strpos(definition,'o.personal_connection_delegations,') = 0 THEN
-    RAISE EXCEPTION '0492 outbox claim prerequisite drift' USING ERRCODE = '55000';
+    RAISE EXCEPTION '0493 outbox claim prerequisite drift' USING ERRCODE = '55000';
   END IF;
   definition := replace(definition,'personal_connection_delegations jsonb',
     'mcp_account_bindings jsonb, personal_connection_delegations jsonb');

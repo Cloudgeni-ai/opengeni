@@ -4,6 +4,8 @@ import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { scheduledSessionIds } from "@opengeni/db";
 import { withSiteSessionOrigin } from "@opengeni/core";
 import { resolveSiteSessionOrigin } from "../site-session-origin";
+import { codexAccountJson } from "./codex";
+import { getSessionCodexAccounts } from "@opengeni/db";
 import {
   AcknowledgeStreamRequest,
   ApplySessionGoalRevisionRequest,
@@ -2002,6 +2004,31 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ),
       ),
       children: decorateNodes(mapLineageNodes(lineage.children, policy)),
+    });
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/codex-accounts", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    // authorizeSessionHttp has already enforced private-session and agent scope.
+    const projection = await getSessionCodexAccounts(db, workspaceId, c.req.param("sessionId"));
+    if (!projection) throw new HTTPException(404, { message: "session not found" });
+    const activeAccountId = projection.rotation?.activeCredentialId ?? null;
+    return c.json({
+      accounts: projection.accounts.map((account) => codexAccountJson(account)),
+      activeAccountId,
+      settings: {
+        rotationEnabled: projection.rotation?.rotationEnabled ?? false,
+        rotationStrategy: "sharded",
+        activeCredentialId: activeAccountId,
+      },
+      currentSelection: projection.currentSelection,
+      currentAccount: projection.currentAccount
+        ? codexAccountJson(projection.currentAccount)
+        : null,
+      pinnedAccountId: projection.pinnedAccountId,
+      lastAccountId: projection.lastAccountId,
     });
   });
 
@@ -4647,6 +4674,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
   if (suffix === "/background-commands" && verb === "GET") return "session.read";
   if (suffix === "/model-context" && verb === "GET") return "session.read";
+  if (suffix === "/codex-accounts" && verb === "GET") return "session.read";
   if (/^\/background-commands\/[^/]+$/.test(suffix) && verb === "DELETE") {
     return "session.control";
   }

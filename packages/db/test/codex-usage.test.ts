@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { randomBytes } from "node:crypto";
-import postgres from "postgres";
+import type postgres from "postgres";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { CODEX_TOKEN_URL, CODEX_WHAM_BASE } from "@opengeni/codex";
 import {
@@ -18,22 +18,12 @@ import {
   type Database,
   type DbClient,
 } from "../src/index";
-import { migrate } from "../src/migrate";
 
 // P2 usage cache + the refreshing per-account usage wrapper, under a NON-superuser
 // role so FORCE RLS genuinely applies. fetchCodexUsageForAccount drives the SHARED
 // resolver (refresh-if-stale + (id,version) CAS) and then the /wham/usage read; the
-// OAuth refresh + wham endpoints are mocked on globalThis.fetch. Throwaway pg17.
-
-// Fixed Docker listeners stay above Linux's default ephemeral client-port range;
-// the container name binds the listener contract across worktrees.
-const PORT = 61443;
-const CONTAINER = `ogcodex-pg-usage-${PORT}`;
-const PASSWORD = "x";
-const APP_PASSWORD = "apppw";
-const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const APP_URL = `postgres://codex_app:${APP_PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const IMAGE = "pgvector/pgvector:pg17";
+// OAuth refresh + wham endpoints are mocked on globalThis.fetch. The shared
+// fixture provisions the canonical application role against the full ledger.
 
 const rawKey = randomBytes(32);
 const settings = { environmentsEncryptionKey: rawKey.toString("base64") } as unknown as Settings;
@@ -42,36 +32,8 @@ const key = environmentsEncryptionKeyBytes(settings)!;
 function encTokens(t: { access_token: string; refresh_token: string; id_token: string }): string {
   return encryptEnvironmentValue(key, JSON.stringify(t));
 }
-function docker(args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-}
-function removeContainer(): void {
-  try {
-    docker(["rm", "-f", "-v", CONTAINER]);
-  } catch {
-    /* gone */
-  }
-}
-async function waitForReady(): Promise<void> {
-  const deadline = Date.now() + 60_000;
-  while (true) {
-    try {
-      const probe = postgres(ADMIN_URL, { max: 1, connect_timeout: 2 });
-      try {
-        await probe`SELECT 1`;
-        return;
-      } finally {
-        await probe.end();
-      }
-    } catch (err) {
-      if (Date.now() > deadline)
-        throw new Error(`postgres not ready: ${String(err)}`, { cause: err });
-      await new Promise((r) => setTimeout(r, 500));
-    }
-  }
-}
-
 let available = true;
+let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
@@ -165,55 +127,27 @@ async function connect(
 }
 
 beforeAll(async () => {
-  try {
-    removeContainer();
-    docker([
-      "run",
-      "--rm",
-      "-d",
-      "-e",
-      `POSTGRES_PASSWORD=${PASSWORD}`,
-      "-p",
-      `${PORT}:5432`,
-      "--name",
-      CONTAINER,
-      IMAGE,
-    ]);
-  } catch (err) {
+  shared = await acquireSharedTestDatabase("codex-usage");
+  if (!shared) {
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+      throw new Error("Codex usage regressions require a real PostgreSQL database");
+    }
     available = false;
-    console.warn(`[codex-usage] docker unavailable, skipping: ${String(err)}`);
+    console.warn("[codex-usage] postgres unavailable, skipping");
     return;
   }
-  await waitForReady();
-  await migrate(ADMIN_URL);
-  admin = postgres(ADMIN_URL, { max: 4 });
-  await admin.unsafe(
-    `DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='codex_app') THEN CREATE ROLE codex_app LOGIN PASSWORD '${APP_PASSWORD}'; END IF; END $$;`,
-  );
-  await admin.unsafe(
-    `GRANT USAGE ON SCHEMA public, opengeni_private TO codex_app;` +
-      ` GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO codex_app;` +
-      ` GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO codex_app;` +
-      ` GRANT EXECUTE ON FUNCTION public.session_reference_visible(uuid, uuid, uuid) TO codex_app;` +
-      ` GRANT EXECUTE ON FUNCTION public.get_workspace_kind(uuid, uuid) TO codex_app;` +
-      ` GRANT EXECUTE ON FUNCTION public.resolve_workspace_codex_subscription_source(uuid, uuid) TO codex_app;`,
-  );
-  client = createDb(APP_URL);
+  admin = shared.admin;
+  const appRole = decodeURIComponent(new URL(shared.appUrl).username);
+  const [posture] = await admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
+    select rolsuper, rolbypassrls from pg_roles where rolname = ${appRole}`;
+  expect(posture).toEqual({ rolsuper: false, rolbypassrls: false });
+  client = createDb(shared.appUrl);
   db = client.db;
 }, 180_000);
 
 afterAll(async () => {
-  try {
-    await client?.close();
-  } catch {
-    /* noop */
-  }
-  try {
-    await admin?.end();
-  } catch {
-    /* noop */
-  }
-  removeContainer();
+  await client?.close().catch(() => undefined);
+  await shared?.release();
 });
 
 describe("recordCodexAccountUsage + the cached read", () => {

@@ -1477,13 +1477,25 @@ export function CodexSubscriptionsCardWithClient({
           })}
         </div>
       )}
-      {canManage && workspaceManaged && !sourceDisabled && !pending && !loading && !loadError ? (
+      {canManage && !pending && !loading && !loadError ? (
         <SubscriptionConnectAction
           analyticsAction="connect_codex"
           provider="Codex"
           count={accounts.length}
           busy={busy}
           onConnect={() => void connect()}
+          actionLabel={
+            !workspaceManaged || sourceDisabled ? "Connect workspace account" : undefined
+          }
+          description={
+            sourceDisabled
+              ? "Connecting an account keeps Codex turned off."
+              : !workspaceManaged
+                ? source?.mode === "automatic"
+                  ? "Connect a workspace account to use it for new work."
+                  : "Organization subscriptions remain selected."
+                : undefined
+          }
         />
       ) : null}
       {accounts.length > 0 && !pending && !loading ? (
@@ -1491,13 +1503,13 @@ export function CodexSubscriptionsCardWithClient({
           <p>
             {rotationEnabled ? (
               <>
-                Sessions are spread across all {accounts.length} subscriptions, each sticking to its
-                own plan for maximum prompt-cache reuse. Pinned sessions stay on their pin.
+                New work is spread across all {accounts.length} subscriptions, keeping account
+                affinity for prompt-cache reuse. Pinned sessions stay on their pin.
               </>
             ) : (
               <>
-                The <span className="font-medium">active</span> subscription runs every session that
-                isn't pinned to a specific one.
+                New work uses the <span className="font-medium">active</span> subscription unless
+                the session is pinned to a specific one.
               </>
             )}
           </p>

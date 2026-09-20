@@ -16,6 +16,7 @@ import type {
   CodexAccount,
   CodexAccountsResponse,
   CodexUsageWindow,
+  SessionCodexAccountsResponse,
   SessionEvent,
 } from "@opengeni/sdk";
 
@@ -68,7 +69,113 @@ function response(accounts: CodexAccount[]): CodexAccountsResponse {
   };
 }
 
+function sessionResponse(
+  accounts: CodexAccount[],
+  overrides: Partial<SessionCodexAccountsResponse> = {},
+): SessionCodexAccountsResponse {
+  return {
+    ...response(accounts),
+    currentAccount: null,
+    currentSelection: null,
+    pinnedAccountId: null,
+    lastAccountId: null,
+    ...overrides,
+  };
+}
+
 describe("useCodexAccounts — cached usage + refreshUsage", () => {
+  test("session projection preserves old-pool identity through drift and realtime settlement switches to new-work choices", async () => {
+    let waiting = true;
+    let reads = 0;
+    const old = account("accepted", { source: "organization" });
+    const next = account("new", { source: "workspace" });
+    const codexClient: CodexAccountsClientLike = {
+      listCodexAccounts: async () => {
+        throw new Error("session must not fall back to workspace");
+      },
+      listSessionCodexAccounts: async () => {
+        reads += 1;
+        return sessionResponse(waiting ? [old] : [next], {
+          currentSelection: waiting ? { credentialId: old.id, waiting: true } : null,
+          currentAccount: waiting ? old : null,
+        });
+      },
+    };
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useCodexAccounts({
+          client,
+          workspaceId: WORKSPACE_ID,
+          sessionId: "session",
+          codexClient,
+          events,
+          pollIntervalMs: 0,
+        }),
+      [] as SessionEvent[],
+    );
+    try {
+      await flush();
+      expect(hook.result.current.accounts.map((row) => row.id)).toEqual(["accepted"]);
+      expect(hook.result.current.currentAccount?.id).toBe("accepted");
+      waiting = false;
+      await hook.rerender([
+        {
+          id: "done",
+          sessionId: "session",
+          workspaceId: WORKSPACE_ID,
+          sequence: 1,
+          type: "turn.completed",
+          payload: {},
+          occurredAt: new Date().toISOString(),
+        },
+      ]);
+      await flush();
+      expect(reads).toBe(2);
+      expect(hook.result.current.accounts.map((row) => row.id)).toEqual(["new"]);
+      expect(hook.result.current.currentAccount).toBeNull();
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  test("a failed session-authorized projection never falls back to workspace inventory", async () => {
+    let workspaceReads = 0;
+    let denied = false;
+    const codexClient: CodexAccountsClientLike = {
+      listCodexAccounts: async () => {
+        workspaceReads += 1;
+        return response([account("wrong-pool")]);
+      },
+      listSessionCodexAccounts: async () => {
+        if (denied) throw new Error("Forbidden");
+        return sessionResponse([account("accepted")]);
+      },
+    };
+    const hook = await renderHook(
+      () =>
+        useCodexAccounts({
+          client,
+          workspaceId: WORKSPACE_ID,
+          sessionId: "session",
+          codexClient,
+          events: [],
+          pollIntervalMs: 0,
+        }),
+      undefined,
+    );
+    try {
+      await flush();
+      expect(hook.result.current.accounts.map((row) => row.id)).toEqual(["accepted"]);
+      denied = true;
+      await actRun(() => hook.result.current.refresh());
+      await flush();
+      expect(workspaceReads).toBe(0);
+      expect(hook.result.current.accounts).toEqual([]);
+      expect(hook.result.current.error?.message).toBe("Forbidden");
+    } finally {
+      await hook.unmount();
+    }
+  });
   test("refreshes only after the durable post-selection event", () => {
     expect(isCodexAccountEvent({ type: "turn.started" })).toBe(false);
     expect(isCodexAccountEvent({ type: "codex.account.switched" })).toBe(true);
@@ -81,13 +188,14 @@ describe("useCodexAccounts — cached usage + refreshUsage", () => {
     let selected: string | null = null;
     let blocked = "a";
     const codexClient: CodexAccountsClientLike = {
-      listCodexAccounts: async () => ({
-        ...response([account("a"), account("b")]),
+      listCodexAccounts: async () => {
+        throw new Error("must use session projection");
+      },
+      listSessionCodexAccounts: async () => ({
+        ...sessionResponse([account("a"), account("b")]),
         activeAccountId: "b",
-      }),
-      getSession: async () => ({
-        codexPinnedCredentialId: selected,
-        codexCurrentSelection: { credentialId: blocked, waiting: true },
+        pinnedAccountId: selected,
+        currentSelection: { credentialId: blocked, waiting: true },
       }),
       pinSessionCodexAccount: async (_workspaceId, _sessionId, target) => {
         selected = target;
@@ -128,8 +236,11 @@ describe("useCodexAccounts — cached usage + refreshUsage", () => {
     });
     const codexClient: CodexAccountsClientLike = {
       listCodexAccounts: async () => {
+        throw new Error("must use session projection");
+      },
+      listSessionCodexAccounts: async () => {
         reads += 1;
-        return response([account("a")]);
+        return sessionResponse([account("a")]);
       },
     };
     const turnStarted = {

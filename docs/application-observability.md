@@ -98,10 +98,18 @@ Ordinary public logs are not a substitute for this protected receiver.
 The OTLP scope is `@opengeni/observability/diagnostics`, version `1`. Log bodies
 contain JSON with schema `opengeni.failure-diagnostic.v1`: a generated diagnostic
 UUID, closed code/stage/retry decision, reviewed constraint names, SQLSTATE,
-bounded contract event types, exact UUID attempt/session/turn correlation and
+bounded contract event types, exact UUID attempt/session/turn/process correlation and
 the 40-hex deployment revision when configured. IDs belong in restricted log
 bodies, never indexed metric labels. Unknown constraints and invalid IDs are
 omitted. Source failure classification and retries remain owned by the DB layer.
+
+Retained-command proof writes use `sandbox_retained_processes.proof`. Typed
+ownership-fence failures have code `retained_process_fenced`; database failures
+retain SQLSTATE and reviewed proof/claim/settlement constraint names. Other
+failures use `retained_process_proof_failed`. The public warning carries only the
+diagnostic UUID. Inspect the protected cause location before treating a warning
+as a persistent defect: a concurrent owner may already have settled the process.
+This instrumentation neither releases claims nor changes retry or settlement.
 
 Original causes are inspected before generic public error projection. At most
 four causes and 32 frames per cause are retained. **Raw stack text and messages

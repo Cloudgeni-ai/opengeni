@@ -74,7 +74,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       add column end_user_id text,
       add column memory_scope text not null default 'workspace',
       add column initial_mcp_account_bindings jsonb`;
-    // Current session/claim adapters project 0492 receipts. Keep historical
+    // Current session/claim adapters project 0493 receipts. Keep historical
     // NULL semantics and install no account-binding runtime guards here: this
     // fixture must still exercise the actual pre-0343 authority boundary.
     await admin`alter table session_turns add column mcp_account_bindings jsonb`;
@@ -291,7 +291,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await admin`alter table session_system_updates drop column mcp_account_bindings`;
     await admin`alter table session_system_update_outbox drop column mcp_account_bindings`;
     await migrate(ownerUrl);
-    // 0492 must recreate the real receipt columns after the temporary bridge
+    // 0493 must recreate the real receipt columns after the temporary bridge
     // is gone, retaining historical NULL rather than accepting an empty list.
     const [historicalBindings] = await admin`
       select s.initial_mcp_account_bindings as session_bindings,

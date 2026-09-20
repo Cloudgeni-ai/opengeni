@@ -16,7 +16,7 @@ type Fixture = {
 let db: Fixture;
 let blank: BlankTestDatabase | null = null;
 const migration = await readFile(
-  new URL("../drizzle/0492_mcp_account_bindings.sql", import.meta.url),
+  new URL("../drizzle/0493_mcp_account_bindings.sql", import.meta.url),
   "utf8",
 );
 const sender = await readFile(
@@ -64,9 +64,9 @@ beforeAll(async () => {
     const { PGlite } = await import(modulePath);
     db = new PGlite();
   } else {
-    blank = await acquireBlankTestDatabase("migration-0492-exact-mcp");
+    blank = await acquireBlankTestDatabase("migration-0493-exact-mcp");
     if (!blank)
-      throw new Error("0492 requires disposable PostgreSQL or OPENGENI_MCP_BINDINGS_PGLITE_MODULE");
+      throw new Error("0493 requires disposable PostgreSQL or OPENGENI_MCP_BINDINGS_PGLITE_MODULE");
     const sql = postgres(blank.databaseUrl, { max: 1 });
     db = nativeMcpAccountBindingsFixture(sql);
   }
