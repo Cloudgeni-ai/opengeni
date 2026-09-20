@@ -16,6 +16,9 @@ eligible accounts. The web composer keeps these controls inside Connectors and
 blocks an explicit empty selection until an account is attached or the connector
 is disabled.
 
+The chat account list only controls attachments. Adding or connecting accounts
+belongs on the connector's Capabilities page.
+
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit
 `accountSelection: "all_eligible"` mode cannot be combined with a connection ID,

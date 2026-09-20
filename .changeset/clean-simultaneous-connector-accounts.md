@@ -9,4 +9,4 @@
 "@opengeni/api-router": patch
 ---
 
-Support simultaneous authorized personal and workspace MCP account attachments with immutable account-qualified routing, sender isolation, and scheduled execution binding. Move account controls inside Connectors with readable ownership labels and an explicit add-account action.
+Support simultaneous authorized personal and workspace MCP account attachments with immutable account-qualified routing, sender isolation, and scheduled execution binding. Move attachment controls inside Connectors with readable ownership labels; keep account setup on the Capabilities page.
