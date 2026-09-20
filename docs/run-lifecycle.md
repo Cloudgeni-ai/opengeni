@@ -1492,6 +1492,57 @@ the exact receipt; unrelated revisions or newer writes invalidate it. Only a
 subsequent fresh checkpoint makes the archive current. This operation does not
 resume a turn, modify session history, or claim recovery of unavailable writes.
 
+### Explicit same-session historical checkpoint consent
+
+The managed browser exposes a separate public contract at
+`GET|POST /v1/workspaces/:workspaceId/sessions/:sessionId/sandbox-recovery`.
+GET is a bounded, provider-free projection. POST requires the canonical managed
+human cookie, current session-control authority, an operation UUID, explicit
+historical-checkpoint acceptance, and the exact selection returned by GET.
+Agents, delegated/API principals, shared groups, non-Modal homes, active foreign
+routes, legacy/unregistered archives, and `archive.previous` are unsupported.
+
+The selection binds session/group, tenancy and route epochs, lease identity/epoch,
+CURRENT artifact and revision, capture timestamp, and archive/workspace generations.
+The generation gap is not a count of missing edits or files. Conversation and tool
+receipts remain; changes after the checkpoint are unavailable and external effects
+are not undone. No empty reset or command replay occurs.
+
+Consent takes the existing workspace tenancy fence exclusively before checking
+complete group membership, including actor-hidden sessions. It then takes the
+canonical workspace-control/session/lease prefix and requires a cold, instance-free
+lease with no holders, unsettled admissions, retained processes, active attempts,
+pending quiescence or queued work. Current authority is checked before receipt
+replay. An identical receipt replays before mutable eligibility; a changed body
+with the same key conflicts. Database guards prevent group attachment, route
+changes and CURRENT artifact replacement while the restore owns its selection.
+The referenced CURRENT artifact stays pinned against existing checkpoint GC.
+Authority revocation is not blocked and invalidates restore authorization.
+
+Consent accepted, restoring, and verified completion are distinct projection states.
+The API uses the existing direct lease election/create/verify/commit lifecycle with
+an empty operation callback, not Send or Retry. Provider binding and native receipt
+verification remain mandatory; native Modal verification is not a tar-tree proof.
+The old generation gap and immutable artifact provenance survive publication.
+Pause/Cancel and unknown-effect Retry fences remain independent. New Retry refuses
+an unchanged authoritative blocked effective route; selecting another model does
+not repair it, while a healthy selected Connected Machine is not blocked by its
+managed home's condition.
+
+Every later agent build reads the durable consent receipt and includes its exact
+filesystem-discontinuity warning in session instructions. This warning is outside
+compactable transcript state and is reconstructed after worker restart. Prior tool
+success must not be treated as proof those files still exist. Consent alone does
+not claim restore success. Failed/stale public restores and a later loss after
+verified recovery remain explicit blockers requiring operator review; this slice
+does not introduce an abandon/reset or automatic re-consent operation.
+
+Migration `0492_consented_sandbox_recovery.sql` is maintenance-only: stop all old
+API/control/turn processes, supply the complete runtime login list, migrate and
+start only matching code. Old workers cannot produce the mandatory warning, so
+pre-0492 rollback/restart is unsupported. No cancellation/reaper protocol changes
+are included in this recovery slice.
+
 New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected sandbox environment/base
 image instead of replacing the whole machine. Existing serialized sessions keep

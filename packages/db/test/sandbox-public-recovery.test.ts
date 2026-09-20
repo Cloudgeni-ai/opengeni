@@ -1,0 +1,452 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { sql } from "drizzle-orm";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireLease,
+  beginSandboxRematerialization,
+  bootstrapWorkspace,
+  claimSandboxCheckpointArtifactsForGc,
+  commitWarmingToWarm,
+  consentPublicSandboxRecovery,
+  createDb,
+  createSession,
+  failWarmingToCold,
+  getSandboxRecoveryDiscontinuity,
+  markSandboxRestoreVerifying,
+  readLease,
+  readPublicSandboxRecovery,
+  recordWarmingSandboxCreated,
+  registerSandboxCheckpointArtifact,
+  withWorkspaceSubjectRls,
+  withWorkspaceSubjectSessionActivityRls,
+  mutateSessionControlInTransaction,
+} from "../src/index";
+import type { SandboxRecoveryRequest } from "@opengeni/contracts";
+
+let shared: SharedTestDatabase;
+let client: ReturnType<typeof createDb>;
+beforeAll(async () => {
+  const acquired = await acquireSharedTestDatabase("public-recovery");
+  if (!acquired) throw new Error("Real PostgreSQL required");
+  shared = acquired;
+  client = createDb(shared.appUrl);
+}, 180_000);
+afterAll(async () => {
+  await client?.close();
+  await shared?.release();
+}, 60_000);
+
+async function fixture() {
+  const unique = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: unique,
+    accountName: "recovery",
+    workspaceExternalSource: "test",
+    workspaceExternalId: unique,
+    workspaceName: "recovery",
+    subjectId: `subject-${unique}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const scope = {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    subjectId: grant.subjectId,
+  };
+  const create = (groupId?: string) =>
+    createSession(client.db, {
+      ...scope,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "modal",
+      ...(groupId ? { sandboxGroupId: groupId } : {}),
+    });
+  const session = await create();
+  const leaseId = crypto.randomUUID();
+  const selectionTime = "2026-09-16T06:24:07.000Z";
+  const archive = Buffer.from(
+    `MODAL_SANDBOX_FS_SNAPSHOT_V1\n${JSON.stringify({ snapshot_id: `im-${unique}`, workspace_persistence: "snapshot_filesystem" })}`,
+  ).toString("base64");
+  const sha = createHash("sha256").update(Buffer.from(archive, "base64")).digest("hex");
+  const descriptor = {
+    version: 2 as const,
+    kind: "provider_snapshot" as const,
+    revision: `wa2:${Date.parse(selectionTime)}:${sha}`,
+    capturedAt: selectionTime,
+    archiveSha256: sha,
+    archiveBytes: Buffer.from(archive, "base64").length,
+    provider: "modal_snapshot_filesystem" as const,
+    snapshotId: `im-${unique}`,
+    workspacePersistence: "snapshot_filesystem",
+  };
+  const resume = {
+    backendId: "modal",
+    sessionState: { workspaceArchive: archive, workspaceArchiveMeta: descriptor },
+    opengeniRecovery: {
+      provider: { status: "missing", instanceId: null, observedAt: "2026-09-17T06:24:31.000Z" },
+      restore: { status: "degraded", retryable: false, failureCode: "archive_generation_mismatch" },
+      workspace: { status: "degraded" },
+    },
+  };
+  await shared.admin`insert into sandbox_leases(id,account_id,workspace_id,sandbox_group_id,backend,liveness,
+    lease_epoch,workspace_generation,archive_generation,resume_backend_id,resume_state,expires_at)
+    values(${leaseId},${scope.accountId},${scope.workspaceId},${session.sandboxGroupId},'modal','cold',3,44,10,'modal',${shared.admin.json(resume)},now())`;
+  const binding = {
+    version: 1,
+    serverUrl: "https://modal.test",
+    workspaceName: "recovery-fixture",
+    environment: "main",
+  };
+  const artifact = await registerSandboxCheckpointArtifact(client.db, {
+    ...scope,
+    sandboxGroupId: session.sandboxGroupId,
+    sourceLeaseId: leaseId,
+    sourceLeaseEpoch: 2,
+    sourceInstanceId: "gone-provider",
+    sourceWorkspaceGeneration: 10,
+    providerBinding: binding,
+    providerBindingKey: JSON.stringify(binding),
+    workspaceArchive: archive,
+    workspaceArchiveMeta: descriptor,
+  });
+  await shared.admin.begin(async (tx) => {
+    await tx`select set_config('opengeni.account_id', ${scope.accountId}, true), set_config('opengeni.workspace_id', ${scope.workspaceId}, true)`;
+    await tx`update sandbox_checkpoint_artifacts set state = 'current' where id = ${artifact.id}`;
+    await tx`update sandbox_leases set current_checkpoint_artifact_id = ${artifact.id} where id = ${leaseId}`;
+  });
+  const input = { ...scope, sessionId: session.id };
+  const preview = await readPublicSandboxRecovery(client.db, input);
+  expect(preview.status).toBe("eligible");
+  const request: SandboxRecoveryRequest = {
+    operationId: crypto.randomUUID(),
+    acceptHistoricalCheckpoint: true,
+    selection: preview.checkpoint!,
+  };
+  const consent = (override: Partial<SandboxRecoveryRequest> = {}) =>
+    consentPublicSandboxRecovery(client.db, { ...input, request: { ...request, ...override } });
+  return { ...input, session, leaseId, artifact, preview, request, consent, create, scope };
+}
+
+describe("explicit singleton checkpoint recovery", () => {
+  test("a fresh Modal session without a blocked lease does not suppress ordinary failure remedies", async () => {
+    const f = await fixture();
+    const fresh = await f.create();
+    expect(await readPublicSandboxRecovery(client.db, { ...f, sessionId: fresh.id })).toMatchObject(
+      {
+        status: "unsupported",
+        reason: "historical_checkpoint_not_required",
+        checkpoint: null,
+      },
+    );
+  });
+
+  test("preview is bounded and read-only; consent does not replay commands, resume Pause or fabricate readiness", async () => {
+    const f = await fixture();
+    expect(JSON.stringify(f.preview)).not.toMatch(
+      /providerBinding|modal.test|gone-provider|workspaceArchive|snapshotId/,
+    );
+    const before =
+      await shared.admin`select status, active_turn_id from sessions where id = ${f.session.id}`;
+    expect(
+      await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id),
+    ).toBeNull();
+    const result = await f.consent();
+    expect(result.recovery.status).toBe("consent_accepted");
+    expect(
+      Array.from(
+        await shared.admin`select status, active_turn_id from sessions where id = ${f.session.id}`,
+      ),
+    ).toEqual(Array.from(before));
+    expect(
+      (
+        await shared.admin`select count(*)::int as count from session_turns where session_id = ${f.session.id}`
+      )[0]!.count,
+    ).toBe(0);
+    expect(
+      (
+        await shared.admin`select count(*)::int as count from session_system_updates where session_id = ${f.session.id}`
+      )[0]!.count,
+    ).toBe(0);
+    const warning = await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id);
+    expect(warning).toContain(f.request.selection.capturedAt);
+    expect(warning).toContain("External effects are not undone");
+    expect(warning).toContain("Never automatically replay");
+    const replacement = createDb(shared.appUrl);
+    expect(await getSandboxRecoveryDiscontinuity(replacement.db, f.workspaceId, f.session.id)).toBe(
+      warning,
+    );
+    await replacement.close();
+  });
+
+  test("concurrent identical consent replays durably; changed timestamp/payload conflicts even after mutable state changes", async () => {
+    const f = await fixture();
+    const results = await Promise.all([f.consent(), f.consent()]);
+    expect(results.map((r) => r.outcome).sort()).toEqual(["accepted", "replayed"]);
+    await expect(
+      f.consent({ selection: { ...f.request.selection, capturedAt: "2026-09-17T06:24:07.000Z" } }),
+    ).rejects.toThrow();
+    await shared.admin`update sandbox_leases set liveness = 'warming' where id = ${f.leaseId}`;
+    expect((await f.consent()).outcome).toBe("replayed");
+    expect((await readPublicSandboxRecovery(client.db, f)).status).toBe("restoring");
+  });
+
+  test("stale consent is rejected before writing authorization", async () => {
+    const f = await fixture();
+    await shared.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${f.accountId}, true), set_config('opengeni.workspace_id', ${f.workspaceId}, true)`;
+      await tx`update sandbox_leases set workspace_generation = 45 where id = ${f.leaseId}`;
+    });
+    await expect(f.consent()).rejects.toThrow("changed");
+    expect(
+      (
+        await shared.admin`select count(*)::int as count from audit_events where id = ${f.request.operationId}`
+      )[0]!.count,
+    ).toBe(0);
+  });
+
+  test("complete group membership rejects a second session; pending consent fences new attachment and route changes", async () => {
+    const sharedFixture = await fixture();
+    await sharedFixture.create(sharedFixture.session.sandboxGroupId);
+    expect(await readPublicSandboxRecovery(client.db, sharedFixture)).toMatchObject({
+      status: "unsupported",
+      reason: "singleton_required",
+    });
+    await expect(sharedFixture.consent()).rejects.toThrow("changed");
+    const f = await fixture();
+    await f.consent();
+    await expect(f.create(f.session.sandboxGroupId)).rejects.toThrow();
+    await expect(
+      Promise.resolve(
+        shared.admin`update sessions set active_epoch = active_epoch + 1 where id = ${f.session.id}`,
+      ),
+    ).rejects.toThrow("protects group membership");
+  });
+
+  test("an actor-hidden historical group member is counted without disclosing its identity", async () => {
+    const f = await fixture();
+    const hidden = await f.create(f.session.sandboxGroupId);
+    const ownerId = crypto.randomUUID();
+    const ownerSubject = `user:hidden-${ownerId}`;
+    // Seed a historical private member as the test administrator. Do not mint
+    // a lifecycle capability or relax RLS on the app-facing read under test.
+    await shared.admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`insert into organization_memberships(id,account_id,subject_id,status) values(${ownerId},${f.accountId},${ownerSubject},'suspended')`;
+      await tx`update sessions set visibility = 'user_private', owner_organization_membership_id = ${ownerId}, owner_subject_id = ${ownerSubject} where id = ${hidden.id}`;
+    });
+    const visible = await withWorkspaceSubjectRls(client.db, f.workspaceId, f.subjectId, (tx) =>
+      tx.execute(sql`select id from sessions where sandbox_group_id = ${f.session.sandboxGroupId}`),
+    );
+    expect(visible).toHaveLength(1);
+    const projection = await readPublicSandboxRecovery(client.db, f);
+    expect(projection).toMatchObject({
+      status: "unsupported",
+      reason: "singleton_required",
+      checkpoint: null,
+    });
+    expect(JSON.stringify(projection)).not.toContain(hidden.id);
+    await expect(f.consent()).rejects.toThrow("changed");
+  });
+
+  test("concurrent attach and consent have one winner under the shared membership fence", async () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const f = await fixture();
+      const [consent, attach] = await Promise.allSettled([
+        f.consent(),
+        f.create(f.session.sandboxGroupId),
+      ]);
+      expect([consent.status, attach.status].filter((value) => value === "fulfilled")).toHaveLength(
+        1,
+      );
+      const projection = await readPublicSandboxRecovery(client.db, f);
+      expect(projection.status).toBe(
+        consent.status === "fulfilled" ? "consent_accepted" : "unsupported",
+      );
+    }
+  });
+
+  test("Pause is preserved and unresolved holders refuse consent", async () => {
+    const f = await fixture();
+    await withWorkspaceSubjectSessionActivityRls(client.db, f.workspaceId, f.subjectId, (db) =>
+      mutateSessionControlInTransaction(db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sessionId: f.session.id,
+        actor: { type: "human", subjectId: f.subjectId },
+        action: "pause",
+        operationKey: crypto.randomUUID(),
+      }),
+    );
+    await f.consent();
+    expect(
+      (await shared.admin`select direct_control_state from sessions where id = ${f.session.id}`)[0]!
+        .direct_control_state,
+    ).toBe("paused");
+    const blocked = await fixture();
+    await shared.admin`insert into sandbox_lease_holders(account_id,workspace_id,lease_id,kind,holder_id)
+      values(${blocked.accountId},${blocked.workspaceId},${blocked.leaseId},'viewer','unsettled-viewer')`;
+    expect(await readPublicSandboxRecovery(client.db, blocked)).toMatchObject({
+      status: "blocked",
+      reason: "execution_unresolved",
+    });
+    await expect(blocked.consent()).rejects.toThrow("changed");
+  });
+
+  test("pending selection stays CURRENT and GC-pinned; late capture cannot replace provenance", async () => {
+    const f = await fixture();
+    await f.consent();
+    await expect(
+      Promise.resolve(
+        shared.admin`update sandbox_leases set archive_generation = 44 where id = ${f.leaseId}`,
+      ),
+    ).rejects.toThrow("pins the exact current checkpoint");
+    await expect(
+      Promise.resolve(
+        shared.admin`update sandbox_leases set current_checkpoint_artifact_id = null where id = ${f.leaseId}`,
+      ),
+    ).rejects.toThrow();
+    const claims = await claimSandboxCheckpointArtifactsForGc(client.db, {
+      claimId: crypto.randomUUID(),
+      limit: 100,
+      claimTtlMs: 60_000,
+    });
+    expect(claims.some((row) => row.id === f.artifact.id)).toBe(false);
+  });
+
+  test("supported restore CAS verifies selected CURRENT without rewriting generations; late completion loses", async () => {
+    const f = await fixture();
+    await f.consent();
+    const scope = {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sandboxGroupId: f.session.sandboxGroupId,
+    };
+    const elected = await acquireLease(client.db, {
+      ...scope,
+      kind: "viewer",
+      holderId: "recovery-test",
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    expect(elected.role).toBe("spawner");
+    expect(elected.lease.archiveComplete).toBe(false);
+    expect(elected.lease.historicalRecoveryAuthorized).toBe(true);
+    const id = crypto.randomUUID();
+    const expectedEpoch = elected.lease.leaseEpoch;
+    expect(
+      await beginSandboxRematerialization(client.db, {
+        ...scope,
+        expectedEpoch,
+        rematerializationId: id,
+      }),
+    ).toMatchObject({ status: "started" });
+    expect(
+      await commitWarmingToWarm(client.db, {
+        ...scope,
+        expectedEpoch,
+        instanceId: "restored-box",
+        leaseTtlMs: 60_000,
+      }),
+    ).toMatchObject({ committed: false });
+    await recordWarmingSandboxCreated(client.db, {
+      ...scope,
+      expectedEpoch,
+      rematerializationId: id,
+      instanceId: "restored-box",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "restored-box" } },
+      },
+      leaseTtlMs: 60_000,
+    });
+    await markSandboxRestoreVerifying(client.db, {
+      ...scope,
+      expectedEpoch,
+      rematerializationId: id,
+    });
+    const completion = {
+      ...scope,
+      expectedEpoch,
+      instanceId: "restored-box",
+      leaseTtlMs: 60_000,
+      rematerialization: { id, verifiedRevision: f.request.selection.revision },
+    };
+    expect(await commitWarmingToWarm(client.db, completion)).toMatchObject({ committed: true });
+    expect(await readLease(client.db, f.workspaceId, f.session.sandboxGroupId)).toMatchObject({
+      workspaceGeneration: 44,
+      archiveGeneration: 10,
+      archiveComplete: false,
+    });
+    expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({ status: "restored" });
+    expect(await commitWarmingToWarm(client.db, completion)).toMatchObject({
+      committed: false,
+      reason: "stale_epoch",
+    });
+    expect((await f.consent()).outcome).toBe("replayed");
+  });
+
+  test("failed restoration remains blocked, preserves provenance, and cannot silently re-elect", async () => {
+    const f = await fixture();
+    await f.consent();
+    const scope = {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sandboxGroupId: f.session.sandboxGroupId,
+    };
+    const elected = await acquireLease(client.db, {
+      ...scope,
+      kind: "viewer",
+      holderId: "failed-recovery-test",
+      backend: "modal",
+      leaseTtlMs: 60_000,
+    });
+    await failWarmingToCold(client.db, { ...scope, expectedEpoch: elected.lease.leaseEpoch });
+    expect(await readPublicSandboxRecovery(client.db, f)).toMatchObject({
+      status: "blocked",
+      reason: "restore_failed",
+    });
+    expect(await readLease(client.db, f.workspaceId, f.session.sandboxGroupId)).toMatchObject({
+      workspaceGeneration: 44,
+      archiveGeneration: 10,
+    });
+    expect((await f.consent()).outcome).toBe("replayed");
+    await expect(
+      acquireLease(client.db, {
+        ...scope,
+        kind: "viewer",
+        holderId: "failed-recovery-retry",
+        backend: "modal",
+        leaseTtlMs: 60_000,
+      }),
+    ).resolves.toMatchObject({ role: "blocked" });
+    expect(await getSandboxRecoveryDiscontinuity(client.db, f.workspaceId, f.session.id)).toContain(
+      f.request.selection.capturedAt,
+    );
+  });
+
+  test("cross-tenant selection and revoked actor cannot authorize or replay", async () => {
+    const f = await fixture();
+    const other = await fixture();
+    await expect(f.consent({ selection: other.request.selection })).rejects.toThrow();
+    await f.consent();
+    await shared.admin`delete from workspace_memberships where workspace_id = ${f.workspaceId} and subject_id = ${f.subjectId}`;
+    await expect(f.consent()).rejects.toThrow("authority is unavailable");
+    await expect(
+      acquireLease(client.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sandboxGroupId: f.session.sandboxGroupId,
+        kind: "viewer",
+        holderId: "revoked-recovery",
+        backend: "modal",
+        leaseTtlMs: 60_000,
+      }),
+    ).resolves.toMatchObject({ role: "blocked" });
+  });
+});

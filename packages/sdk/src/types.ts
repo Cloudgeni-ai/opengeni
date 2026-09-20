@@ -5182,6 +5182,38 @@ export type SessionRetryRequest = {
   latencyMode?: LatencyMode;
 };
 
+export type SandboxRecoverySelection = {
+  version: 1;
+  sessionId: string;
+  sandboxGroupId: string;
+  leaseId: string;
+  routeEpoch: number;
+  authorityEpoch: number;
+  leaseEpoch: number;
+  workspaceGeneration: number;
+  archiveGeneration: number;
+  artifactId: string;
+  revision: string;
+  capturedAt: string;
+};
+export type SandboxRecoveryProjection = {
+  version: 1;
+  status: "unsupported" | "blocked" | "eligible" | "consent_accepted" | "restoring" | "restored";
+  reason: string | null;
+  checkpoint: SandboxRecoverySelection | null;
+  operationId: string | null;
+};
+export type SandboxRecoveryRequest = {
+  operationId: string;
+  acceptHistoricalCheckpoint: true;
+  selection: SandboxRecoverySelection;
+};
+export type SandboxRecoveryResponse = {
+  outcome: "accepted" | "replayed";
+  operationId: string;
+  recovery: SandboxRecoveryProjection;
+};
+
 export type SessionRetryResponse = {
   outcome: "accepted" | "replayed";
   turnId: string;

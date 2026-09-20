@@ -9317,6 +9317,7 @@ export const sandboxLeases = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     sandboxGroupId: uuid("sandbox_group_id").notNull(),
+    publicRecovery: jsonb("public_recovery").$type<Record<string, unknown>>(),
 
     unobservableCommandDrainIds: uuid("unobservable_command_drain_ids").array(),
     unobservableCommandCheckedAt: timestamp("unobservable_command_checked_at", {

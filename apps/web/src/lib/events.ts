@@ -1,6 +1,7 @@
 import { buildTimeline, presentFailure, type TimelineItem } from "@opengeni/react";
 
 import type { Session, SessionEvent, SessionStatus } from "@/types";
+import { isStructuralSandboxFailure } from "./sandbox-recovery";
 
 // Only "cancelled" is terminal for the console: a FAILED session is revivable
 // by sending it a new message (the API transitions failed -> queued and
@@ -70,6 +71,8 @@ export type SessionFailureSummary = {
   /** Final consecutive automatic-recovery streak, not total recoveries in a turn or session. */
   consecutiveRecoveryCount: number | null;
   detailsTruncated?: boolean;
+  /** Typed sandbox evidence suppresses generic execution/model remedies, never grants recovery. */
+  structuralSandboxFailure?: boolean;
 };
 
 /**
@@ -113,6 +116,9 @@ export function summarizeSessionFailure(
       failedAt: diagnostics?.occurredAt ?? null,
       failureEventId: diagnostics?.eventId ?? null,
       consecutiveRecoveryCount: failureRecoveryStreak(payload),
+      ...(structuralSandboxFailure(payload, events, diagnostics?.turnId, diagnostics?.sequence)
+        ? { structuralSandboxFailure: true }
+        : {}),
       ...((payload.projection as { truncatedFields?: unknown[] } | undefined)?.truncatedFields
         ?.length
         ? { detailsTruncated: true }
@@ -126,6 +132,7 @@ export function summarizeSessionFailure(
   let failureEventId: string | null = null;
   let consecutiveRecoveryCount: number | null = null;
   let latestFailedTurnId: string | null = null;
+  let structuralFailure = false;
   for (const event of events) {
     if (event.type === "turn.failed") {
       latestFailedTurnId = event.turnId ?? null;
@@ -139,6 +146,7 @@ export function summarizeSessionFailure(
       safetyRefusal = presentation.safetyRefusal;
       failedAt = event.occurredAt;
       failureEventId = event.id;
+      structuralFailure = structuralSandboxFailure(payload, events, event.turnId, event.sequence);
     }
     if (event.type === "session.status.changed") {
       const payload = event.payload as Record<string, unknown>;
@@ -158,10 +166,40 @@ export function summarizeSessionFailure(
         safetyRefusal = presentation.safetyRefusal;
         failedAt = event.occurredAt;
         failureEventId = event.id;
+        structuralFailure = structuralSandboxFailure(payload, events, event.turnId, event.sequence);
       }
     }
   }
-  return { reason, safetyRefusal, failedAt, failureEventId, consecutiveRecoveryCount };
+  return {
+    reason,
+    safetyRefusal,
+    failedAt,
+    failureEventId,
+    consecutiveRecoveryCount,
+    ...(structuralFailure ? { structuralSandboxFailure: true } : {}),
+  };
+}
+
+function structuralSandboxFailure(
+  payload: Record<string, unknown>,
+  events: SessionEvent[],
+  turnId: string | null | undefined,
+  sequence: number | undefined,
+): boolean {
+  if (isStructuralSandboxFailure(payload)) return true;
+  if (!turnId || sequence === undefined) return false;
+  // A provisioning failure belongs only to its exact failed turn. A later
+  // successful/new provision supersedes it; prose and unrelated history do not.
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index]!;
+    if (event.turnId !== turnId || event.sequence > sequence) continue;
+    const detail = event.payload as Record<string, unknown> | null;
+    if (detail?.name !== "sandbox.provision") continue;
+    if (event.type === "sandbox.operation.failed") return isStructuralSandboxFailure(detail);
+    if (event.type === "sandbox.operation.started" || event.type === "sandbox.operation.completed")
+      return false;
+  }
+  return false;
 }
 
 function failureRecoveryStreak(payload: Record<string, unknown>): number | null {

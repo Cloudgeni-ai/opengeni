@@ -1395,7 +1395,8 @@ export async function resumeBoxForTurn(
       const continuityRecovery = acquired.lease.recovery.continuity;
       if (
         (acquired.lease.recovery.archive.status === "available" &&
-          acquired.lease.archiveComplete) ||
+          (acquired.lease.archiveComplete ||
+            acquired.lease.historicalRecoveryAuthorized === true)) ||
         (acquired.lease.recovery.archive.status === "none" &&
           workspaceArchiveFieldsFromEnvelope(archiveSource) !== null)
       ) {

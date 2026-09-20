@@ -430,6 +430,9 @@ import type {
   SteerSessionQueueItemRequest,
   SessionControlResponse,
   SessionRetryRequest,
+  SandboxRecoveryProjection,
+  SandboxRecoveryRequest,
+  SandboxRecoveryResponse,
   SessionRetryResponse,
   WorkspaceInferenceControlResponse,
   WorkspaceControlEvent,
@@ -2511,6 +2514,30 @@ export class OpenGeniClient {
     return await this.requestSessionCommand<SubmitComposerDraftResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft/submit`,
+      request,
+    );
+  }
+
+  /** Inspect bounded checkpoint recovery eligibility without changing session state. */
+  async getSandboxRecovery(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SandboxRecoveryProjection> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/sandbox-recovery`,
+    );
+  }
+
+  /** Restore only the explicitly selected checkpoint; never retry a command. */
+  async recoverSandbox(
+    workspaceId: string,
+    sessionId: string,
+    request: SandboxRecoveryRequest,
+  ): Promise<SandboxRecoveryResponse> {
+    return this.requestSessionCommand(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/sandbox-recovery`,
       request,
     );
   }

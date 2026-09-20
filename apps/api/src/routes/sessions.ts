@@ -4,6 +4,9 @@ import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { scheduledSessionIds } from "@opengeni/db";
 import { withSiteSessionOrigin } from "@opengeni/core";
 import { resolveSiteSessionOrigin } from "../site-session-origin";
+import { SandboxRecoveryRequest } from "@opengeni/contracts";
+import { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } from "@opengeni/core";
+import { SandboxRecoveryConflictError } from "@opengeni/db";
 import {
   AcknowledgeStreamRequest,
   ApplySessionGoalRevisionRequest,
@@ -3127,6 +3130,80 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/sandbox-recovery", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    try {
+      return c.json(
+        await getManagedHumanSandboxRecovery(
+          deps,
+          authorization,
+          workspaceId,
+          c.req.param("sessionId"),
+        ),
+      );
+    } catch (error) {
+      throw sessionTenancyHttpError(error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/sandbox-recovery", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const parsed = SandboxRecoveryRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid checkpoint consent" });
+    try {
+      const receipt = await consentManagedHumanSandboxRecovery(
+        deps,
+        authorization,
+        workspaceId,
+        sessionId,
+        parsed.data,
+      );
+      const projection = await getManagedHumanSandboxRecovery(
+        deps,
+        authorization,
+        workspaceId,
+        sessionId,
+      );
+      if (
+        projection.operationId === receipt.operationId &&
+        projection.status === "consent_accepted"
+      ) {
+        // Establish/verify only. No failed-turn Retry, Send, tool callback or
+        // command replay. The ordinary cold->warming election owns creation.
+        const session = await getSession(db, workspaceId, sessionId);
+        if (session) {
+          try {
+            await withChannelARead(
+              channelAServices,
+              {
+                accountId: authorization.grant.accountId,
+                workspaceId,
+                session,
+                subjectId: authorization.grant.subjectId,
+              },
+              async () => undefined,
+            );
+          } catch {
+            // Consent committed. Never turn a provider failure into a false
+            // rejection of consent or leak native provider bindings/messages.
+          }
+        }
+      }
+      return c.json({
+        ...receipt,
+        recovery: await getManagedHumanSandboxRecovery(deps, authorization, workspaceId, sessionId),
+      });
+    } catch (error) {
+      if (error instanceof SandboxRecoveryConflictError)
+        return c.json({ code: error.code, message: error.message }, 409);
+      if (error instanceof SessionCommandIdempotencyError) return commandConflictResponse(c, error);
+      throw sessionTenancyHttpError(error);
+    }
+  });
+
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/retry", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
@@ -4714,6 +4791,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/composer-draft/submit" && verb === "POST") return "session.append";
   if (suffix === "/control" && verb === "POST") return "session.control";
   if (suffix === "/retry" && verb === "POST") return "session.control";
+  if (suffix === "/sandbox-recovery" && ["GET", "POST"].includes(verb)) return "session.control";
   if (suffix === "/steer" && verb === "POST") return "session.steer";
   if (suffix === "/human-input-requests" && verb === "GET") {
     return "session.human_input.read";
