@@ -1503,6 +1503,12 @@ the exact latest generation is durable before teardown. It may also use the
 separate `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` provider budget so a large
 workspace can receive extended recovery headroom without lengthening ordinary
 periodic or turn-end finalization. Unset preserves the shared snapshot timeout;
+logical turn closure does not let the reaper reclaim the sole holder of an
+already-admitted warm capture before its original capture deadline. Otherwise
+the sweep could adopt a still-running finalizer's snapshot with the longer drain
+budget. This bounded reclamation exception grants no execution or heartbeat
+authority; settlement restores ordinary idle grace, and deadline expiry still
+permits dead-worker capture recovery.
 Boot validation requires the larger configured capture budget and one reaper
 period to fit strictly inside provider-deadline rotation headroom even when the
 default backend is no longer Modal, because historical Modal leases remain

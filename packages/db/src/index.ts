@@ -48983,6 +48983,20 @@ export async function reapStaleLeaseHolders(
           where id in (
             select holder.id from sandbox_lease_holders as holder
             where holder.workspace_id = ${input.workspaceId} and holder.kind = 'turn'
+              -- Logical turn closure is not physical capture settlement. A
+              -- warm claim was admitted with this turn as its sole holder;
+              -- retain it through the ORIGINAL bounded capture window so the
+              -- reaper cannot steal a live finalizer and escalate its budget.
+              -- This affects reclamation only, never execution authority or
+              -- holder heartbeats. Expired claims still enter normal recovery.
+              and not exists (
+                select 1 from sandbox_leases capture_lease
+                where capture_lease.id = holder.lease_id
+                  and capture_lease.liveness = 'warm'
+                  and capture_lease.archive_capture_id is not null
+                  and capture_lease.archive_capture_published_at is null
+                  and capture_lease.archive_capture_deadline_at > now()
+              )
               and (
                 holder.last_heartbeat_at < now() - (${String(input.turnHolderTtlMs)} || ' milliseconds')::interval
                 or not ${LIVE_CANONICAL_TURN_HOLDER_PREDICATE}
