@@ -82,7 +82,7 @@ BEGIN
         AND d ->> 'ownerSubjectId' = item ->> 'ownerSubjectId'
         AND d ->> 'providerDomain' = item ->> 'providerDomain'
         AND d ->> 'kind' = item ->> 'kind'
-        AND d ->> 'connectionType' = 'connection'
+        AND d ->> 'connectionType' = 'mcp'
     ) THEN RAISE EXCEPTION 'MCP account binding requires exact sender delegation' USING ERRCODE = '42501'; END IF;
     seen := array_append(seen,item ->> 'serverId');
     pairs := pairs || jsonb_build_array(pair);

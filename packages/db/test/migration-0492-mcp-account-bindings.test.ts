@@ -2,6 +2,8 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
+import { McpConnectionAccountBindings } from "@opengeni/contracts";
+import { personalDelegationsForAccountBindings } from "../../core/src/domain/mcp-account-bindings";
 
 // Optional isolated WASM PostgreSQL for sandboxes without Docker. No deployed
 // database URL is read; otherwise use the repository's disposable DB harness.
@@ -243,21 +245,18 @@ test("personal selection requires exact sender delegation, never fabricated work
     ownerSubjectId: "sender",
     connectionRef: { ...binding.connectionRef, subjectScope: "subject" },
   };
-  const delegation = {
-    serverId: route,
-    connectionId: connection,
-    originWorkspaceId: workspace,
-    ownerSubjectId: "sender",
-    providerDomain: "mail.test",
-    kind: "oauth2",
-    connectionType: "connection",
-  };
+  // Exercise the actual admission producer, not a hand-built SQL-only shape.
+  const [delegation] = personalDelegationsForAccountBindings(
+    McpConnectionAccountBindings.parse([personal]),
+  );
+  expect(delegation?.connectionType).toBe("mcp");
   await validate([personal], [delegation]);
   for (const delta of [
     { connectionId: otherConnection },
     { ownerSubjectId: "someone-else" },
     { serverId: "mail" },
     { connectionType: "social" },
+    { connectionType: "connection" },
   ]) {
     await expect(validate([personal], [{ ...delegation, ...delta }])).rejects.toThrow(
       "exact sender delegation",
@@ -478,7 +477,7 @@ test("personal bindings retain sender proofs and live membership/resource revoca
     ownerSubjectId: "sender",
     providerDomain: "mail.test",
     kind: "oauth2",
-    connectionType: "connection",
+    connectionType: "mcp",
   };
   await db.query(
     `INSERT INTO connections VALUES ($1,$2,$3,$3,'sender','user','active','mail.test','oauth2',1,$4)`,
@@ -687,7 +686,7 @@ test("visibility cleanup requires the protected capability and clears initial bi
     ownerSubjectId: "sender",
     providerDomain: "mail.test",
     kind: "oauth2",
-    connectionType: "connection",
+    connectionType: "mcp",
   };
   await db.query(
     `INSERT INTO sessions(id,account_id,workspace_id,visibility,authority_epoch,owner_subject_id,
