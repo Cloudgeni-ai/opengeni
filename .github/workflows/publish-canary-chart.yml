@@ -119,6 +119,7 @@ jobs:
             .release/canary-chart.json
             .release/opengeni-*.tgz
           if-no-files-found: error
+          include-hidden-files: true
 
       - name: Clear registry credentials
         if: always()

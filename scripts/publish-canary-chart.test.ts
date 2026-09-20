@@ -12,6 +12,17 @@ const source = readFileSync(
 const workflow = parse(source);
 
 describe("manual canary chart publication", () => {
+  test("retains only the exact hidden release outputs, never registry credentials", () => {
+    const step = workflow.jobs.publish.steps.find(
+      (item: { name?: string }) => item.name === "Retain verified chart receipt",
+    );
+    expect(step.with["include-hidden-files"]).toBe(true);
+    expect(step.with["if-no-files-found"]).toBe("error");
+    expect(step.with.path.trim().split("\n")).toEqual([
+      ".release/canary-chart.json",
+      ".release/opengeni-*.tgz",
+    ]);
+  });
   test("admits only exact protected-main dispatch before source or credentials are consumed", () => {
     expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);
     expect(workflow.permissions).toEqual({ contents: "read" });
