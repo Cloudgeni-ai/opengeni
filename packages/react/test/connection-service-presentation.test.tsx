@@ -121,3 +121,114 @@ test("one search includes Outlook and deduplicates Gmail; selecting Outlook pres
     controller.dispose();
   }
 });
+
+for (const ownership of ["personal", "workspace"] as const) {
+  test(`Outlook submits ${ownership} ownership and authorizes only on the host's click`, async () => {
+    let submitted: unknown;
+    let authorized: unknown;
+    let inClick = false;
+    let authorizationWasSynchronous = false;
+    const unexpected = async (): Promise<never> => {
+      throw new Error("Unexpected mutation");
+    };
+    const controller = new ConnectController(
+      {
+        catalog: async () => [
+          {
+            id: "microsoft-outlook-mail",
+            label: "Outlook Mail",
+            family: "microsoft",
+            readiness: "available",
+            ownership: ["personal", "workspace"],
+            setup: ["oauth"],
+          },
+        ],
+        accounts: async () => [],
+        pending: async () => [],
+        begin: async (workspaceId, input) => {
+          submitted = input;
+          return {
+            id: "outlook-attempt",
+            workspaceId,
+            providerId: input.providerId,
+            ownership: input.ownership,
+            revision: 1,
+            state: "requires_user_action",
+            nextAction: { type: "authorize", url: "https://provider.example/authorize" },
+            credentialsCommitted: false,
+            integrationInstalled: false,
+            completionRequirement: "integration",
+            expiresAt: "2030-01-01T00:00:00Z",
+          };
+        },
+        get: unexpected,
+        advance: unexpected,
+        cancel: unexpected,
+        disconnect: unexpected,
+      },
+      "workspace",
+    );
+    const returnUrl = "https://host.example/return?state=%2f#exact";
+    const client = {
+      listCapabilities: async () => ({ items: [] }),
+      listConnections: async () => [],
+    } as unknown as OpenGeniClient;
+    const view = await renderComponent(
+      <ConnectPanel
+        client={client}
+        controller={controller}
+        returnUrl={returnUrl}
+        presentation="catalog"
+        showProviderConnections
+        showCustomConnections={false}
+        onAuthorize={(attempt) => {
+          authorized = attempt;
+          authorizationWasSynchronous = inClick;
+        }}
+      />,
+    );
+    try {
+      const row = [...view.container.querySelectorAll("button")].find((node) =>
+        node.textContent?.includes("Outlook Mail"),
+      )!;
+      await actRun(() => row.click());
+      const select = [...view.container.querySelectorAll("select")].find((node) =>
+        node.querySelector('option[value="personal"]'),
+      )!;
+      expect(select.value).toBe("personal");
+      await actRun(() => {
+        select.value = ownership;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await actRun(() =>
+        view.container
+          .querySelector("form")!
+          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      expect(submitted).toMatchObject({
+        providerId: "microsoft-outlook-mail",
+        ownership,
+        returnUrl,
+      });
+      expect(authorized).toBeUndefined();
+      const authorize = [...view.container.querySelectorAll("button")].find(
+        (node) => node.textContent === "Continue to Outlook Mail",
+      )!;
+      expect(authorize).toBeTruthy();
+      await actRun(() => {
+        inClick = true;
+        authorize.click();
+        inClick = false;
+      });
+      expect(authorizationWasSynchronous).toBe(true);
+      expect(authorized).toMatchObject({
+        id: "outlook-attempt",
+        ownership,
+        nextAction: { type: "authorize" },
+      });
+    } finally {
+      await view.unmount();
+      controller.dispose();
+    }
+  });
+}
