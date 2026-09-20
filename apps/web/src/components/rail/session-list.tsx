@@ -2544,24 +2544,26 @@ export function SessionList() {
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex min-w-0 items-center justify-between gap-2 pb-1 pl-[18px] pr-3 pt-1">
-        <span className="text-sm font-normal text-fg-muted">
+      <div className="mb-1 flex min-w-0 shrink-0 items-center gap-1 pl-[18px] pr-3 pt-1">
+        <span className="min-w-0 flex-1 truncate text-sm font-normal text-fg-muted">
           {search ? "Search results" : browseControlsActive ? "Browse sessions" : "Sessions"}
         </span>
-      </div>
-
-      <div className="mb-1 ml-2 mr-3 flex shrink-0 items-center gap-1">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={openSearchDialog}
-          aria-label="Search sessions"
-          className="min-w-0 flex-1 justify-start text-xs text-fg-subtle pointer-coarse:h-11"
-        >
-          <SearchIcon aria-hidden="true" className="size-3.5" />
-          Search sessions
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              onClick={openSearchDialog}
+              aria-label="Search sessions"
+              aria-haspopup="dialog"
+              className="shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
+            >
+              <SearchIcon aria-hidden="true" className="size-3.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">Search sessions</TooltipContent>
+        </Tooltip>
         {channelMode ? (
           <Tooltip>
             <TooltipTrigger asChild>
@@ -2586,10 +2588,7 @@ export function SessionList() {
               variant="ghost"
               size="icon-xs"
               aria-label={browseControlsActive ? "Session view, customized" : "Session view"}
-              className={cn(
-                "relative shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11",
-                browseControlsActive && "bg-surface-2 text-fg",
-              )}
+              className="relative shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
             >
               <ListFilterIcon className="size-3.5" />
               {browseControlsActive ? (
