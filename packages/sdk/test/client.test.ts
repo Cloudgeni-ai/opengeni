@@ -67,6 +67,54 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
 }
 
 describe("OpenGeniClient", () => {
+  test("checkpoint recovery preview is read-only and explicit consent sends one exact request, never a Retry", async () => {
+    const projection = {
+      version: 1 as const,
+      status: "eligible" as const,
+      reason: null,
+      checkpoint: null,
+      operationId: null,
+    };
+    const request = {
+      operationId: crypto.randomUUID(),
+      acceptHistoricalCheckpoint: true as const,
+      selection: {
+        version: 1 as const,
+        sessionId: SESSION_ID,
+        sandboxGroupId: crypto.randomUUID(),
+        leaseId: crypto.randomUUID(),
+        routeEpoch: 1,
+        authorityEpoch: 2,
+        leaseEpoch: 3,
+        workspaceGeneration: 44,
+        archiveGeneration: 10,
+        artifactId: crypto.randomUUID(),
+        revision: "wa2:exact",
+        capturedAt: "2026-09-16T06:24:07.000Z",
+      },
+    };
+    const { client, requests } = makeClient((r) =>
+      jsonResponse(
+        r.method === "GET"
+          ? projection
+          : {
+              outcome: "accepted",
+              operationId: request.operationId,
+              recovery: { ...projection, status: "consent_accepted" },
+            },
+      ),
+    );
+    expect(await client.getSandboxRecovery(WORKSPACE_ID, SESSION_ID)).toEqual(projection);
+    expect((await client.recoverSandbox(WORKSPACE_ID, SESSION_ID, request)).recovery.status).toBe(
+      "consent_accepted",
+    );
+    expect(requests.map((r) => r.method)).toEqual(["GET", "POST"]);
+    expect(requests.every((r) => r.url.endsWith(`/sessions/${SESSION_ID}/sandbox-recovery`))).toBe(
+      true,
+    );
+    expect(JSON.parse(requests[1]!.body!)).toEqual(request);
+  });
+
   test("retrySession preserves the exact failure and selected policy without a message", async () => {
     const request = {
       clientEventId: crypto.randomUUID(),

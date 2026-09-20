@@ -5,6 +5,10 @@ import { Button } from "@/components/ui/button";
 import type { SessionFailureSummary } from "@/lib/events";
 import { formatTimestamp } from "@/lib/format";
 import { FailedSessionActions } from "./failed-session-actions";
+import {
+  SandboxRecoveryActions,
+  type SandboxRecoveryActionsProps,
+} from "./sandbox-recovery-actions";
 
 /**
  * Failure honesty: the reason the session failed, how many turns timed out and
@@ -22,6 +26,7 @@ export function FailedSessionBanner({
   canBuyCredits = false,
   canConnectModel = false,
   actions,
+  sandboxRecovery,
 }: {
   failure: SessionFailureSummary;
   creditExhausted?: boolean;
@@ -29,8 +34,9 @@ export function FailedSessionBanner({
   canBuyCredits?: boolean;
   canConnectModel?: boolean;
   actions?: ComponentProps<typeof FailedSessionActions>;
+  sandboxRecovery?: Omit<SandboxRecoveryActionsProps, "structuralFailure" | "children">;
 }) {
-  if (creditExhausted) {
+  if (creditExhausted && !failure.structuralSandboxFailure) {
     return (
       <div className="mx-auto mb-2 w-full max-w-3xl px-4 pt-4 sm:px-6">
         <div
@@ -119,28 +125,47 @@ export function FailedSessionBanner({
               </>
             ) : null}
             {failure.detailsTruncated ? "Some error details are shortened. " : null}
-            {failure.safetyRefusal
-              ? "The conversation history is preserved. This request cannot be retried. You can send a new message below."
-              : "Your request and conversation history are preserved. Try again to pick up where execution stopped, or send a new message below."}
+            {failure.structuralSandboxFailure
+              ? "Conversation history is preserved. Retrying execution or changing models cannot repair this sandbox. Pause and Cancel remain available."
+              : failure.safetyRefusal
+                ? "The conversation history is preserved. This request cannot be retried. You can send a new message below."
+                : "Your request and conversation history are preserved."}
           </div>
-          {actions ? (
-            failure.safetyRefusal ? (
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                className="mt-3"
-                disabled={actions.modelDisabled}
-                onClick={actions.onChooseModel}
-              >
-                Choose another model
-              </Button>
-            ) : (
-              <FailedSessionActions {...actions} />
-            )
+          {sandboxRecovery ? (
+            <SandboxRecoveryActions
+              {...sandboxRecovery}
+              structuralFailure={Boolean(failure.structuralSandboxFailure)}
+            >
+              {actions ? <OrdinaryFailureActions failure={failure} actions={actions} /> : null}
+            </SandboxRecoveryActions>
+          ) : actions && !failure.structuralSandboxFailure ? (
+            <OrdinaryFailureActions failure={failure} actions={actions} />
           ) : null}
         </div>
       </div>
     </div>
+  );
+}
+
+function OrdinaryFailureActions({
+  failure,
+  actions,
+}: {
+  failure: SessionFailureSummary;
+  actions: ComponentProps<typeof FailedSessionActions>;
+}) {
+  return failure.safetyRefusal ? (
+    <Button
+      type="button"
+      size="sm"
+      variant="secondary"
+      className="mt-3"
+      disabled={actions.modelDisabled}
+      onClick={actions.onChooseModel}
+    >
+      Choose another model
+    </Button>
+  ) : (
+    <FailedSessionActions {...actions} />
   );
 }

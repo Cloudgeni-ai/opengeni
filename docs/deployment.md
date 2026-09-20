@@ -1,5 +1,20 @@
 # Deployment
 
+## Consented sandbox recovery (0492)
+
+`0492_consented_sandbox_recovery.sql` requires maintenance. Stop every API,
+control-worker and turn-worker using the target database and supply the complete
+old/new runtime login list through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`
+(or `applicationDatabaseRoles`). Missing/invalid roles or a live listed login
+abort activation. Migrate, provision the normal application role, verify runtime
+posture, and start only the matching binaries. Never restart a pre-0492 image:
+old workers do not reconstruct the mandatory model-visible filesystem warning.
+Rollback requires the consistent pre-cutover backup and matching old binaries.
+
+This adds canonical-human consent for singleton managed-home Modal recovery only.
+It does not enable automatic rollback, shared-group recovery, command replay,
+empty reset, or a new cancellation/reaper protocol. See [run lifecycle](run-lifecycle.md).
+
 ## Selective Knowledge source discovery (0469)
 
 `0469_knowledge_source_discovery.sql` requires maintenance. Stop every API,

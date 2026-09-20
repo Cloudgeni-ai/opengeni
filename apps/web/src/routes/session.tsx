@@ -2436,6 +2436,12 @@ function SessionChatPane(props: {
                     props.session.workspaceId,
                     "connections:write",
                   )}
+                  sandboxRecovery={{
+                    client: context.client,
+                    workspaceId: props.session.workspaceId,
+                    sessionId: props.session.id,
+                    canControl: workspacePermissions.includes("sessions:control"),
+                  }}
                   actions={{
                     failureId: props.failure.failureEventId,
                     retryInput: pendingRetryInput,

@@ -423,27 +423,29 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
-Sessions have durable home-compute policy and optional epoch-fenced active targets.
-Selection proves turn-context establishment authority; invalid pointers reconcile visibly.
-The lease/reaper owns managed sandboxes, not API/viewer requests. Identity persists before
-setup; capture fences every writer. Provider loss retires only the matching instance,
-never licensing ambiguous replay. Agent execution keeps the lazy routing wrapper after
-provisioning; raw handles serve lifecycle setup/capture (`turn-sandbox-access.ts`).
+Same-session historical CURRENT recovery requires managed-human consent, exact
+checkpoint/generation CAS, fenced singleton membership and durable model warnings;
+never command replay. Public authority: `packages/core/src/application/sandbox-recovery.ts`;
+restore lifecycle: `packages/db/src/index.ts`; membership/GC guards: migration 0492.
+Retry checks the effective route. See [run lifecycle](run-lifecycle.md).
 
-Ordinary snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains
-and rotations may use `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` (unset inherits
-the ordinary budget). Boot admission reserves rotation headroom for the larger
-budget plus a reaper period, including historical Modal leases after a backend
-change. Explicit drain budgets must fit dispatch, capture and retry handoff
-inside the lifecycle ceiling. Reclamation preserves a warm capture's sole holder
-until its original deadline despite logical turn closure, preventing drain
-takeover without extending execution authority.
+Sessions retain home-compute policy and epoch-fenced targets. Selection proves
+establishment authority; invalid pointers reconcile visibly. Leases/reapers—not
+viewers—own managed sandboxes. Identity precedes setup; capture fences writers.
+Provider loss retires only matching instances, never authorizing ambiguous replay.
+Execution retains lazy routing; raw handles serve setup/capture (`turn-sandbox-access.ts`).
 
-Acquisition/mutation waiters may extend their configured budget once for the
-first observed durable capture deadline plus handoff grace, capped at one hour.
-Expired/replacement claims cannot replenish it; zero-wait probes remain immediate.
-Expiry returns a fence, never capture takeover or writer authority. The shared
-policy is `packages/db/src/sandbox-transition-wait.ts`.
+Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
+may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot admission
+reserves the larger budget plus reaper period, including historical Modal leases
+after backend changes. Drain budgets include dispatch/capture/retry handoff within
+the lifecycle ceiling. Warm-capture reclamation preserves its sole holder until
+the original deadline despite turn closure: no drain takeover or extended authority.
+
+Acquisition/mutation waiters extend once for the first durable capture deadline
+plus handoff grace, capped at one hour. Expired/replacement claims never replenish
+budgets; zero-wait probes stay immediate. Expiry grants no capture/writer authority.
+Policy: `packages/db/src/sandbox-transition-wait.ts`.
 
 A settled capture rejection releases only its exact unpublished claim, allowing
 waiters to re-arm the intact instance. Unresolved timeouts and publication/teardown

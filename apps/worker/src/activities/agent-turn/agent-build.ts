@@ -10,6 +10,7 @@ import {
   getSessionTurnForAttempt,
   ensureSessionReasoningConfiguration,
   ensureSessionSkillCatalog,
+  getSandboxRecoveryDiscontinuity,
 } from "@opengeni/db";
 import {
   formatSkillCatalog,
@@ -193,6 +194,16 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     codexContext,
   } = deps;
   const preparedTools = eventing.preparedTools!;
+  // Durable recovery truth is read for every attempt, including reconstruction
+  // after compaction. It is never inferred from transcript tool successes.
+  const filesystemDiscontinuity = await getSandboxRecoveryDiscontinuity(
+    db,
+    input.workspaceId,
+    session.id,
+  );
+  const sessionInstructions = [session.instructions, filesystemDiscontinuity]
+    .filter(Boolean)
+    .join("\n\n");
 
   const missingSessionTitleHint = preparationIndependentToolNames.includes(
     SESSION_TITLE_MODEL_TOOL_NAME,
@@ -744,7 +755,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // Per-session persona tier (session > workspace > deployment default).
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.
-        ...(session.instructions ? { sessionInstructions: session.instructions } : {}),
+        ...(sessionInstructions ? { sessionInstructions } : {}),
         ...workspaceEnvironmentOption,
         // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
         // the frozen version carries a non-empty script), and the rig credential

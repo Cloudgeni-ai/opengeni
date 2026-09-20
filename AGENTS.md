@@ -347,6 +347,16 @@ Use [`docs/README.md`](docs/README.md) as the docs map. When you move or rename 
 
 ## Sandbox Notes
 
+Public historical checkpoint consent (0492) is canonical-managed-human-only,
+singleton managed-home Modal only. Consent uses the exclusive workspace tenancy
+fence before a complete group census; a visible session count is not authority.
+The accepted operation protects membership, active route and CURRENT artifact
+until verified restoration or failed creation. Keep consent, restore completion
+and failed-turn Retry separate. Every later attempt reconstructs the filesystem
+discontinuity warning from the durable command receipt, outside compactable
+history. Migration 0492 is maintenance-only because old workers lack that warning;
+never restart a pre-0492 worker after activation. See `docs/run-lifecycle.md`.
+
 Sandbox acquisition and workspace mutation waits honor the first observed
 capture's durable remaining timeout once, within the lifecycle ceiling.
 Expired or replacement captures never replenish a caller's wait. Budget expiry

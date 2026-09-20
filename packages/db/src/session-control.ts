@@ -492,7 +492,7 @@ function lockBudgetFor(options: WorkspaceControlLockOptions): WorkspaceControlLo
 }
 
 /** Run one lock-acquiring statement under the remaining budget. */
-async function boundedLockStep<T>(
+export async function boundedLockStep<T>(
   db: Database,
   workspaceId: string,
   budget: WorkspaceControlLockBudget | null,

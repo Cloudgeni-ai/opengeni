@@ -11,6 +11,7 @@ import * as schema from "./schema";
 import { clearCodexCapacityRecovery } from "./codex-capacity-recovery";
 import { fromPostgresLosslessJson, withLosslessContentWriteVersion } from "./lossless-json";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
+import { sessionEffectiveSandboxRecoveryBlocked } from "./index";
 import {
   canonicalSessionCommandHash,
   evaluateSessionControl,
@@ -27,6 +28,7 @@ export class SessionRetryConflictError extends Error {
       | "RETRY_STALE_FAILURE"
       | "RETRY_EXECUTION_UNRESOLVED"
       | "RETRY_PAUSED"
+      | "RETRY_SANDBOX_RECOVERY_REQUIRED"
       | "RETRY_UNSUPPORTED_FAILURE",
     message: string,
   ) {
@@ -190,6 +192,11 @@ export async function retryFailedSessionInTransaction(
       "Execution or tool settlement is unresolved; retry cannot replay it",
     );
   const now = new Date();
+  if (await sessionEffectiveSandboxRecoveryBlocked(db, session))
+    throw new SessionRetryConflictError(
+      "RETRY_SANDBOX_RECOVERY_REQUIRED",
+      "The effective sandbox route requires recovery; review its checkpoint before retrying",
+    );
   // A never-claimed prompt must traverse normal first claim exactly once so
   // its original user history item is inserted. Started turns retain history.
   const preclaim = turn.executionGeneration === 0;

@@ -68,6 +68,34 @@ test("one Try again click sequence requests recovery without a follow-up message
   await act(async () => modelButton!.click());
   expect(modelOpens).toBe(1);
 });
+
+test("typed structural sandbox failure never exposes retry or model-switch remedies", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        failure={{
+          reason: "Checkpoint is older than workspace",
+          failedAt: null,
+          consecutiveRecoveryCount: null,
+          structuralSandboxFailure: true,
+        }}
+        actions={{
+          onRetry: async () => true,
+          retryBlocker: null,
+          onChooseModel: () => {},
+          modelDisabled: false,
+        }}
+      />,
+    ),
+  );
+  expect(container.textContent).not.toContain("Try again");
+  expect(container.textContent).not.toContain("Choose another model");
+  expect(container.textContent).toContain("Pause and Cancel remain available");
+  expect(container.querySelectorAll("button")).toHaveLength(0);
+});
 test("failed local submission remains retryable and blocked drafts explain the reason", async () => {
   let sends = 0;
   const props = {
