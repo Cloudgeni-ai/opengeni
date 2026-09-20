@@ -1488,6 +1488,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectStartupDependencyAttributes(attributes),
       ...projectPublicChannelADiagnosticAttributes(attributes),
       ...projectApiFatalDiagnosticAttributes(attributes),
+      ...projectSnapshotDiagnosticAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
     };
   }
@@ -1559,6 +1560,47 @@ function projectPublicChannelADiagnosticAttributes(attributes: Attributes): Attr
       ? { sandboxLeaseKey }
       : {}),
   };
+}
+
+function projectSnapshotDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "SnapshotOperationError") return {};
+  const projected: Attributes = {};
+  const name = attributes.providerErrorName;
+  if (
+    typeof name === "string" &&
+    [
+      "ClientError",
+      "TimeoutError",
+      "ConnectionError",
+      "AuthError",
+      "NotFoundError",
+      "InvalidError",
+      "RemoteError",
+      "AbortError",
+    ].includes(name)
+  )
+    projected.providerErrorName = name;
+  const grpc = attributes.providerGrpcCode;
+  if (
+    name === "ClientError" &&
+    typeof grpc === "number" &&
+    Number.isInteger(grpc) &&
+    grpc >= 0 &&
+    grpc <= 16
+  )
+    projected.providerGrpcCode = grpc;
+  const http = attributes.providerHttpStatus;
+  if (typeof http === "number" && Number.isInteger(http) && http >= 100 && http <= 599)
+    projected.providerHttpStatus = http;
+  if (typeof attributes.providerRetryable === "boolean")
+    projected.providerRetryable = attributes.providerRetryable;
+  const leaseKey = attributes.sandboxLeaseKey;
+  if (typeof leaseKey === "string" && /^slk_[0-9a-f]{32}$/.test(leaseKey))
+    projected.sandboxLeaseKey = leaseKey;
+  const epoch = attributes.leaseEpoch;
+  if (typeof epoch === "number" && Number.isSafeInteger(epoch) && epoch >= 0)
+    projected.leaseEpoch = epoch;
+  return projected;
 }
 
 function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {

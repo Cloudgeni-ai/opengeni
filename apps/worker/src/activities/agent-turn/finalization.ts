@@ -660,6 +660,7 @@ async function finalizeTurnAttemptSteps(
             settings,
             objectStorage,
             sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+            observability,
           },
           {
             accountId: input.accountId,
