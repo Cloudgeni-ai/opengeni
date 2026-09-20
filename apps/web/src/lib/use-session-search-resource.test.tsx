@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, jest, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, StrictMode, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -232,6 +232,9 @@ test("disable and reopen never commit a retained preview before the live read", 
 });
 
 test("StrictMode clears an old resource denial before committing the reopened live read", async () => {
+  // Async act may yield long enough for a real zero-delay request timer to
+  // fire. Control that boundary so the first-commit assertions precede it.
+  jest.useFakeTimers();
   let denied = true;
   let requests = 0;
   const load = async () => {
@@ -257,13 +260,9 @@ test("StrictMode clears an old resource denial before committing the reopened li
         </StrictMode>,
       ),
     );
-  const flush = () =>
-    act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    });
   try {
     await render(true);
-    await flush();
+    await act(async () => jest.advanceTimersByTime(0));
     expect(state.accessDenied).toBe(true);
     commits.length = 0;
     await render(false);
@@ -273,11 +272,12 @@ test("StrictMode clears an old resource denial before committing the reopened li
     await render(true);
     expect(requests).toBe(1);
     expect(commits[0]).toMatchObject({ accessDenied: false, error: null, loading: true });
-    await flush();
+    await act(async () => jest.advanceTimersByTime(0));
     expect(requests).toBe(2);
     expect(state.accessDenied).toBe(false);
     expect(state.value).toBe("authorized preview");
   } finally {
     await act(async () => root.unmount());
+    jest.useRealTimers();
   }
 });
