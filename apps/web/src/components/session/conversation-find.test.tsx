@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, type ComponentType } from "react";
+import { act, StrictMode, type ComponentType } from "react";
 import { createRoot } from "react-dom/client";
 import type { TimelineSearchTarget } from "@opengeni/react/session-ui";
 import type { ConversationSearchPage } from "@/lib/use-conversation-search";
@@ -50,6 +50,94 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
+test.each([false, true])(
+  "mounted replacement route preserves its exact occurrence (StrictMode=%s)",
+  async (strict) => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const targets: Array<TimelineSearchTarget | null> = [];
+    const onTarget = (target: TimelineSearchTarget | null) => targets.push(target);
+    const onJump = async () => true;
+    const render = (initial: SessionSearchRoute) =>
+      act(async () => {
+        const child = (
+          <ConversationFind
+            workspaceId="workspace"
+            sessionId="session"
+            open
+            focusRevision={0}
+            initial={initial}
+            onTarget={onTarget}
+            onJump={onJump}
+            onClose={() => {}}
+          />
+        );
+        root.render(strict ? <StrictMode>{child}</StrictMode> : child);
+      });
+    const flush = (ms = 20) =>
+      act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      });
+    try {
+      await render({ find: "old", matchSequence: 7, matchOffset: 12 });
+      await flush();
+      expect(targets.at(-1)).toMatchObject({ query: "old", offset: 12 });
+      await render({ find: "new", matchSequence: 7, matchOffset: 24 });
+      await flush(300);
+      await flush();
+      expect(targets.at(-1)).toMatchObject({ query: "new", offset: 24 });
+      expect(host.textContent).toContain("3 / 3");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  },
+);
+
+test("an authority scope change discards a pending replacement-route occurrence", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const targets: Array<TimelineSearchTarget | null> = [];
+  const onTarget = (target: TimelineSearchTarget | null) => targets.push(target);
+  const onJump = async () => true;
+  const render = (workspaceId: string, initial: SessionSearchRoute) =>
+    act(async () => {
+      root.render(
+        <StrictMode>
+          <ConversationFind
+            workspaceId={workspaceId}
+            sessionId="session"
+            open
+            focusRevision={0}
+            initial={initial}
+            onTarget={onTarget}
+            onJump={onJump}
+            onClose={() => {}}
+          />
+        </StrictMode>,
+      );
+    });
+  const flush = (ms = 20) =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+    });
+  try {
+    await render("original", { find: "old", matchSequence: 7, matchOffset: 12 });
+    await flush();
+    await render("original", { find: "new", matchSequence: 7, matchOffset: 24 });
+    await render("other", { find: "new", matchSequence: 7, matchOffset: 24 });
+    await flush(300);
+    await flush();
+    expect(targets.at(-1)).toMatchObject({ query: "new", offset: 0 });
+    expect(host.textContent).toContain("1 / 3");
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
 test("deep-link occurrence stays selected, Enter moves matches, Escape clears without another jump", async () => {
   const host = document.createElement("div");
   document.body.append(host);
@@ -84,6 +172,27 @@ test("deep-link occurrence stays selected, Enter moves matches, Escape clears wi
       await new Promise((resolve) => setTimeout(resolve, 220));
     });
     expect(targets.at(-1)?.offset).toBe(12);
+    expect(host.textContent).toContain("2 / 3");
+    const beforeDraft = jumps.length;
+    const beforeTargets = targets.length;
+    const typeDraft = async (value: string) =>
+      act(async () => {
+        const input = host.querySelector("input")!;
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+          input,
+          value,
+        );
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent("keyup", { key: "e", bubbles: true }));
+      });
+    await typeDraft("testx");
+    expect(host.textContent).toContain("Showing matches for “test”");
+    await typeDraft("test");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 280));
+    });
+    expect(jumps.length).toBe(beforeDraft);
+    expect(targets.length).toBe(beforeTargets);
     expect(host.textContent).toContain("2 / 3");
     await act(async () =>
       host

@@ -34,9 +34,9 @@ user; task notes cover temporary tree coordination. Linking never merges users.
 See [product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), and [run lifecycle](run-lifecycle.md).
-Skill removal is a guarded physical deletion of the scoped registry head and
-all revisions, with exact removal approval and Learning enforcement through the
-same Skill lifecycle. It does not rewrite accepted conversation context.
+Skill removal physically deletes the scoped registry head and revisions,
+requiring exact approval and Learning enforcement through the Skill lifecycle.
+Accepted conversation context remains unchanged.
 
 Session `mcpApprovalPolicies` requires session-control authority. Claims freeze
 inherited approvals with catalog floors; policies grant neither capabilities nor credentials.
@@ -50,16 +50,16 @@ inherited approvals with catalog floors; policies grant neither capabilities nor
 Postgres commits precede notifications. NATS transports fanout, invalidations,
 request/reply and machine streams—not durable commit evidence.
 
-`session_event_cursors` transactionally verifies every append and owns monotonic
-per-session sequencing. Semantic writers retain the session row to commit state
-and events together. Accepted raw exact-attempt batches hold session identity
+`session_event_cursors` verifies every append transactionally and owns monotonic
+per-session sequencing. Semantic writers lock the session row for atomic state/event
+commits. Accepted raw exact-attempt batches hold session identity
 with `FOR KEY SHARE`, serialize on the cursor, retain exact turn/attempt fences,
 and never update the wide session row. Public
 `lastSequence`, unread, child acknowledgment, and viewer-specific tree
 attention projections (including unacknowledged failed descendants) read the
 cursor; `sessions.last_sequence` remains only a semantic/legacy compatibility
-projection. Legacy SQL writers are rebased at the database boundary, and late
-raw events roll back and retry through the semantic gate before becoming
+projection. Legacy SQL writers are rebased at the database boundary; late
+raw events roll back, then retry the semantic gate before becoming
 rejected audit evidence. SSE clients replay durable events, subscribe to live
 fanout, and backfill sequence gaps from Postgres. NATS restarts may interrupt
 delivery or machine reachability, never session history or queued obligations.
@@ -76,18 +76,17 @@ Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 
 ### 3.2 Temporal coordinates; streams stay outside workflow history
 
-Temporal orchestrates workflows, activities, signals, timers and `continueAsNew`.
-Activities read Postgres obligations, never replaced by duplicate, delayed, lost
-or closing-run signals. Conversation, goals, queues, tokens, tool output and
-provider transcripts stay outside workflow history; streams use ordinary events.
+Temporal coordinates execution; activities read Postgres obligations, not signals.
+Conversation, goals, queues, usage and provider/tool transcripts stay outside
+workflow history; streams use ordinary events.
 
 Canonical: `apps/worker/src/workflows/session.ts` and
 [`run-lifecycle.md`](run-lifecycle.md).
 
-Control observation is not settlement: unavailable scoped reads and exact
-still-owned attempts retain bounded signal-interruptible waits without marking
-work idle, revoking writers, or dispatching successors. Temporal inspection is
-metadata evidence, not a replacement for physical-writer quiescence proof.
+Control observation is not settlement: unavailable scoped reads and owned
+attempts retain bounded, signal-interruptible waits without marking work idle,
+revoking writers, or dispatching successors. Temporal metadata cannot prove
+physical-writer quiescence.
 
 ### 3.3 Logical turns and physical attempts are different
 
@@ -105,7 +104,8 @@ preserving lineage. See [`run-lifecycle.md`](run-lifecycle.md).
 operations have external effects. Recovery is explicit and attempt-fenced.
 Provider work stays outside retries; retry only idempotent settlement.
 Replay: [notices/catalogs](run-lifecycle.md),
-[compaction](context-compaction.md).
+[compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`
+shares sandbox/lazy-tool-prepared requests with remote compaction, including before first inference.
 
 Failed-session retry differs from Pause/Resume and prompt admission.
 `packages/db/src/session-retry.ts` fences failure identity, reserves actor-scoped
@@ -138,10 +138,8 @@ never history; running reads do not. Failed/cancelled sessions retain audit only
 Fanout is replaceable and post-commit. Conversation history remains separate:
 sequence cursors bound traversal, and `packages/db/src/session-event-slices.ts`
 transfers large message scalars in bounded slices, not whole histories.
-Literal full-history Find is separately authorized and resumable:
-`packages/db/src/session-message-search.ts` batches ordinary scalars, reusing
-slices for large completed messages. Browsers receive occurrence snippets and
-cursors, never complete payload-history scans. See
+Full-history Find (`packages/db/src/session-message-search.ts`) coalesces authorized
+scalar windows, returning bounded snippets/cursors, not histories. See
 [`session-message-search.md`](session-message-search.md).
 
 Docker/local SDK processes expose turn-scoped handles after a bounded wait.
@@ -199,6 +197,10 @@ originals stay in object storage. Scoped access precedes ranking. Chat attachmen
 remain conversation resources; agents select lasting findings/reference sources.
 Default discovery excludes supporting evidence. Read-only save preparation fetches
 collections and published/pending matches on demand. See [`knowledge.md`](knowledge.md).
+
+Unconditional CORE routes persistent behavior to instructions or Skills, not
+Knowledge, preserving destination scope and review; see
+[`company-brain-write-routing.md`](company-brain-write-routing.md).
 
 Agent learning centralizes Knowledge, instructions and Skills in Automatic,
 Review first and Off settings, with sparse chat/task overrides and immutable
@@ -1387,11 +1389,11 @@ joins interleaved chunks by provider identity without merging distinct messages.
 Pre-transfer metadata planning bounds database batches to 256 events and the
 default 1 MiB full-payload page budget.
 
-The rail's lazy dialog and route's lazy Find bar search retained user and completed
-assistant text through the browser SDK—not DOM, tool output, reasoning or
-unfinished delta-only messages. Rail providers retain dialog state across session
-navigation, including collapsed/mobile rails. Links carry query, event sequence
-and original UTF-16 offset. `useSessionEvents.jumpToSequence` loads cancellable,
+The lazy rail dialog and Find bar search retained user/completed-assistant text
+through the browser SDK—not DOM, tools, reasoning or unfinished deltas. Rail
+providers retain dialog state across session navigation and collapsed/mobile rails.
+Links carry query, event sequence and original UTF-16 offset.
+`useSessionEvents.jumpToSequence` loads cancellable,
 bounded target windows; `MessageTimeline.searchTarget` owns disclosure/occurrence
 navigation. Browser batches/scan continuations are bounded; counts remain
 provisional until traversal ends. Labeled, bounded Markdown source excerpts

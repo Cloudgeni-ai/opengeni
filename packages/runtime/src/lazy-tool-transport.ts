@@ -1,3 +1,4 @@
+import { rememberPreparedModelRequest } from "./prepared-compaction-request";
 import {
   tool as agentTool,
   toolSearchTool,
@@ -821,6 +822,7 @@ class LazyToolModel implements Model {
 
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
     const prepared = prepareLazyToolRequest(request, this.runtime);
+    rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     const response = await this.inner.getResponse(prepared);
     if (responseRequiresToolPreparation(response, this.runtime)) {
@@ -833,6 +835,7 @@ class LazyToolModel implements Model {
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
     const prepared = prepareLazyToolRequest(request, this.runtime);
+    rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     for await (const event of this.inner.getStreamedResponse(prepared)) {
       if (event.type === "response_done") {

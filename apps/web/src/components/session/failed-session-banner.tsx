@@ -1,30 +1,24 @@
-import { AlertTriangleIcon, CreditCardIcon } from "lucide-react";
+import { AlertTriangleIcon } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import type { ComponentProps } from "react";
 import { Button } from "@/components/ui/button";
 import type { SessionFailureSummary } from "@/lib/events";
-import { formatTimestamp } from "@/lib/format";
+import { failedSessionCopy } from "@/lib/failed-session-copy";
 import { FailedSessionActions } from "./failed-session-actions";
 import {
   SandboxRecoveryActions,
   type SandboxRecoveryActionsProps,
 } from "./sandbox-recovery-actions";
 
-/**
- * Failure honesty: the reason the session failed, how many turns timed out and
- * were retried automatically before it, and the fact that the composer stays
- * usable — sending a message revives the session.
- *
- * Credit exhaustion keeps Add credits and the policy-constrained model picker
- * available. The automatic continuation shortcut stays hidden until the user
- * resolves that billing choice through the existing composer flow.
- */
+/** Presentation only: admission, billing and retry identity remain with their owners. */
 export function FailedSessionBanner({
   failure,
   creditExhausted,
   workspaceId,
   canBuyCredits = false,
   canConnectModel = false,
+  modelChanged = false,
+  canChooseModel = false,
   actions,
   sandboxRecovery,
 }: {
@@ -33,139 +27,64 @@ export function FailedSessionBanner({
   workspaceId?: string;
   canBuyCredits?: boolean;
   canConnectModel?: boolean;
+  modelChanged?: boolean;
+  canChooseModel?: boolean;
   actions?: ComponentProps<typeof FailedSessionActions>;
   sandboxRecovery?: Omit<SandboxRecoveryActionsProps, "structuralFailure" | "children">;
 }) {
-  if (creditExhausted && !failure.structuralSandboxFailure) {
-    return (
-      <div className="mx-auto mb-2 w-full max-w-3xl px-4 pt-4 sm:px-6">
-        <div
-          data-testid="failed-session-banner"
-          className="flex flex-col gap-3 rounded-lg border border-status-failed/30 bg-status-failed/10 p-3 text-status-failed sm:flex-row sm:items-center sm:justify-between"
-        >
-          <div className="flex min-w-0 gap-2.5">
-            <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-failed" />
-            <div className="min-w-0 text-sm">
-              <span className="font-medium">
-                This workspace is out of OpenGeni credits
-                {failure.failedAt ? ` (since ${formatTimestamp(failure.failedAt)})` : ""}.
-              </span>
-              <div className="mt-1 text-xs text-fg-muted">
-                The conversation history is preserved. Buy organization credits or connect a model,
-                then keep working here.
-              </div>
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {workspaceId && canBuyCredits ? (
-              <Button asChild type="button" size="sm" className="shrink-0">
-                <Link
-                  to="/workspaces/$workspaceId/organization"
-                  params={{ workspaceId }}
-                  search={{ section: "billing" }}
-                >
-                  <CreditCardIcon className="size-3.5" />
-                  Buy credits
-                </Link>
-              </Button>
-            ) : null}
-            {workspaceId && canConnectModel ? (
-              <Button asChild type="button" size="sm" variant="secondary" className="shrink-0">
-                <Link
-                  to="/workspaces/$workspaceId/settings"
-                  params={{ workspaceId }}
-                  search={{ section: "models" }}
-                >
-                  Connect a model
-                </Link>
-              </Button>
-            ) : null}
-            {actions ? (
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                disabled={actions.modelDisabled}
-                onClick={actions.onChooseModel}
-              >
-                Choose another model
-              </Button>
-            ) : null}
-            {!canBuyCredits && !canConnectModel ? (
-              <span className="self-center text-xs text-fg-muted">
-                Ask an organization owner or workspace admin for help.
-              </span>
-            ) : null}
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const structuralFailure = Boolean(failure.structuralSandboxFailure);
+  const billingFailure = creditExhausted && !structuralFailure;
+  const { reason, unavailableModel } = failedSessionCopy(
+    failure,
+    billingFailure,
+    modelChanged,
+    canChooseModel && !structuralFailure,
+  );
+  const retryActions =
+    actions &&
+    !structuralFailure &&
+    !failure.safetyRefusal &&
+    (!unavailableModel || modelChanged || actions.retryInput) ? (
+      <FailedSessionActions {...actions} />
+    ) : null;
   return (
     <div className="mx-auto mb-2 w-full max-w-3xl px-4 pt-4 sm:px-6">
       <div
         data-testid="failed-session-banner"
-        className="flex gap-2.5 rounded-lg border border-status-failed/30 bg-status-failed/10 p-3 text-status-failed"
+        className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-fg-muted"
       >
-        <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-failed" />
-        <div className="min-w-0 text-sm">
-          <span className="font-medium">
-            This session failed{failure.failedAt ? ` ${formatTimestamp(failure.failedAt)}` : ""}.
-          </span>{" "}
-          {failure.reason ? (
-            <span className="text-status-failed/90">{failure.reason}</span>
-          ) : (
-            <span className="text-fg-muted">No failure detail was recorded.</span>
-          )}
-          <div className="mt-1 text-xs text-fg-muted">
-            {failure.consecutiveRecoveryCount !== null && failure.consecutiveRecoveryCount > 0 ? (
-              <>
-                {failure.consecutiveRecoveryCount} consecutive automatic retr
-                {failure.consecutiveRecoveryCount === 1 ? "y" : "ies"} failed before stopping.{" "}
-              </>
-            ) : null}
-            {failure.detailsTruncated ? "Some error details are shortened. " : null}
-            {failure.structuralSandboxFailure
-              ? "Conversation history is preserved. Retrying execution or changing models cannot repair this sandbox. Pause and Cancel remain available."
-              : failure.safetyRefusal
-                ? "The conversation history is preserved. This request cannot be retried. You can send a new message below."
-                : "Your request and conversation history are preserved."}
-          </div>
-          {sandboxRecovery ? (
-            <SandboxRecoveryActions
-              {...sandboxRecovery}
-              structuralFailure={Boolean(failure.structuralSandboxFailure)}
-            >
-              {actions ? <OrdinaryFailureActions failure={failure} actions={actions} /> : null}
-            </SandboxRecoveryActions>
-          ) : actions && !failure.structuralSandboxFailure ? (
-            <OrdinaryFailureActions failure={failure} actions={actions} />
-          ) : null}
-        </div>
+        <AlertTriangleIcon aria-hidden="true" className="size-3.5 shrink-0" />
+        <span className="min-w-0 break-words">{reason}</span>
+        {billingFailure ? (
+          workspaceId && canBuyCredits ? (
+            <Button asChild size="sm" variant="ghost">
+              <Link
+                to="/workspaces/$workspaceId/organization"
+                params={{ workspaceId }}
+                search={{ section: "billing" }}
+              >
+                Buy credits
+              </Link>
+            </Button>
+          ) : workspaceId && canConnectModel ? (
+            <Button asChild size="sm" variant="ghost">
+              <Link
+                to="/workspaces/$workspaceId/settings"
+                params={{ workspaceId }}
+                search={{ section: "models" }}
+              >
+                Connect a model
+              </Link>
+            </Button>
+          ) : null
+        ) : sandboxRecovery ? (
+          <SandboxRecoveryActions {...sandboxRecovery} structuralFailure={structuralFailure}>
+            {retryActions}
+          </SandboxRecoveryActions>
+        ) : (
+          retryActions
+        )}
       </div>
     </div>
-  );
-}
-
-function OrdinaryFailureActions({
-  failure,
-  actions,
-}: {
-  failure: SessionFailureSummary;
-  actions: ComponentProps<typeof FailedSessionActions>;
-}) {
-  return failure.safetyRefusal ? (
-    <Button
-      type="button"
-      size="sm"
-      variant="secondary"
-      className="mt-3"
-      disabled={actions.modelDisabled}
-      onClick={actions.onChooseModel}
-    >
-      Choose another model
-    </Button>
-  ) : (
-    <FailedSessionActions {...actions} />
   );
 }

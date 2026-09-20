@@ -6,8 +6,17 @@ description: Find, install, create, edit, and permanently remove Skills; underst
 # Managing Skills
 
 A Skill is a folder containing `SKILL.md` and supporting UTF-8 text files.
-Use Skills for reusable instructions and procedures. Use Knowledge for facts and
-outcomes, and workspace instructions for short always-on rules.
+Use Skills for reusable procedures and context-specific or personal behavioral
+preferences. Use workspace instructions for short always-on rules within their
+authorized scope. A request to remember how to behave belongs in one of those
+destinations, not Knowledge, even when phrased as "the user prefers concise replies."
+Knowledge holds facts and outcomes for retrieval, not standing behavior.
+
+Make the Skill description state when it applies: only that descriptor enters
+the prompt index; the agent reads the full instructions with `skill_read` when
+relevant. Do not promise that the full Skill body is always in the prompt.
+For mixed requests, keep the short rule in workspace instructions and the detailed
+procedure in a Skill. Do not duplicate either as a Knowledge entry.
 
 ## Read
 
@@ -79,6 +88,9 @@ change; Review first saves an inactive revision and the task continues; Off
 prevents agent authoring. Existing Skills remain readable and usable, and an
 authorized human can still manage or install Skills in the UI. Do not change
 settings or infer an override from “the user asked.” Report the actual receipt.
+Do not widen a personal preference into a workspace-wide rule. If the intended
+scope is unavailable, explain the limitation. Do not fall back to Knowledge or
+another destination to bypass learning settings, review, scope or size limits.
 
 Saved history supports restoration. Upstream updates must preserve workspace
 customizations; report an available update instead of replacing customized

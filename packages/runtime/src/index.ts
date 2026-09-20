@@ -1,3 +1,8 @@
+import {
+  withPreparedCompactionRequest,
+  deferCompactionToModelBoundary,
+} from "./prepared-compaction-request";
+export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {
@@ -343,6 +348,7 @@ import {
 import {
   ModelRequestCaptureModel,
   ModelRequestCaptureProvider,
+  notifyModelRequestCapture,
   withModelRequestCapture,
   type ModelRequestCapture,
   nextModelContextCaptureIndex,
@@ -1267,10 +1273,9 @@ function serializeToolForRemoteCompaction(tool: Tool): SerializedTool | null {
  * exactly one `{ type: "compaction", encrypted_content }` output item.
  * Must run inside Codex ALS with `remote_compaction_v2` beta + turn metadata.
  *
- * Prompt-cache critical: `systemInstructions` and `tools` must match the
- * ordinary agent turn prefix (Codex CLI sends `base_instructions` +
- * `model_visible_specs` on the compact call). An empty instructions string
- * busts the shared tools→instructions prefix and is rejected here.
+ * Reuse the complete prepared ordinary request, after sandbox and lazy-tool
+ * preparation. Never reconstruct its prefix from Agent configuration. Empty
+ * instructions are rejected.
  *
  * Tools are schema context only. This is a single `_fetchResponse` (no tool
  * loop), and extract still requires exactly one compaction item, so a
@@ -1283,60 +1288,44 @@ export async function requestRemoteCompactionV2(
     client: OpenAI;
     provider?: ResolvedModelProvider;
     model: string;
-    /**
-     * Exact agent system instructions for this session/turn. Required and
-     * non-blank — must match the prior ordinary model call for cache prefix.
-     */
-    systemInstructions: string;
-    promptCacheKey?: string;
-    /** Preserve the ordinary request’s effective model-side reasoning instructions. */
-    reasoning?: ModelRequest["modelSettings"]["reasoning"];
-    /** Model-visible tool schemas for the compact request (CLI parity). */
-    tools?: readonly SerializedTool[];
+    preparedRequest: Omit<ModelRequest, "input">;
+    captureAgent?: object;
+    signal?: AbortSignal | undefined;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
   },
 ): Promise<Record<string, unknown>> {
-  // Match Agents SDK `normalizeInstructions`: reject blank after trim, but send
-  // the original bytes. Trimming here would diverge from ordinary turns that
-  // keep leading/trailing whitespace and bust the tools→instructions prefix.
-  if (options.systemInstructions.trim() === "") {
+  const { signal: _priorSignal, ...prefix } = options.preparedRequest;
+  if (!prefix.systemInstructions?.trim()) {
     throw new EmptyCompactionSummaryError({
       stage: "remote_v2_instructions",
       reason: "empty_system_instructions",
     });
   }
-  const systemInstructions = options.systemInstructions;
-  const promptInput = buildRemoteCompactionV2PromptInput(input);
-  const tools = options.tools ? [...options.tools] : [];
+  // Reuse the complete prepared request. New SDK/model settings flow through
+  // automatically; only history and the transient compaction marker differ.
   const request: ModelRequest = {
-    systemInstructions,
-    input: promptInput as AgentInputItem[],
-    modelSettings: {
-      reasoning: options.reasoning ?? {
-        effort: settings.openaiReasoningEffort,
-        summary: "detailed",
-      },
-      // Azure rejects store:false; Codex transport enforces store:false itself.
-      ...(settings.openaiProvider === "azure" ? {} : { store: false }),
-      ...(options.promptCacheKey
-        ? { providerData: { prompt_cache_key: options.promptCacheKey } }
-        : {}),
-    },
-    tools,
-    toolsExplicitlyProvided: true,
-    outputType: "text",
-    handoffs: [],
+    ...prefix,
+    input: buildRemoteCompactionV2PromptInput(input) as AgentInputItem[],
+    // This call outlives the SDK Runner trace. Tracing is client-side metadata,
+    // not part of the provider request or cache prefix.
     tracing: false,
+    // The stopped inference stream may have aborted its per-call signal.
+    // Compaction uses the still-active turn cancellation signal instead.
+    ...(options.signal ? { signal: options.signal } : {}),
   };
   let response: unknown;
   try {
     const provider = options.provider ?? configuredProviders(settings)[0];
     if (!provider) throw new Error("Built-in model provider is unavailable");
-    response = await new CompactionResponsesModel(
-      options.client,
-      options.model,
-      provider,
-    ).fetchResponse(request);
+    response = await withModelRequestCapture(
+      options.captureAgent ? agentModelContextCaptures.get(options.captureAgent) : undefined,
+      async () => {
+        void notifyModelRequestCapture(request);
+        return new CompactionResponsesModel(options.client, options.model, provider).fetchResponse(
+          request,
+        );
+      },
+    );
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
@@ -2112,6 +2101,8 @@ export function coreInstructions(
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; resume a paused goal with opengeni__goal_resume regardless of who paused it or why; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
+    'Choose durable storage by purpose, including requests to "remember this" or keep something "for future sessions". Knowledge is retrieval-only information, not standing behavior. Use instruction_policy_get then instruction_policy_save for short always-on workspace rules, such as "Keep replies concise; expand when asked." Use Skills for reusable procedures and context-specific or personal behavioral preferences; make the Skill description state when it applies so the prompt index can guide skill_read. Do not save behavioral preferences as Knowledge by rephrasing them as facts like "the user prefers concise replies". Preserve the intended scope: do not turn a personal preference into a workspace-wide rule; use an authorized personal Skill when appropriate, or explain the unavailable scope. Split mixed requests into a short rule and detailed Skill steps without duplicating them in Knowledge.',
+    "Before changing workspace instructions, read the current instruction and exact baseline, preserve unrelated rules, append new rules, and use only a localized exact anchored edit for updates or removals. Agents cannot replace the complete instruction; whole-policy rewrites belong in the manual workspace editor. Do not bypass a destination's Agent learning setting, review, scope, limits, or unavailable tools by saving to another destination. Report the actual destination and receipt: active, pending review, or not saved. Do not promise future behavior from a Knowledge save.",
     "Use knowledge_search and knowledge_get when retained information is relevant. For questions about what the workspace knows, ground the answer in authorized Knowledge and attached sources. Missing internal facts remain unknown; do not infer a person's role or cite unrelated public search results as evidence. Keep any relevant external research clearly separate from workspace records. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save only when they help a plausible future task. Do not retain routine approvals, acknowledgments, temporary task instructions, status chatter or raw screenshots merely because they occurred. Before saving, use knowledge_prepare_save when available to fetch the authorized collection map with descriptions and parent IDs plus related published and pending entries; otherwise search both views and browse collections. Skip unchanged duplicates, improve the existing entry when appropriate, and create a new entry only for distinct useful information. Read the current entry before correcting it and preserve uncertainty, conflicting evidence and existing relationships. When a user supplies or confirms a durable fact, use knowledge_retain_message to retain the actual message and cite its returned entryId/revisionId in the finding evidence. Preserve existing source evidence and relationships when correcting an entry; do not replace them with empty arrays merely because the user confirmed a new value. Explicit confirmation can supersede a conflicting pending proposal, but explain that outcome to the user. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files for the conversation without automatically publishing OCR or source text into Knowledge. Inspect an image visually in the current task; save only a useful supported observation, requirement or incident when warranted. Use knowledge_retain_file purpose=evidence only when a selected finding needs the original as supporting evidence, or purpose=reference when deliberately retaining a reusable source document. Supporting sources remain accessible through evidence links and explicit includeEvidence searches, but do not fill ordinary Knowledge discovery. An upload alone is not a reason to save Knowledge. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
     ...(workspaceEnvironment ? workspaceEnvironmentInstructions(workspaceEnvironment) : []),
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
@@ -7498,11 +7489,16 @@ function measuredModelInputFilter(
   };
 }
 
+const agentModelContextCaptures = new WeakMap<object, ModelRequestCapture>();
+
 function bindModelVisibleContextCapture(
   agent: Agent<any, any>,
   onCapture: RunAgentStreamOptions["onModelVisibleContext"],
 ): ModelRequestCapture | undefined {
-  if (!onCapture) return undefined;
+  if (!onCapture) {
+    agentModelContextCaptures.delete(agent);
+    return undefined;
+  }
   const capture: ModelRequestCapture = async (request) => {
     const requestIndex = nextModelContextCaptureIndex(agent);
     await onCapture(
@@ -7527,6 +7523,7 @@ function bindModelVisibleContextCapture(
       }),
     );
   };
+  agentModelContextCaptures.set(agent, capture);
   return capture;
 }
 
@@ -7555,7 +7552,9 @@ export async function runAgentStream(
   const scope = gate?.beginStream(overrides.signal);
   try {
     if (scope) agent.toolUseBehavior = scope.toolUseBehavior;
-    const stream = await runAgentStreamInternal(agent, input, settings, overrides, scope);
+    const stream = await withPreparedCompactionRequest(agent, () =>
+      runAgentStreamInternal(agent, input, settings, overrides, scope),
+    );
     // Observe the SDK's own settlement promise before exposing the stream. Do
     // not wrap/replace SDK history, errors, cancellation, or stream iteration.
     // In particular a fatal sibling tool error must not leave admission open
@@ -7596,7 +7595,7 @@ async function runAgentStreamInternal(
     agent,
     overrides.onModelVisibleContext,
   );
-  if (modelRequestCapture) installNonLazyModelRequestCapture(agent);
+  installNonLazyModelRequestCapture(agent);
   if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
     throw new Error("runCredentialSessionId is required when run credential setup is enabled");
   }
@@ -7760,19 +7759,21 @@ async function runAgentStreamInternal(
         ),
         measuredModelInputFilter(
           "input_filter_context",
-          contextRobustnessFilterForSettings(settings, {
-            throwOnCompactionNeeded: Boolean(
-              overrides.contextCompactionSignal || overrides.contextCompactionRequested,
-            ),
-            ...(overrides.contextCompactionSignal
-              ? { contextCompactionSignal: overrides.contextCompactionSignal }
-              : {}),
-            ...(overrides.contextCompactionRequested
-              ? {
-                  contextCompactionRequested: overrides.contextCompactionRequested,
-                }
-              : {}),
-          }),
+          deferCompactionToModelBoundary(
+            contextRobustnessFilterForSettings(settings, {
+              throwOnCompactionNeeded: Boolean(
+                overrides.contextCompactionSignal || overrides.contextCompactionRequested,
+              ),
+              ...(overrides.contextCompactionSignal
+                ? { contextCompactionSignal: overrides.contextCompactionSignal }
+                : {}),
+              ...(overrides.contextCompactionRequested
+                ? {
+                    contextCompactionRequested: overrides.contextCompactionRequested,
+                  }
+                : {}),
+            }),
+          ),
         ),
         // Seal admission before any provider preparation/transport awaits.
         inputWaitYield?.modelDispatchFilter,
@@ -7916,19 +7917,21 @@ async function runAgentStreamInternal(
       ),
       measuredModelInputFilter(
         "input_filter_context",
-        contextRobustnessFilterForSettings(settings, {
-          throwOnCompactionNeeded: Boolean(
-            overrides.contextCompactionSignal || overrides.contextCompactionRequested,
-          ),
-          ...(overrides.contextCompactionSignal
-            ? { contextCompactionSignal: overrides.contextCompactionSignal }
-            : {}),
-          ...(overrides.contextCompactionRequested
-            ? {
-                contextCompactionRequested: overrides.contextCompactionRequested,
-              }
-            : {}),
-        }),
+        deferCompactionToModelBoundary(
+          contextRobustnessFilterForSettings(settings, {
+            throwOnCompactionNeeded: Boolean(
+              overrides.contextCompactionSignal || overrides.contextCompactionRequested,
+            ),
+            ...(overrides.contextCompactionSignal
+              ? { contextCompactionSignal: overrides.contextCompactionSignal }
+              : {}),
+            ...(overrides.contextCompactionRequested
+              ? {
+                  contextCompactionRequested: overrides.contextCompactionRequested,
+                }
+              : {}),
+          }),
+        ),
       ),
       inputWaitYield?.modelDispatchFilter,
     ].filter((f): f is CallModelInputFilter => Boolean(f)),

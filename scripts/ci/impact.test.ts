@@ -29,6 +29,7 @@ const CURATED_ARTIFACT_BROWSER_E2E = [
 ] as const;
 const AI_GATEWAY_CONNECTION_E2E = "test/e2e/ai-gateway-connection.browser.e2e.ts";
 const COMPACT_SESSION_VIEW_E2E = "test/e2e/compact-session-view.browser.e2e.ts";
+const FAILED_SESSION_RECOVERY_E2E = "test/e2e/failed-session-recovery.browser.e2e.ts";
 const COMPOSER_MENUS_E2E = "test/e2e/composer-menus.browser.e2e.ts";
 const PERSONAL_WORKSPACE_ACCESSIBILITY_E2E =
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts";
@@ -188,6 +189,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CRYPTO_RANDOM_UUID_E2E,
+      FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
@@ -460,6 +462,26 @@ describe("fail-closed change impact", () => {
     );
   });
 
+  test("failed-session recovery follows its real route and shared dependencies without widening leaf plans", () => {
+    for (const path of [
+      FAILED_SESSION_RECOVERY_E2E,
+      "apps/web/src/routes/session.tsx",
+      "apps/web/src/components/session/failed-session-actions.tsx",
+      "packages/react/src/components/message-timeline.tsx",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(FAILED_SESSION_RECOVERY_E2E);
+      expect(plan.unitTests, path).not.toContain(FAILED_SESSION_RECOVERY_E2E);
+      expect(plan.integrationTests, path).not.toContain(FAILED_SESSION_RECOVERY_E2E);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(
+      FAILED_SESSION_RECOVERY_E2E,
+    );
+  });
+
   test("composer menus follow the real web fixture and shared dependencies without widening leaf plans", () => {
     for (const path of [
       COMPOSER_MENUS_E2E,
@@ -585,6 +607,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CRYPTO_RANDOM_UUID_E2E,
+      FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
@@ -967,6 +990,22 @@ describe("workflow fail-closed contracts", () => {
     expect(sourceContracts).toContain("path: ${{ runner.temp }}/ci-impact-plan");
     expect(sourceContracts).toContain("--plan ${{ runner.temp }}/ci-impact-plan/impact-plan.json");
     expect(sourceContracts).not.toContain("--plan impact-plan.json");
+  });
+
+  test("CI runs the compact session-search header regression with real database evidence", () => {
+    const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+    const step = ci.slice(
+      ci.indexOf("      - name: Compact session-search header browser acceptance"),
+      ci.indexOf("      - name: Queue surface browser acceptance"),
+    );
+    expect(step).toContain("matrix.lane == 'interaction'");
+    expect(step).toContain('OPENGENI_REQUIRE_REAL_DB: "1"');
+    expect(step).toContain(
+      "--test-name-pattern 'desktop expanded header keeps icon-only search inline'",
+    );
+    expect(step).toContain("./test/e2e/session-search.browser.e2e.ts");
+    expect(ci).toContain("name: session-search-header-evidence");
+    expect(ci).toContain("path: /tmp/session-search-header-evidence");
   });
 
   test("CI retains exact aggregate names and every current release/image lane", () => {
