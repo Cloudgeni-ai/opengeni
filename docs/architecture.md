@@ -1,6 +1,6 @@
 # OpenGeni architecture reference
 
-> Code and docs define behavior.
+> Code/docs define behavior.
 > Setup: [`../AGENTS.md`](../AGENTS.md). Documentation index: [`README.md`](README.md).
 
 ## Navigation
@@ -20,12 +20,12 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-OpenGeni: a self-hostable session-based agent runtime. Postgres owns durable
+OpenGeni: self-hostable session-based agent runtime. Postgres owns durable
 truth, Temporal execution coordination, and NATS reconstructible transport.
 Control plane: identity, tenancy, sessions, human intervention, goals,
 recovery, compute, files, artifacts, usage, and observability. The API authorizes
 clients and bounded browser access to storage, sandboxes, relays, Codex WebRTC,
-and Gateway realtime WebSockets. Workers run agents in sandboxes or Connected Machines.
+and Gateway realtime WebSockets. Workers execute in sandboxes or Connected Machines.
 
 External users require live membership. `asUser()` supplies canonical
 identity; an end-user label does not. Private/shared visibility differs from
