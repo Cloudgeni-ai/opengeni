@@ -1527,12 +1527,18 @@ export function recordTurnStartupPhase(
     durationSeconds: number;
     count?: number | null;
     cache?: TurnStartupCache;
+    /** Trace-only lookup for the completed claim while its execution root is still open. */
+    executionCorrelationId?: string;
   },
 ): void {
   completedOperationSpan(observability, `worker.prepare.${input.phase}`, input.durationSeconds, {
     provider: input.provider,
     backend: input.backend,
     outcome: input.outcome,
+    ...(input.phase === "claim_and_policy" &&
+    /^turn_[0-9a-f]{32}$/.test(input.executionCorrelationId ?? "")
+      ? { correlationId: input.executionCorrelationId }
+      : {}),
   });
   observability.observeHistogram({
     name: "opengeni_turn_startup_phase_duration_seconds",
@@ -1592,7 +1598,12 @@ function completedOperationSpan(
   observability: Observability,
   name: string,
   durationSeconds: number,
-  attributes: { outcome: string; provider?: string; backend?: string },
+  attributes: {
+    outcome: string;
+    provider?: string;
+    backend?: string;
+    correlationId?: string | undefined;
+  },
 ): void {
   if (!Number.isFinite(durationSeconds) || durationSeconds < 0) return;
   try {

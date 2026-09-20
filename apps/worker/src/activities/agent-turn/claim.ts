@@ -14,7 +14,7 @@ import {
   type SessionTurnForExecution,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
-import { linkCurrentSpanToAdmission } from "@opengeni/observability";
+import { linkCurrentSpanToAdmission, turnExecutionTelemetryKey } from "@opengeni/observability";
 import { deliverChildRequiresActionToParent } from "../parent-wake";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
@@ -551,6 +551,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   throwIfTurnCancelled();
   recordTurnStartupPhase(observability, {
     phase: "claim_and_policy",
+    executionCorrelationId: turnExecutionTelemetryKey(
+      input.workspaceId,
+      input.sessionId,
+      input.attemptId,
+    ),
     provider: turnExecutionPolicy.providerId,
     backend: turn.sandboxBackend,
     outcome: "completed",
