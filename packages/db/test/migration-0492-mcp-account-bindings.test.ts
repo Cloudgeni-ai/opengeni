@@ -4,6 +4,7 @@ import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/test
 import postgres from "postgres";
 import { McpConnectionAccountBindings } from "@opengeni/contracts";
 import { personalDelegationsForAccountBindings } from "../../core/src/domain/mcp-account-bindings";
+import { nativeMcpAccountBindingsFixture } from "./mcp-account-bindings-fixture";
 
 // Optional isolated WASM PostgreSQL for sandboxes without Docker. No deployed
 // database URL is read; otherwise use the repository's disposable DB harness.
@@ -67,11 +68,7 @@ beforeAll(async () => {
     if (!blank)
       throw new Error("0492 requires disposable PostgreSQL or OPENGENI_MCP_BINDINGS_PGLITE_MODULE");
     const sql = postgres(blank.databaseUrl, { max: 1 });
-    db = {
-      exec: (text) => sql.unsafe(text),
-      query: async (text, args = []) => ({ rows: await sql.unsafe(text, args as never[]) }),
-      close: () => sql.end(),
-    };
+    db = nativeMcpAccountBindingsFixture(sql);
   }
   // Minimal, local-only prerequisites. Install the real 0478 resolver and
   // sender read helper; this tests the migration's actual patched SQL body.
