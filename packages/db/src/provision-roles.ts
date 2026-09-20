@@ -540,6 +540,7 @@ async function grantAppRoleIfSchemaExists(
     "get_organization_administration_overview(uuid,text)",
     "get_workspace_kind(uuid,uuid)",
     "resolve_workspace_codex_subscription_source(uuid,uuid)",
+    "capture_legacy_codex_turn_sources(uuid,uuid)",
     "list_organization_workspace_ids(uuid)",
     "list_organization_codex_workspace_ids(uuid)",
     "organization_workspace_command(jsonb)",
@@ -630,6 +631,9 @@ BEGIN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.mcp_operation_command(jsonb,text,jsonb) TO %I', ${literal(schema)}, ${literal(role)});
     END IF;
     EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', ${literal(schema)}, ${literal(role)});
+    IF to_regprocedure('opengeni_private.codex_credential_serves_turn(uuid,uuid,uuid,uuid)') IS NOT NULL THEN
+      EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.codex_credential_serves_turn(uuid,uuid,uuid,uuid) TO %I', ${literal(role)});
+    END IF;
     EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM %I', ${literal(schema)}, ${literal(role)});
     EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM %I', ${literal(schema)}, ${literal(role)});
     FOREACH runtime_table IN ARRAY ${runtimeFullDmlTables} LOOP

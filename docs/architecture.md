@@ -1,6 +1,5 @@
 # OpenGeni architecture reference
 
-> Code and docs define behavior.
 > Setup: [`../AGENTS.md`](../AGENTS.md). Documentation index: [`README.md`](README.md).
 
 ## Navigation
@@ -20,8 +19,8 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-OpenGeni: a self-hostable session-based agent runtime. Postgres owns durable
-truth, Temporal execution coordination, and NATS reconstructible transport.
+OpenGeni: self-hostable session agent runtime. Postgres owns durable truth;
+Temporal coordinates execution; NATS transports reconstructible events.
 Control plane: identity, tenancy, sessions, human intervention, goals,
 recovery, compute, files, artifacts, usage, and observability. The API authorizes
 clients and bounded browser access to storage, sandboxes, relays, Codex WebRTC,
@@ -425,18 +424,18 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
-Same-session historical CURRENT recovery requires managed-human consent, exact
-checkpoint/generation CAS, fenced singleton membership and durable model warnings;
-never command replay. Public authority: `packages/core/src/application/sandbox-recovery.ts`;
-restore lifecycle: `packages/db/src/index.ts`; membership/GC/protocol guards: migration 0492.
-Default-off activation and permanent worker-protocol fencing protect rolling rollout.
-Retry checks the effective route. See [run lifecycle](run-lifecycle.md).
+Historical CURRENT recovery requires same-session managed-human consent,
+checkpoint/generation CAS, singleton fencing and durable model warnings; never replay.
+Authority: `packages/core/src/application/sandbox-recovery.ts`; lifecycle:
+`packages/db/src/index.ts`; membership/GC/protocol guards: migration 0494.
+Rolling activation defaults off; permanent worker-protocol fencing applies.
+Retry checks effective routes. See [run lifecycle](run-lifecycle.md).
 
-Sessions retain home-compute policy and epoch-fenced targets. Selection proves
-establishment authority; invalid pointers reconcile visibly. Leases/reapers—not
-viewers—own managed sandboxes. Identity precedes setup; capture fences writers.
-Provider loss retires only matching instances, never authorizing ambiguous replay.
-Execution retains lazy routing; raw handles serve setup/capture (`turn-sandbox-access.ts`).
+Home-compute policy and epoch-fenced targets persist. Selection proves establishment
+authority; invalid pointers reconcile visibly. Leases/reapers—not viewers—own
+managed sandboxes. Identity precedes setup; capture fences writers. Provider loss
+retires exact instances, never authorizing ambiguous replay. Routing stays lazy;
+raw handles serve setup/capture (`turn-sandbox-access.ts`).
 
 Stock Modal non-PTY commands without `runAs` can carry the versioned native
 subreaper supervision protocol. Exact-instance native capability verification
@@ -981,33 +980,31 @@ organization-owned BYOK products. Organization products use dedicated encrypted
 FORCE-RLS storage, inherit only into same-organization shared workspaces, and
 retain organization payer identity through admission and execution; no rail
 implicitly falls back to another key.
-Provider-refusal cooldowns carry separate provenance and revision authority so
-fresh usage repairs only an older quota refusal, never generic backpressure or
-a concurrently newer refusal. All-capped admission and durable capacity waits
-run that reconciliation through bounded control-plane refreshes.
-Every Codex turn owns one durable credential lease before provider work. The
-lease protocol is unconditional execution fencing; `rotation_enabled` only
-decides whether a new or recovered turn may leave the active account. Rotation
-off therefore waits on a capped active account instead of using a healthy
-alternate, while rotation on may recover the same checkpointed turn elsewhere.
-The first allocator decision also atomically records a bounded
-`codexCredentialPolicySnapshotV1` in the durable turn metadata, including a
-new turn's no-credential result before it enters a capacity wait. The snapshot
-freezes the effective workspace/organization/disabled allocator source as well
-as active-pointer, rotation, effective strategy, and pin state. Re-acquisition
-and definitive-failure settlement reuse that accepted policy while reading current
-account health/cooldowns; a
-missing or expired last database-confirmed lease deadline fails closed before
-provider dispatch and follows the existing lease-loss recovery path.
-Heartbeat renewal is fail-closed as well: a response that arrives after the
-prior worker-confirmed deadline is discarded, while expiry-sensitive lease SQL
-uses execution-time database time after its relevant locks are acquired.
-An effective workspace/organization source transition is a serialized hard
-cutover: the source advisory lock rejects it while a Codex turn is running,
-awaiting action, recovering, waiting for capacity, or still holds a live lease.
-This keeps a capacity waiter from resuming against an obsolete allocator pool;
-same-source pointer, rotation, allocator, and health mutations may wake and
-re-evaluate the immutable accepted snapshot.
+Provider-refusal cooldowns retain provenance and revisions: fresh usage repairs
+older quota refusals, never generic backpressure or newer refusals. All-capped
+admission and capacity waits reconcile through bounded refreshes.
+
+Codex turns require durable credential leases. `rotation_enabled` controls
+account switching: off waits on capped accounts; on allows same-turn recovery
+elsewhere. First allocation atomically freezes source, active-pointer, rotation,
+strategy, and pin in `codexCredentialPolicySnapshotV1`, before no-credential waits.
+Recovery reuses that policy with current health/cooldowns. Missing/expired confirmed
+deadlines fail closed; discard late heartbeats. Expiry SQL reads database time
+after locking.
+
+Source-advisory locks serialize changes without idle turns. Accepted pools govern
+allocation, recovery, capacity, tokens and wakes. Guarded content-free capture
+preserves immutable legacy pre-change sources in `codex_turn_source_bindings`,
+never rewriting history. New work uses new settings. Connecting preserves selected
+mode; Automatic prefers connected local accounts. Token loading/refresh requires
+exact live leases. Workspace lists use current pools; authorized session pickers use
+accepted pools for waits, current pools for new work. Membership, ownership, health,
+token-family CAS and live-lease disconnect fences remain enforced.
+
+Migration 0492 requires maintenance: drain API/control/turn processes, supply all
+runtime logins, migrate, provision roles; start compatible binaries only.
+Before/after guards reject live runtime DB sessions. Preserve checkpoints and
+recover—not cancel—accepted turns. Never restart pre-0492 binaries.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`model-providers.md`](model-providers.md),

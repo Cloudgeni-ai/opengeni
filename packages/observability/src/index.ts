@@ -71,6 +71,25 @@ export function sandboxLeaseTelemetryKey(workspaceId: string, sandboxGroupId: st
     .slice(0, 32)}`;
 }
 
+/** Content-free lookup key for a worker execution attempt, never a metric label.
+ * Operators derive it from authorized session/attempt records to find a trace
+ * without publishing raw tenancy or conversation identifiers to telemetry. */
+export function turnExecutionTelemetryKey(
+  workspaceId: string,
+  sessionId: string,
+  attemptId: string,
+): string {
+  return `turn_${createHash("sha256")
+    .update("opengeni:turn-execution-telemetry:v1\0")
+    .update(workspaceId)
+    .update("\0")
+    .update(sessionId)
+    .update("\0")
+    .update(attemptId)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
 /**
  * Stable selectors shared by OpenGeni's runtime metrics and optional
  * Prometheus/Grafana distribution. Operators can use these values for custom

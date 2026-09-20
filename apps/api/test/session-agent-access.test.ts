@@ -401,6 +401,7 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
   test("session-scoped trees are isolated from every peer and stay whole inside", async () => {
     if (!available) return;
     const f = await fixture();
+    const foreignWorkspace = await fixture();
     const a = await createSession(f, { agentAccess: "session", scopeSubjectId: u1 });
     const b = await createSession(f, { agentAccess: "session", scopeSubjectId: u1 });
     const c = await createSession(f, { agentAccess: "workspace" });
@@ -417,11 +418,20 @@ describe("session agent access (real PostgreSQL, HTTP + first-party MCP)", () =>
     await expectDenied(callTool(aServer, "session_events", { sessionId: b.id }));
     await expectDenied(callTool(aServer, "session_get", { sessionId: c.id }));
     const aBearer = await agentBearer(f, aAttempt);
+    expect(
+      (
+        await f.app.request(`/v1/workspaces/${f.workspaceId}/sessions/${a.id}/codex-accounts`, {
+          headers: { authorization: foreignWorkspace.humanBearer },
+        })
+      ).status,
+    ).toBe(403);
     expect((await httpGet(f, aBearer, `/sessions/${a.id}/events`)).status).toBe(200);
     expect((await httpGet(f, aBearer, `/sessions/${b.id}/events`)).status).toBe(404);
     expect((await httpGet(f, aBearer, `/sessions/${b.id}`)).status).toBe(404);
     expect((await httpGet(f, aBearer, `/sessions/${b.id}/turns`)).status).toBe(404);
     expect((await httpGet(f, aBearer, `/sessions/${b.id}/queue`)).status).toBe(404);
+    expect((await httpGet(f, aBearer, `/sessions/${b.id}/codex-accounts`)).status).toBe(404);
+    expect((await httpGet(f, aBearer, `/sessions/${a.id}/codex-accounts`)).status).toBe(200);
     expect((await httpGet(f, aBearer, `/sessions/${c.id}/events`)).status).toBe(404);
 
     // An authorized workspace coordinator can inspect a narrowly scoped task.

@@ -1546,7 +1546,7 @@ not claim restore success. Failed/stale public restores and a later loss after
 verified recovery remain explicit blockers requiring operator review; this slice
 does not introduce an abandon/reset or automatic re-consent operation.
 
-Migration `0492_consented_sandbox_recovery.sql` is additive with DB-default-off
+Migration `0494_consented_sandbox_recovery.sql` is additive with DB-default-off
 consent. Activation is owner-only and follows verified immutable API/control/turn
 images and worker templates; see [deployment](deployment.md). Disabling new consent
 does not interrupt accepted restoration or exact receipt replay. Finalized consent
@@ -2560,6 +2560,18 @@ transactionally exactly-once; a replica-safe Postgres-backed metrics projector
 would be a separate observability architecture.
 
 Provider request lifecycle diagnostics are synchronous, bounded, and best-effort. Codex reports `headers`, `first_byte`, and one semantic `terminal` phase; SuperGrok reports the equivalent `headers`, first valid SSE event, and terminal phases plus valid-event count/gap telemetry. Terminal outcomes are `completed`, `failed`, or `timed_out`. The worker maps these to `opengeni_model_request_phases_total{provider,phase,outcome}` and `opengeni_model_request_phase_duration_seconds{provider,phase}`. SuperGrok additionally exposes `opengeni_model_requests_inflight`, `opengeni_model_request_oldest_no_event_age_seconds`, `opengeni_model_request_stream_events_total`, and `opengeni_model_request_stream_event_gap_seconds`, all with provider-only labels. Provider ids come from the resolved provider registry; request ids, model bodies, credentials, session ids, and token content are not metric labels.
+
+To locate one worker execution, derive
+`turnExecutionTelemetryKey(workspaceId, sessionId, attemptId)` from
+`@opengeni/observability` using authorized session and attempt records. The
+domain-separated opaque key appears as `correlationId` on the
+`worker.run_agent_segment` root and its `worker execution started` log; the log
+also carries `traceId` and `spanId`. Query the trace store by that correlation
+attribute, or follow the log's trace ID. Each recovered execution attempt has
+its own key. Raw IDs are not exported, and this key is never a metric label.
+The start log records an execution invocation, not a successful turn claim.
+Missing traces may reflect sampling or retention; the durable session timeline
+remains authoritative. This linkage does not retroactively identify old traces.
 
 Codex EOF classification waits for the SSE parser's final buffered block, including
 a valid terminal without a trailing blank separator. Raw transport EOF is not

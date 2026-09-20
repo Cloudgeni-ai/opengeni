@@ -128,9 +128,11 @@ export function CodexAccountIndicator({
 
   const current = codex.currentSelection;
   const effective =
+    (current ? codex.currentAccount : null) ??
     codex.accounts.find(
       (account) => account.id === (current ? current.credentialId : codex.pinnedAccountId),
-    ) ?? null;
+    ) ??
+    null;
   const selectionLabel = current
     ? current.waiting
       ? "Waiting for capacity"
@@ -236,7 +238,9 @@ export function CodexAccountIndicator({
             }}
             className="flex h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm"
           >
-            <span className="min-w-0 flex-1 truncate">Auto (workspace default)</span>
+            <span className="min-w-0 flex-1 truncate">
+              {current?.waiting ? "Auto" : "Auto (workspace default)"}
+            </span>
             {codex.pinningTarget === AUTO ? (
               <Loader2Icon className="ml-1 size-4 shrink-0 animate-spin" />
             ) : codex.pinnedAccountId === null ? (
@@ -278,7 +282,9 @@ export function CodexAccountIndicator({
           })}
 
           {!hasAccounts ? (
-            <p className="px-2 pt-1 text-2xs text-fg-subtle">No Codex subscriptions connected.</p>
+            <p className="px-2 pt-1 text-2xs text-fg-subtle">
+              {codex.error ? "Accounts unavailable." : "No Codex subscriptions connected."}
+            </p>
           ) : null}
           {codex.mutationError ? (
             <p className="px-2 pt-1 text-2xs text-danger">

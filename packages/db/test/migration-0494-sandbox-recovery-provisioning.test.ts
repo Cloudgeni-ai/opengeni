@@ -1,3 +1,4 @@
+// Regression companion for 0494_consented_sandbox_recovery.sql.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,

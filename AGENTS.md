@@ -175,6 +175,14 @@ See `docs/run-lifecycle.md` for catalog refresh and prompt-placement boundaries.
 - Domain/access/billing helpers now live in `@opengeni/core` under `packages/core/src`; `apps/api` routes are HTTP adapters over them.
 - **Pre-registration organization invitations activate at maintenance migration 0314.** Stop every old API, control-worker, and turn-worker before applying `0314_unregistered_organization_invitations.sql`; supply the exact old/new runtime login list through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`). After commit, never restart a pre-0314 image. Invitation creation and verified-email convergence share the normalized-email advisory fence before any organization lock; public projections never reveal whether the target email is registered. See `docs/organization-tenancy.md`.
 - **Post-sign-in organization setup activates at maintenance migration 0348.** Stop every old API, control-worker, and turn-worker before applying `0348_named_signup_and_user_setup.sql`; supply the exact old/new runtime login list through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`). A live listed identity aborts activation with SQLSTATE `55000`. After commit, never restart a pre-0348 image: old access writers still synthesize the retired `better-auth:user` fallback organization and `Default workspace`, and old clients do not speak the Personal-only setup contract. Public signup is an ordinary Better Auth account create; a separate authenticated organization-name-only lifecycle creates exactly one active owner membership plus its canonical Personal workspace and control row - never a shared/`Default` workspace, never a Personal `workspace_memberships` row, and never a second organization for a human who already holds a membership. A bound invitation always wins over self-service creation. The stock web console may then show a skippable product step to connect a model or buy OpenGeni credits; that step does not widen the 0348 name-only API. Because managed-access convergence no longer self-heals, that lifecycle **adopts** an orphaned legacy `better-auth:user` account (one carrying no organization membership at all) instead of refusing it, and defers the adoption rename until after the canonical workspace prefix; an account that already has a membership is refused rather than reinterpreted. Invited-user setup is a separate signed-out digest-only bearer: hashed at rest, single-use, expiry-bounded, rate-limited and preflighted before any password hashing, minting no session and no plaintext or temporary password. See `docs/organization-tenancy.md` and `docs/deployment.md`.
+- **Live Codex source changes activate at maintenance migration 0492.** Stop every
+  old/new API, control-worker, and turn-worker process and supply all runtime logins
+  through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`. Apply
+  `0492_codex_accepted_source_authority.sql`, provision roles, and start only matching
+  binaries; never restart pre-0492 code. This drains processes, not logical turns:
+  retain checkpoints and recover accepted work with its frozen source. Ordinary
+  source changes after activation require no idle workspace. See
+  `docs/codex-subscription-rotation.md` and `docs/deployment.md`.
 - **Personal-workspace organization Codex inheritance activates at maintenance migration 0422.**
   Stop every old API, control worker, and turn worker before applying
   `0422_personal_workspace_organization_codex_inheritance.sql`; supply the complete
@@ -349,14 +357,14 @@ Use [`docs/README.md`](docs/README.md) as the docs map. When you move or rename 
 
 ## Sandbox Notes
 
-Public historical checkpoint consent (0492) is canonical-managed-human-only,
+Public historical checkpoint consent (0494) is canonical-managed-human-only,
 singleton managed-home Modal only. Consent uses the exclusive workspace tenancy
 fence before a complete group census; a visible session count is not authority.
 The accepted operation protects membership, active route and CURRENT artifact
 until verified restoration or failed creation. Keep consent, restore completion
 and failed-turn Retry separate. Every later attempt reconstructs the filesystem
 discontinuity warning from the durable command receipt, outside compactable
-history. Migration 0492 is additive with DB-default-off consent. Activate only
+history. Migration 0494 is additive with DB-default-off consent. Activate only
 after verifying compatible immutable worker images/templates. Permanent consent
 receipts fence old inference claims, including reattachment, even after disabling
 new consent or replacing a lease. See `docs/run-lifecycle.md`.

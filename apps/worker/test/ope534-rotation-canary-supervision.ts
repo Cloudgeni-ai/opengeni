@@ -3,7 +3,7 @@ import { CommandSupervisionReceipt, ModalRouterProviderCommand } from "@opengeni
 import type { sandboxRetainedProcesses, sessionBackgroundCommands } from "@opengeni/db/schema";
 import { requireCanary } from "./ope534-rotation-canary-evidence";
 
-/** The exact 0493 projection, not an adapter-generated terminal assertion. */
+/** The exact 0495 projection, not an adapter-generated terminal assertion. */
 export type CanarySupervisionProjection = Pick<
   typeof sandboxRetainedProcesses.$inferSelect,
   | "providerCommand"

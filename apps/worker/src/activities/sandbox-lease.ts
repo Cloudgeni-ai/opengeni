@@ -14,6 +14,7 @@
 // timer, viewer activity, owner task queue, or provider-specific lifecycle path
 // in the normal drain state machine.
 import { warnDrainSnapshotFailure } from "../sandbox-snapshot-diagnostics";
+import { warnRetainedProcessProofFailure } from "../retained-process-diagnostics";
 
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -1682,10 +1683,7 @@ async function reconcileTerminalRetainedProcesses(
         recordRetainedProcessReconciliation(observability, `proof_${proof.outcome}`);
       } catch (error) {
         recordRetainedProcessReconciliation(observability, "proof_checkpoint_failed");
-        observability.warn("sandbox reaper: retained-process proof checkpoint failed", {
-          processId: process.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
+        warnRetainedProcessProofFailure(observability, error, process);
         continue;
       }
     }

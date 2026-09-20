@@ -288,6 +288,7 @@ test("scope changes hide old hits immediately and reject late responses even if 
     expect(view.state().page).toBeNull();
     await flush();
     expect(reads).toBe(3);
+    expect(view.commits.every((state) => state.page === null)).toBe(true);
     expect(signals[1]!.aborted).toBe(true);
     expect(view.state().page).toBeNull();
     await act(async () => archived.resolve(page({ matches: [hit("archived")] })));

@@ -155,6 +155,7 @@ import type {
   BillingEntitlementsResponse,
   CodexAccount,
   CodexAccountsResponse,
+  SessionCodexAccountsResponse,
   CodexAppsUpdate,
   CodexRotationSettings,
   CodexOverviewResponse,
@@ -8076,6 +8077,17 @@ export class OpenGeniClient {
     return await this.requestJson<CodexAccountsResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/codex/accounts`,
+    );
+  }
+
+  /** Session-authorized retry choices plus the current accepted account. */
+  async listSessionCodexAccounts(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionCodexAccountsResponse> {
+    return await this.requestJson<SessionCodexAccountsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-accounts`,
     );
   }
 

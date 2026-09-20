@@ -3713,6 +3713,15 @@ export type CodexAccountsResponse = {
 
 export type OrganizationCodexAccountsResponse = Omit<CodexAccountsResponse, "apps" | "source">;
 
+/** Session-authorized choices: the accepted pool for a capacity wait, otherwise
+ * the current pool for the next turn. Current execution may use another pool. */
+export type SessionCodexAccountsResponse = Omit<CodexAccountsResponse, "apps" | "source"> & {
+  currentSelection: { credentialId: string | null; waiting: boolean } | null;
+  currentAccount: CodexAccount | null;
+  pinnedAccountId: string | null;
+  lastAccountId: string | null;
+};
+
 export type CodexAppsUpdate = {
   credentialId: string | null;
   version: number;

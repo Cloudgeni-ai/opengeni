@@ -252,6 +252,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     db,
     mcpSettings,
     input.workspaceId,
+    turn.id,
   );
   const codexSettings = await settingsWithCodexCredential(
     db,

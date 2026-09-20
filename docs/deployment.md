@@ -1,14 +1,14 @@
 # Deployment
 
-## Consented sandbox recovery (0492)
+## Consented sandbox recovery (0494)
 
-Fresh bootstrap may migrate before runtime roles exist. Migration 0492 grants
+Fresh bootstrap may migrate before runtime roles exist. Migration 0494 grants
 read access to existing configured roles only; normal `db:provision-roles`
 converges newly created and later-added app roles to SELECT-only access on the
 rollout row. Re-provisioning revokes activation writes and PUBLIC access; it
 never enables consent. Do not precreate runtime roles merely to run migration.
 
-`0492_consented_sandbox_recovery.sql` is additive and rolling, but does not enable
+`0494_consented_sandbox_recovery.sql` is additive and rolling, but does not enable
 consent. Supply the runtime login list through
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`),
 migrate and provision the normal application role. The owner-only
@@ -518,6 +518,18 @@ models. Drain API/control/turn processes, apply with the complete application
 role list, deploy the matching release, then restart. Pre-0390 workers do not
 understand the new credential/billing branch. No new environment variable is
 required; the stable environments encryption key protects these credentials.
+
+Migration `0492_codex_accepted_source_authority.sql` is a forward-only maintenance
+activation for non-blocking Codex source settings. Stop every old/new API,
+control-worker, and turn-worker process, supply the complete runtime login list
+through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, apply the migration, and
+run `db:provision-roles`. Its before/after guards reject live listed database
+sessions. Select
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0492_codex_accepted_source_authority`
+for generated plans. Start only matching binaries; never restart pre-0492 images.
+Do not cancel or require accepted turns to finish: preserve checkpoints and
+recover those logical turns with their retained source. This one-time process
+drain is distinct from ordinary settings changes, which require no idle window.
 
 Migration `0422_personal_workspace_organization_codex_inheritance.sql` is a
 maintenance activation for Personal workspace Codex inheritance. Stop all API,
