@@ -6717,7 +6717,22 @@ export async function getFilesForSubject(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+      // A service continuation has no human file authority. Its ambient actor
+      // (for example service:agent-turn) must not disagree with the explicit null
+      // passed to the file ACL function, or ordinary shared files disappear.
+      const [previousScope] =
+        input.subjectId === null
+          ? await scopedDb.execute<{ subject: string | null; owner: string | null }>(sql`
+            select current_setting('opengeni.subject_id', true) as subject,
+                   current_setting('opengeni.private_file_owner', true) as owner`)
+          : [];
+      if (input.subjectId === null) {
+        await scopedDb.execute(sql`select
+          set_config('opengeni.subject_id', '', true),
+          set_config('opengeni.private_file_owner', '', true)`);
+      } else {
+        await setSubjectRlsContext(scopedDb, input.subjectId);
+      }
       const subjectIdSql = input.subjectId === null ? sql`NULL::text` : sql`${input.subjectId}`;
       const rows = await scopedDb
         .select()
@@ -6738,6 +6753,16 @@ export async function getFilesForSubject(
             )`,
           ),
         );
+
+      // withRlsContext can be a savepoint on a caller's transaction. Restore
+      // its actor scope so this read cannot change later authorization.
+      // On query failure, savepoint rollback restores scope; do not mask the
+      // original SQLSTATE by issuing SQL in an aborted transaction.
+      if (input.subjectId === null) {
+        await scopedDb.execute(sql`select
+            set_config('opengeni.subject_id', ${previousScope?.subject ?? ""}, true),
+            set_config('opengeni.private_file_owner', ${previousScope?.owner ?? ""}, true)`);
+      }
       return rows.map(mapFile);
     },
   );
