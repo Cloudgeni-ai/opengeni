@@ -1,14 +1,22 @@
+import type { ConnectAccount, ConnectController, ConnectProvider } from "@opengeni/connect";
+import { ConnectChooser } from "./connect-chooser";
+import {
+  capabilityConnectProviderId,
+  connectionServicePresentation,
+  isServiceConnectProvider,
+} from "./connection-service-presentation";
 import type { CapabilityCatalogItem, ConnectionMetadata, OpenGeniClient } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
 import { CapabilityCatalogRow } from "./capability-catalog-row";
 import { ConnectionLogo } from "./connection-logo";
 import { ConnectionSkeleton } from "./connection-skeleton";
-import { capabilityLogoFallback } from "./capability-logo-fallback";
+import { ConnectionServiceLogo } from "./connection-service-logo";
 import { McpConnectionCard } from "./components/session-mcp-capability-card";
 import { mcpConnectionDiscoveryState } from "./mcp-connection-status";
 
 export type ConnectionDiscoveryProps = {
   client: OpenGeniClient;
+  controller?: ConnectController | undefined;
   workspaceId: string;
   returnUrl: string;
   onConfigured?: (() => void | Promise<void>) | undefined;
@@ -17,10 +25,10 @@ export type ConnectionDiscoveryProps = {
 /** Service discovery over the native catalogue. No host-owned OAuth state or
  * assumed account selection: details resolve current authority before acting. */
 export function ConnectionDiscovery(props: ConnectionDiscoveryProps) {
-  const [client, setClient] = useState(props.client);
+  const [scope, setScope] = useState({ client: props.client, controller: props.controller });
   const [generation, setGeneration] = useState(0);
-  if (client !== props.client) {
-    setClient(props.client);
+  if (scope.client !== props.client || scope.controller !== props.controller) {
+    setScope({ client: props.client, controller: props.controller });
     setGeneration(generation + 1);
   }
   return <ScopedDiscovery key={`${generation}:${props.workspaceId}`} {...props} />;
@@ -28,10 +36,15 @@ export function ConnectionDiscovery(props: ConnectionDiscoveryProps) {
 
 function ScopedDiscovery({
   client,
+  controller,
   workspaceId,
   returnUrl,
   onConfigured,
 }: ConnectionDiscoveryProps) {
+  const [providers, setProviders] = useState<ConnectProvider[]>([]);
+  const [accounts, setAccounts] = useState<ConnectAccount[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState<ConnectProvider | null>(null);
+  const [providerFailed, setProviderFailed] = useState(false);
   const [items, setItems] = useState<CapabilityCatalogItem[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
@@ -43,6 +56,24 @@ function ScopedDiscovery({
   useEffect(() => {
     let current = true;
     setFailed(false);
+    setSelectedProvider(null);
+    setProviders([]);
+    setAccounts([]);
+    setProviderFailed(false);
+    if (controller)
+      void Promise.all([
+        controller.transport.catalog(workspaceId),
+        controller.transport.accounts(workspaceId),
+      ])
+        .then(([catalog, inventory]) => {
+          if (current) {
+            setProviders(catalog.filter(isServiceConnectProvider));
+            setAccounts(inventory);
+          }
+        })
+        .catch(() => {
+          if (current) setProviderFailed(true);
+        });
     void Promise.all([client.listCapabilities(workspaceId), client.listConnections(workspaceId)])
       .then(([catalog, inventory]) => {
         if (current) {
@@ -63,13 +94,37 @@ function ScopedDiscovery({
     return () => {
       current = false;
     };
-  }, [client, workspaceId, reload]);
+  }, [client, controller, workspaceId, reload]);
   const matches =
     items?.filter((item) =>
       `${item.name} ${item.description ?? ""} ${item.providerDomain ?? ""}`
         .toLocaleLowerCase()
         .includes(query.trim().toLocaleLowerCase()),
     ) ?? [];
+  const providerMatches = providers.filter(
+    (provider) =>
+      !items?.some((item) => capabilityConnectProviderId(item) === provider.id) &&
+      provider.label.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+  );
+  if (selectedProvider && controller)
+    return (
+      <section aria-label={`Connect ${selectedProvider.label}`}>
+        <button type="button" onClick={() => setSelectedProvider(null)}>
+          Back to connections
+        </button>
+        <ConnectionLogo
+          name={selectedProvider.label}
+          src={connectionServicePresentation(selectedProvider).logo}
+        />
+        <ConnectChooser
+          controller={controller}
+          returnUrl={returnUrl}
+          presentation="catalog"
+          providerOnly
+          initialProviderId={selectedProvider.id}
+        />
+      </section>
+    );
   return (
     <section className="og-connection-discovery" aria-label="Find a connection">
       <h3>Add a connection</h3>
@@ -85,6 +140,12 @@ function ScopedDiscovery({
           }}
         />
       </label>
+      {providerFailed && (
+        <p role="alert">
+          Some services could not be loaded.{" "}
+          <button onClick={() => setReload((value) => value + 1)}>Retry</button>
+        </p>
+      )}
       <div className="og-connection-discovery-results" aria-busy={!items && !failed}>
         {failed ? (
           <p role="alert">
@@ -96,6 +157,27 @@ function ScopedDiscovery({
         ) : (
           <>
             <div>
+              {providerMatches.map((provider) => {
+                const connected = accounts.some(
+                  (account) => account.providerId === provider.id && account.status === "connected",
+                );
+                return (
+                  <CapabilityCatalogRow
+                    key={provider.id}
+                    name={provider.label}
+                    icon={
+                      <ConnectionLogo
+                        name={provider.label}
+                        src={connectionServicePresentation(provider).logo}
+                      />
+                    }
+                    status={connected ? "added" : "available"}
+                    statusLabel={connected ? "Connected" : "Connect"}
+                    showStatusLabel
+                    onOpen={() => setSelectedProvider(provider)}
+                  />
+                );
+              })}
               {matches.slice(0, limit).map((item) => {
                 const state = mcpConnectionDiscoveryState(item, connections);
                 return (
@@ -103,7 +185,7 @@ function ScopedDiscovery({
                     key={item.id}
                     name={item.name}
                     description={item.description ?? undefined}
-                    icon={<ServiceLogo client={client} item={item} />}
+                    icon={<ConnectionServiceLogo client={client} item={item} name={item.name} />}
                     status={state.status}
                     statusLabel={state.label}
                     showStatusLabel
@@ -118,7 +200,9 @@ function ScopedDiscovery({
                 );
               })}
             </div>
-            {!matches.length ? <p role="status">No services match your search.</p> : null}
+            {!matches.length && !providerMatches.length ? (
+              <p role="status">No services match your search.</p>
+            ) : null}
             {matches.length > limit ? (
               <button onClick={() => setLimit((value) => value + 12)}>Show more services</button>
             ) : null}
@@ -146,46 +230,5 @@ function ScopedDiscovery({
         />
       ) : null}
     </section>
-  );
-}
-
-function ServiceLogo({ client, item }: { client: OpenGeniClient; item: CapabilityCatalogItem }) {
-  const [src, setSrc] = useState<string | null>(null);
-  const [settled, setSettled] = useState(false);
-  useEffect(() => {
-    setSrc(null);
-    setSettled(false);
-    const path = item.logoAssetPath;
-    if (!path?.startsWith("catalog-assets/")) return;
-    const abort = new AbortController();
-    let url: string | null = null;
-    void client
-      .downloadCatalogAsset(path, { signal: abort.signal })
-      .then((blob) => {
-        if (abort.signal.aborted || !blob.type.startsWith("image/") || blob.size > 2_000_000)
-          return;
-        url = URL.createObjectURL(blob);
-        setSrc(url);
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (!abort.signal.aborted) setSettled(true);
-      });
-    return () => {
-      abort.abort();
-      if (url) URL.revokeObjectURL(url);
-    };
-  }, [client, item.logoAssetPath]);
-  return (
-    <ConnectionLogo
-      name={item.name}
-      src={
-        src ??
-        (item.logoAssetPath?.startsWith("catalog-assets/") && !settled
-          ? null
-          : capabilityLogoFallback(item))
-      }
-      loading={Boolean(item.logoAssetPath?.startsWith("catalog-assets/")) && !settled}
-    />
   );
 }

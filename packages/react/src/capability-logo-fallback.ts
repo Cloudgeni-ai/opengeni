@@ -1,5 +1,8 @@
 import type { CapabilityCatalogItem } from "@opengeni/sdk";
-import gmailLogo from "./assets/gmail.ico";
+import {
+  capabilityConnectProviderId,
+  connectionServicePresentation,
+} from "./connection-service-presentation";
 
 /** Passive catalogue identity, shared by embedded and console surfaces. */
 export function capabilityLogoFallback(
@@ -10,7 +13,10 @@ export function capabilityLogoFallback(
     item.id.startsWith("mcp:integrations-sh:gmailmcp-googleapis-com-") ||
     item.mcpUrl === "https://gmailmcp.googleapis.com/mcp/v1"
   )
-    return gmailLogo;
+    return connectionServicePresentation({
+      id: capabilityConnectProviderId(item) ?? "gmail",
+      label: "Gmail",
+    }).logo;
   const original = item.metadata?.originalLogoUrl;
   if (typeof original !== "string") return null;
   try {
