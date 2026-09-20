@@ -1402,6 +1402,41 @@ per-file-size ceilings before readiness. Helm projects only the selected
 `artifactMaterializer` database/object-storage credential keys; it never imports
 the shared runtime Secret wholesale.
 
+For Kubernetes nodes that restrict nested user namespaces or mask `/proc`, the
+materializer may require a pod user namespace in addition to its child sandbox:
+
+```yaml
+artifactMaterializer:
+  hostUsers: false
+  securityContext:
+    procMount: Unmasked
+    appArmorProfile:
+      type: Localhost
+      localhostProfile: artifact-materializer
+```
+
+This is an explicit deployment selection, not a portable default. Verify that
+the Kubernetes version, container runtime, node kernel and filesystem support
+pod user namespaces. Provision the named enforcing AppArmor profile on every
+eligible node before scheduling; it must permit the child sandbox's user,
+mount, PID and network namespace setup while preserving sensitive `/proc` and
+`/sys` denials. Do not disable AppArmor globally or grant the container host
+capabilities. The chart preserves non-root execution, dropped capabilities,
+read-only root and `allowPrivilegeEscalation: false`; the overlay above changes
+only the listed fields. An unmasked proc mount is rejected unless `hostUsers`
+is explicitly `false`. Leaving `hostUsers` null omits the field and retains the
+existing cluster default.
+
+User namespaces also separate the pod's host user-ID accounting: the child's
+native process limit must not compete with unrelated containers sharing the
+same numeric user ID. Treat a successful chart render as configuration proof
+only. Before admitting the deployment, run the production launcher probe on
+each selected node/runtime combination and prove `sandboxEnforced: true`,
+private child networking, read-only child root, writable scratch, unchanged
+native limits, and no parent mount authority. Exercise restart and replacement
+node scheduling; a missing profile or unsupported user namespace must remain
+a startup failure, not trigger an unsandboxed fallback.
+
 When a common host port is already occupied, `bun run dev` auto-selects a nearby
 free port and rewrites the in-memory runtime URLs for that run. Set
 `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`,
