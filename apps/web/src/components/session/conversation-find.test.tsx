@@ -85,6 +85,27 @@ test("deep-link occurrence stays selected, Enter moves matches, Escape clears wi
     });
     expect(targets.at(-1)?.offset).toBe(12);
     expect(host.textContent).toContain("2 / 3");
+    const beforeDraft = jumps.length;
+    const beforeTargets = targets.length;
+    const typeDraft = async (value: string) =>
+      act(async () => {
+        const input = host.querySelector("input")!;
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+          input,
+          value,
+        );
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent("keyup", { key: "e", bubbles: true }));
+      });
+    await typeDraft("testx");
+    expect(host.textContent).toContain("Showing matches for “test”");
+    await typeDraft("test");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 280));
+    });
+    expect(jumps.length).toBe(beforeDraft);
+    expect(targets.length).toBe(beforeTargets);
+    expect(host.textContent).toContain("2 / 3");
     await act(async () =>
       host
         .querySelector("input")!

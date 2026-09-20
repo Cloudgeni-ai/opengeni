@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { act } from "react";
-import { SearchResultsView } from "./search-results-view";
+import { SearchResultsView, SearchPreviewView } from "./search-results-view";
 import {
   registerDom,
   renderComponent,
@@ -8,6 +8,71 @@ import {
 } from "../../../../../packages/react/test/render-hook";
 
 registerDom();
+
+test("transient result and preview warnings preserve content and retry independently", async () => {
+  let resultRetries = 0;
+  let previewRetries = 0;
+  let opened = 0;
+  const view = await renderComponent(
+    <>
+      <SearchResultsView
+        query="needle"
+        results={[
+          {
+            sessionId: "s",
+            title: "needle title",
+            subtitle: "",
+            snippet: "",
+            matchingMessages: 0,
+            titleMatch: true,
+          },
+        ]}
+        selectedId="s"
+        onSelect={() => {}}
+        loading={false}
+        error="Message search unavailable"
+        onRetry={() => resultRetries++}
+        hasMore={false}
+        onMore={() => {}}
+      />
+      <SearchPreviewView
+        title="needle title"
+        query="needle"
+        messages={[{ key: "e", role: "user", text: "saved needle passage", selected: true }]}
+        loading
+        error="Context unavailable"
+        onRetry={() => previewRetries++}
+        onOpen={() => opened++}
+        onBack={() => {}}
+        onPrevious={() => {}}
+        onNext={() => {}}
+        previousDisabled
+        nextDisabled
+        counter="1 of 1"
+        titleOnly={false}
+      />
+    </>,
+  );
+  expect(view.container.querySelectorAll("[data-search-result]").length).toBe(1);
+  expect(view.container.textContent).toContain("saved needle passage");
+  expect(view.container.textContent).not.toContain("No matching sessions");
+  expect(view.container.querySelectorAll('[role="alert"]').length).toBe(2);
+  const click = async (text: string) =>
+    act(async () =>
+      [...view.container.querySelectorAll("button")]
+        .find((button) => button.textContent?.includes(text))!
+        .click(),
+    );
+  await click("Retry search");
+  expect(resultRetries).toBe(1);
+  expect(previewRetries).toBe(0);
+  await click("Retry preview");
+  expect(resultRetries).toBe(1);
+  expect(previewRetries).toBe(1);
+  await click("Open here");
+  expect(opened).toBe(1);
+  await view.unmount();
+});
 
 test("live result revisions cannot undo a DOM scroll before its event; query resets still restore", async () => {
   const position = { current: 0 };
