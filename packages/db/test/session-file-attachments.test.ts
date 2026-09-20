@@ -632,6 +632,29 @@ for (const running of [false, true])
     expect(claim.turn.initiatingHumanSubjectId).toBe(f.grant.subjectId);
     expect(await f.read("user:viewer", f.session.id, 3)).toHaveLength(1);
     await expect(f.read("user:viewer", f.session.id, 2)).rejects.toThrow();
+    // The running worker captured epoch 2 before sharing. Its exact live
+    // attempt can still read its own attachments; browser claims cannot.
+    const files = await withSessionRlsActorContext({ subjectId: "service:agent-turn" }, () =>
+      withWorkspaceRls(client.db, f.scope.workspaceId, (tx) =>
+        readSessionFileAttachments(tx, {
+          ...f.scope,
+          fileIds: [f.file.id],
+          access: {
+            sessionId: f.session.id,
+            authorityEpoch: running ? 2 : 3,
+            actor: {
+              kind: "agent_attempt",
+              subjectId: "service:agent-turn",
+              callerSessionId: f.session.id,
+              turnId: claim.turn.id,
+              attemptId,
+              executionGeneration: claim.turn.executionGeneration,
+            },
+          },
+        }),
+      ),
+    );
+    expect(files.map((file) => file.id)).toEqual([f.file.id]);
     await applySessionTurnSettlement(client.db, f.scope.workspaceId, {
       sessionId: f.session.id,
       turnId: claim.turn.id,

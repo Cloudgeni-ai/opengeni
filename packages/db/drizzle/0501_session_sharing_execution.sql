@@ -186,6 +186,11 @@ BEGIN
     "signature": "derive_session_execution_authority_epoch()",
     "before": "      IF TG_OP = 'INSERT' THEN\n        NEW.execution_authority_epoch := NEW.authority_epoch;\n      ELSIF NEW.execution_authority_epoch IS DISTINCT FROM OLD.execution_authority_epoch THEN\n        RAISE EXCEPTION 'execution authority floor is lifecycle-owned' USING ERRCODE='42501';\n      ELSIF NEW.authority_epoch IS DISTINCT FROM OLD.authority_epoch THEN\n        NEW.execution_authority_epoch := NEW.authority_epoch;\n      END IF;\n      RETURN NEW;",
     "after": "      IF TG_OP = 'INSERT' THEN\n        NEW.execution_authority_epoch := NEW.authority_epoch;\n      ELSIF NEW.execution_authority_epoch IS DISTINCT FROM OLD.execution_authority_epoch THEN\n        RAISE EXCEPTION 'execution authority floor is lifecycle-owned' USING ERRCODE='42501';\n      ELSIF NEW.authority_epoch IS DISTINCT FROM OLD.authority_epoch THEN\n        IF NOT (OLD.visibility = 'user_private' AND NEW.visibility = 'workspace_shared'\n          AND NEW.authority_epoch = OLD.authority_epoch + 1\n          AND NEW.owner_subject_id IS NOT DISTINCT FROM OLD.owner_subject_id\n          AND NEW.owner_organization_membership_id IS NOT DISTINCT FROM OLD.owner_organization_membership_id) THEN\n          NEW.execution_authority_epoch := NEW.authority_epoch;\n        END IF;\n      END IF;\n      RETURN NEW;"
+  },
+  {
+    "signature": "opengeni_private.read_session_file_attachments(uuid,uuid,uuid,integer,uuid[],jsonb)",
+    "before": "session_row.authority_epoch IS DISTINCT FROM p_epoch",
+    "after": "NOT COALESCE((session_row.authority_epoch = p_epoch OR (\n      p_actor->>'kind'='agent_attempt' AND (p_actor->>'callerSessionId')::uuid=p_session\n      AND p_epoch BETWEEN session_row.execution_authority_epoch AND session_row.authority_epoch)), false)"
   }
 ]$patches$::jsonb) WITH ORDINALITY AS ordered(value,ordinal) GROUP BY value->>'signature' LOOP
   target := to_regprocedure(patch->>'signature');

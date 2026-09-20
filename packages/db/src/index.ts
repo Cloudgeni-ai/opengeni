@@ -68257,8 +68257,13 @@ export async function claimSessionWorkForAttempt(
               );
               if (
                 targetPolicy.sessionId !== sessionId ||
-                targetPolicy.visibility !== session.visibility ||
-                targetPolicy.authorityEpoch !== session.authorityEpoch ||
+                (targetPolicy.visibility !== session.visibility &&
+                  !(
+                    targetPolicy.visibility === "user_private" &&
+                    session.visibility === "workspace_shared"
+                  )) ||
+                targetPolicy.authorityEpoch < session.executionAuthorityEpoch ||
+                targetPolicy.authorityEpoch > session.authorityEpoch ||
                 stableJson(targetPolicy.firstPartyMcpTools) !==
                   stableJson(session.firstPartyMcpTools) ||
                 stableJson(targetPolicy.firstPartyMcpPermissions) !==
