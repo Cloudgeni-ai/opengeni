@@ -51,6 +51,39 @@ describe("composer connector account controls (local fixture)", () => {
     { width: 1280, height: 900 },
     { width: 390, height: 844 },
   ]) {
+    test(`Customize removes a disconnected connector without reconnecting at ${viewport.width}px`, async () => {
+      const page = await browser.newPage({ viewport });
+      page.setDefaultTimeout(10_000);
+      page.setDefaultNavigationTimeout(15_000);
+      try {
+        await page.goto(`${baseUrl}/test/connector-menu.html`);
+        await page.getByRole("button", { name: "More composer actions" }).click();
+        await page.getByRole("menuitem", { name: /Connectors/ }).click();
+        await page.getByRole("switch", { name: "Customize connectors" }).click();
+        const connector = page.getByRole("menuitemcheckbox", { name: "Linear", exact: true });
+        expect(await connector.getAttribute("aria-checked")).toBe("true");
+        if (process.env.CONNECTOR_SCREENSHOT_DIR) {
+          await page.screenshot({
+            path: `${process.env.CONNECTOR_SCREENSHOT_DIR}/connector-unavailable-${viewport.width}.png`,
+            animations: "disabled",
+          });
+        }
+        await connector.focus();
+        await page.keyboard.press("Space");
+        await page.getByRole("menuitem", { name: "Reconnect Linear" }).waitFor();
+        expect(await connector.count()).toBe(0);
+        expect(await page.getByRole("status", { includeHidden: true }).textContent()).toBe(
+          "Preview connections use sample data.",
+        );
+        expect(
+          await page
+            .getByRole("menuitemcheckbox", { name: "Slack", exact: true })
+            .getAttribute("aria-checked"),
+        ).toBe("true");
+      } finally {
+        await page.close();
+      }
+    }, 45_000);
     test(`multiple accounts can be narrowed with keyboard and pointer at ${viewport.width}px`, async () => {
       const page = await browser.newPage({ viewport });
       try {

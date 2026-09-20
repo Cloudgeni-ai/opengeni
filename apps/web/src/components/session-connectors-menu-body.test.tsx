@@ -4,7 +4,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { SessionConnectorsMenuBody } from "./session-connectors-menu-body";
 import { useState } from "react";
-import type { ConnectionMetadata } from "@opengeni/sdk";
+import type { CapabilityCatalogItem, ConnectionMetadata } from "@opengeni/sdk";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { SessionToolSelection } from "./pickers";
+import { useConnectionAccounts } from "./capabilities/use-connection-accounts";
+import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { connectionAccountLabel } from "./capabilities/connection-account-picker";
 import type { ConnectionAccountChoices } from "./capabilities/session-connection-accounts";
 
@@ -26,6 +30,103 @@ afterEach(async () => {
   container.remove();
 });
 afterAll(() => GlobalRegistrator.unregister());
+
+for (const status of ["connect", "reconnect", "unavailable"] as const) {
+  test(`Customize can deselect a ${status} connector with no accounts and unblock send without reconnecting`, async () => {
+    const recover = mock();
+    const client = {
+      listOwnConnectionAccounts: async () => [],
+    } as unknown as OpenGeniBrowserClient;
+    const catalog = [
+      {
+        enabled: true,
+        name: "Mail",
+        runtime: { mcpServerId: "mail" },
+        connectionRef: { providerDomain: "example.com", kind: "oauth2", subjectScope: "subject" },
+      },
+    ] as CapabilityCatalogItem[];
+    let current: SessionToolSelection;
+    let blocked: ReturnType<typeof getComposerSendBlocker>;
+    function Preview() {
+      const [selection, setSelection] = useState<SessionToolSelection>({
+        mcpServerIds: new Set(["mail", "files", "hidden"]),
+        firstPartyToolIds: new Set(["session_get"]),
+      });
+      const [customizing, setCustomizing] = useState(false);
+      const accountState = useConnectionAccounts(
+        client,
+        {
+          id: "session",
+          workspaceId: "workspace",
+          selectedIds: [...selection.mcpServerIds],
+        },
+        catalog,
+      );
+      current = selection;
+      blocked = getComposerSendBlocker({
+        uploadPending: false,
+        repositoryError: null,
+        policyValid: true,
+        variableSetBlocked: false,
+        personalDecision: accountState.requiresAccountChoice,
+        personalLoading: accountState.loading || accountState.error !== null,
+      });
+      return (
+        <>
+          <SessionConnectorsMenuBody
+            presentation="dialog"
+            servers={[{ id: "mail", name: "Mail", connectionStatus: status }]}
+            firstPartyTools={[]}
+            selection={selection}
+            onChange={setSelection}
+            customizing={customizing}
+            onCustomizingChange={setCustomizing}
+            onReconnect={recover}
+            accountControls={{
+              groups: accountState.accountGroups,
+              choices: accountState.accountChoices,
+              onChoose: accountState.selectAccount,
+            }}
+          />
+          <button type="button" disabled={blocked !== null}>
+            Send
+          </button>
+        </>
+      );
+    }
+    await act(async () => root.render(<Preview />));
+    expect(blocked!).toBe("personal_decision");
+    const send = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "Send",
+    )!;
+    expect(send.disabled).toBe(true);
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="Customize connectors"]')!.click(),
+    );
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[role="switch"][aria-label="Mail"]',
+    )!;
+    expect(toggle?.getAttribute("aria-checked")).toBe("true");
+    await act(async () => toggle.click());
+    expect(current!.mcpServerIds).toEqual(new Set(["files", "hidden"]));
+    expect(current!.firstPartyToolIds).toEqual(new Set(["session_get"]));
+    expect(recover).not.toHaveBeenCalled();
+    expect(blocked!).toBeNull();
+    expect(send.disabled).toBe(false);
+    const repairLabel =
+      status === "connect"
+        ? "Connect your Mail account"
+        : status === "reconnect"
+          ? "Reconnect Mail"
+          : "Mail unavailable";
+    const repair = container.querySelector<HTMLButtonElement>(`[aria-label="${repairLabel}"]`)!;
+    expect(repair.hasAttribute("aria-checked")).toBe(false);
+    await act(async () => repair.click());
+    expect(recover).toHaveBeenCalledWith("mail");
+    expect(current!.mcpServerIds.has("mail")).toBe(false);
+    expect(send.disabled).toBe(false);
+  });
+}
 
 test("missing personal accounts offer setup without toggling the session selection", async () => {
   const recover = mock();
