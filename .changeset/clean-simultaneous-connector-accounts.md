@@ -5,6 +5,7 @@
 "@opengeni/runtime": minor
 "@opengeni/worker-bundle": minor
 "@opengeni/sdk": patch
+"@opengeni/react": patch
 "@opengeni/api-router": patch
 ---
 
