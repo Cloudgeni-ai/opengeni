@@ -1,6 +1,44 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { coreInstructions } from "../src";
+import { testSettings } from "@opengeni/testing";
+import { buildOpenGeniAgent, coreInstructions } from "../src";
+
+test.each([undefined, "CUSTOM PERSONA", "CUSTOM {{core}} PERSONA"])(
+  "behavior storage routing is present without existing governance (template=%s)",
+  (instructionsTemplate) => {
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      instructionsTemplate,
+    });
+    const prompt = agent.instructions;
+    expect(typeof prompt).toBe("string");
+    for (const guidance of [
+      "for future sessions",
+      "instruction_policy_get",
+      "instruction_policy_save",
+      "Keep replies concise",
+      "Do not save behavioral preferences as Knowledge",
+      "Skill description",
+      "personal Skill",
+      "pending review",
+      "Do not bypass",
+    ]) {
+      expect(prompt).toContain(guidance);
+    }
+    expect((prompt as string).split("Choose durable storage by purpose")).toHaveLength(2);
+  },
+);
+
+test("behavior routing precedes Knowledge retention and preserves instruction edit safety", () => {
+  const core = coreInstructions().join(" ");
+  expect(core.indexOf("Choose durable storage by purpose")).toBeGreaterThan(-1);
+  expect(core.indexOf("Choose durable storage by purpose")).toBeLessThan(
+    core.indexOf("Use knowledge_search"),
+  );
+  expect(core).toContain("preserve unrelated rules");
+  expect(core).toContain("localized exact anchored edit");
+  expect(core).toContain("Agents cannot replace the complete instruction");
+  expect(core).toContain("Do not promise future behavior from a Knowledge save");
+});
 
 test("agent guidance teaches canonical authoring, proposal reuse, and publication boundaries", async () => {
   const core = coreInstructions().join(" ");
@@ -22,6 +60,9 @@ test("agent guidance teaches canonical authoring, proposal reuse, and publicatio
   );
   expect(skill).toContain("knowledge_save");
   expect(skill).toContain("pending");
+  expect(skill.replace(/\s+/g, " ")).toContain("behavioral preferences");
+  expect(skill).toContain("Skill description");
+  expect(skill).toContain("not Knowledge");
   expect(skill).not.toMatch(/memory_(save|correct|search|propose)/);
 });
 

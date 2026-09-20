@@ -34,9 +34,9 @@ user; task notes cover temporary tree coordination. Linking never merges users.
 See [product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), and [run lifecycle](run-lifecycle.md).
-Skill removal physically deletes the scoped registry head and all revisions,
-requiring exact removal approval and Learning enforcement through the Skill
-lifecycle. Accepted conversation context remains unchanged.
+Skill removal physically deletes the scoped registry head and revisions,
+requiring exact approval and Learning enforcement through the Skill lifecycle.
+Accepted conversation context remains unchanged.
 
 Session `mcpApprovalPolicies` requires session-control authority. Claims freeze
 inherited approvals with catalog floors; policies grant neither capabilities nor credentials.
@@ -53,16 +53,16 @@ Account isolation: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-a
 Postgres commits precede notifications. NATS transports fanout, invalidations,
 request/reply and machine streams—not durable commit evidence.
 
-`session_event_cursors` transactionally verifies every append and owns monotonic
-per-session sequencing. Semantic writers retain the session row to commit state
-and events together. Accepted raw exact-attempt batches hold session identity
+`session_event_cursors` verifies every append transactionally and owns monotonic
+per-session sequencing. Semantic writers lock the session row for atomic state/event
+commits. Accepted raw exact-attempt batches hold session identity
 with `FOR KEY SHARE`, serialize on the cursor, retain exact turn/attempt fences,
 and never update the wide session row. Public
 `lastSequence`, unread, child acknowledgment, and viewer-specific tree
 attention projections (including unacknowledged failed descendants) read the
 cursor; `sessions.last_sequence` remains only a semantic/legacy compatibility
-projection. Legacy SQL writers are rebased at the database boundary, and late
-raw events roll back and retry through the semantic gate before becoming
+projection. Legacy SQL writers are rebased at the database boundary; late
+raw events roll back, then retry the semantic gate before becoming
 rejected audit evidence. SSE clients replay durable events, subscribe to live
 fanout, and backfill sequence gaps from Postgres. NATS restarts may interrupt
 delivery or machine reachability, never session history or queued obligations.
@@ -86,10 +86,10 @@ workflow history; streams use ordinary events.
 Canonical: `apps/worker/src/workflows/session.ts` and
 [`run-lifecycle.md`](run-lifecycle.md).
 
-Control observation is not settlement: unavailable scoped reads and exact
-still-owned attempts retain bounded signal-interruptible waits without marking
-work idle, revoking writers, or dispatching successors. Temporal inspection is
-metadata evidence, not a replacement for physical-writer quiescence proof.
+Control observation is not settlement: unavailable scoped reads and owned
+attempts retain bounded, signal-interruptible waits without marking work idle,
+revoking writers, or dispatching successors. Temporal metadata cannot prove
+physical-writer quiescence.
 
 ### 3.3 Logical turns and physical attempts are different
 
@@ -141,10 +141,9 @@ never history; running reads do not. Failed/cancelled sessions retain audit only
 Fanout is replaceable and post-commit. Conversation history remains separate:
 sequence cursors bound traversal, and `packages/db/src/session-event-slices.ts`
 transfers large message scalars in bounded slices, not whole histories.
-Literal full-history Find is separately authorized and resumable:
-`packages/db/src/session-message-search.ts` batches ordinary scalars, reusing
-slices for large completed messages. Browsers receive occurrence snippets and
-cursors, never complete payload-history scans. See
+Full-history Find (`packages/db/src/session-message-search.ts`) coalesces bounded
+scalar windows in the authorized transaction. Browsers receive snippets and
+cursors, not complete histories. See
 [`session-message-search.md`](session-message-search.md).
 
 Docker/local SDK processes expose turn-scoped handles after a bounded wait.
@@ -202,6 +201,10 @@ originals stay in object storage. Scoped access precedes ranking. Chat attachmen
 remain conversation resources; agents select lasting findings/reference sources.
 Default discovery excludes supporting evidence. Read-only save preparation fetches
 collections and published/pending matches on demand. See [`knowledge.md`](knowledge.md).
+
+Unconditional CORE routes persistent behavior to instructions or Skills, not
+Knowledge, preserving destination scope and review; see
+[`company-brain-write-routing.md`](company-brain-write-routing.md).
 
 Agent learning centralizes Knowledge, instructions and Skills in Automatic,
 Review first and Off settings, with sparse chat/task overrides and immutable

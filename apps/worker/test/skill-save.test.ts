@@ -73,6 +73,23 @@ function fixture(options: { deny?: boolean; outcome?: "applied" | "pending" } = 
 }
 
 describe("skill_save gateway", () => {
+  test("describes scoped behavior and discoverable triggers without bypassing learning", () => {
+    const definition = createSkillSaveAttemptToolDefinition({
+      authorize: async () => {},
+      load: async () => {
+        throw new Error("Discovery must not load content");
+      },
+      save: async () => {
+        throw new Error("Discovery must not save content");
+      },
+    });
+    expect(definition.description).toContain("behavioral preferences");
+    expect(definition.description).toContain("description");
+    expect(definition.description).toContain("instruction_policy_save");
+    expect(definition.description).toContain("Off prevents agent authoring");
+    expect(definition.description).toContain("Private chats save personal Skills");
+  });
+
   test("preserves omitted files and returns actual pending outcome", async () => {
     const f = fixture({ outcome: "pending" });
     const result = await f.call();
