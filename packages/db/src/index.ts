@@ -1,5 +1,6 @@
 import {
   SKILL_CATALOG_CONTEXT_PREFIX,
+  ModalRouterProviderCommand,
   readSkillCatalogContext,
   skillCatalogContextItem,
 } from "@opengeni/contracts";
@@ -47602,6 +47603,7 @@ async function lockExactLostProviderWorkspaceBlockersTx(
     leaseId: string;
     sandboxGroupId: string;
     lostEpoch: number;
+    lostBackend: string;
     lostInstanceId: string;
   },
 ): Promise<void> {
@@ -47612,6 +47614,7 @@ async function lockExactLostProviderWorkspaceBlockersTx(
       and lease_id = ${input.leaseId}
       and sandbox_group_id = ${input.sandboxGroupId}
       and lease_epoch = ${input.lostEpoch}
+      and provider_backend = ${input.lostBackend}
       and provider_instance_id = ${input.lostInstanceId}
       and state = 'active'
     order by id
@@ -47624,6 +47627,7 @@ async function lockExactLostProviderWorkspaceBlockersTx(
       and lease_id = ${input.leaseId}
       and sandbox_group_id = ${input.sandboxGroupId}
       and lease_epoch = ${input.lostEpoch}
+      and provider_backend = ${input.lostBackend}
       and provider_instance_id = ${input.lostInstanceId}
       and settled_at is null
     order by id
@@ -47636,6 +47640,7 @@ async function lockExactLostProviderWorkspaceBlockersTx(
       and lease_id = ${input.leaseId}
       and sandbox_group_id = ${input.sandboxGroupId}
       and lease_epoch = ${input.lostEpoch}
+      and provider_backend = ${input.lostBackend}
       and provider_instance_id = ${input.lostInstanceId}
       and status = 'open'
     order by id
@@ -47651,9 +47656,19 @@ async function settleExactLostProviderWorkspaceBlockersTx(
     leaseId: string;
     sandboxGroupId: string;
     lostEpoch: number;
+    lostBackend: string;
     lostInstanceId: string;
   },
 ): Promise<LostProviderWorkspaceSettlement> {
+  // Only callers that locked and revalidated this exact provider tuple reach
+  // here. Migration0493 independently checks the cold missing-provider outcome
+  // at commit. This is loss classification, not a supervision/EOF receipt.
+  const [priorLossBinding] = await tx.execute<{ value: string | null }>(sql`
+    select current_setting('opengeni.supervised_provider_loss_binding', true) as value
+  `);
+  await tx.execute(sql`
+    select set_config('opengeni.supervised_provider_loss_binding', ${JSON.stringify(input)}, true)
+  `);
   const lostProcesses = await tx
     .update(schema.sandboxRetainedProcesses)
     .set({
@@ -47669,6 +47684,7 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         eq(schema.sandboxRetainedProcesses.leaseId, input.leaseId),
         eq(schema.sandboxRetainedProcesses.sandboxGroupId, input.sandboxGroupId),
         eq(schema.sandboxRetainedProcesses.leaseEpoch, input.lostEpoch),
+        eq(schema.sandboxRetainedProcesses.providerBackend, input.lostBackend),
         eq(schema.sandboxRetainedProcesses.providerInstanceId, input.lostInstanceId),
         eq(schema.sandboxRetainedProcesses.state, "active"),
       ),
@@ -47677,6 +47693,9 @@ async function settleExactLostProviderWorkspaceBlockersTx(
       id: schema.sandboxRetainedProcesses.id,
       holderId: schema.sandboxRetainedProcesses.holderId,
     });
+  await tx.execute(sql`
+    select set_config('opengeni.supervised_provider_loss_binding', ${priorLossBinding?.value ?? ""}, true)
+  `);
 
   const rejectedAdmissions = await tx
     .update(schema.sandboxWorkspaceMutationAdmissions)
@@ -47688,6 +47707,7 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         eq(schema.sandboxWorkspaceMutationAdmissions.leaseId, input.leaseId),
         eq(schema.sandboxWorkspaceMutationAdmissions.sandboxGroupId, input.sandboxGroupId),
         eq(schema.sandboxWorkspaceMutationAdmissions.leaseEpoch, input.lostEpoch),
+        eq(schema.sandboxWorkspaceMutationAdmissions.providerBackend, input.lostBackend),
         eq(schema.sandboxWorkspaceMutationAdmissions.providerInstanceId, input.lostInstanceId),
         isNull(schema.sandboxWorkspaceMutationAdmissions.settledAt),
       ),
@@ -47704,6 +47724,7 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         eq(schema.sandboxPtySessions.leaseId, input.leaseId),
         eq(schema.sandboxPtySessions.sandboxGroupId, input.sandboxGroupId),
         eq(schema.sandboxPtySessions.leaseEpoch, input.lostEpoch),
+        eq(schema.sandboxPtySessions.providerBackend, input.lostBackend),
         eq(schema.sandboxPtySessions.providerInstanceId, input.lostInstanceId),
         eq(schema.sandboxPtySessions.status, "open"),
       ),
@@ -47774,6 +47795,8 @@ export async function markWarmLeaseInstanceLost(
     sandboxGroupId: string;
     expectedEpoch: number;
     expectedInstanceId: string;
+    /** Optional for legacy callers; new provider observers should bind backend too. */
+    expectedBackend?: string;
     /** Bounded classifier output only; never raw provider error text. */
     diagnostic?: string;
   },
@@ -47794,7 +47817,8 @@ export async function markWarmLeaseInstanceLost(
           !observed ||
           observed.liveness !== "warm" ||
           Number(observed.lease_epoch) !== input.expectedEpoch ||
-          observed.instance_id !== input.expectedInstanceId
+          observed.instance_id !== input.expectedInstanceId ||
+          (input.expectedBackend !== undefined && observed.backend !== input.expectedBackend)
         ) {
           return {
             status: "stale" as const,
@@ -47808,6 +47832,7 @@ export async function markWarmLeaseInstanceLost(
           leaseId: observed.id,
           sandboxGroupId: input.sandboxGroupId,
           lostEpoch: input.expectedEpoch,
+          lostBackend: observed.backend,
           lostInstanceId: input.expectedInstanceId,
         };
         await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
@@ -47823,7 +47848,8 @@ export async function markWarmLeaseInstanceLost(
           current.id !== observed.id ||
           current.liveness !== "warm" ||
           Number(current.lease_epoch) !== input.expectedEpoch ||
-          current.instance_id !== input.expectedInstanceId
+          current.instance_id !== input.expectedInstanceId ||
+          current.backend !== observed.backend
         ) {
           return {
             status: "stale" as const,
@@ -48071,6 +48097,7 @@ export async function reconcileColdLostLeaseInstanceBlockers(
           leaseId: observed.id,
           sandboxGroupId: input.sandboxGroupId,
           lostEpoch: input.expectedLostEpoch,
+          lostBackend: observed.backend,
           lostInstanceId: input.expectedLostInstanceId,
         };
         await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
@@ -49718,6 +49745,7 @@ export async function confirmDrainCold(
                 leaseId: observed.id,
                 sandboxGroupId: input.sandboxGroupId,
                 lostEpoch: input.expectedEpoch,
+                lostBackend: observed.backend,
                 lostInstanceId: observed.instance_id,
               }
             : null;
@@ -49746,7 +49774,8 @@ export async function confirmDrainCold(
           (row.refcount !== 0 && !row.unobservable_command_drain_ids?.length) ||
           Number(row.lease_epoch) !== input.expectedEpoch ||
           row.archive_capture_id !== (input.expectedCaptureId ?? null) ||
-          (blockerScope && row.instance_id !== blockerScope.lostInstanceId)
+          (blockerScope && row.instance_id !== blockerScope.lostInstanceId) ||
+          (blockerScope && row.backend !== blockerScope.lostBackend)
         ) {
           return { wentCold: false };
         }
@@ -52504,6 +52533,41 @@ export async function settleRetainedProcess(
   process: SandboxRetainedProcess;
   backgroundCommandEvents: SessionEvent[];
 }> {
+  return settleRetainedProcessWithAuthority(db, input);
+}
+
+/** Only call for an authenticated, typed provider response proving this exact
+ * retained launch was never started. Ambiguous dispatch is NOT rejection proof.
+ * The command equality and empty launch checks repeat under the settlement lock. */
+export async function rejectRetainedSupervisedLaunch(
+  db: Database,
+  scope: { accountId: string; workspaceId: string; sessionId: string; processId: string },
+  command: ModalRouterProviderCommand,
+): Promise<void> {
+  const expectedCommand = ModalRouterProviderCommand.parse(command);
+  if (!expectedCommand.supervision) throw new Error("Launch rejection requires supervision");
+  const process = await getRetainedProcess(db, scope);
+  if (!process) throw new Error("Retained supervised launch is unavailable");
+  await settleRetainedProcessWithAuthority(
+    db,
+    {
+      ...scope,
+      expected: process,
+      outcome: "lost",
+      reason: "provider_start_rejected",
+      idleGraceMs: 0,
+    },
+    expectedCommand,
+  );
+}
+
+// Never expose the launch-rejection authority on the public generic settlement
+// input: ordinary lost callbacks must not become never-started evidence.
+async function settleRetainedProcessWithAuthority(
+  db: Database,
+  input: Parameters<typeof settleRetainedProcess>[1],
+  rejectedLaunch?: ModalRouterProviderCommand,
+): ReturnType<typeof settleRetainedProcess> {
   const reason = normalizeRetainedProcessSettlementReason(input.reason);
   const exitCode = input.outcome === "exited" ? (input.exitCode ?? null) : null;
   if (exitCode !== null && !Number.isSafeInteger(exitCode)) {
@@ -52541,6 +52605,41 @@ export async function settleRetainedProcess(
           "process_fenced",
           "Retained process settlement did not match the copied durable identity",
         );
+      }
+      if (rejectedLaunch) {
+        if (
+          input.outcome !== "lost" ||
+          reason !== "provider_start_rejected" ||
+          !isDeepStrictEqual(process.providerCommand, rejectedLaunch) ||
+          process.supervisionReceipt !== null ||
+          process.supervisionOutputCaptured ||
+          process.reconcileProofOutcome !== null ||
+          process.providerCommandInputIndex !== 0 ||
+          !Object.values(rejectedLaunch.streams).every(
+            (stream) =>
+              stream.byteOffset === 0 &&
+              stream.utf8Remainder === "" &&
+              !stream.eof &&
+              stream.exitCode === null,
+          ) ||
+          (process.state !== "active" &&
+            (process.state !== "lost" || process.settlementReason !== reason))
+        ) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Launch rejection requires the exact pristine retained invocation",
+          );
+        }
+        const [children] = await tx.execute<{ present: boolean }>(sql`
+          select exists(select 1 from sandbox_workspace_mutation_admissions
+            where account_id=${input.accountId} and workspace_id=${input.workspaceId}
+              and actor_kind='process' and actor_id=${input.processId}) as present
+        `);
+        if (children?.present)
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Launch rejection cannot retire admitted process input",
+          );
       }
       if (process.state !== "active") {
         if (process.state !== input.outcome || process.exitCode !== exitCode) {
@@ -52593,6 +52692,7 @@ export async function settleRetainedProcess(
       if (
         process.providerCommand?.kind === "modal-router-v1" &&
         process.providerCommand.supervision &&
+        !rejectedLaunch &&
         (input.outcome !== "exited" ||
           !process.supervisionReceipt ||
           !process.supervisionOutputCaptured ||
@@ -52685,6 +52785,16 @@ export async function settleRetainedProcess(
             eq(schema.sandboxPtySessions.status, "open"),
           ),
         );
+      const [priorRejectionBinding] = rejectedLaunch
+        ? await tx.execute<{ value: string | null }>(sql`
+        select current_setting('opengeni.supervised_launch_rejection_binding', true) as value
+      `)
+        : [];
+      if (rejectedLaunch)
+        await tx.execute(sql`
+        select set_config('opengeni.supervised_launch_rejection_binding',
+          ${JSON.stringify({ processId: process.id, command: rejectedLaunch })}, true)
+      `);
       const [updated] = await tx
         .update(schema.sandboxRetainedProcesses)
         .set({
@@ -52710,6 +52820,10 @@ export async function settleRetainedProcess(
           ),
         )
         .returning();
+      if (rejectedLaunch)
+        await tx.execute(sql`
+        select set_config('opengeni.supervised_launch_rejection_binding', ${priorRejectionBinding?.value ?? ""}, true)
+      `);
       if (!updated) {
         throw new SandboxWorkspaceMutationFencedError(
           "process_fenced",
