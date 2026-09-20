@@ -18,6 +18,33 @@ generation, interruption state, and current machine selection immediately before
 the machine transport is used. Revocation advances the machine and common authority
 generation and invalidates existing grants.
 
+### Enrollment maintenance boundary
+
+Migration `0498_enrollment_membership_fence.sql` repairs user-owned device approval
+under a non-superuser, non-bypass migration owner. Stop every old API/control/turn
+worker and supply the exact application-role list before applying it; the migration
+refuses live listed connections. Start only the matching binaries afterward—do not
+restart pre-0498 approval writers. This is not a rolling or application-rollback-safe
+cutover, and preparing the migration does not authorize deployment.
+
+User approval takes the organization membership fence before RLS workspace-tenancy
+entry, pending-request locks, and enrollment writes. Both the public wrapper and
+SQL finalizer fail closed with `55P03` on fence contention rather than waiting while
+an unknown caller may hold a reverse-order lock. Retry the complete transaction
+after the membership change settles; no failed approval is automatically replayed.
+The finalizer rereads exact active organization membership under that fence and
+retains workspace membership `FOR KEY SHARE` to exclude direct runtime DELETEs.
+Direct workspace-removal preparation takes the same early nonblocking fence before
+downstream rows; its command keeps the existing organization/tenancy prefix.
+Legacy token enrollment retains its existing workspace-owned authority contract.
+
+Known separate boundary: `scoped_compute_actor_membership` still uses an
+organization-membership `FOR SHARE` that can be blinded by FORCE-RLS under this
+owner posture. Its list/rig/attach consumers—including `list_scoped_enrollments`,
+`get_scoped_sandbox`, and `authorize_scoped_sandbox_attach`—are not repaired here.
+Successful enrollment does not establish a complete Connected Machine availability
+fix or prove that those downstream paths work.
+
 This guide is embedder-facing: it shows how to create a session on a machine,
 discover the enrolled machines and their metrics, swap a session's active
 sandbox, connect a machine (zero-click token or the interactive device flow), and

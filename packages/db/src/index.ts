@@ -59564,109 +59564,133 @@ export async function approveDeviceEnrollmentRequest(
   sandbox: SandboxRecord | null;
 }> {
   const now = input.now ?? new Date();
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      await setSubjectRlsContext(scopedDb, input.approvedBySubjectId);
-      // Re-read FOR UPDATE under the txn so a concurrent approve / expiry can't race.
-      const [pending] = await scopedDb
-        .select()
-        .from(schema.deviceEnrollmentRequests)
-        .where(
-          and(
-            eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
-            eq(schema.deviceEnrollmentRequests.id, input.requestId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!pending) {
-        return { approved: false, enrollment: null, sandbox: null };
-      }
-      // Already approved → idempotent return of the exact existing rows. Do not run
-      // the finalize upsert again: that operation is the credential-generation
-      // rotation boundary for a genuinely new enrollment request.
-      if (pending.status === "approved") {
-        if (!pending.enrollmentId || !pending.sandboxId) {
-          throw new Error("Approved enrollment request is missing its finalized row ids");
-        }
-        const [existingEnrollment] = await scopedDb
+  const approveInScope = (database: Database) =>
+    withRlsContext(
+      database,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) => {
+        await setSubjectRlsContext(scopedDb, input.approvedBySubjectId);
+        // Re-read FOR UPDATE under the txn so a concurrent approve / expiry can't race.
+        const [pending] = await scopedDb
           .select()
-          .from(schema.enrollments)
+          .from(schema.deviceEnrollmentRequests)
           .where(
             and(
-              eq(schema.enrollments.workspaceId, input.workspaceId),
-              eq(schema.enrollments.id, pending.enrollmentId),
+              eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+              eq(schema.deviceEnrollmentRequests.id, input.requestId),
             ),
           )
+          .for("update")
           .limit(1);
-        const [existingSandbox] = await scopedDb
-          .select()
-          .from(schema.sandboxes)
-          .where(
-            and(
-              eq(schema.sandboxes.workspaceId, input.workspaceId),
-              eq(schema.sandboxes.id, pending.sandboxId),
-              eq(schema.sandboxes.enrollmentId, pending.enrollmentId),
-            ),
-          )
-          .limit(1);
-        if (!existingEnrollment || !existingSandbox) {
-          throw new Error("Approved enrollment request references missing finalized rows");
+        if (!pending) {
+          return { approved: false, enrollment: null, sandbox: null };
         }
-        return {
-          approved: true,
-          enrollment: mapEnrollment(existingEnrollment),
-          sandbox: mapSandbox(existingSandbox),
-        };
-      }
-      const expired = pending.expiresAt.getTime() <= now.getTime();
-      if (pending.status === "denied" || pending.status === "consumed") {
-        return { approved: false, enrollment: null, sandbox: null };
-      }
-      if (pending.status === "pending" && expired) {
-        return { approved: false, enrollment: null, sandbox: null };
-      }
+        // Already approved → idempotent return of the exact existing rows. Do not run
+        // the finalize upsert again: that operation is the credential-generation
+        // rotation boundary for a genuinely new enrollment request.
+        if (pending.status === "approved") {
+          if (!pending.enrollmentId || !pending.sandboxId) {
+            throw new Error("Approved enrollment request is missing its finalized row ids");
+          }
+          const [existingEnrollment] = await scopedDb
+            .select()
+            .from(schema.enrollments)
+            .where(
+              and(
+                eq(schema.enrollments.workspaceId, input.workspaceId),
+                eq(schema.enrollments.id, pending.enrollmentId),
+              ),
+            )
+            .limit(1);
+          const [existingSandbox] = await scopedDb
+            .select()
+            .from(schema.sandboxes)
+            .where(
+              and(
+                eq(schema.sandboxes.workspaceId, input.workspaceId),
+                eq(schema.sandboxes.id, pending.sandboxId),
+                eq(schema.sandboxes.enrollmentId, pending.enrollmentId),
+              ),
+            )
+            .limit(1);
+          if (!existingEnrollment || !existingSandbox) {
+            throw new Error("Approved enrollment request references missing finalized rows");
+          }
+          return {
+            approved: true,
+            enrollment: mapEnrollment(existingEnrollment),
+            sandbox: mapSandbox(existingSandbox),
+          };
+        }
+        const expired = pending.expiresAt.getTime() <= now.getTime();
+        if (pending.status === "denied" || pending.status === "consumed") {
+          return { approved: false, enrollment: null, sandbox: null };
+        }
+        if (pending.status === "pending" && expired) {
+          return { approved: false, enrollment: null, sandbox: null };
+        }
 
-      // The SHARED finalize core: upsert the enrollment (idempotent) + ensure a
-      // selfhosted sandbox. RLS is already set on scopedDb's session and this call
-      // runs INSIDE this FOR-UPDATE txn, so the re-read fence + the stamp below + the
-      // enrollment/sandbox writes all commit atomically (semantics unchanged from the
-      // pre-refactor inline block — acceptance #2 stays one machine). The headless
-      // token exchange (finalizeEnrollmentByToken) calls the SAME core.
-      const { enrollment, sandbox } = await finalizeEnrollmentInScope(scopedDb, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        ...(input.scope ? { scope: input.scope } : {}),
-        allowOrganization: input.allowOrganization === true,
-        pubkey: pending.pubkey,
-        hasDisplay: pending.canOfferDisplay,
-        allowScreenControl: input.allowScreenControl,
-        os: pending.os as EnrollmentOs,
-        arch: pending.arch,
-        sandboxName: input.sandboxName,
-        now,
-      });
-
-      // Stamp the request approved + the LOUD CONSENT record (who/when/what).
-      await scopedDb
-        .update(schema.deviceEnrollmentRequests)
-        .set({
-          status: "approved",
+        // The SHARED finalize core: upsert the enrollment (idempotent) + ensure a
+        // selfhosted sandbox. RLS is already set on scopedDb's session and this call
+        // runs INSIDE this FOR-UPDATE txn, so the re-read fence + the stamp below + the
+        // enrollment/sandbox writes all commit atomically (semantics unchanged from the
+        // pre-refactor inline block — acceptance #2 stays one machine). The headless
+        // token exchange (finalizeEnrollmentByToken) calls the SAME core.
+        const { enrollment, sandbox } = await finalizeEnrollmentInScope(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          ...(input.scope ? { scope: input.scope } : {}),
+          allowOrganization: input.allowOrganization === true,
+          pubkey: pending.pubkey,
+          hasDisplay: pending.canOfferDisplay,
           allowScreenControl: input.allowScreenControl,
-          approvedBySubjectId: input.approvedBySubjectId,
-          approvedBySubjectLabel: input.approvedBySubjectLabel ?? null,
-          approvedAt: now,
-          enrollmentId: enrollment.id,
-          sandboxId: sandbox.id,
-          updatedAt: now,
-        })
-        .where(eq(schema.deviceEnrollmentRequests.id, pending.id));
+          os: pending.os as EnrollmentOs,
+          arch: pending.arch,
+          sandboxName: input.sandboxName,
+          now,
+        });
 
-      return { approved: true, enrollment, sandbox };
-    },
-  );
+        // Stamp the request approved + the LOUD CONSENT record (who/when/what).
+        await scopedDb
+          .update(schema.deviceEnrollmentRequests)
+          .set({
+            status: "approved",
+            allowScreenControl: input.allowScreenControl,
+            approvedBySubjectId: input.approvedBySubjectId,
+            approvedBySubjectLabel: input.approvedBySubjectLabel ?? null,
+            approvedAt: now,
+            enrollmentId: enrollment.id,
+            sandboxId: sandbox.id,
+            updatedAt: now,
+          })
+          .where(eq(schema.deviceEnrollmentRequests.id, pending.id));
+
+        return { approved: true, enrollment, sandbox };
+      },
+    );
+  if (input.scope !== "user") return await approveInScope(db);
+  // Organization membership precedes the tenancy fence acquired by
+  // withRlsContext, then the pending request and enrollment rows. A Database
+  // can itself be a transaction holding locks: fail closed rather than wait
+  // on an unknown caller's reverse-order prefix. The SQL finalizer repeats
+  // this nonblocking check for direct callers and old binaries.
+  return await db.transaction(async (tx) => {
+    const database = tx as unknown as Database;
+    const [fence] = await rawRows<{ acquired: boolean }>(
+      database,
+      sql`
+      select pg_try_advisory_xact_lock(hashtextextended(
+        ${`organization-membership:${input.accountId}`}, 0
+      )) as acquired
+    `,
+    );
+    if (!fence?.acquired) {
+      throw Object.assign(new Error("Enrollment membership is changing; retry the transaction"), {
+        code: "55P03",
+      });
+    }
+    return await approveInScope(database);
+  });
 }
 
 // Mark a pending request DENIED (an explicit user "no" at the approve page).
