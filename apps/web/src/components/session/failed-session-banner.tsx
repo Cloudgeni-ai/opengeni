@@ -34,7 +34,10 @@ export function FailedSessionBanner({
   canBuyCredits?: boolean;
   canConnectModel?: boolean;
   actions?: ComponentProps<typeof FailedSessionActions>;
-  sandboxRecovery?: Omit<SandboxRecoveryActionsProps, "structuralFailure" | "children">;
+  sandboxRecovery?: Omit<
+    SandboxRecoveryActionsProps,
+    "structuralFailure" | "children" | "retryActions"
+  >;
 }) {
   if (creditExhausted && !failure.structuralSandboxFailure) {
     return (
@@ -126,7 +129,7 @@ export function FailedSessionBanner({
             ) : null}
             {failure.detailsTruncated ? "Some error details are shortened. " : null}
             {failure.structuralSandboxFailure
-              ? "Conversation history is preserved. Retrying execution or changing models cannot repair this sandbox. Pause and Cancel remain available."
+              ? "Conversation history is preserved. Check sandbox recovery before retrying; changing models cannot repair files. Pause and Cancel remain available."
               : failure.safetyRefusal
                 ? "The conversation history is preserved. This request cannot be retried. You can send a new message below."
                 : "Your request and conversation history are preserved."}
@@ -135,6 +138,11 @@ export function FailedSessionBanner({
             <SandboxRecoveryActions
               {...sandboxRecovery}
               structuralFailure={Boolean(failure.structuralSandboxFailure)}
+              retryActions={
+                actions && !failure.safetyRefusal ? (
+                  <FailedSessionActions {...actions} showModelChoice={false} />
+                ) : null
+              }
             >
               {actions ? <OrdinaryFailureActions failure={failure} actions={actions} /> : null}
             </SandboxRecoveryActions>

@@ -45128,10 +45128,26 @@ async function projectPublicSandboxRecovery(
       ),
     );
   if (!session) return unavailable("session_unavailable");
-  if (
-    session.sandboxBackend !== "modal" ||
-    (session.activeSandboxId !== null && session.activeSandboxId !== session.sandboxGroupId)
-  )
+  if (session.activeSandboxId !== null && session.activeSandboxId !== session.sandboxGroupId) {
+    const [target] = await tx
+      .select({ kind: schema.sandboxes.kind })
+      .from(schema.sandboxes)
+      .where(
+        and(
+          eq(schema.sandboxes.workspaceId, input.workspaceId),
+          eq(schema.sandboxes.id, session.activeSandboxId),
+        ),
+      );
+    return {
+      ...unavailable(
+        target?.kind === "selfhosted"
+          ? "connected_machine_selected"
+          : "managed_modal_home_required",
+      ),
+      status: "unsupported",
+    };
+  }
+  if (session.sandboxBackend !== "modal")
     return { ...unavailable("managed_modal_home_required"), status: "unsupported" };
   if ((await completeRecoveryGroupCount(tx, input, session.sandboxGroupId)) !== 1)
     return { ...unavailable("singleton_required"), status: "unsupported" };

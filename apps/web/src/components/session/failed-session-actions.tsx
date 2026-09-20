@@ -32,6 +32,7 @@ export function FailedSessionActions(props: {
   retryInput?: FailedSessionRetryInput | null;
   onChooseModel: () => void;
   modelDisabled: boolean;
+  showModelChoice?: boolean;
 }) {
   const [identity, setIdentity] = useState(props.failureId ?? null);
   const [generation, setGeneration] = useState(0);
@@ -52,6 +53,7 @@ function FailureActionsAttempt({
   retryInput,
   onChooseModel,
   modelDisabled,
+  showModelChoice = true,
 }: {
   onRetry: () => Promise<boolean>;
   composerBlocker?: ComposerSendBlocker | null;
@@ -60,6 +62,7 @@ function FailureActionsAttempt({
   retryInput?: FailedSessionRetryInput | null;
   onChooseModel: () => void;
   modelDisabled: boolean;
+  showModelChoice?: boolean;
 }) {
   const retryDescriptionId = useId();
   const retryBlockedReason = composerBlocker
@@ -127,16 +130,18 @@ function FailureActionsAttempt({
                 ? "Check prior retry"
                 : "Try again"}
         </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
-          disabled={modelDisabled || Boolean(retryInput)}
-          aria-describedby={retryInput ? retryDescriptionId : undefined}
-          onClick={onChooseModel}
-        >
-          Choose another model
-        </Button>
+        {showModelChoice ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={modelDisabled || Boolean(retryInput)}
+            aria-describedby={retryInput ? retryDescriptionId : undefined}
+            onClick={onChooseModel}
+          >
+            Choose another model
+          </Button>
+        ) : null}
       </div>
       {retryInput ? (
         <p id={retryDescriptionId} className="mt-2 text-xs text-fg-muted" role="status">
