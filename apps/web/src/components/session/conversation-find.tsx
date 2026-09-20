@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   useConversationSearch,
+  useCommittedSearchQuery,
   type ConversationSearchMatch,
   type ConversationSearchPage,
 } from "@/lib/use-conversation-search";
@@ -24,6 +25,8 @@ export default function ConversationFind(props: {
   const { onJump, onTarget } = props;
   const { client, accessContext } = useAppContext();
   const [query, setQuery] = useState(props.initial.find ?? "");
+  const scope = JSON.stringify([accessContext.subjectId, props.workspaceId, props.sessionId]);
+  const committedQuery = useCommittedSearchQuery(query, scope, props.open);
   const [index, setIndex] = useState(0);
   const desired = useRef<{ sequence: number; offset: number; query: string } | null>(null);
   const [seeking, setSeeking] = useState(false);
@@ -41,7 +44,8 @@ export default function ConversationFind(props: {
     authority: accessContext.subjectId,
     workspaceId: props.workspaceId,
     sessionId: props.sessionId,
-    query,
+    query: committedQuery,
+    debounceMs: 0,
     enabled: props.open,
   });
   const matches = search.page?.matches ?? [];
@@ -74,11 +78,11 @@ export default function ConversationFind(props: {
       void choose({
         sequence: match.sequence,
         eventId: match.eventId,
-        query,
+        query: committedQuery,
         offset: match.messageMatchOffset,
       });
     },
-    [choose, query],
+    [choose, committedQuery],
   );
   useEffect(() => {
     if (!props.open) {
@@ -116,7 +120,7 @@ export default function ConversationFind(props: {
     if (!props.open || search.loading || !page || handledPage.current === page) return;
     const pageMatches = page.matches;
     const requested = desired.current;
-    if (requested && requested.query !== query) return;
+    if (requested && requested.query !== committedQuery) return;
     handledPage.current = page;
     if (requested) {
       const found = pageMatches.findIndex(
@@ -144,25 +148,35 @@ export default function ConversationFind(props: {
     page,
     search.loading,
     props.open,
-    query,
+    committedQuery,
     selectMatch,
     nextPage,
     props.initial.find,
     props.initial.matchSequence,
     props.initial.matchOffset,
   ]);
-  function changeQuery(value: string) {
+  const lastIdentity = useRef({ scope, query: committedQuery, client });
+  useEffect(() => {
+    const sameAuthority =
+      lastIdentity.current.scope === scope && lastIdentity.current.client === client;
+    if (sameAuthority && lastIdentity.current.query === committedQuery && !search.accessDenied)
+      return;
+    lastIdentity.current = { scope, query: committedQuery, client };
     ++navigationLifetime.current.generation;
     navigationLifetime.current.controller?.abort();
     setNavigating(false);
-    setQuery(value);
-    desired.current = null;
-    setSeeking(false);
+    // A replacement route installs its exact occurrence before the query
+    // debounce commits. Preserve that pending target for this query, but never
+    // carry it across authority changes, denial, or an unrelated draft commit.
+    if (!sameAuthority || search.accessDenied || desired.current?.query !== committedQuery) {
+      desired.current = null;
+    }
+    setSeeking(desired.current !== null);
     handledPage.current = null;
     setNavigationError(null);
     setIndex(0);
     onTarget(null);
-  }
+  }, [scope, committedQuery, client, search.accessDenied, onTarget]);
   function move(direction: -1 | 1) {
     if (!matches.length || search.loading) return;
     const next = index + direction;
@@ -185,9 +199,11 @@ export default function ConversationFind(props: {
       ? "Searching…"
       : matches.length
         ? `${ordinal} / ${total}${search.page?.countIsExact ? "" : "+"}`
-        : query.trim()
-          ? "No matches"
-          : "";
+        : search.error
+          ? "Unavailable"
+          : committedQuery.trim()
+            ? "No matches"
+            : "";
   return (
     <section
       aria-label="Find in conversation"
@@ -199,7 +215,7 @@ export default function ConversationFind(props: {
           ref={input}
           type="search"
           value={query}
-          onChange={(event) => changeQuery(event.target.value)}
+          onChange={(event) => setQuery(event.target.value)}
           maxLength={200}
           placeholder="Find in conversation…"
           aria-label="Find in conversation"
@@ -256,7 +272,11 @@ export default function ConversationFind(props: {
       </div>
       <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-fg-subtle">
         <span>
-          {navigating ? "Loading passage…" : "All saved user and completed assistant messages"}
+          {query !== committedQuery
+            ? `Showing matches for “${committedQuery}”`
+            : navigating
+              ? "Loading passage…"
+              : "All saved user and completed assistant messages"}
         </span>
         <button
           type="button"

@@ -8,7 +8,7 @@ import type {
 } from "@opengeni/contracts";
 import type { Database } from "./database";
 import * as schema from "./schema";
-import { listSessionEventSlices } from "./session-event-slices";
+import { readSessionMessageSliceInScope } from "./session-event-slices";
 import { fromPostgresLosslessJson, LOSSLESS_JSON_STRING_PREFIX } from "./lossless-json";
 
 const Position = z
@@ -140,7 +140,7 @@ export async function scanSessionMessages(
         eventId: e.id,
         sequence: e.sequence,
         turnId: e.turnId,
-        type: e.type,
+        type: sql<"user.message" | "agent.message.completed">`${e.type}`,
         sessionTitle: sql<
           string | null
         >`case when octet_length(${schema.sessions.title}) <= 2048 then ${schema.sessions.title} else null end`,
@@ -220,6 +220,10 @@ export async function scanSessionMessages(
       const offset = position!.offset;
       const utf16Offset = position!.utf16Offset;
       const smallText = fromPostgresLosslessJson(identity.smallText, identity.codec);
+      // Amortize full-source detoasting/codec validation over adjacent windows,
+      // not a larger request budget. A four-window read consumes four of the
+      // original 32 slots, even if a match/short source ends it early.
+      const scalarWindows = typeof smallText === "string" ? 1 : Math.min(4, 32 - window);
       const slice =
         typeof smallText === "string"
           ? {
@@ -229,16 +233,22 @@ export async function scanSessionMessages(
               text: smallText,
               omitted: false,
             }
-          : (
-              await listSessionEventSlices(db, workspaceId, identity.sessionId, {
-                sourceSequence: identity.sequence,
-                sourceOffset: offset,
-                after: identity.sequence - 1,
-                before: identity.sequence + 1,
-                includeTypes: ["user.message", "agent.message.completed"],
-                view: "conversation",
-              })
-            ).slices?.[identity.sequence];
+          : await readSessionMessageSliceInScope(
+              db,
+              workspaceId,
+              identity.sessionId,
+              {
+                id: identity.eventId,
+                sequence: identity.sequence,
+                type: identity.type,
+                turnId: identity.turnId,
+                turnAssociation: null,
+                duplicateOfEventId: null,
+              },
+              offset,
+              scalarWindows,
+            );
+      window += scalarWindows - 1;
       if (!slice || slice.omitted) {
         // Deletion/visibility changes never turn into a fabricated message.
         position = { ...position!, done: true };

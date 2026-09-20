@@ -96,8 +96,13 @@ database cancellation. An abort observed during the search returns an empty
 may never receive that response. Authorization, transaction, and RLS setup run
 once per page, rather than per ordinary message.
 
-Large scalars use the existing `session-event-slices` reader, including exact
-lossless UTF-16 decoding for NUL, lone surrogates, and codec-marker collisions.
+Large scalars reuse the `session-event-slices` scalar reader and exact lossless
+UTF-16 decoding for NUL, lone surrogates, and codec-marker collisions. Search
+already holds the subject-RLS transaction and authorized event identity, so it
+does not repeat identity discovery and nested RLS setup for every slice. A
+search-only read can coalesce up to four adjacent 8192-unit windows, charging
+each against the unchanged 32-window request budget. Ordinary conversation
+slice reads remain bounded to 8192 units.
 Overlapping windows and in-message occurrence cursors prevent truncated false
 negatives and duplicate hits at window/page boundaries. PostgreSQL still has to
 extract/detoast source scalars; large encoded messages are slower than ordinary
@@ -108,6 +113,28 @@ Clients should cancel superseded searches with the SDK's third `{ signal }`
 argument and retain only result snippets/cursors. Do not fetch or concatenate
 complete history in the browser to implement Find. Old servers return an error;
 the SDK never silently falls back to title search or local history scans.
+
+## Browser query and failure lifecycle
+
+The stock search dialog and conversation Find separate the draft input from the
+committed literal query. Brief edits that are undone before commitment leave the
+active request, results, selection, and scroll position intact. Highlights and
+navigation use the committed query while the draft differs; clearing the input
+is immediate. This is not a persistent result cache: scope/client changes and
+reopening require fresh authorization.
+
+Transient transport/server failures retain already-returned snippets and the
+last successful continuation. Retry resumes that boundary, without discarding
+matches or fetching successful title/context sources again. Warnings appear
+alongside usable results instead of replacing them. Definitive client errors
+discard the affected traversal; a rejected cursor retries from the beginning.
+Access-denied responses also hide the other sources and selected preview until
+fresh authorized reads succeed. Disabled hooks expose no retained content, and
+late responses from cancelled requests cannot restore it.
+
+The HTTP metrics use the bounded route label
+`/v1/workspaces/:workspaceId/session-message-search`, without query text or
+workspace identifiers, so search latency and status can be measured separately.
 
 ## Selected-result context
 
@@ -131,8 +158,9 @@ surrounding events separately uses the ordinary target-session authorization.
 
 ## Verification
 
-`packages/db/test/session-message-search.test.ts` and
-`apps/api/test/session-message-search.test.ts` require real PostgreSQL. They use
+`packages/db/test/session-message-search.test.ts`,
+`apps/api/test/session-message-search.test.ts`, and the search browser suite
+`test/e2e/session-search.browser.e2e.ts` require real PostgreSQL. They use
 the shared Docker pgvector harness by default. In a sandbox without Docker,
 `OPENGENI_SESSION_SEARCH_TEST_ADMIN_URL` may point at an explicitly disposable
 native PostgreSQL/pgvector cluster: the narrow test helper creates an isolated

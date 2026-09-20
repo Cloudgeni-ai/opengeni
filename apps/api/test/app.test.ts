@@ -609,6 +609,9 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/queue`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/queue",
     );
+    expect(routeLabel(`/v1/workspaces/${workspace}/session-message-search`)).toBe(
+      "/v1/workspaces/:workspaceId/session-message-search",
+    );
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/composer-draft`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/composer-draft",
     );
