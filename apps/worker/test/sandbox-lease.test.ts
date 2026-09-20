@@ -6775,6 +6775,15 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
             workspacePersistence: "snapshot_filesystem",
           }
         : tarDescriptor;
+      // Deferred checkpoint validators run as the non-bypass owner under FORCE
+      // RLS, even when invoked by admin. Keep tenant scope through COMMIT so
+      // native artifact checks see the exact fixture instead of an invisible row.
+      const mutateFixture = (write: (tx: postgres.TransactionSql) => PromiseLike<unknown>) =>
+        admin.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${ids.accountId}, true),
+            set_config('opengeni.workspace_id', ${ids.workspaceId}, true)`;
+          await write(tx);
+        });
       const leaseId = await insertLease(ids, {
         liveness: "cold",
         backend: "modal",
@@ -6810,12 +6819,15 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
           workspaceArchive: archive,
           workspaceArchiveMeta: descriptor,
         });
-        await admin.begin(async (tx) => {
+        await mutateFixture(async (tx) => {
           await tx`update sandbox_leases set archive_generation = 0, current_checkpoint_artifact_id = ${artifact.id} where id = ${leaseId}`;
           await tx`update sandbox_checkpoint_artifacts set state = 'current' where id = ${artifact.id}`;
         });
       }
-      await admin`update sandbox_leases set workspace_generation = 3, archive_generation = 0 where id = ${leaseId}`;
+      await mutateFixture(
+        (tx) =>
+          tx`update sandbox_leases set workspace_generation = 3, archive_generation = 0 where id = ${leaseId}`,
+      );
       const scope = {
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
@@ -6875,13 +6887,19 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         if (mutation === "epoch")
           await admin`update sandbox_leases set lease_epoch = 2 where id = ${leaseId}`;
         if (mutation === "generation")
-          await admin`update sandbox_leases set workspace_generation = 4 where id = ${leaseId}`;
+          await mutateFixture(
+            (tx) => tx`update sandbox_leases set workspace_generation = 4 where id = ${leaseId}`,
+          );
         if (mutation === "pointer")
-          await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
-          '{opengeniHistoricalArchiveRecoveryId}', to_jsonb(${crypto.randomUUID()}::text)) where id = ${leaseId}`;
+          await mutateFixture(
+            (tx) => tx`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{opengeniHistoricalArchiveRecoveryId}', to_jsonb(${crypto.randomUUID()}::text)) where id = ${leaseId}`,
+          );
         if (mutation === "revision")
-          await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
-          '{sessionState,workspaceArchiveMeta,revision}', to_jsonb('wa1:1900000000001:changed'::text)) where id = ${leaseId}`;
+          await mutateFixture(
+            (tx) => tx`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{sessionState,workspaceArchiveMeta,revision}', to_jsonb('wa1:1900000000001:changed'::text)) where id = ${leaseId}`,
+          );
         if (mutation === "receipt-group")
           await admin`update audit_events set target_id = ${crypto.randomUUID()} where id = ${authorization.operationId}`;
         expect(
@@ -6893,11 +6911,15 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
             leaseTtlMs: 60_000,
           }),
         ).toMatchObject({ role: "blocked" });
-        await admin`update sandbox_leases set lease_epoch = 1, workspace_generation = 3,
+        await mutateFixture(
+          (tx) => tx`update sandbox_leases set lease_epoch = 1, workspace_generation = 3,
           resume_state = jsonb_set(resume_state, '{opengeniHistoricalArchiveRecoveryId}',
-          to_jsonb(${authorization.operationId}::text)) where id = ${leaseId}`;
-        await admin`update sandbox_leases set resume_state = jsonb_set(resume_state,
-          '{sessionState,workspaceArchiveMeta,revision}', to_jsonb(${descriptor.revision}::text)) where id = ${leaseId}`;
+          to_jsonb(${authorization.operationId}::text)) where id = ${leaseId}`,
+        );
+        await mutateFixture(
+          (tx) => tx`update sandbox_leases set resume_state = jsonb_set(resume_state,
+          '{sessionState,workspaceArchiveMeta,revision}', to_jsonb(${descriptor.revision}::text)) where id = ${leaseId}`,
+        );
         await admin`update audit_events set target_id = ${ids.groupId} where id = ${authorization.operationId}`;
       }
       expect(await authorizeHistoricalSandboxCheckpointRecovery(db, authorization)).toEqual({
@@ -6913,16 +6935,16 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       const rematerializationId = crypto.randomUUID();
       const epoch = elected.lease.leaseEpoch;
       if (native) {
-        // Even a fixture bypassing immutability cannot commit mismatched provenance.
+        // The immutable source generation cannot be rebound to a newer archive
+        // generation. Exercise the deferred fence without disabling any guard.
         await expect(
-          admin.begin(async (tx) => {
-            await tx`alter table sandbox_checkpoint_artifacts disable trigger sandbox_checkpoint_artifact_immutability_guard`;
-            await tx`update sandbox_checkpoint_artifacts set source_workspace_generation = 1
-            where id = (select current_checkpoint_artifact_id from sandbox_leases where id = ${leaseId})`;
-            await tx`update sandbox_leases set current_checkpoint_artifact_id = current_checkpoint_artifact_id where id = ${leaseId}`;
-            await tx`alter table sandbox_checkpoint_artifacts enable trigger sandbox_checkpoint_artifact_immutability_guard`;
-          }),
+          mutateFixture(
+            (tx) => tx`update sandbox_leases set archive_generation = 1 where id = ${leaseId}`,
+          ),
         ).rejects.toThrow("current checkpoint artifact does not match its exact lease scope");
+        expect(await readLease(db, ids.workspaceId, ids.groupId)).toMatchObject({
+          archiveGeneration: 0,
+        });
       }
       expect(
         await beginSandboxRematerialization(db, {
