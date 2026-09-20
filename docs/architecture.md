@@ -570,6 +570,13 @@ flowchart LR
   Relay <--> Machine
 ```
 
+Artifact materializer and outbox sidecars have role-specific configuration in
+`packages/config`: the materializer consumes storage configuration; the outbox
+consumes broker configuration. Both retain telemetry and dedicated database
+posture without inheriting API authentication or agent sandbox credentials.
+Their startup adapters are `apps/worker/src/editable-artifact-materializer-service.ts`
+and `apps/worker/src/editable-artifact-outbox-service.ts`.
+
 ### 4.1 Request and event path
 
 1. A client calls `apps/api`. Middleware establishes the deployment perimeter,
