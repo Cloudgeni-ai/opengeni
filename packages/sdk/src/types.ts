@@ -2184,6 +2184,8 @@ export type ToolAuthNeededPayload = {
   serverId: string;
   /** Configured connector for recovery; serverId retains the execution alias. */
   canonicalServerId?: string | undefined;
+  /** Scope of the exact failed account, not the canonical catalog default. */
+  connectionSubjectScope?: "workspace" | "subject" | undefined;
   toolName?: string | null | undefined;
   providerDomain: string;
   provider?: string | undefined;

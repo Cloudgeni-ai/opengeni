@@ -64,6 +64,14 @@ test("auth recovery keeps exact execution alias and adds only frozen canonical i
   expect(accountRouteAuthNeededPayload(payload, [personal])).toEqual({
     ...payload,
     canonicalServerId: "mail",
+    connectionSubjectScope: "subject",
+  });
+  expect(
+    accountRouteAuthNeededPayload({ ...payload, serverId: workspace.serverId }, [workspace]),
+  ).toMatchObject({
+    serverId: workspace.serverId,
+    canonicalServerId: "mail",
+    connectionSubjectScope: "workspace",
   });
   expect(
     accountRouteAuthNeededPayload({ ...payload, serverId: "unknown" }, [personal]),

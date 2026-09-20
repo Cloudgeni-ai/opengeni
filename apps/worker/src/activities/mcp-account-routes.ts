@@ -11,7 +11,13 @@ export function accountRouteAuthNeededPayload(
   bindings: readonly McpConnectionAccountBinding[] | null | undefined,
 ): ToolAuthNeededPayload {
   const binding = bindings?.find((candidate) => candidate.serverId === payload.serverId);
-  return binding ? { ...payload, canonicalServerId: binding.canonicalServerId } : payload;
+  return binding
+    ? {
+        ...payload,
+        canonicalServerId: binding.canonicalServerId,
+        connectionSubjectScope: binding.subjectScope,
+      }
+    : payload;
 }
 
 /** Expand only after canonical tool-policy admission. Aliases are execution

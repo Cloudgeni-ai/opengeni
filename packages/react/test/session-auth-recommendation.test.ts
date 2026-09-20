@@ -17,6 +17,7 @@ test("personal alias recovery uses explicit canonical identity with hidden conne
       payload: {
         serverId: `account-${"a".repeat(64)}`,
         canonicalServerId: "mail",
+        connectionSubjectScope: "subject",
         toolName: "send",
         providerDomain: "example.test",
         reason: "personal_authority_unavailable",
@@ -31,13 +32,31 @@ test("personal alias recovery uses explicit canonical identity with hidden conne
       kind: "mcp",
       source: "manual",
       runtime: { mcpServerId: "mail", available: true },
-      connectionRef: { subjectScope: "subject", providerDomain: "example.test", kind: "oauth2" },
+      connectionRef: { subjectScope: "workspace", providerDomain: "example.test", kind: "oauth2" },
     }),
   ];
   expect(item.serverId).toBe(`account-${"a".repeat(64)}`);
   expect(item.canonicalServerId).toBe("mail");
   expect(item.connectionId).toBeNull();
+  expect(item.connectionSubjectScope).toBe("subject");
   expect(sessionAuthRecommendation(item, catalog)?.capability?.id).toBe("mail-capability");
+  expect(
+    sessionAuthRecommendation({ ...item, connectionSubjectScope: null }, catalog),
+  ).toBeUndefined();
+  expect(
+    sessionAuthRecommendation({ ...item, connectionSubjectScope: "workspace" }, catalog),
+  ).toBeUndefined();
+  expect(
+    sessionAuthRecommendation(
+      {
+        ...item,
+        serverId: `account-${"b".repeat(64)}`,
+        connectionSubjectScope: "workspace",
+        reason: "expired",
+      },
+      catalog,
+    )?.capability?.id,
+  ).toBe("mail-capability");
   expect(sessionAuthRecommendation({ ...item, canonicalServerId: null }, catalog)).toBeUndefined();
   expect(
     sessionAuthRecommendation({ ...item, canonicalServerId: "other" }, catalog),

@@ -27,8 +27,8 @@ export function sessionAuthRecommendation(
   const personalAccess = item.reason === "personal_authority_unavailable";
   if (
     personalAccess &&
-    (entry.connectionRef?.subjectScope !== "subject" ||
-      entry.connectionRef.authoritySource === "host")
+    ((item.connectionSubjectScope ?? entry.connectionRef?.subjectScope) !== "subject" ||
+      entry.connectionRef?.authoritySource === "host")
   )
     return undefined;
   return {

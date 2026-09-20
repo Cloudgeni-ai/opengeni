@@ -2870,8 +2870,8 @@ function maybeInstallLazyToolTransport(
   if (!enabled) return;
 
   const mcpServers = options.mcpServers ?? [];
-  // Prepared servers use a shared SDK lifecycle name; tool prefixes come from
-  // their registry identity. Preserve the fallback for embedded/test servers.
+  // Prepared servers use exact model-name mappings, not SDK lifecycle names
+  // or parseable prefixes. Preserve legacy embedded/test-server classification.
   const mcpServerIds = new Set(mcpServers.map((server) => mcpServerRegistryId(server)));
   const deferredMcpServerIds = new Set(
     mcpServers
@@ -2885,6 +2885,18 @@ function maybeInstallLazyToolTransport(
     options.toolPreparationReady,
     deferredMcpServerIds,
     new Set(options.preparationIndependentToolNames ?? []),
+    () => {
+      const identities = new Map<string, string>();
+      for (const server of mcpServers) {
+        if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
+          continue;
+        for (const name of server.modelToolNames()) {
+          if (identities.has(name)) throw new Error("MCP model tool identity collision");
+          identities.set(name, server.registryId);
+        }
+      }
+      return identities;
+    },
   );
 }
 
@@ -3978,6 +3990,7 @@ class DeferredPreparedMcpServer implements MCPServer {
   readonly cacheToolsList = false;
   readonly deferredPreparation = true;
   readonly name: string;
+  private readonly listedModelNames = new Set<string>();
 
   constructor(
     readonly registryId: string,
@@ -4008,7 +4021,14 @@ class DeferredPreparedMcpServer implements MCPServer {
   async listTools(): Promise<RuntimeMcpTool[]> {
     if (!this.isPrepared()) return [];
     const target = await this.resolveTarget();
-    return target ? ((await target.listTools()) as RuntimeMcpTool[]) : [];
+    const tools = target ? ((await target.listTools()) as RuntimeMcpTool[]) : [];
+    this.listedModelNames.clear();
+    for (const tool of tools) this.listedModelNames.add(tool.name);
+    return tools;
+  }
+
+  modelToolNames(): Iterable<string> {
+    return this.listedModelNames.values();
   }
 
   async unprefixedToolName(name: string): Promise<string> {
@@ -6693,6 +6713,10 @@ export class PrefixedMcpServer implements MCPServer {
   private listedToolSchemaTokens = 0;
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
   private readonly originalToolNames = new Map<string, string>();
+  /** Exact attempt-local classification, including names too long for a prefix. */
+  modelToolNames(): Iterable<string> {
+    return this.originalToolNames.keys();
+  }
   private attemptToolEnvironment: AttemptToolEnvironment | null = null;
   private attemptToolSubjectId = "worker:mcp-model";
   private readonly resultCustomDataBridge: McpResultCustomDataBridge;

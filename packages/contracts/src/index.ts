@@ -12873,6 +12873,8 @@ export const ToolAuthNeededPayload = z
     serverId: z.string().min(1),
     /** Exact configured connector for recovery; serverId remains the execution route. */
     canonicalServerId: z.string().min(1).optional(),
+    /** Scope of the exact failed account, not the canonical catalog default. */
+    connectionSubjectScope: z.enum(["workspace", "subject"]).optional(),
     toolName: z.string().min(1).nullable().optional(),
     providerDomain: z.string().min(1),
     provider: z.string().min(1).max(128).optional(),
