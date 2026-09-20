@@ -419,7 +419,7 @@ test("ordinary no-hit history uses batched scalar SQL rather than per-message re
 test("efficiency benchmark covers ordinary, long and multi-session complete traversals", async () => {
   // Keep performance volumes out of the authority regression workspace: list
   // scope tests deliberately exercise different recursive authorization plans.
-  const subjectId = `user:search-benchmark-${crypto.randomUUID()}`;
+  const benchmarkSubjectId = `user:search-benchmark-${crypto.randomUUID()}`;
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
     accountExternalId: crypto.randomUUID(),
@@ -427,14 +427,15 @@ test("efficiency benchmark covers ordinary, long and multi-session complete trav
     workspaceExternalSource: "test",
     workspaceExternalId: crypto.randomUUID(),
     workspaceName: "Search benchmark",
-    subjectId,
+    subjectId: benchmarkSubjectId,
   });
-  const { workspaceId, accountId } = access.workspaceGrants[0]!;
-  const makeSession = (requestedSessionId: string) =>
+  const { workspaceId: benchmarkWorkspaceId, accountId: benchmarkAccountId } =
+    access.workspaceGrants[0]!;
+  const makeBenchmarkSession = (requestedSessionId: string) =>
     createSession(client.db, {
       requestedSessionId,
-      accountId,
-      workspaceId,
+      accountId: benchmarkAccountId,
+      workspaceId: benchmarkWorkspaceId,
       initialMessage: "benchmark",
       resources: [],
       metadata: {},
@@ -453,13 +454,13 @@ test("efficiency benchmark covers ordinary, long and multi-session complete trav
   ] as const) {
     const ids: string[] = [];
     for (let i = 0; i < sessionCount; i++) {
-      const session = await makeSession(
+      const session = await makeBenchmarkSession(
         `10000000-0000-4000-8000-${String(fixtureId++).padStart(12, "0")}`,
       );
       ids.push(session.id);
       const payload = toPostgresLosslessJson({ text });
       await shared.admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload, payload_codec_version)
-        select ${accountId}, ${workspaceId}, ${session.id}, n, 'user.message', ${shared.admin.json(payload as never)}, 1
+        select ${benchmarkAccountId}, ${benchmarkWorkspaceId}, ${session.id}, n, 'user.message', ${shared.admin.json(payload as never)}, 1
         from generate_series(1, ${messageCount}) n`;
     }
     scenarios.push({ name, ids, count: sessionCount * messageCount });
@@ -486,10 +487,10 @@ test("efficiency benchmark covers ordinary, long and multi-session complete trav
         do {
           page = await searchSessionMessagesForSubject(
             observed,
-            workspaceId,
+            benchmarkWorkspaceId,
             { query: "never-present-token", ...(cursor ? { cursor } : {}) },
             {
-              subjectId,
+              subjectId: benchmarkSubjectId,
               authorizationScope: { kind: "scoped", sessionIds: scenario.ids, rootSessionIds: [] },
             },
           );
