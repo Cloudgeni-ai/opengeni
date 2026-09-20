@@ -254,10 +254,10 @@ Organization keys with `workspace:admin` may configure their organization's
 private-session product setting through the normal settings API. The shared
 database administrator fence rechecks the live key even on command replay;
 changing this setting grants no access to private session contents.
-Visibility transitions clear session-initial personal connection selections
-under the native transaction-local visibility capability. This cleanup cannot
-change captured turn authority or parent provenance; ordinary writes and
-caller-supplied capability settings alone remain insufficient.
+Sharing preserves accepted execution and connection selections while advancing
+the viewer-access epoch. A separate execution epoch floor advances on
+privatization or authority revocation. Privatization still requires quiescence
+and clears staged personal selections; neither path rewrites accepted receipts.
 Do not infer human authority from session creation, current UI identity, a
 worker process, a connection row, or provenance metadata. A turn freezes its
 initiating principal and the authority snapshots needed by later execution and

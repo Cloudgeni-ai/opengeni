@@ -10,6 +10,7 @@ const migration = "0478_sender_owned_connections.sql";
 // 0494 patches the installed 0478 resolver, so it must wait until this fixture
 // has actually applied the sender cutover rather than merely marked it applied.
 const accountBindingsMigration = "0494_mcp_account_bindings.sql";
+const sharingMigration = "0501_session_sharing_execution.sql";
 let database: OwnerMigratedTestDatabase | null = null;
 
 beforeAll(async () => {
@@ -30,9 +31,9 @@ test("maintenance cutover backfills proven owners under FORCE RLS without rewrit
     await owner.unsafe(
       `CREATE TABLE schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`,
     );
-    await owner`insert into schema_migrations (name) values (${migration}), (${accountBindingsMigration})`;
+    await owner`insert into schema_migrations (name) values (${migration}), (${accountBindingsMigration}), (${sharingMigration})`;
     await migrate(db.ownerUrl);
-    await owner`delete from schema_migrations where name in (${migration}, ${accountBindingsMigration})`;
+    await owner`delete from schema_migrations where name in (${migration}, ${accountBindingsMigration}, ${sharingMigration})`;
     const [posture] =
       await owner`select rolsuper, rolbypassrls from pg_roles where rolname = current_user`;
     expect(posture).toMatchObject({ rolsuper: false, rolbypassrls: false });

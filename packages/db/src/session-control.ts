@@ -989,11 +989,15 @@ export function sessionAuthoritySnapshotMatchesSession(
   session: Pick<
     typeof schema.sessions.$inferSelect,
     "authorityEpoch" | "visibility" | "ownerOrganizationMembershipId"
-  >,
+  > & { executionAuthorityEpoch?: number },
 ): boolean {
   return (
-    snapshot.authorityEpoch === session.authorityEpoch &&
-    snapshot.authorityVisibility === session.visibility &&
+    snapshot.authorityEpoch >= (session.executionAuthorityEpoch ?? session.authorityEpoch) &&
+    snapshot.authorityEpoch <= session.authorityEpoch &&
+    (snapshot.authorityVisibility === session.visibility ||
+      (snapshot.authorityVisibility === "user_private" &&
+        session.visibility === "workspace_shared" &&
+        snapshot.authorityEpoch < session.authorityEpoch)) &&
     snapshot.authorityOwnerOrganizationMembershipId ===
       (session.ownerOrganizationMembershipId ?? null)
   );

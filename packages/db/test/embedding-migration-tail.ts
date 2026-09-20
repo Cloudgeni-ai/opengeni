@@ -43,4 +43,5 @@ export const embeddingMigrationTail = [
   "0488_permanent_skill_removal.sql",
   // Rewrites the original-file policy introduced by 0461.
   "0499_session_attachment_access.sql",
+  "0501_session_sharing_execution.sql",
 ];

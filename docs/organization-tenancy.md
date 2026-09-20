@@ -1545,7 +1545,12 @@ The activated database contract is intentionally narrow:
   `personal_workspace_id` names the workspace, or an ordinary
   `workspace_memberships` row. Names, creators, defaults, roles, and permission
   strings are never authority.
-- A transition rejects with a typed conflict unless turns/attempts,
+- Sharing a private session with its workspace preserves accepted turns, their
+  human identity, connections and resource receipts, including running or queued
+  work. Viewer claims still expire when the access epoch changes. Migration 0501
+  adds an execution epoch floor: only epochs since the last revocation remain
+  valid; sharing never rewrites an accepted snapshot.
+- Privatization rejects with a typed conflict unless turns/attempts,
   interruptions, updates, human/tool/RunState receipts, goals/capacity waits,
   realtime, schedules, workspace writers/processes, and sandbox viewer or
   interaction holders are all quiescent. The stale 0225 auto-cancellation
@@ -1558,7 +1563,7 @@ The activated database contract is intentionally narrow:
   transition still replays after disable. Personal workspaces are exempt and
   transition-to-shared never consults the setting.
   A
-  proven transition advances the epoch, revokes old-epoch personal grants,
+  proven privatization advances both epoch boundaries, revokes old-epoch personal grants,
   clears staged personal delegations, preserves 0301 cache/pin behavior, and
   appends one event without a workflow wake.
 - The fork contract is same-workspace with an explicit `user_private` or
