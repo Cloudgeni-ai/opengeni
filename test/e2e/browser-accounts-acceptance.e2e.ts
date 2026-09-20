@@ -39,6 +39,11 @@ import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics
 import { createAccountReadDiagnostics } from "./browser-account-read-diagnostics";
 import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
 import {
+  observeCapabilityResume,
+  consumeCapabilityResumeRead,
+  type CapabilityResumeEvidence,
+} from "./browser-account-capability-resume";
+import {
   sanitizeRaceProjection,
   sanitizeRaceRequest,
   sanitizeRaceResult,
@@ -1394,13 +1399,14 @@ async function expectNoBrowserProblems(problems: BrowserProblems): Promise<void>
 async function expectAndConsumeConsoleErrors(
   page: Page,
   problems: BrowserProblems,
-  allowed: string[],
-  required: string[] = allowed,
+  allowed: string[] | (() => Promise<string[]>),
+  required?: string[],
 ): Promise<void> {
   // Console delivery trails the response event by a task. Consume only the
   // exact fail-closed requests intentionally induced by the current window;
   // every later or additional browser error remains subject to the final gate.
   await page.waitForTimeout(1_000);
+  const allowedMessages = typeof allowed === "function" ? await allowed() : allowed;
   const counts = Object.fromEntries(
     [...new Set(problems.consoleErrors)].map((message) => [
       message,
@@ -1408,16 +1414,18 @@ async function expectAndConsumeConsoleErrors(
     ]),
   );
   const allowedCounts = Object.fromEntries(
-    [...new Set(allowed)].map((message) => [
+    [...new Set(allowedMessages)].map((message) => [
       message,
-      allowed.filter((candidate) => candidate === message).length,
+      allowedMessages.filter((candidate) => candidate === message).length,
     ]),
   );
   expect({
     excess: Object.fromEntries(
       Object.entries(counts).filter(([message, count]) => count > (allowedCounts[message] ?? 0)),
     ),
-    missing: required.filter((message) => !problems.consoleErrors.includes(message)),
+    missing: (required ?? allowedMessages).filter(
+      (message) => !problems.consoleErrors.includes(message),
+    ),
   }).toEqual({ excess: {}, missing: [] });
   problems.consoleErrors.splice(0);
 }
@@ -4358,6 +4366,9 @@ describe("provider-neutral browser account acceptance", () => {
     const secondTab = await context.newPage();
     const otherPage = await otherBrowserSet.newPage();
     const pageProblems = observeBrowser(page);
+    let capabilityResumeObserver: Awaited<ReturnType<typeof observeCapabilityResume>> | undefined;
+    let capabilityResumeEvidence: CapabilityResumeEvidence | undefined;
+    const consumedCapabilityResumeRequests = new Set<string>();
     const draftRequests: Array<{ method: string; pathname: string }> = [];
     page.on("request", (request) => {
       const pathname = new URL(request.url()).pathname;
@@ -4789,6 +4800,13 @@ describe("provider-neutral browser account acceptance", () => {
         ],
         [],
       );
+      const resumeCapabilityUrl = `${publicOrigin}/v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`;
+      capabilityResumeObserver = await observeCapabilityResume(page, {
+        url: resumeCapabilityUrl,
+        phase: () => pageProblems.phase,
+        actorEpochHeader: MANAGED_AUTH_ACTOR_EPOCH_HEADER,
+        hashAuthority: sessionSetAuthorityHash,
+      });
       const reauthMenu = await openAccountMenu(page, beta.displayName);
       const alphaReauthSlot = reauthMenu.getByRole("menuitem", {
         name: new RegExp(alpha.displayName),
@@ -4806,24 +4824,39 @@ describe("provider-neutral browser account acceptance", () => {
       await expectAndConsumeConsoleErrors(
         page,
         pageProblems,
-        [
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-          // WebKit can restore page visibility after closing the popup as well
-          // as remounting the actor. useSessionCapabilities renegotiates once
-          // on that page-live transition. Budget only this exact denied read.
-          ...(engine === "webkit"
-            ? [
-                `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-              ]
-            : []),
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
-          ...optionalWebKitReauthenticationReloadError(pageProblems, engine),
-        ],
+        async () => {
+          const authorityHash = sessionSetAuthorityHash(await browserCookieHeader(context));
+          const evidence = await capabilityResumeObserver!.finish();
+          capabilityResumeEvidence = evidence;
+          // A controlled resume reproduces this extra read in Chromium too.
+          // Original CI causation remains unknown; only actual lifecycle and
+          // authenticated request evidence can authorize this one extra error.
+          const resumedRequest = consumeCapabilityResumeRead(
+            evidence,
+            {
+              url: resumeCapabilityUrl,
+              actorEpoch: projection.actorEpoch,
+              authorityHash,
+              phase: pageProblems.phase,
+            },
+            consumedCapabilityResumeRequests,
+          );
+          return [
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+            ...(resumedRequest !== null
+              ? [
+                  `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+                ]
+              : []),
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+            ...optionalWebKitReauthenticationReloadError(pageProblems, engine),
+          ];
+        },
         [],
       );
       await expectAndConsumePageErrors(
@@ -5135,6 +5168,13 @@ describe("provider-neutral browser account acceptance", () => {
         )}\n`,
       );
     } finally {
+      if (capabilityResumeEvidence) {
+        await writeFile(
+          `${EVIDENCE_DIR}/${engine}-capability-resume.json`,
+          `${JSON.stringify(capabilityResumeEvidence, null, 2)}\n`,
+        );
+      }
+      await capabilityResumeObserver?.dispose();
       await context.close().catch(() => undefined);
       await otherBrowserSet.close().catch(() => undefined);
       await independentBrowser.close().catch(() => undefined);
