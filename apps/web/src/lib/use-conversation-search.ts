@@ -100,11 +100,23 @@ export function useConversationSearch(input: {
   const identity = JSON.stringify([authority, workspaceId, sessionId, query, archiveStatus]);
   const [navigation, setNavigation] = useState<{
     identity: string;
+    client: typeof client;
     cursors: Array<string | undefined>;
     index: number;
-  }>({ identity, cursors: [undefined], index: 0 });
+  }>({ identity, client, cursors: [undefined], index: 0 });
   const activeNavigation =
-    navigation.identity === identity ? navigation : { identity, cursors: [undefined], index: 0 };
+    navigation.identity === identity && navigation.client === client
+      ? navigation
+      : { identity, client, cursors: [undefined], index: 0 };
+  useEffect(() => {
+    // Commit the new owner even before paging, so switching back cannot revive
+    // another client's (or scope's) old navigation stack.
+    setNavigation((current) =>
+      current.identity === identity && current.client === client
+        ? current
+        : { identity, client, cursors: [undefined], index: 0 },
+    );
+  }, [identity, client]);
   const cursor = activeNavigation.cursors[activeNavigation.index];
   const [state, setState] = useState<{
     identity: string;
@@ -115,6 +127,7 @@ export function useConversationSearch(input: {
     error: string | null;
     scanned: number;
     accessDenied: boolean;
+    restartOnRetry: boolean;
   } | null>(null);
   const retryFrom = useRef<typeof state>(null);
   const [revision, setRevision] = useState(0);
@@ -122,6 +135,7 @@ export function useConversationSearch(input: {
     let active = true;
     if (!enabled || !query.trim()) {
       retryFrom.current = null;
+      setState(null);
       return;
     }
     const controller = new AbortController();
@@ -140,6 +154,7 @@ export function useConversationSearch(input: {
       error: null,
       scanned: checkpoint?.scannedMessages ?? 0,
       accessDenied: false,
+      restartOnRetry: false,
     };
     let progress = initial;
     setState(initial);
@@ -179,6 +194,7 @@ export function useConversationSearch(input: {
             loading: false,
             error: "Search could not be completed. Try again.",
             accessDenied: searchAccessDenied(error),
+            restartOnRetry: discardSearchResultsOnError(error),
           });
         },
       );
@@ -201,7 +217,11 @@ export function useConversationSearch(input: {
     debounceMs,
   ]);
   const currentState =
-    state?.identity === identity && state.client === client && state.cursor === cursor
+    enabled &&
+    !!query.trim() &&
+    state?.identity === identity &&
+    state.client === client &&
+    state.cursor === cursor
       ? state
       : null;
   const page = currentState?.page ?? null;
@@ -209,22 +229,25 @@ export function useConversationSearch(input: {
     if (!page?.hasMore || !page.nextCursor) return;
     setNavigation((previous) => {
       const current =
-        previous.identity === identity ? previous : { identity, cursors: [undefined], index: 0 };
+        previous.identity === identity && previous.client === client
+          ? previous
+          : { identity, client, cursors: [undefined], index: 0 };
       return {
         identity,
+        client,
         cursors: [...current.cursors.slice(0, current.index + 1), page.nextCursor!],
         index: current.index + 1,
       };
     });
-  }, [identity, page]);
+  }, [identity, client, page]);
   const previous = useCallback(
     () =>
       setNavigation((current) =>
-        current.identity === identity
+        current.identity === identity && current.client === client
           ? { ...current, index: Math.max(0, current.index - 1) }
           : current,
       ),
-    [identity],
+    [identity, client],
   );
   return {
     page,
@@ -239,7 +262,10 @@ export function useConversationSearch(input: {
       // A retry alone can resume partial progress. Closing/reopening or changing
       // identity must reauthorize from scratch rather than revive cached hits.
       retryFrom.current = currentState?.error && currentState.page?.hasMore ? currentState : null;
+      if (currentState?.restartOnRetry) {
+        setNavigation({ identity, client, cursors: [undefined], index: 0 });
+      }
       setRevision((value) => value + 1);
-    }, [currentState]),
+    }, [currentState, identity, client]),
   };
 }

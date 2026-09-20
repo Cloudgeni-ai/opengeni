@@ -22,15 +22,16 @@ export function useSessionSearchResource<T>(
     let active = true;
     if (!enabled) {
       retryFrom.current = null;
+      setResult(null);
       setPending(false);
       return;
     }
     const controller = new AbortController();
     const retained = retryFrom.current;
     retryFrom.current = null;
-    const value =
+    const retainedValue =
       retained?.identity === identity && retained.loader === load ? retained.value : null;
-    setResult({ identity, loader: load, value, error: null, accessDenied: false });
+    setResult({ identity, loader: load, value: retainedValue, error: null, accessDenied: false });
     setPending(true);
     const timer = window.setTimeout(() => {
       void Promise.resolve()
@@ -47,7 +48,7 @@ export function useSessionSearchResource<T>(
             setResult({
               identity,
               loader: load,
-              value: discardSearchResultsOnError(error) ? null : value,
+              value: discardSearchResultsOnError(error) ? null : retainedValue,
               error: "Search could not be loaded. Try again.",
               accessDenied: searchAccessDenied(error),
             });
@@ -62,7 +63,8 @@ export function useSessionSearchResource<T>(
     };
   }, [identity, load, enabled, debounceMs, revision]);
 
-  const current = result?.identity === identity && result.loader === load ? result : null;
+  const current =
+    enabled && result?.identity === identity && result.loader === load ? result : null;
   return {
     value: current?.value ?? null,
     error: current?.error ?? null,

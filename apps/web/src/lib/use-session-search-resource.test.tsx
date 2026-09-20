@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, StrictMode, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import { useSessionSearchResource } from "./use-session-search-resource";
@@ -179,6 +179,104 @@ test("a synchronous loader failure is a retryable visible error, not an unhandle
     });
     expect(state.loading).toBe(false);
     expect(state.error).toBe("Search could not be loaded. Try again.");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("disable and reopen never commit a retained preview before the live read", async () => {
+  const fresh = deferred();
+  let reads = 0;
+  const load = async () => (++reads === 1 ? "private preview" : fresh.promise);
+  let state!: ReturnType<typeof useSessionSearchResource<string>>;
+  const commits: Array<typeof state> = [];
+  function Probe({ enabled }: { enabled: boolean }) {
+    state = useSessionSearchResource("same-scope", load, enabled, 0);
+    useLayoutEffect(() => {
+      commits.push(state);
+    });
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  const flush = () =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    });
+  try {
+    await act(async () => root.render(<Probe enabled />));
+    await flush();
+    expect(state.value).toBe("private preview");
+    commits.length = 0;
+    await act(async () => root.render(<Probe enabled={false} />));
+    expect(commits.length).toBeGreaterThan(0);
+    for (const commit of commits) {
+      expect(commit.value).toBeNull();
+      expect(commit.error).toBeNull();
+      expect(commit.loading).toBe(false);
+    }
+    commits.length = 0;
+    await act(async () => root.render(<Probe enabled />));
+    await flush();
+    expect(commits.length).toBeGreaterThan(0);
+    for (const commit of commits) {
+      expect(commit.value).toBeNull();
+      expect(commit.error).toBeNull();
+      expect(commit.loading).toBe(true);
+    }
+    expect(reads).toBe(2);
+    await act(async () => fresh.resolve("authorized fresh preview"));
+    expect(state.value).toBe("authorized fresh preview");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("StrictMode clears an old resource denial before committing the reopened live read", async () => {
+  let denied = true;
+  let requests = 0;
+  const load = async () => {
+    requests++;
+    if (denied) throw new OpenGeniApiError(403, "denied");
+    return "authorized preview";
+  };
+  let state!: ReturnType<typeof useSessionSearchResource<string>>;
+  const commits: Array<typeof state> = [];
+  function Probe({ enabled }: { enabled: boolean }) {
+    state = useSessionSearchResource("same-scope", load, enabled, 0);
+    useLayoutEffect(() => {
+      commits.push(state);
+    });
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  const render = (enabled: boolean) =>
+    act(async () =>
+      root.render(
+        <StrictMode>
+          <Probe enabled={enabled} />
+        </StrictMode>,
+      ),
+    );
+  const flush = () =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    });
+  try {
+    await render(true);
+    await flush();
+    expect(state.accessDenied).toBe(true);
+    commits.length = 0;
+    await render(false);
+    expect(commits[0]).toMatchObject({ accessDenied: false, error: null, loading: false });
+    denied = false;
+    commits.length = 0;
+    await render(true);
+    expect(requests).toBe(1);
+    expect(commits[0]).toMatchObject({ accessDenied: false, error: null, loading: true });
+    await flush();
+    expect(requests).toBe(2);
+    expect(state.accessDenied).toBe(false);
+    expect(state.value).toBe("authorized preview");
   } finally {
     await act(async () => root.unmount());
   }
