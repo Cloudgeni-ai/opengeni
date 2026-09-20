@@ -53285,8 +53285,13 @@ export async function claimWorkspaceArchiveCapture(
         if (!attemptMayCapture) return { status: "attempt_fenced" as const };
       }
 
-      const rows = await scopedDb.execute<LeaseRow & { reaper_hold_active: boolean }>(sql`
+      const rows = await scopedDb.execute<
+        LeaseRow & { reaper_hold_active: boolean; periodic_capture_throttled: boolean }
+      >(sql`
         select lease.*,
+          coalesce(lease.archive_capture_last_attempt_at > now() -
+            (${input.minIntervalMs}::bigint * interval '1 millisecond'), false)
+            as periodic_capture_throttled,
           (lease.reaper_hold_id is not null and lease.reaper_hold_until > now())
             as reaper_hold_active
         from sandbox_leases lease
@@ -53312,6 +53317,9 @@ export async function claimWorkspaceArchiveCapture(
       }
       if (row.archive_capture_id !== null) {
         return { status: "capture_in_progress" as const };
+      }
+      if (input.minIntervalMs > 0 && row.periodic_capture_throttled) {
+        return { status: "throttled" as const };
       }
       const holderCounts = input.warmAttempt
         ? await scopedDb.execute<{
@@ -53417,6 +53425,7 @@ export async function claimWorkspaceArchiveCapture(
           archive_capture_attempt = ${captureAttempt},
           archive_capture_generation = workspace_generation,
           archive_capture_started_at = now(),
+          archive_capture_last_attempt_at = now(),
           archive_capture_deadline_at = now() +
             (${input.captureTimeoutMs}::bigint * interval '1 millisecond'),
           archive_capture_published_at = null,

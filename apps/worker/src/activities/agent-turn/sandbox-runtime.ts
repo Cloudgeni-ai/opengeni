@@ -564,8 +564,10 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
       // MID-SESSION snapshot (sandbox-file-persistence): while the turn holds
       // the box, fold a fresh /workspace snapshot onto the lease every
       // sandboxSnapshotIntervalMs, so a box death the reaper never sees
-      // (Modal hard timeout mid-busy, OOM, infra) costs at most one interval
-      // of work — a legit multi-day turn is otherwise completely unprotected
+      // (Modal hard timeout mid-busy, OOM, infra) has a recent recovery point
+      // when capture succeeds. This interval is not a maximum recovery-point
+      // age: live writers and failed captures can defer publication. A legit
+      // multi-day turn is otherwise completely unprotected
       // (the reaper only drain-persists IDLE leases). Uses the UN-proxied box
       // session (setupBoxSession): the routing veneer could swap mid-op and a
       // selfhosted target has no persistWorkspace anyway. Best-effort +

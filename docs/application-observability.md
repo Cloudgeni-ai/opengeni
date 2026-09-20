@@ -20,6 +20,13 @@ under the physical attempt. Completed duration measurements are siblings, not
 claims that one completed operation caused another. Existing first-startup
 phase deduplication is unchanged; model-call and MCP timing are per invocation.
 
+Periodic capture cadence uses a durable attempt clock,
+not only the last successful archive: a failed provider call releases its exact
+admission gate but cannot immediately start another periodic capture on the next
+heartbeat. The configured interval is a start-to-start cadence, not a maximum
+recovery-point age. Forced finalization/recovery bypasses this cadence only; all
+ownership, active-capture and possible-writer fences still apply.
+
 Workspace capture admission is measured on every routed operation, including
 operations after startup. `opengeni_sandbox_capture_wait_duration_seconds`
 separates durable admission and provider capture gates using closed `stage`

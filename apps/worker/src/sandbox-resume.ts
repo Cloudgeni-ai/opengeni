@@ -894,6 +894,9 @@ async function persistWarmWorkspaceSnapshot(
         : {}),
     });
     if (claimed.status !== "claimed") {
+      // A scheduled interval not being due is normal, including after a failed
+      // attempt. Do not turn every ten-second heartbeat into an error log.
+      if (claimed.status === "throttled") return false;
       console.error("mid-session workspace snapshot skipped (capture claim)", {
         sandboxGroupId: ids.sandboxGroupId,
         status: claimed.status,
