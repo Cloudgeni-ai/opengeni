@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, jest, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, StrictMode, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -432,6 +432,9 @@ test("StrictMode starts one live request and cancels it on unmount", async () =>
 });
 
 test("StrictMode clears an old denial before committing the reopened live search", async () => {
+  // Async act may yield long enough for a real zero-delay request timer to
+  // fire. Control that boundary so the first-commit assertions precede it.
+  jest.useFakeTimers();
   let denied = true;
   let requests = 0;
   const view = await harness(async () => {
@@ -440,7 +443,7 @@ test("StrictMode clears an old denial before committing the reopened live search
     return page();
   }, true);
   try {
-    await flush();
+    await act(async () => jest.advanceTimersByTime(0));
     expect(view.state().accessDenied).toBe(true);
     view.commits.length = 0;
     await view.render({ enabled: false });
@@ -450,12 +453,13 @@ test("StrictMode clears an old denial before committing the reopened live search
     await view.render({ enabled: true });
     expect(requests).toBe(1);
     expect(view.commits[0]).toMatchObject({ accessDenied: false, error: null, loading: true });
-    await flush();
+    await act(async () => jest.advanceTimersByTime(0));
     expect(requests).toBe(2);
     expect(view.state().accessDenied).toBe(false);
     expect(view.state().page).not.toBeNull();
   } finally {
     await view.unmount();
+    jest.useRealTimers();
   }
 });
 
