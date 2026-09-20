@@ -73,6 +73,8 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "read_sender_connection(uuid, uuid, uuid, text)",
+  "validate_mcp_account_bindings(jsonb, jsonb)",
+  "fence_mcp_account_bindings()",
   "guard_mcp_operation_immutable()",
   "mcp_operation_command_scoped(jsonb, text, jsonb)",
   "guard_workspace_owned_skill_head_delete()",
@@ -3654,6 +3656,27 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
     const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
+    if (
+      ["validate_mcp_account_bindings(jsonb, jsonb)", "fence_mcp_account_bindings()"].includes(
+        routine.name,
+      )
+    ) {
+      if (routine.execute || routine.publicExecute) {
+        violations.push(
+          `runtime or PUBLIC has forbidden EXECUTE on MCP account binding internal routine ${routine.name}`,
+        );
+      }
+      if (routine.owner !== tableByName.get("session_turns")?.owner) {
+        violations.push(
+          `MCP account binding internal routine ${routine.name} owner does not match turn owner`,
+        );
+      }
+      if (routine.securityDefiner !== (routine.name === "fence_mcp_account_bindings()")) {
+        violations.push(
+          `MCP account binding internal routine ${routine.name} has unsafe execution mode`,
+        );
+      }
+    }
     if (
       routine.name === "read_sender_connection(uuid, uuid, uuid, text)" &&
       (routine.execute || routine.publicExecute)
