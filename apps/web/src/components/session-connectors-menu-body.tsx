@@ -158,6 +158,9 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
           const connect = server.connectionStatus === "connect";
           const unavailable = server.connectionStatus === "unavailable";
           const busy = props.busyId === server.id;
+          // Turning a selected connector off must not require usable credentials.
+          // An unusable connector that is already off still needs setup, not a toggle on.
+          const setupAction = (connect || repair || unavailable) && !(customizing && selected);
           const rowLocked = !customizing && !connect && !repair && !unavailable;
           return (
             <div
@@ -168,22 +171,24 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
                 presentation={props.presentation}
                 keepOpen
                 key={server.id}
-                checked={connect || repair || unavailable || rowLocked ? undefined : selected}
+                checked={setupAction || rowLocked ? undefined : selected}
                 label={
-                  connect
-                    ? `Connect your ${server.name} account`
-                    : repair
-                      ? `Reconnect ${server.name}`
-                      : unavailable
-                        ? `${server.name} unavailable`
-                        : rowLocked
-                          ? `${server.name}${selected ? ", on for this session" : ", off for this session"}`
-                          : server.name
+                  customizing && selected
+                    ? server.name
+                    : connect
+                      ? `Connect your ${server.name} account`
+                      : repair
+                        ? `Reconnect ${server.name}`
+                        : unavailable
+                          ? `${server.name} unavailable`
+                          : rowLocked
+                            ? `${server.name}${selected ? ", on for this session" : ", off for this session"}`
+                            : server.name
                 }
                 disabled={busy}
                 locked={rowLocked}
                 onAction={() => {
-                  if (connect || repair || unavailable) {
+                  if (setupAction) {
                     props.onReconnect?.(server.id);
                     return;
                   }
@@ -218,10 +223,14 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
                   {connect || repair || unavailable ? (
                     <span className="block text-2xs text-status-waiting">
                       {connect
-                        ? "Connect your account"
+                        ? setupAction
+                          ? "Connect your account"
+                          : "No connected account"
                         : repair
                           ? "Reconnect required"
-                          : "Unavailable · Manage connection"}
+                          : setupAction
+                            ? "Unavailable · Manage connection"
+                            : "Unavailable"}
                     </span>
                   ) : null}
                   {server.connectionStatus === "unknown" ? (
@@ -230,12 +239,12 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
                 </span>
                 {busy ? (
                   <Loader2Icon className="size-4 animate-spin" />
+                ) : customizing && !setupAction ? (
+                  <ComposerMenuSwitchIndicator checked={selected} />
                 ) : connect ? (
                   <PlugIcon className="size-4 text-fg-muted" />
                 ) : repair || unavailable ? (
                   <RefreshCwIcon className="size-4 text-fg-muted" />
-                ) : customizing ? (
-                  <ComposerMenuSwitchIndicator checked={selected} />
                 ) : selected ? (
                   <CheckIcon className="size-4 text-fg-muted" aria-hidden />
                 ) : (
