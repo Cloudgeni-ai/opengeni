@@ -7,6 +7,7 @@ import {
   acknowledgeConsumedChildEvents,
   appendSessionEvents,
   reconcileHistoricalChildReadAcknowledgments,
+  removeWorkspaceMember,
   addSessionSystemUpdateWithSourceMutation,
   applySessionTurnSettlement,
   bootstrapWorkspace,
@@ -393,7 +394,129 @@ async function enqueueHumanTurn(grant: Grant, sessionId: string): Promise<void> 
   });
 }
 
+async function recordHistoricalResult(grant: Grant, parent: Started, child: Started) {
+  const sequence = await lastMeaningfulSequence(child.session.id);
+  const id = crypto.randomUUID();
+  await appendSessionEvents(client.db, grant.workspaceId, parent.session.id, [
+    {
+      type: "agent.toolCall.created",
+      turnId: parent.turn.id,
+      turnAssociation: "current",
+      payload: {
+        id,
+        name: "opengeni__session_events",
+        arguments: JSON.stringify({ sessionId: child.session.id, view: "results" }),
+      },
+    },
+    {
+      type: "agent.toolCall.output",
+      turnId: parent.turn.id,
+      turnAssociation: "current",
+      payload: {
+        id,
+        output: {
+          view: "results",
+          sourceExact: true,
+          events: [{ sequence, type: "turn.completed", text: "Test answer" }],
+        },
+      },
+    },
+  ]);
+  return { workspaceId: grant.workspaceId, parentSessionId: parent.session.id, apply: true };
+}
+
 describe("child read acknowledgment on parent consumption", () => {
+  test("historical replay after membership removal cannot recreate the frozen human's personal rows", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "parent" });
+    const child = await startSession(grant, { parent, message: "child" });
+    await settleIdle(grant, child);
+    const input = await recordHistoricalResult(grant, parent, child);
+    const actorSubjectId = `user:remover-${crypto.randomUUID()}`;
+    await grantWorkspaceAccess(client.db, {
+      ...grant,
+      subjectId: actorSubjectId,
+      permissions: ["workspace:admin"],
+    });
+    expect(
+      await removeWorkspaceMember(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        actorSubjectId,
+        targetSubjectId: grant.subjectId,
+      }),
+    ).toBe(true);
+    expect((await reconcileHistoricalChildReadAcknowledgments(client.db, input)).provenEvents).toBe(
+      1,
+    );
+    expect(await pinRow(grant.subjectId, child.session.id)).toBeNull();
+  });
+
+  test("historical replay yields to concurrent removal's exclusive fence and remains blocked after removal", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "parent" });
+    const child = await startSession(grant, { parent, message: "child" });
+    await settleIdle(grant, child);
+    const input = await recordHistoricalResult(grant, parent, child);
+    const actorSubjectId = `user:remover-${crypto.randomUUID()}`;
+    await grantWorkspaceAccess(client.db, {
+      ...grant,
+      subjectId: actorSubjectId,
+      permissions: ["workspace:admin"],
+    });
+    // Keep the actual canonical removal transaction uncommitted while repair
+    // runs. Its exclusive personal-state fence must make repair a clean no-op.
+    await client.db.transaction(async (tx) => {
+      expect(
+        await removeWorkspaceMember(tx as unknown as typeof client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          actorSubjectId,
+          targetSubjectId: grant.subjectId,
+        }),
+      ).toBe(true);
+      expect(
+        (await reconcileHistoricalChildReadAcknowledgments(client.db, input)).provenEvents,
+      ).toBe(1);
+      expect(await pinRow(grant.subjectId, child.session.id)).toBeNull();
+    });
+    await reconcileHistoricalChildReadAcknowledgments(client.db, input);
+    expect(await pinRow(grant.subjectId, child.session.id)).toBeNull();
+  });
+
+  test("historical replay accepts the still-active exact Personal owner without a workspace membership row", async () => {
+    const userId = `personal-history-${crypto.randomUUID()}`;
+    const provisioned = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Personal history owner",
+    });
+    const membership = provisioned.organizationMemberships[0]!;
+    if (!membership.personalWorkspaceId) throw new Error("Personal owner fixture missing pointer");
+    const grant: Grant = {
+      accountId: membership.organizationId,
+      workspaceId: membership.personalWorkspaceId,
+      subjectId: `user:${userId}`,
+    };
+    await shared.admin`insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (${grant.accountId}, 1, ${"a".repeat(64)}, ${"b".repeat(64)}, 'historical-read-test')
+      on conflict (account_id) do nothing`;
+    const [row] = await shared.admin`select count(*)::int as count from workspace_memberships
+      where workspace_id=${grant.workspaceId} and subject_id=${grant.subjectId}`;
+    expect(row!.count).toBe(0);
+    const parent = await startSession(grant, { message: "parent" });
+    const child = await startSession(grant, { parent, message: "child" });
+    await settleIdle(grant, child);
+    const input = await recordHistoricalResult(grant, parent, child);
+    expect((await reconcileHistoricalChildReadAcknowledgments(client.db, input)).provenEvents).toBe(
+      1,
+    );
+    expect((await pinRow(grant.subjectId, child.session.id))?.acknowledged_sequence).toBe(
+      await lastMeaningfulSequence(child.session.id),
+    );
+  });
+
   test("historical exact result receipts reconcile only their frozen human and default to dry-run", async () => {
     const grant = await workspace();
     const other = await member(grant);
@@ -462,6 +585,11 @@ describe("child read acknowledgment on parent consumption", () => {
     const root = await startSession(grant, { message: "root" });
     const parent = await startSession(grant, { parent: root, message: "parent" });
     const child = await startSession(grant, { parent, message: "child" });
+    await appendSessionEvents(client.db, grant.workspaceId, child.session.id, [
+      { type: "agent.message.completed", payload: { text: "Inspecting the implementation" } },
+      { type: "goal.progress", payload: { text: "Validation in progress" } },
+      { type: "agent.message.completed", payload: { text: "Tests have finished" } },
+    ]);
     await settleIdle(grant, child);
     await deliverOutboxTo(parent.session.id);
     await settleIdle(grant, parent);
@@ -532,11 +660,15 @@ describe("child read acknowledgment on parent consumption", () => {
     ).toBe(true);
   });
 
-  test("explicit reads require meaningful complete prefixes, a human and a direct child", async () => {
+  test("complete final reads are cumulative; other reads require prefixes, a human and a direct child", async () => {
     const grant = await workspace();
     const other = await member(grant);
     const parent = await startSession(grant, { message: "parent" });
     const child = await startSession(grant, { parent, message: "child" });
+    await appendSessionEvents(client.db, grant.workspaceId, child.session.id, [
+      { type: "agent.message.completed", payload: { text: "Earlier commentary" } },
+      { type: "goal.progress", payload: { text: "Earlier progress" } },
+    ]);
     await settleIdle(grant, child);
     const first = await lastMeaningfulSequence(child.session.id);
     await appendSessionEvents(client.db, grant.workspaceId, child.session.id, [
@@ -568,7 +700,13 @@ describe("child read acknowledgment on parent consumption", () => {
       (await getSessionForSubject(client.db, grant.workspaceId, child.session.id, grant.subjectId))
         ?.unread,
     ).toBe(true);
-    await read([first, second]);
+    await read([first]); // complete final summarizes prior commentary/progress
+    expect((await pinRow(grant.subjectId, child.session.id))!.acknowledged_sequence).toBe(first);
+    expect(
+      (await getSessionForSubject(client.db, grant.workspaceId, child.session.id, grant.subjectId))
+        ?.unread,
+    ).toBe(true); // the genuinely newer answer is still unseen
+    await read([second]);
     expect((await pinRow(grant.subjectId, child.session.id))!.acknowledged_sequence).toBe(second);
     expect(await pinRow(other, child.session.id)).toBeNull();
 
@@ -583,12 +721,14 @@ describe("child read acknowledgment on parent consumption", () => {
       (await getSessionForSubject(client.db, grant.workspaceId, child.session.id, grant.subjectId))
         ?.unread,
     ).toBe(true);
-    await setSessionAttention(client.db, {
-      workspaceId: grant.workspaceId,
-      subjectId: grant.subjectId,
-      sessionId: child.session.id,
-      unread: false,
-    });
+    await appendSessionEvents(client.db, grant.workspaceId, child.session.id, [
+      { type: "sandbox.box.terminated", payload: {} },
+    ]);
+    await read([await lastSequence(child.session.id)]);
+    expect(
+      (await getSessionForSubject(client.db, grant.workspaceId, child.session.id, grant.subjectId))
+        ?.unread,
+    ).toBe(true); // newer housekeeping does not supersede explicit intent
     await appendSessionEvents(client.db, grant.workspaceId, child.session.id, [
       { type: "agent.message.completed", payload: { text: "Third answer" } },
     ]);
@@ -1112,7 +1252,7 @@ describe("child read acknowledgment on parent consumption", () => {
     expect(marked?.unread).toBe(true);
   });
 
-  test("a later consumption preserves an explicit mark-unread", async () => {
+  test("genuinely newer lifecycle consumption supersedes an explicit mark-unread", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { message: "orchestrate" });
     const child = await startSession(grant, { parent, message: "work" });
@@ -1131,8 +1271,8 @@ describe("child read acknowledgment on parent consumption", () => {
     });
     expect(marked?.unread).toBe(true);
 
-    // New child work and another proven consumption must not override the
-    // human's explicit attention choice.
+    // Replaying old evidence must not override intent, but consuming genuinely
+    // newer child work does. Its event position, not claim time, is the fence.
     await enqueueHumanTurn(grant, child.session.id);
     const reclaimed = await claim(grant, child.session.id);
     if (reclaimed.action !== "claimed") throw new Error("child turn was not reclaimed");
@@ -1156,9 +1296,9 @@ describe("child read acknowledgment on parent consumption", () => {
       child.session.id,
       grant.subjectId,
     );
-    expect(afterSecondConsumption?.unread).toBe(true);
+    expect(afterSecondConsumption?.unread).toBe(false);
     expect(await pinRow(grant.subjectId, child.session.id)).toMatchObject({
-      acknowledged_sequence: -1,
+      acknowledged_sequence: await lastMeaningfulSequence(child.session.id),
     });
   });
 

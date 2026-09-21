@@ -138,7 +138,7 @@ describe("release schema contract", () => {
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     const meaningfulAttention = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0502_session_meaningful_attention.sql",
+      (migration) => migration.path === "0503_session_meaningful_attention.sql",
     );
     const sessionExecutionEpoch = completeSourceContract.migrations.some(
       (migration) => migration.path === "0500_session_execution_epoch.sql",
@@ -607,11 +607,11 @@ describe("release schema contract", () => {
       ...(sessionAttachmentAccess ? { latestMigration: "0499_session_attachment_access.sql" } : {}),
       ...(sessionExecutionEpoch ? { latestMigration: "0500_session_execution_epoch.sql" } : {}),
       ...(sessionSharingExecution ? { latestMigration: "0501_session_sharing_execution.sql" } : {}),
-      ...(meaningfulAttention ? { latestMigration: "0502_session_meaningful_attention.sql" } : {}),
+      ...(meaningfulAttention ? { latestMigration: "0503_session_meaningful_attention.sql" } : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
       path: meaningfulAttention
-        ? "0502_session_meaningful_attention.sql"
+        ? "0503_session_meaningful_attention.sql"
         : sessionSharingExecution
           ? "0501_session_sharing_execution.sql"
           : sessionAttachmentAccess
@@ -1791,7 +1791,7 @@ describe("release schema contract", () => {
   test("preserves published host-export history and appends the forward repair", async () => {
     const unfilteredSourceContract = await buildCompleteSchemaContract();
     const meaningfulAttention = unfilteredSourceContract.migrations.some(
-      (migration) => migration.path === "0502_session_meaningful_attention.sql",
+      (migration) => migration.path === "0503_session_meaningful_attention.sql",
     );
     const sessionExecutionEpoch = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0500_session_execution_epoch.sql",
@@ -2396,7 +2396,7 @@ describe("release schema contract", () => {
       "0499_session_attachment_access.sql",
       "0500_session_execution_epoch.sql",
       "0501_session_sharing_execution.sql",
-      "0502_session_meaningful_attention.sql",
+      "0503_session_meaningful_attention.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2928,7 +2928,7 @@ describe("release schema contract", () => {
     if (meaningfulAttention)
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0502_session_meaningful_attention.sql",
+        latestMigration: "0503_session_meaningful_attention.sql",
       };
     expect(completeSourceContract).toMatchObject({
       fileCount:
@@ -3380,7 +3380,7 @@ describe("release schema contract", () => {
       ...(sessionAttachmentAccess ? { latestMigration: "0499_session_attachment_access.sql" } : {}),
       ...(sessionExecutionEpoch ? { latestMigration: "0500_session_execution_epoch.sql" } : {}),
       ...(sessionSharingExecution ? { latestMigration: "0501_session_sharing_execution.sql" } : {}),
-      ...(meaningfulAttention ? { latestMigration: "0502_session_meaningful_attention.sql" } : {}),
+      ...(meaningfulAttention ? { latestMigration: "0503_session_meaningful_attention.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport

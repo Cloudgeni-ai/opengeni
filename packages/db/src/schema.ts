@@ -5383,7 +5383,9 @@ export const sessionPins = pgTable(
     // Compare the meaningful event frontier, not the raw durable cursor.
     // Merely opening a route never changes this per-subject fence.
     acknowledgedSequence: integer("acknowledged_sequence").notNull().default(0),
-    manuallyUnread: boolean("manually_unread").notNull().default(false),
+    // A replay at/before this raw event position cannot consume explicit intent.
+    // A genuinely newer proven read, or an explicit mark-read, removes it.
+    manuallyUnreadThrough: integer("manually_unread_through"),
     activelyWorking: boolean("actively_working").notNull().default(false),
     attentionVersion: integer("attention_version").notNull().default(0),
     archived: boolean("archived").notNull().default(false),

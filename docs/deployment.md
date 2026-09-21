@@ -1,17 +1,28 @@
 # Deployment
 
-## Meaningful child attention (0502)
+## Meaningful child attention (0503)
 
-`0502_session_meaningful_attention.sql` is a maintenance migration. Stop all old
+`0503_session_meaningful_attention.sql` is a maintenance migration. Stop all old
 API/control/turn workers, provide the exact application login list through
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`),
 and migrate before starting the matching binary. Do not restart pre-0502 writers:
-they do not maintain the new personal `manually_unread` intent field.
+they do not maintain the new personal `manually_unread_through` intent fence.
+The nullable sequence (not a sticky boolean) is necessary to distinguish replay
+of an old answer from consumption of activity newer than a human mark-unread.
+Existing attention revisions do not record that event position. Although the
+column is additive, old attention writers neither capture nor clear its fence
+and old claim writers still advance to the current raw cursor. A mixed-version
+rollout would therefore violate the attention contract; this focused migration
+uses a drain rather than adding a second compatibility-trigger protocol.
 
-The owner-only transactional NO FORCE windows cover both `session_pins` and
-`session_event_cursors` and restore FORCE RLS before commit. The backfill protects
-ambiguous historical human attention intent; it never advances an acknowledgement
-cursor. Meaningful frontier derivation clears bookkeeping-only dots without a
+The owner-only transactional NO FORCE windows cover `session_pins`,
+`session_event_cursors`, and `session_events` and restore FORCE RLS before commit. The backfill protects
+ambiguous historical human attention intent at the migration-time raw frontier;
+only a newer proven consumed event or explicit mark-read clears that protection.
+Human-read-through-final rows followed only by cleanup are not fenced. The old
+schema cannot distinguish a manual mark made only against housekeeping from such
+a read; no historical intent is invented when meaningful work is already read.
+The backfill never advances an acknowledgement cursor. Meaningful frontier derivation clears bookkeeping-only dots without a
 backfill over event history. Optional bounded historical consumption repair is
 dry-run by default; see [session monitoring](session-monitoring-mcp.md#child-unread-and-consumption).
 

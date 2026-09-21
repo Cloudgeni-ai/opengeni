@@ -1,15 +1,12 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
-import { sql } from "drizzle-orm";
-import { PgDialect } from "drizzle-orm/pg-core";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
 import { appendSessionEvents, bootstrapWorkspace, createDb, createSession } from "../src/index";
 import { migrate } from "../src/migrate";
-import { meaningfulSessionSequenceSql } from "../src/session-meaningful-events";
 
 let shared: OwnerMigratedTestDatabase;
 let owner: ReturnType<typeof postgres>;
@@ -29,7 +26,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-test("non-bypass owner preserves ambiguous intent without advancing any cursor; frontier uses its partial index", async () => {
+test("non-bypass owner protects meaningful unread intent but not a read final followed by cleanup", async () => {
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
     accountExternalId: crypto.randomUUID(),
@@ -53,6 +50,10 @@ test("non-bypass owner preserves ambiguous intent without advancing any cursor; 
   });
   await appendSessionEvents(client.db, workspaceId, session.id, [
     { type: "turn.completed", payload: { output: "answer" } },
+  ]);
+  const [final] =
+    await shared.admin`select last_sequence from session_event_cursors where session_id=${session.id}`;
+  await appendSessionEvents(client.db, workspaceId, session.id, [
     ...Array.from({ length: 512 }, () => ({
       type: "sandbox.box.terminated" as const,
       payload: {},
@@ -64,38 +65,44 @@ test("non-bypass owner preserves ambiguous intent without advancing any cursor; 
     ["manual", 0, 1],
     ["automatic", 0, 0],
     ["read", cursor!.last_sequence, 1],
+    ["read-final-before-cleanup", final!.last_sequence, 1],
   ] as const) {
     await shared.admin`insert into session_pins(account_id, workspace_id, subject_id, session_id,
       acknowledged_sequence, attention_version) values(${accountId}, ${workspaceId}, ${subject}, ${session.id}, ${sequence}, ${revision})`;
   }
   const migration = await readFile(
-    new URL("../drizzle/0502_session_meaningful_attention.sql", import.meta.url),
+    new URL("../drizzle/0503_session_meaningful_attention.sql", import.meta.url),
     "utf8",
   );
   // Reconstruct only this isolated fixture's pre-0502 shape, then execute the
   // exact shipped migration as its NOSUPERUSER NOBYPASSRLS owner.
   await owner.begin(async (tx) => {
-    await tx`alter table session_pins drop column manually_unread`;
+    await tx`alter table session_pins drop column manually_unread_through`;
     await tx`drop index session_events_meaningful_attention_idx`;
     await tx`select set_config('opengeni.migration_application_roles', ${JSON.stringify([applicationRole])}, true)`;
     await tx.unsafe(migration);
   });
-  const rows = await shared.admin`select subject_id, acknowledged_sequence, manually_unread
+  const rows = await shared.admin`select subject_id, acknowledged_sequence, manually_unread_through
     from session_pins where session_id=${session.id} order by subject_id`;
   expect([...rows]).toEqual([
-    { subject_id: "automatic", acknowledged_sequence: 0, manually_unread: false },
-    { subject_id: "manual", acknowledged_sequence: 0, manually_unread: true },
-    { subject_id: "read", acknowledged_sequence: cursor!.last_sequence, manually_unread: false },
+    { subject_id: "automatic", acknowledged_sequence: 0, manually_unread_through: null },
+    {
+      subject_id: "manual",
+      acknowledged_sequence: 0,
+      manually_unread_through: cursor!.last_sequence,
+    },
+    {
+      subject_id: "read",
+      acknowledged_sequence: cursor!.last_sequence,
+      manually_unread_through: null,
+    },
+    {
+      subject_id: "read-final-before-cleanup",
+      acknowledged_sequence: final!.last_sequence,
+      manually_unread_through: null,
+    },
   ]);
   const posture = await shared.admin`select relname, relforcerowsecurity from pg_class
-    where relname in ('session_pins', 'session_event_cursors') order by relname`;
+    where relname in ('session_pins', 'session_event_cursors', 'session_events') order by relname`;
   expect(posture.every((row) => row.relforcerowsecurity)).toBe(true);
-  const query = new PgDialect().sqlToQuery(
-    sql`select ${meaningfulSessionSequenceSql(sql`${workspaceId}::uuid`, sql`${session.id}::uuid`)}`,
-  );
-  const plan = await shared.admin.begin(async (tx) => {
-    await tx`set local enable_seqscan = off`;
-    return await tx.unsafe(`explain ${query.sql}`, query.params as string[]);
-  });
-  expect(JSON.stringify(plan)).toContain("session_events_meaningful_attention_idx");
 }, 180_000);

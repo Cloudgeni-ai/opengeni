@@ -10,6 +10,8 @@ import {
   getSessionForSubject,
   grantWorkspaceAccess,
   initializeSessionStartAtomically,
+  listSessionsForSubject,
+  setSessionAttention,
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
@@ -96,6 +98,9 @@ async function fixture(output = "Whole final answer") {
     },
   });
   await appendSessionEvents(client.db, workspaceId, child.id, [
+    { type: "agent.message.completed", payload: { text: "Inspecting the implementation" } },
+    { type: "goal.progress", payload: { text: "Validation in progress" } },
+    { type: "agent.message.completed", payload: { text: "Tests have finished" } },
     { type: "turn.completed", payload: { output } },
   ]);
   const grant: AccessGrant = {
@@ -152,7 +157,14 @@ async function fixture(output = "Whole final answer") {
   };
   const unread = async (subjectId = human) =>
     (await getSessionForSubject(client.db, workspaceId, child.id, subjectId))!.unread;
-  return { call, unread, otherHuman, workspaceId, child };
+  const ancestorUnread = async () => {
+    const page = await listSessionsForSubject(client.db, workspaceId, {
+      subjectId: human,
+      parentSessionId: null,
+    });
+    return page.sessions.find((session) => session.id === parent.id)!.treeStats!.unreadDescendants;
+  };
+  return { call, unread, otherHuman, workspaceId, child, ancestorUnread, human };
 }
 
 test("actual session_events acknowledges the exact parent turn human; status reads do not", async () => {
@@ -160,7 +172,9 @@ test("actual session_events acknowledges the exact parent turn human; status rea
   await f.call("session_get", { sessionId: f.child.id });
   expect(await f.unread()).toBe(true);
   const page = await f.call("session_events", { sessionId: f.child.id, view: "results" });
-  expect(page.events[0].text).toBe("Whole final answer");
+  expect(page.events.some((event: { text?: string }) => event.text === "Whole final answer")).toBe(
+    true,
+  );
   expect(await f.unread()).toBe(false);
   expect(await f.unread(f.otherHuman)).toBe(true);
 }, 60_000);
@@ -185,7 +199,11 @@ test("actual complete wait result followed by cleanup stays read; a new answer r
     waitFor: "completion",
     maxWaitSeconds: 1,
   });
-  expect(result.changed[0].events[0].text).toBe("Whole final answer");
+  expect(
+    result.changed[0].events.some(
+      (event: { text?: string }) => event.text === "Whole final answer",
+    ),
+  ).toBe(true);
   expect(await f.unread()).toBe(false);
   await appendSessionEvents(client.db, f.workspaceId, f.child.id, [
     { type: "sandbox.box.terminated", payload: {} },
@@ -197,4 +215,53 @@ test("actual complete wait result followed by cleanup stays read; a new answer r
     { type: "agent.message.completed", payload: { text: "New answer" } },
   ]);
   expect(await f.unread()).toBe(true);
+}, 60_000);
+
+test("actual results-only final consumes earlier commentary through its exact watermark and clears ancestors", async () => {
+  const f = await fixture();
+  expect(await f.ancestorUnread()).toBe(1);
+  const page = await f.call("session_events", {
+    sessionId: f.child.id,
+    view: "results",
+    limit: 1,
+    direction: "before",
+  });
+  expect(page.events).toHaveLength(1);
+  expect(page.events[0].text).toBe("Whole final answer");
+  expect(page.sourceExact).toBe(true);
+  expect(await f.unread()).toBe(false);
+  expect(await f.ancestorUnread()).toBe(0);
+  await appendSessionEvents(client.db, f.workspaceId, f.child.id, [
+    { type: "sandbox.box.terminated", payload: {} },
+    { type: "workspace.revision.captured", payload: {} },
+    { type: "turn.event.rejected_late", payload: { originalType: "turn.completed" } },
+  ]);
+  expect(await f.unread()).toBe(false);
+  expect(await f.ancestorUnread()).toBe(0);
+  await setSessionAttention(client.db, {
+    workspaceId: f.workspaceId,
+    subjectId: f.human,
+    sessionId: f.child.id,
+    unread: true,
+  });
+  await f.call("session_events", {
+    sessionId: f.child.id,
+    view: "results",
+    limit: 1,
+    direction: "before",
+  });
+  expect(await f.unread()).toBe(true); // same final replay cannot clear later human intent
+  await appendSessionEvents(client.db, f.workspaceId, f.child.id, [
+    { type: "turn.completed", payload: { output: "Genuinely newer final answer" } },
+  ]);
+  expect(await f.unread()).toBe(true);
+  expect(await f.ancestorUnread()).toBe(1);
+  await f.call("session_events", {
+    sessionId: f.child.id,
+    view: "results",
+    limit: 1,
+    direction: "before",
+  });
+  expect(await f.unread()).toBe(false);
+  expect(await f.ancestorUnread()).toBe(0);
 }, 60_000);

@@ -64,3 +64,21 @@ export function meaningfulSessionSequenceSql(
       order by meaningful.sequence desc limit 1
     ), 0)`;
 }
+
+/** Bound indexed candidate rows BEFORE testing payload size/completeness. Without
+ * this boundary, a long run of oversized answers can cause an unbounded scan. */
+export function childLifecycleEvidenceCandidatesSql(
+  workspaceId: SQLWrapper,
+  sessionId: SQLWrapper,
+): SQL {
+  return sql`with candidates as materialized (
+    select meaningful.* from session_events meaningful
+    where meaningful.workspace_id = ${workspaceId} and meaningful.session_id = ${sessionId}
+      and ${meaningfulSessionEventSql("meaningful")}
+    order by meaningful.sequence desc limit 32
+  )
+  select candidates.sequence, candidates.type, candidates.payload from candidates
+  where ${completeMeaningfulSessionEventSql("candidates")}
+    and octet_length(candidates.payload::text) <= 8192
+  order by candidates.sequence desc`;
+}

@@ -25,6 +25,7 @@ import {
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
 import {
+  childLifecycleEvidenceCandidatesSql,
   completeMeaningfulSessionEventSql,
   meaningfulSessionEventSql,
   meaningfulSessionSequenceSql,
@@ -34640,7 +34641,7 @@ type SessionPinRow = Pick<
   | "pinnedAt"
   | "version"
   | "acknowledgedSequence"
-  | "manuallyUnread"
+  | "manuallyUnreadThrough"
   | "activelyWorking"
   | "attentionVersion"
   | "archived"
@@ -34781,7 +34782,7 @@ function mapSessionAttention(
   return row
     ? {
         unread:
-          row.manuallyUnread ||
+          row.manuallyUnreadThrough != null ||
           (session.meaningfulSequence ?? session.lastSequence) > row.acknowledgedSequence,
         activelyWorking: row.activelyWorking,
         attentionVersion: Number(row.attentionVersion),
@@ -35124,7 +35125,7 @@ export async function sessionTreeStatsForSessions(
               and status = 'failed'
               and ${subjectId ?? null}::text is not null
               and last_sequence > coalesce((
-                select case when personal.manually_unread then -1 else personal.acknowledged_sequence end
+                select case when personal.manually_unread_through is not null then -1 else personal.acknowledged_sequence end
                 from ${schema.sessionPins} personal
                 where personal.workspace_id = ${workspaceId}
                   and personal.subject_id = ${subjectId ?? null}
@@ -35136,7 +35137,7 @@ export async function sessionTreeStatsForSessions(
               and depth > 0
               and ${subjectId ?? null}::text is not null
               and last_sequence > coalesce((
-                select case when personal.manually_unread then -1 else personal.acknowledged_sequence end
+                select case when personal.manually_unread_through is not null then -1 else personal.acknowledged_sequence end
                 from ${schema.sessionPins} personal
                 where personal.workspace_id = ${workspaceId}
                   and personal.subject_id = ${subjectId ?? null}
@@ -36687,10 +36688,15 @@ export async function setSessionAttention(
                   ),
                 );
         const desiredActivelyWorking = input.activelyWorking ?? current.activelyWorking;
-        const manuallyUnread = input.unread ?? existing?.manuallyUnread ?? false;
+        const manuallyUnreadThrough =
+          input.unread === undefined
+            ? (existing?.manuallyUnreadThrough ?? null)
+            : input.unread
+              ? session.lastSequence
+              : null;
         if (
           acknowledgedSequence === currentAcknowledgedSequence &&
-          manuallyUnread === (existing?.manuallyUnread ?? false) &&
+          manuallyUnreadThrough === (existing?.manuallyUnreadThrough ?? null) &&
           desiredActivelyWorking === current.activelyWorking
         ) {
           const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
@@ -36735,7 +36741,7 @@ export async function setSessionAttention(
               pinnedAt: null,
               version: 0,
               acknowledgedSequence,
-              manuallyUnread,
+              manuallyUnreadThrough,
               activelyWorking: desiredActivelyWorking,
               attentionVersion: 1,
               archiveVersion: 0,
@@ -36748,7 +36754,7 @@ export async function setSessionAttention(
               ],
               set: {
                 acknowledgedSequence: acknowledgedSequenceWrite,
-                manuallyUnread,
+                manuallyUnreadThrough,
                 activelyWorking: desiredActivelyWorking,
                 attentionVersion: sql`${schema.sessionPins.attentionVersion} + 1`,
               },
@@ -36760,7 +36766,7 @@ export async function setSessionAttention(
             .update(schema.sessionPins)
             .set({
               acknowledgedSequence: acknowledgedSequenceWrite,
-              manuallyUnread,
+              manuallyUnreadThrough,
               activelyWorking: desiredActivelyWorking,
               attentionVersion: sql`${schema.sessionPins.attentionVersion} + 1`,
             })
@@ -66242,7 +66248,8 @@ type ConsumedChildEvidence = {
  * Only complete immutable event evidence carried in the claimed payload counts.
  * A terminal status alone does not prove that the parent saw the child's answer.
  * Pure service turns and legacy notices without content evidence write nothing.
- * The shared writer advances only a contiguous meaningful prefix, preserves
+ * A complete final answer is a cumulative read watermark. Other evidence advances
+ * only a contiguous meaningful prefix. The shared writer preserves newer
  * personal attention mutations, and never reads the child's current raw cursor
  * as consumption evidence. Failed/requires_action lifecycle indicators remain.
  *
@@ -66280,13 +66287,12 @@ type ConsumedChildEvidence = {
  * The upsert is monotone: the conflict path re-reads the committed row under its
  * own row lock and refuses to move a fence backward.
  *
- * There is no membership probe. The write grants nothing and discloses nothing
- * (a fence is visible only to its own subject), the subject comes from durable
- * frozen turn provenance rather than a request, membership removal deletes these
- * rows and is serialized against this writer by the fence above, and the
- * personal-workspace-owner exception a bare membership probe would need is
- * authorized by an API-layer canonical-managed-cookie stamp that this worker path
- * does not have. Both RLS policies on `session_pins` still apply through the
+ * Current authority is rechecked inside the advisory fence, so historical replay
+ * after membership removal cannot recreate deleted personal state. Frozen turn
+ * provenance identifies the human; the canonical live-authority resolver only
+ * checks that human's still-active shared membership or exact Personal pointer,
+ * and is not used to authorize a caller or grant access. No creator fallback or
+ * request-derived human is accepted. Both RLS policies on `session_pins` still apply through the
  * temporary subject scope, and the insert is additionally fenced on
  * `parent_session_id`, so a payload field can never decide whose personal state
  * is mutated on an unrelated session.
@@ -66545,8 +66551,16 @@ async function acknowledgeConsumedChildSequencesInTransaction(
   const pins = schema.sessionPins;
   const sessions = schema.sessions;
   await withTemporarySubjectRls(tx, subjectId, async () => {
-    // Stable UUID order preserves the personal-row lock order. Only a contiguous
-    // meaningful prefix may advance; a filtered/tail read never clears a hole.
+    if (
+      !(await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+        accountId: await accountIdInRlsScope(tx),
+        workspaceId: input.workspaceId,
+        subjectId,
+      }))
+    )
+      return;
+    // Stable UUID order preserves the personal-row lock order. A complete final
+    // answer summarizes earlier work; nonfinal filtered reads cannot skip holes.
     for (const child of [...input.children].sort((a, b) =>
       a.sessionId.localeCompare(b.sessionId),
     )) {
@@ -66559,7 +66573,7 @@ async function acknowledgeConsumedChildSequencesInTransaction(
       ];
       if (requested.length === 0) continue;
       const events = await tx
-        .select({ sequence: schema.sessionEvents.sequence })
+        .select({ sequence: schema.sessionEvents.sequence, type: schema.sessionEvents.type })
         .from(schema.sessionEvents)
         .where(
           and(
@@ -66572,6 +66586,10 @@ async function acknowledgeConsumedChildSequencesInTransaction(
       const sequences = events.map((event) => event.sequence);
       if (sequences.length === 0) continue; // status-only reads do not acknowledge
       const through = Math.max(...sequences);
+      const finalThrough = Math.max(
+        0,
+        ...events.filter((event) => event.type === "turn.completed").map((event) => event.sequence),
+      );
       await tx.execute(sql`
       insert into ${pins} (
         account_id, workspace_id, subject_id, session_id,
@@ -66588,27 +66606,15 @@ async function acknowledgeConsumedChildSequencesInTransaction(
         least(${through}, coalesce((
           select min(unseen.sequence) - 1 from session_events unseen
           where unseen.workspace_id = ${sessions.workspaceId} and unseen.session_id = ${sessions.id}
-            and unseen.sequence > coalesce(personal.acknowledged_sequence, 0)
+            and unseen.sequence > greatest(
+              coalesce(personal.acknowledged_sequence, 0),
+              coalesce(personal.manually_unread_through, 0), ${finalThrough})
             and unseen.sequence <= ${through}
             and ${meaningfulSessionEventSql("unseen")}
             and unseen.sequence not in (${sql.join(
               sequences.map((sequence) => sql`${sequence}`),
               sql`, `,
             )})
-            -- The completed message and terminal answer often duplicate the
-            -- same final text. Reading that exact terminal answer proves both,
-            -- but does not consume different commentary from the same turn.
-            and not (unseen.type = 'agent.message.completed' and ${completeMeaningfulSessionEventSql("unseen")} and exists (
-              select 1 from session_events consumed
-              where consumed.workspace_id = unseen.workspace_id
-                and consumed.session_id = unseen.session_id and consumed.turn_id = unseen.turn_id
-                and consumed.type = 'turn.completed' and consumed.sequence > unseen.sequence
-                and consumed.sequence in (${sql.join(
-                  sequences.map((sequence) => sql`${sequence}`),
-                  sql`, `,
-                )})
-                and unseen.payload -> 'text' = coalesce(nullif(consumed.payload -> 'output', 'null'::jsonb), consumed.payload -> 'result')
-            ))
         ), ${through})), false, 0,
         false, null, 0
       from ${sessions}
@@ -66619,13 +66625,13 @@ async function acknowledgeConsumedChildSequencesInTransaction(
         eq(sessions.parentSessionId, input.sessionId),
         eq(sessions.id, child.sessionId),
       )}
-        and coalesce(personal.acknowledged_sequence, 0) >= 0
-        and not coalesce(personal.manually_unread, false)
+        and (personal.manually_unread_through is null or ${through} > personal.manually_unread_through)
       order by ${sessions.id}
       on conflict (subject_id, workspace_id, session_id) do update
-        set acknowledged_sequence = excluded.acknowledged_sequence
+        set acknowledged_sequence = excluded.acknowledged_sequence,
+            manually_unread_through = null
         where ${pins.acknowledgedSequence} < excluded.acknowledged_sequence
-          and ${pins.acknowledgedSequence} >= 0 and not ${pins.manuallyUnread}
+          and (${pins.manuallyUnreadThrough} is null or excluded.acknowledged_sequence > ${pins.manuallyUnreadThrough})
     `);
     }
   });
@@ -76071,33 +76077,21 @@ async function enqueueChildLifecycleNoticeOutboxTx(
   });
   // Freeze complete content at notice creation, never at parent claim time.
   // Oversized evidence is omitted, not truncated and then called consumed.
-  // A bounded prefix keeps model input small; explicit reads handle the rest.
-  const candidates = await tx
-    .select({
-      sequence: schema.sessionEvents.sequence,
-      type: schema.sessionEvents.type,
-      payload: schema.sessionEvents.payload,
-    })
-    .from(schema.sessionEvents)
-    .where(
-      and(
-        eq(schema.sessionEvents.workspaceId, workspaceId),
-        eq(schema.sessionEvents.sessionId, session.id),
-        completeMeaningfulSessionEventSql("session_events"),
-        sql`octet_length(${schema.sessionEvents.payload}::text) <= 8192`,
-      ),
-    )
-    .orderBy(desc(schema.sessionEvents.sequence))
-    .limit(32);
+  // Bound index candidates before payload filters, and prefer the newest complete
+  // result within the total budget. Explicit reads handle omitted evidence.
+  const candidates = await rawRows<{ sequence: number; type: string; payload: unknown }>(
+    tx,
+    childLifecycleEvidenceCandidatesSql(sql`${workspaceId}::uuid`, sql`${session.id}::uuid`),
+  );
   const childEventEvidence: typeof candidates = [];
   let evidenceBytes = 0;
-  for (const candidate of candidates.reverse()) {
+  for (const candidate of candidates) {
     const bytes = Buffer.byteLength(JSON.stringify(candidate), "utf8");
-    if (evidenceBytes + bytes > 8192) break;
+    if (evidenceBytes + bytes > 8192) continue;
     childEventEvidence.push(candidate);
     evidenceBytes += bytes;
   }
-  const noticePayload = { ...input.payload, childEventEvidence };
+  const noticePayload = { ...input.payload, childEventEvidence: childEventEvidence.reverse() };
   const inserted = await tx
     .insert(schema.sessionSystemUpdateOutbox)
     .values(

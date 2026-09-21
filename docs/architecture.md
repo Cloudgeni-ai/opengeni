@@ -62,8 +62,11 @@ semantic/legacy compatibility projection. Unread and viewer-specific tree
 attention use the same indexed, derived meaningful-event frontier in
 `packages/db/src/session-meaningful-events.ts`, not the raw cursor. Complete
 child content delivered in claimed lifecycle input or exact parent reads can
-advance only the frozen initiating human's contiguous meaningful read prefix.
-Explicit unread intent is durable and wins over automatic acknowledgments.
+advance only the frozen initiating human's meaningful read watermark. A proven
+complete final answer cumulatively acknowledges earlier activity, never newer
+answers. Other filtered reads cannot skip unseen meaningful events. Explicit
+unread intent survives old evidence replay, but genuinely newer consumed activity
+or an explicit mark-read supersedes it.
 See [`session-monitoring-mcp.md`](session-monitoring-mcp.md) for bounded-read and
 historical reconciliation limits. Legacy SQL writers are rebased at the database boundary; late
 raw events roll back, then retry the semantic gate before becoming
