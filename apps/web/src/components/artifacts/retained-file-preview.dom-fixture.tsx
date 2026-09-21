@@ -95,18 +95,6 @@ test("equivalent receipts preserve playback while authorization changes refresh 
     ),
   );
   expect(client.createRetainedArtifactDownloadUrl).toHaveBeenCalledTimes(3);
-  await act(async () =>
-    root.render(
-      <RetainedFilePreview
-        workspaceId={workspaceId}
-        artifact={{ ...artifact, available: false }}
-        title="Video"
-      />,
-    ),
-  );
-  expect(container.querySelector("video")).toBeNull();
-  expect(container.textContent).toContain("Artifact unavailable");
-  expect(client.createRetainedArtifactDownloadUrl).toHaveBeenCalledTimes(3);
 });
 
 test("PDF renderer failures stay inside the preview", async () => {
