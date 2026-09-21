@@ -12,6 +12,7 @@ import {
 } from "./core";
 import { createJudge, preflight, type Arm, type Receipt } from "./gateway";
 import { scoreInvestigation } from "./scoring";
+import { INVESTIGATION_VERSION, investigateV3 } from "./investigation";
 
 // This executable is an experiment, not a registered OpenGeni tool or authority boundary.
 // All output goes outside the investigated snapshot; raw source remains local.
@@ -65,16 +66,21 @@ async function main() {
   // Exclusive manifest creation prevents rerunning paid work into an existing run directory.
   const setup = await preflight();
   const maxRequests = Number(option("--max-requests", "80"));
-  if (!Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > 80)
+  if (!Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > 160)
     throw new Error("invalid_request_budget");
+  const maxUsd = Number(option("--max-usd", "0.5"));
+  if (!Number.isFinite(maxUsd) || maxUsd <= 0 || maxUsd > 1) throw new Error("invalid_cost_budget");
+  const workflow = option("--workflow", "v3");
+  if (workflow !== "v3" && workflow !== "legacy") throw new Error("invalid_workflow");
+  const runInvestigation = workflow === "v3" ? investigateV3 : investigate;
   const implementationDigest = hash(
-    ["core.ts", "gateway.ts", "run.ts", "scoring.ts", "bun.lock"]
+    ["core.ts", "investigation.ts", "gateway.ts", "run.ts", "scoring.ts", "bun.lock"]
       .map((p) => readFileSync(`${import.meta.dir}/${p}`, "utf8"))
       .join("\n"),
   );
   const manifest = {
     version: 1,
-    policyVersion: POLICY_VERSION,
+    policyVersion: workflow === "v3" ? INVESTIGATION_VERSION : POLICY_VERSION,
     implementationDigest,
     bunVersion: Bun.version,
     createdAt: new Date().toISOString(),
@@ -84,7 +90,7 @@ async function main() {
     prices: setup.prices,
     priceCheckedAt: setup.checkedAt,
     maxRequests,
-    maxUsd: 0.5,
+    maxUsd,
     concurrency: 1,
     retries: 0,
     limits: { ...DEFAULT_LIMITS, maxSteps: 4 },
@@ -94,15 +100,18 @@ async function main() {
     flag: "wx",
     mode: 0o600,
   });
-  const journal = `${output}/requests.jsonl`;
+  const journal = resolve(option("--ledger", `${output}/requests.jsonl`)!);
   if (mode === "investigate") {
     const requestPath = option("--request");
     if (!requestPath) throw new Error("request_file_required");
     const request = JSON.parse(readFileSync(requestPath, "utf8")) as Request;
-    const result = await investigate(
+    const result = await runInvestigation(
       snapshot,
       request,
-      createJudge("jev", setup, journal, maxRequests),
+      createJudge("jev", setup, journal, maxRequests, maxUsd, {
+        caseId: "investigate",
+        runId: output,
+      }),
       manifest.limits,
     );
     writeFileSync(`${output}/result.json`, JSON.stringify(result, null, 2), { mode: 0o600 });
@@ -154,10 +163,10 @@ async function main() {
     if (only && only !== "jev" && only !== "llm") throw new Error("invalid_arm");
     const arms: Arm[] = only ? [only as Arm] : index % 2 ? ["llm", "jev"] : ["jev", "llm"];
     for (const arm of arms) {
-      const result = await investigate(
+      const result = await runInvestigation(
         snapshot,
         request,
-        createJudge(arm, setup, journal, maxRequests),
+        createJudge(arm, setup, journal, maxRequests, maxUsd, { caseId: c.id, runId: output }),
         manifest.limits,
       );
       const row = {
@@ -194,7 +203,9 @@ async function main() {
     .map((s) => JSON.parse(s));
   const costs = Object.fromEntries(
     (["jev", "llm"] as Arm[]).map((arm) => {
-      const rows = receipts.filter((r) => r.kind === "completed" && r.arm === arm);
+      const rows = receipts.filter(
+        (r) => r.kind === "completed" && r.arm === arm && r.runId === output,
+      );
       return [
         arm,
         {

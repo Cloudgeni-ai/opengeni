@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "bun test ./core.test.ts",
+    "test": "bun test ./core.test.ts ./investigation.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

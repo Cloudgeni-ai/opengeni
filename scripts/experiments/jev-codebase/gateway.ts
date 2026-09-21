@@ -22,6 +22,8 @@ export type Receipt = {
   resolvedModel?: string;
   answers?: Record<string, Judgment>;
   reason?: string;
+  caseId?: string;
+  runId?: string;
 };
 export const MODELS = { jev: "typesafe-ai/jev", llm: "openai/gpt-4.1-mini" } as const;
 
@@ -63,6 +65,7 @@ export function createJudge(
   journal: string,
   maxRequests = 80,
   maxUsd = 0.5,
+  attribution: { caseId?: string; runId?: string } = {},
 ): Judge {
   let stopped = false;
   return async (state, questions, signal) => {
@@ -93,6 +96,7 @@ export function createJudge(
     if (starts.length >= maxRequests || used + reserve > maxUsd)
       throw new Error("run_budget_exhausted");
     const base = {
+      ...attribution,
       id: crypto.randomUUID(),
       arm,
       model: MODELS[arm],

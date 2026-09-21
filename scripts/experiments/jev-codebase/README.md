@@ -11,7 +11,7 @@ From this directory:
 
 ```sh
 bun install --frozen-lockfile --ignore-scripts
-bun test ./core.test.ts
+bun test ./core.test.ts ./investigation.test.ts
 bun run typecheck
 bun fixtures/verify.ts
 ```
@@ -68,6 +68,20 @@ for runtime evidence. Semantic yes/no interpretation can still be wrong.
 
 ## Synthetic comparison
 
+The default `v3` workflow separates entry discovery, bounded local dependency
+reads, evidence classification, answering the literal question, and verification
+of the proposed answer against the requested path. It reassembles overlapping
+source windows before parsing and recognizes named constants/arrow functions.
+The first named declaration in the question is an entry-point heuristic, not a
+semantic proof; other declarations remain contrast candidates. Two independent
+lexical candidates can expose alternate implementations without treating them
+as reachable from the entry point. `--workflow legacy` preserves the earlier
+per-excerpt loop for diagnosis; its outcomes must not be pooled with v3.
+
+Each returned answer remains a model judgment, not a formally verified property.
+Verification is a second model judgment using the same provider and correlated
+errors remain possible. Direct mode is still experimental.
+
 ```sh
 JEV_ALLOW_LIVE=1 bun run.ts benchmark --root /path/to/opengeni \
   --subdir scripts/experiments/jev-codebase/fixtures/repo \
@@ -92,6 +106,16 @@ cost ceiling, no retries, 15-second call timeout and four exploration steps.
 budget or a cross-process coordinator. An uncertain request blocks reuse of
 its journal. Each new output directory is a new paid experiment; never create
 one to bypass a failed/uncertain run without explicitly accounting for it.
+
+For an explicitly authorized experiment spanning several outputs, `--ledger`
+shares one append-only request journal and its budget across runs. `--max-requests`
+can be set up to 160 and `--max-usd` up to 1; larger limits are not accepted.
+There is no concurrent-process budget locking: run one process at a time.
+Requests include case/run attribution, and per-run cost summaries filter the
+shared ledger to their own run. Failed or unsettled shared-ledger calls stop
+further calls. `--case` selects one named regression case without silently
+overwriting earlier results. Old unknown-billing failures remain historical
+evidence; starting a newly authorized experiment does not settle their bills.
 
 Generated `manifest.json`, `requests.jsonl`, `results.json` and `costs.json` stay
 under ignored `runs/`. The manifest pins snapshot and implementation digests,
