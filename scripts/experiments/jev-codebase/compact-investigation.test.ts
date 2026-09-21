@@ -5,7 +5,7 @@ import {
   sourceSpans,
   prioritizeFiles,
 } from "./compact-investigation";
-import { budgetState } from "./iteration-ledger";
+import { budgetState, withTransientDelegationFallback } from "./iteration-ledger";
 import type { Snapshot, Question } from "./core";
 const snapshot: Snapshot = {
   revision: "x",
@@ -265,4 +265,25 @@ test("duplicate companion is reconsidered without the primary candidate", async 
   );
   expect(calls).toBe(3);
   expect(r.evidence.map((e) => e.path)).toEqual(["select.ts", "save.ts"]);
+});
+test("explicit exhausted Jev transient yields but auth/usage and unsettled failures do not", async () => {
+  const output = await withTransientDelegationFallback(async () => {
+    throw new Error("transient_provider_unavailable");
+  });
+  expect(output.status).toBe("needs_guidance");
+  expect(output.answer).toBe("indecisive");
+  expect(output.evidence).toEqual([]);
+  for (const error of [
+    "provider_or_usage_failure",
+    "unsettled_ledger",
+    "experiment_budget_exhausted",
+  ])
+    await expect(
+      withTransientDelegationFallback(async () => {
+        throw new Error(error);
+      }),
+    ).rejects.toThrow(error);
+  expect(await withTransientDelegationFallback(async () => ({ status: "evidence_ready" }))).toEqual(
+    { status: "evidence_ready" },
+  );
 });

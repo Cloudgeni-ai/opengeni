@@ -12,7 +12,7 @@ import {
 import { loadSnapshot, hash, type Judge, DEFAULT_LIMITS } from "./core";
 import { investigateV3 } from "./investigation";
 import { investigateCompact, COMPACT_VERSION } from "./compact-investigation";
-import { budgetState, transientStatus } from "./iteration-ledger";
+import { budgetState, transientStatus, withTransientDelegationFallback } from "./iteration-ledger";
 import {
   SourceTools,
   scoreTrajectory,
@@ -452,7 +452,7 @@ async function main() {
                 requestedOutput:
                   c.mode === "evidence" ? ("evidence" as const) : ("answer_if_supported" as const),
               };
-              const result =
+              const result = await withTransientDelegationFallback(async () =>
                 workflow === "compact"
                   ? await investigateCompact(
                       snapshot,
@@ -474,7 +474,8 @@ async function main() {
                         maxSteps: 4,
                         deadlineMs: Math.min(90000, remainingTime(start, performance.now())),
                       },
-                    );
+                    ),
+              );
               // Check caught legacy failures too. This telemetry never enters caller context.
               budgetState(ledger());
               internalTelemetry = {

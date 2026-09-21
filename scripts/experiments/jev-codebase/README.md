@@ -182,8 +182,11 @@ its output receipts. No staging integration or subscription billing is implied.
 The shared sequential journal caps the authorized iteration at 400 inference requests
 and a conservative local $5 estimate, reserving each call before transport. Unsettled,
 authentication, missing-usage and ambiguous failures stop the experiment. Explicit
-HTTP 429/502/503/504 failures get one retry, with the unknown bill reserved; a second
-transient failure ends that case while unrelated cases may continue. An old explicit
+HTTP 429/502/503/504 failures get one retry, with the unknown bill reserved; exhausted
+Jev delegation yields empty evidence to ordinary Terra tools, while exhausted Terra
+calls end that case. The Jev yield was added and tested offline after the recorded
+compact-v6 live runs; those failed cases remain failures, not retroactively rescued.
+An old explicit
 transient failure requires `--resume-transient FAILED_REQUEST_UUID` in the same ledger;
 this records authorization, not settled billing. Never reset the ledger to bypass it.
 Limits: 10 Terra turns per task, 2,200 output tokens per call, 60-second
