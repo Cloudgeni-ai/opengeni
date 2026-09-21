@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "72c905337d781b266af140df72380f67071cfccbf73ba84da25f2be006defee5"
+      "sha256": "716c1a1ecca3bfa37de295c84f6437c20ae43ba77f3be8cbbe6193415ceb8d70"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -770,6 +770,12 @@
       "job": "unit-shards",
       "step": "Install dependencies",
       "sha256": "7cb809eb1ef393bbc5a2636bd2b170fa2e07cb82a5abc8a5d8bf3b6c16444b71"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "unit-shards",
+      "step": "Install isolated Jev experiment dependencies",
+      "sha256": "5b9486c41a22053bcf791be0013d8807d36305ab3e0e05b87603047559700971"
     },
     {
       "workflow": ".github/workflows/desktop-e2e.yml",
