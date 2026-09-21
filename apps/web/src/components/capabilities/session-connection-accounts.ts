@@ -123,6 +123,10 @@ export function selectedConnectionAccounts(
   const selections: McpConnectionAccountSelection[] = [];
   const unresolved: ConnectedAccountGroup[] = [];
   for (const group of groups) {
+    // A workspace default can name a connector the sender has never connected.
+    // No eligible account means no access, not an account choice to resolve.
+    // Keep explicit empty/stale choices blocked: omission must not widen them.
+    if (choices[group.serverId] === undefined && group.accounts.length === 0) continue;
     const chosen = choices[group.serverId] ?? group.accounts.map((account) => account.id);
     // Until an explicit empty-set wire representation exists, fail closed:
     // never submit an omission that the backend might interpret as defaults.

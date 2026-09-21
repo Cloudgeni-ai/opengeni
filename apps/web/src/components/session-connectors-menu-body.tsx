@@ -47,6 +47,16 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
   const [settingsId, setSettingsId] = useState<string | null>(null);
   const settingsServer = connectors.find((server) => server.id === settingsId);
   const accounts = props.accountControls;
+  const changeConnector = (serverId: string, enabled: boolean) => {
+    const next = new Set(props.selection.mcpServerIds);
+    if (enabled) next.add(serverId);
+    else next.delete(serverId);
+    props.onCustomizingChange?.(true);
+    props.onChange({
+      mcpServerIds: next,
+      firstPartyToolIds: new Set(props.selection.firstPartyToolIds),
+    });
+  };
   if (settingsServer && accounts) {
     return (
       <>
@@ -73,6 +83,17 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
           <ConnectionAccountPicker
             {...accounts}
             groups={accounts.groups.filter((group) => group.serverId === settingsServer.id)}
+            choices={
+              props.selection.mcpServerIds.has(settingsServer.id)
+                ? accounts.choices
+                : { ...accounts.choices, [settingsServer.id]: [] }
+            }
+            onChoose={(serverId, ids) => {
+              accounts.onChoose(serverId, ids);
+              if (props.selection.mcpServerIds.has(serverId) !== ids.length > 0) {
+                changeConnector(serverId, ids.length > 0);
+              }
+            }}
             presentation={props.presentation}
             disabled={accounts.disabled || accounts.loading || Boolean(accounts.error)}
           />
@@ -139,55 +160,19 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
           const connect = server.connectionStatus === "connect";
           const unavailable = server.connectionStatus === "unavailable";
           const busy = props.busyId === server.id;
-          // Turning a selected connector off must not require usable credentials.
-          // An unusable connector that is already off still needs setup, not a toggle on.
           const setupAction = (connect || repair || unavailable) && !(customizing && selected);
-          const rowLocked = !customizing && !connect && !repair && !unavailable;
+          const accountGroup = accounts?.groups.find((group) => group.serverId === server.id);
+          const setupLabel = connect
+            ? `Connect your ${server.name} account`
+            : repair
+              ? `Reconnect ${server.name}`
+              : `${server.name} unavailable`;
           return (
             <div
               key={server.id}
-              className="flex items-center border-b border-border last:border-b-0"
+              className="flex min-h-16 items-center gap-1 border-b border-border px-2 py-2 last:border-b-0"
             >
-              <ConnectorAction
-                presentation={props.presentation}
-                keepOpen
-                key={server.id}
-                checked={setupAction || rowLocked ? undefined : selected}
-                label={
-                  customizing && selected
-                    ? server.name
-                    : connect
-                      ? `Connect your ${server.name} account`
-                      : repair
-                        ? `Reconnect ${server.name}`
-                        : unavailable
-                          ? `${server.name} unavailable`
-                          : rowLocked
-                            ? `${server.name}${selected ? ", on for this session" : ", off for this session"}`
-                            : server.name
-                }
-                disabled={busy}
-                locked={rowLocked}
-                onAction={() => {
-                  if (setupAction) {
-                    props.onReconnect?.(server.id);
-                    return;
-                  }
-                  if (rowLocked) return;
-                  const next = new Set(props.selection.mcpServerIds);
-                  if (selected) next.delete(server.id);
-                  else next.add(server.id);
-                  // Preserve every hidden builtin and explicitly selected server.
-                  props.onChange({
-                    mcpServerIds: next,
-                    firstPartyToolIds: new Set(props.selection.firstPartyToolIds),
-                  });
-                }}
-                className={cn(
-                  "min-h-11 min-w-0 flex-1 gap-3 rounded-none px-0 py-3",
-                  rowLocked ? "cursor-default hover:bg-transparent" : "cursor-pointer",
-                )}
-              >
+              <div className="flex min-w-0 flex-1 items-center gap-3 pr-2">
                 <CapabilityLogo
                   src={server.logoSrc ?? null}
                   name={server.name}
@@ -204,49 +189,76 @@ export function SessionConnectorsMenuBody(props: SessionConnectorsMenuProps) {
                   {connect || repair || unavailable ? (
                     <span className="block text-2xs text-status-waiting">
                       {connect
-                        ? setupAction
-                          ? "Connect your account"
-                          : "No connected account"
+                        ? "No connected account"
                         : repair
                           ? "Reconnect required"
-                          : setupAction
-                            ? "Unavailable · Manage connection"
-                            : "Unavailable"}
+                          : "Unavailable"}
                     </span>
                   ) : null}
                   {server.connectionStatus === "unknown" ? (
                     <span className="block text-2xs text-fg-subtle">Status unavailable</span>
                   ) : null}
                 </span>
-                {busy ? (
-                  <Loader2Icon className="size-4 animate-spin" />
-                ) : customizing && !setupAction ? (
-                  <ComposerMenuSwitchIndicator checked={selected} />
-                ) : connect ? (
-                  <PlugIcon className="size-4 text-fg-muted" />
-                ) : repair || unavailable ? (
-                  <RefreshCwIcon className="size-4 text-fg-muted" />
-                ) : selected ? (
-                  <CheckIcon className="size-4 text-fg-muted" aria-hidden />
-                ) : (
-                  <span className="size-4" aria-hidden />
-                )}
-              </ConnectorAction>
-              {accounts &&
-              selected &&
-              (accounts.loading ||
-                accounts.error ||
-                accounts.groups.some((group) => group.serverId === server.id)) ? (
+              </div>
+              <span className="flex size-11 shrink-0 items-center justify-center">
+                {accounts &&
+                accountGroup &&
+                (accountGroup.accounts.length > 0 ||
+                  (accounts.choices[server.id]?.length ?? 0) > 0) ? (
+                  <ConnectorAction
+                    presentation={props.presentation}
+                    keepOpen
+                    label={`${server.name} account settings`}
+                    disabled={busy || accounts.disabled}
+                    className="connector-control flex size-11 shrink-0 items-center justify-center rounded-md p-2"
+                    onAction={() => setSettingsId(server.id)}
+                  >
+                    <Settings2Icon className="size-4 text-fg-muted" />
+                  </ConnectorAction>
+                ) : null}
+              </span>
+              {customizing || setupAction ? (
                 <ConnectorAction
                   presentation={props.presentation}
                   keepOpen
-                  label={`${server.name} account settings`}
-                  className="flex size-11 shrink-0 items-center justify-center rounded-md p-2"
-                  onAction={() => setSettingsId(server.id)}
+                  checked={setupAction ? undefined : selected}
+                  label={setupAction ? setupLabel : server.name}
+                  disabled={busy || accounts?.disabled || (!selected && accounts?.loading)}
+                  className="connector-control flex size-11 shrink-0 items-center justify-center rounded-md p-2"
+                  onAction={() => {
+                    if (setupAction) {
+                      props.onReconnect?.(server.id);
+                      return;
+                    }
+                    if (!selected && accounts?.choices[server.id]?.length === 0) {
+                      accounts.onChoose(
+                        server.id,
+                        accountGroup?.accounts.map((account) => account.id) ?? [],
+                      );
+                    }
+                    changeConnector(server.id, !selected);
+                  }}
                 >
-                  <Settings2Icon className="size-4 text-fg-muted" />
+                  {busy ? (
+                    <Loader2Icon className="size-4 animate-spin" />
+                  ) : setupAction ? (
+                    connect ? (
+                      <PlugIcon className="size-4 text-fg-muted" />
+                    ) : (
+                      <RefreshCwIcon className="size-4 text-fg-muted" />
+                    )
+                  ) : (
+                    <ComposerMenuSwitchIndicator checked={selected} />
+                  )}
                 </ConnectorAction>
-              ) : null}
+              ) : (
+                <span
+                  aria-label={`${server.name}, ${selected ? "on" : "off"} for this session`}
+                  className="flex size-11 shrink-0 items-center justify-center"
+                >
+                  {selected ? <CheckIcon className="size-4 text-fg-muted" aria-hidden /> : null}
+                </span>
+              )}
             </div>
           );
         })}

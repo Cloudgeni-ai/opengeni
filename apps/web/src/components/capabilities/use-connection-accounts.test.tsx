@@ -70,11 +70,33 @@ test("defaults attach all accounts; explicit narrowing survives inventory refres
   expect(state.selections).toEqual([{ serverId: "mail", connectionId: "two" }]);
   await act(async () => root.render(<Harness client={client} selectedIds={[]} />));
   expect(state.selections).toEqual([]);
+  expect(state.accountGroups).toEqual([]);
+  expect(state.availableAccountGroups).toHaveLength(1);
   await act(async () => root.render(<Harness client={client} />));
   expect(state.selections).toEqual([{ serverId: "mail", connectionId: "two" }]);
   inventory = [accounts[0]!];
   await act(async () => state.refresh());
   expect(state.requiresAccountChoice).toBe(true);
+  expect(state.accountChoiceMessage).toContain("Review accounts for Mail");
+  expect(state.selections).toEqual([]);
+});
+
+test("a default connector with no eligible accounts does not block; an explicit stale choice still does", async () => {
+  let inventory: ConnectionMetadata[] = [];
+  const client = clientFor(async () => inventory);
+  await act(async () => root.render(<Harness client={client} />));
+  expect(state.loading).toBe(false);
+  expect(state.error).toBeNull();
+  expect(state.requiresAccountChoice).toBe(false);
+  expect(state.accountChoiceMessage).toBeNull();
+  expect(state.selections).toEqual([]);
+  inventory = accounts;
+  await act(async () => state.refresh());
+  await act(async () => state.selectAccount("mail", ["two"]));
+  inventory = [];
+  await act(async () => state.refresh());
+  expect(state.requiresAccountChoice).toBe(true);
+  expect(state.accountChoiceMessage).toContain("+ → Connectors");
   expect(state.selections).toEqual([]);
 });
 
@@ -122,5 +144,22 @@ test("failed inventory blocks sending and retry recovers without forgetting excl
   fail = false;
   await act(async () => state.refresh());
   expect(state.error).toBeNull();
+  expect(state.selections).toEqual([{ serverId: "mail", connectionId: "two" }]);
+});
+
+test("returning to connector defaults restores emptied accounts but preserves nonempty narrowing", async () => {
+  const client = clientFor(async () => accounts);
+  await act(async () => root.render(<Harness client={client} />));
+  await act(async () => state.selectAccount("mail", []));
+  await act(async () => root.render(<Harness client={client} selectedIds={[]} />));
+  expect(state.requiresAccountChoice).toBe(false);
+  await act(async () => {
+    state.resetEmptyChoices();
+    root.render(<Harness client={client} />);
+  });
+  expect(state.requiresAccountChoice).toBe(false);
+  expect(state.selections).toHaveLength(2);
+  await act(async () => state.selectAccount("mail", ["two"]));
+  await act(async () => state.resetEmptyChoices());
   expect(state.selections).toEqual([{ serverId: "mail", connectionId: "two" }]);
 });

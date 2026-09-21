@@ -45,6 +45,11 @@ function connection(subjectId: string | null = "alice"): ConnectionMetadata {
 }
 const input = { accountId, workspaceId, subjectId: "alice", servers: [server] };
 
+test("an unconnected default connector grants no account and does not block admission", () => {
+  expect(mcpAccountBindingsFromVisibleConnections({ ...input, connections: [] })).toEqual([]);
+  expect(personalDelegationsForAccountBindings([])).toEqual([]);
+});
+
 test("catalog projection distinguishes intentional workspace selectors from exact installation pins", () => {
   const item = {
     kind: "mcp",

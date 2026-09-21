@@ -97,7 +97,29 @@ test("explicit exclusions survive new accounts and an empty choice never becomes
     selections: [],
     unresolved: [group],
   });
-  expect(selectedConnectionAccounts([{ ...group, accounts: [] }], {}).unresolved).toHaveLength(1);
+  expect(selectedConnectionAccounts([{ ...group, accounts: [] }], {})).toEqual({
+    selections: [],
+    unresolved: [],
+  });
+  expect(
+    selectedConnectionAccounts([{ ...group, accounts: [] }], { mail: [] }).unresolved,
+  ).toHaveLength(1);
+});
+
+test("a selected Slack default without an account does not prevent an unrelated message", async () => {
+  const slack = {
+    ...item,
+    name: "Slack",
+    runtime: { mcpServerId: "slack" },
+    connectionRef: { providerDomain: "slack.com", subjectScope: "subject" },
+  } as CapabilityCatalogItem;
+  const h = harness();
+  expect(
+    await sessionConnectionAccounts(h.client, { id: "new-session", workspaceId: "workspace" }, [
+      item,
+      slack,
+    ]),
+  ).toEqual([{ serverId: "example", connectionId: "connection" }]);
 });
 
 test("multiple schedule pairs round-trip without collapsing or duplicating accounts", () => {

@@ -83,7 +83,7 @@ for (const status of ["connect", "reconnect", "unavailable"] as const) {
             onCustomizingChange={setCustomizing}
             onReconnect={recover}
             accountControls={{
-              groups: accountState.accountGroups,
+              groups: accountState.availableAccountGroups,
               choices: accountState.accountChoices,
               onChoose: accountState.selectAccount,
             }}
@@ -95,11 +95,11 @@ for (const status of ["connect", "reconnect", "unavailable"] as const) {
       );
     }
     await act(async () => root.render(<Preview />));
-    expect(blocked!).toBe("personal_decision");
+    expect(blocked!).toBeNull();
     const send = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (button) => button.textContent === "Send",
     )!;
-    expect(send.disabled).toBe(true);
+    expect(send.disabled).toBe(false);
     await act(async () =>
       container.querySelector<HTMLButtonElement>('[aria-label="Customize connectors"]')!.click(),
     );
@@ -150,12 +150,9 @@ test("missing personal accounts offer setup without toggling the session selecti
   const setup = container.querySelector<HTMLButtonElement>(
     'button[aria-label="Connect your Calendar account"]',
   )!;
-  expect(setup.textContent).toContain("Connect your account");
-  expect(setup.textContent).not.toContain("Reconnect required");
+  expect(container.textContent).toContain("No connected account");
   expect(setup.hasAttribute("aria-checked")).toBe(false);
-  expect(container.querySelector('button[aria-label="Reconnect Mail"]')?.textContent).toContain(
-    "Reconnect required",
-  );
+  expect(container.querySelector('button[aria-label="Reconnect Mail"]')).not.toBeNull();
   expect(container.textContent).toContain("Status unavailable");
   await act(async () => setup.click());
   expect(recover).toHaveBeenCalledWith("personal");
@@ -171,13 +168,17 @@ test("connector settings attach multiple readable personal/workspace accounts wi
   const reconnect = mock();
   function Preview() {
     const [choices, setChoices] = useState<ConnectionAccountChoices>({});
+    const [selection, setSelection] = useState<SessionToolSelection>({
+      mcpServerIds: new Set(["mail"]),
+      firstPartyToolIds: new Set(),
+    });
     return (
       <SessionConnectorsMenuBody
         presentation="dialog"
         servers={[{ id: "mail", name: "Mail" }]}
         firstPartyTools={[]}
-        selection={{ mcpServerIds: new Set(["mail"]), firstPartyToolIds: new Set() }}
-        onChange={() => {}}
+        selection={selection}
+        onChange={setSelection}
         onReconnect={reconnect}
         accountControls={{
           groups: [{ serverId: "mail", name: "Mail", accounts }],
@@ -204,7 +205,7 @@ test("connector settings attach multiple readable personal/workspace accounts wi
   expect(personal.getAttribute("aria-checked")).toBe("false");
   expect(workspace.getAttribute("aria-checked")).toBe("true");
   await act(async () => workspace.click());
-  expect(container.textContent).toContain("Attach an account or turn off this connector.");
+  expect(container.textContent).toContain("No accounts selected.");
   await act(async () => personal.click());
   expect(personal.getAttribute("aria-checked")).toBe("true");
   expect(workspace.getAttribute("aria-checked")).toBe("false");
@@ -238,4 +239,89 @@ test("account labels use readable metadata and never fall back to a raw connecti
   expect(connectionAccountLabel({ ...accounts[0]!, metadata: {} }, "Mail account 1")).toBe(
     "Mail account 1",
   );
+});
+
+test("last account off disables only its connector; reenable restores accounts and ordinary off/on preserves narrowing", async () => {
+  let current!: SessionToolSelection;
+  let chosen!: ConnectionAccountChoices;
+  function Preview() {
+    const [selection, setSelection] = useState<SessionToolSelection>({
+      mcpServerIds: new Set(["mail", "files", "hidden"]),
+      firstPartyToolIds: new Set(["session_get"]),
+    });
+    const [choices, setChoices] = useState<ConnectionAccountChoices>({});
+    const [customizing, setCustomizing] = useState(false);
+    current = selection;
+    chosen = choices;
+    return (
+      <SessionConnectorsMenuBody
+        presentation="dialog"
+        servers={[{ id: "mail", name: "Mail", connectionStatus: "ready" }]}
+        firstPartyTools={[]}
+        selection={selection}
+        onChange={setSelection}
+        customizing={customizing}
+        onCustomizingChange={setCustomizing}
+        accountControls={{
+          groups: [{ serverId: "mail", name: "Mail", accounts }],
+          choices,
+          onChoose: (id, ids) => setChoices((previous) => ({ ...previous, [id]: ids })),
+        }}
+      />
+    );
+  }
+  const click = async (label: string) =>
+    act(async () => container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!.click());
+  await act(async () => root.render(<Preview />));
+  await click("Mail account settings");
+  await click("alex@example.com, Only me");
+  await click("Support team, This workspace");
+  expect(current.mcpServerIds).toEqual(new Set(["files", "hidden"]));
+  expect(current.firstPartyToolIds).toEqual(new Set(["session_get"]));
+  expect(chosen.mail).toEqual([]);
+  await click("Back to connectors");
+  const settings = container.querySelector('[aria-label="Mail account settings"]')!;
+  const toggle = container.querySelector('[aria-label="Mail"]')!;
+  expect(settings.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await click("Mail");
+  expect(current.mcpServerIds.has("mail")).toBe(true);
+  expect(chosen.mail).toEqual(accounts.map((account) => account.id));
+  await click("Mail account settings");
+  await click("alex@example.com, Only me");
+  await click("Back to connectors");
+  await click("Mail");
+  expect(container.querySelector('[aria-label="Mail account settings"]')).not.toBeNull();
+  await click("Mail");
+  expect(chosen.mail).toEqual(["workspace-id"]);
+});
+
+test("settings remains reachable to remove the last disconnected account", async () => {
+  const change = mock();
+  const choose = mock();
+  await act(async () =>
+    root.render(
+      <SessionConnectorsMenuBody
+        presentation="dialog"
+        servers={[{ id: "mail", name: "Mail", connectionStatus: "connect" }]}
+        firstPartyTools={[]}
+        selection={{ mcpServerIds: new Set(["mail"]), firstPartyToolIds: new Set() }}
+        onChange={change}
+        accountControls={{
+          groups: [{ serverId: "mail", name: "Mail", accounts: [] }],
+          choices: { mail: ["gone"] },
+          onChoose: choose,
+        }}
+      />,
+    ),
+  );
+  await act(async () =>
+    container.querySelector<HTMLButtonElement>('[aria-label="Mail account settings"]')!.click(),
+  );
+  await act(async () =>
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Remove disconnected account")!
+      .click(),
+  );
+  expect(choose).toHaveBeenCalledWith("mail", []);
+  expect(change.mock.calls[0]![0].mcpServerIds.size).toBe(0);
 });

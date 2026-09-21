@@ -1705,14 +1705,29 @@ function SessionChatPane(props: {
     () => selectableSessionMcpServers.map((server) => server.id),
     [selectableSessionMcpServers],
   );
+  const policyToolIds = useMemo(
+    () => sessionPolicyPickerIds(props.session, selectableToolIds, context.workspaceDefaultToolIds),
+    [context.workspaceDefaultToolIds, props.session, selectableToolIds],
+  );
+  const [durableToolSelection, setDurableToolSelection] = useState<SessionToolSelection>(() => ({
+    mcpServerIds: new Set(policyToolIds),
+    firstPartyToolIds: new Set(props.session.firstPartyMcpTools),
+  }));
+  const [durableToolsSnapshot, setDurableToolsSnapshot] = useState(props.session);
+  const durableToolsSaveInFlight = useRef(false);
+  const [durableToolsHydrated, setDurableToolsHydrated] = useState(false);
+  const durableToolsSessionId = useRef(props.session.id);
+  const [durableToolsSaving, setDurableToolsSaving] = useState(false);
+  const [durableToolsError, setDurableToolsError] = useState<string | null>(null);
+  const [connectorCustomizingOverride, setConnectorCustomizingOverride] = useState<boolean | null>(
+    null,
+  );
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
       id: props.session.id,
       workspaceId: props.session.workspaceId,
-      selectedIds:
-        props.session.effectiveToolPolicy?.selectedIds ??
-        props.session.tools.map((tool) => tool.id),
+      selectedIds: [...durableToolSelection.mcpServerIds],
     },
     context.workspaceCapabilityCatalog,
   );
@@ -1752,23 +1767,6 @@ function SessionChatPane(props: {
       props.session.tenancy?.authorityEpoch,
       afterConnectionSetup,
     ],
-  );
-  const policyToolIds = useMemo(
-    () => sessionPolicyPickerIds(props.session, selectableToolIds, context.workspaceDefaultToolIds),
-    [context.workspaceDefaultToolIds, props.session, selectableToolIds],
-  );
-  const [durableToolSelection, setDurableToolSelection] = useState<SessionToolSelection>(() => ({
-    mcpServerIds: new Set(policyToolIds),
-    firstPartyToolIds: new Set(props.session.firstPartyMcpTools),
-  }));
-  const [durableToolsSnapshot, setDurableToolsSnapshot] = useState(props.session);
-  const durableToolsSaveInFlight = useRef(false);
-  const [durableToolsHydrated, setDurableToolsHydrated] = useState(false);
-  const durableToolsSessionId = useRef(props.session.id);
-  const [durableToolsSaving, setDurableToolsSaving] = useState(false);
-  const [durableToolsError, setDurableToolsError] = useState<string | null>(null);
-  const [connectorCustomizingOverride, setConnectorCustomizingOverride] = useState<boolean | null>(
-    null,
   );
   const navigate = useNavigate();
   const launch = props.launch ?? EMPTY_COMPOSER_LAUNCH;
@@ -1973,6 +1971,9 @@ function SessionChatPane(props: {
       personalDecision:
         personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
       personalLoading:
+        durableToolsSaving ||
+        durableToolsSaveInFlight.current ||
+        !durableToolsHydrated ||
         personalAttachment.loading ||
         personalAttachment.refreshing ||
         connectionAccounts.loading ||
@@ -2782,13 +2783,14 @@ function SessionChatPane(props: {
                 <ComposerMobilePlus
                   connectorActions={{
                     accountControls: {
-                      groups: connectionAccounts.accountGroups,
+                      groups: connectionAccounts.availableAccountGroups,
                       choices: connectionAccounts.accountChoices,
                       onChoose: connectionAccounts.selectAccount,
                       loading: connectionAccounts.loading,
                       error: connectionAccounts.error,
                       onRefresh: () => void connectionAccounts.refresh(),
-                      disabled: terminal || composer.sending,
+                      disabled:
+                        terminal || composer.sending || durableToolsSaving || !durableToolsHydrated,
                     },
                   }}
                   chatSettings={{
@@ -2816,6 +2818,7 @@ function SessionChatPane(props: {
                   onConnectorCustomizingChange={(next) => {
                     setConnectorCustomizingOverride(next);
                     if (next) return;
+                    connectionAccounts.resetEmptyChoices();
                     void applyDurableToolPolicy(
                       followWorkspaceConnectorPolicy(durableToolsSnapshot),
                     );
