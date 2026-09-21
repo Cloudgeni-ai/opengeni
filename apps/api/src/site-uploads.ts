@@ -1,5 +1,6 @@
 import { WorkspaceArtifactSourceBundle, type AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps, ObjectStorageDependency } from "@opengeni/core";
+import { retryWhileMissing } from "@opengeni/storage";
 import {
   createWorkspaceArtifactUpload,
   getWorkspaceArtifactUpload,
@@ -19,10 +20,15 @@ export async function validateSiteSource(storage: Storage, key: string, sizeByte
       "Editable source JSON must be at most 64 MiB. Exclude dependencies and build output; HTML has a separate storage limit.",
     );
   }
-  const content = await storage.getObjectBytes(key);
+  const content = await retryWhileMissing(() => storage.getObjectBytes(key));
+  if (!content) {
+    throw new WorkspaceArtifactOperationError(
+      "Site source is not available yet. Retry publication with the same upload.",
+    );
+  }
   try {
     WorkspaceArtifactSourceBundle.parse(
-      JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(content!.bytes)),
+      JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(content.bytes)),
     );
   } catch {
     throw new WorkspaceArtifactOperationError(
@@ -129,13 +135,22 @@ async function freeze(
     }
     decoder.decode();
   }
-  await storage.putObjectStreamIfAbsent({
+  const created = await storage.putObjectStreamIfAbsent({
     key: to,
     contentType,
     byteSize: head.ContentLength,
     chunks: chunks(),
   });
-  return (await storage.headObject(to))!.ContentLength!;
+  // A successful conditional PUT is the receipt. A following visibility miss
+  // cannot invalidate it. Only a conflict needs the existing winner's metadata.
+  if (created) return head.ContentLength;
+  const stored = await retryWhileMissing(() => storage.headObject!(to));
+  if (!stored || stored.ContentLength === undefined) {
+    throw new WorkspaceArtifactOperationError(
+      "Frozen Site upload is unavailable. Retry publication with the same upload.",
+    );
+  }
+  return stored.ContentLength;
 }
 type Input = Partial<Parameters<typeof prepareWorkspaceArtifactContent>[2]> & { uploadId?: string };
 export async function prepareWorkspaceArtifactPublication(
