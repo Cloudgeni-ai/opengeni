@@ -1,5 +1,13 @@
 import { expect, test } from "bun:test";
-import { SourceTools, spanCovered, scoreTrajectory, type BenchmarkCase } from "./trajectory";
+import {
+  SourceTools,
+  spanCovered,
+  scoreTrajectory,
+  nonnegativeAmount,
+  remainingTime,
+  validateCases,
+  type BenchmarkCase,
+} from "./trajectory";
 const snapshot = {
   revision: "fixed",
   digest: "fixed",
@@ -25,6 +33,14 @@ test("source tools paginate paths and return exact bounded lines", () => {
     endLine: 3,
     text: "const value = 2;\nexport { value };",
   });
+});
+test("terminal newline is not an additional citable source line", () => {
+  const t = new SourceTools({
+    ...snapshot,
+    chunks: [{ id: "e0", path: "a.ts", startLine: 1, endLine: 3, text: "one\ntwo\n" }],
+  });
+  expect(t.files[0].endLine).toBe(2);
+  expect(t.read("a.ts", 3, 3)).toEqual({ error: "path_or_range_not_in_snapshot" });
 });
 test("search is literal and no-match does not become absence proof", () => {
   const t = new SourceTools(snapshot);
@@ -68,9 +84,57 @@ test("matching abstention without evidence or a final response is not success", 
   expect(
     scoreTrajectory(
       c,
+      { answer: "indecisive", explanation: "arbitrary", citations: [] },
+      t.returned,
+      t,
+    ).evidenceAndLabelPass,
+  ).toBe(false);
+  expect(
+    scoreTrajectory(
+      c,
+      {
+        answer: "indecisive",
+        explanation: "arbitrary",
+        citations: [{ path: "a.ts", startLine: 2, endLine: 2 }],
+      },
+      t.returned,
+      t,
+    ).evidenceAndLabelPass,
+  ).toBe(false);
+  expect(
+    scoreTrajectory(
+      c,
       { answer: "indecisive", explanation: "value", citations: c.requiredSpans },
       t.returned,
       t,
     ).evidenceAndLabelPass,
   ).toBe(true);
+});
+test("cost fields fail closed for absent or invalid values", () => {
+  for (const raw of [null, undefined, "", " ", NaN, Infinity, -1, {}, "no"])
+    expect(() => nonnegativeAmount(raw)).toThrow();
+  expect(nonnegativeAmount(0)).toBe(0);
+  expect(nonnegativeAmount("0.002")).toBe(0.002);
+});
+test("absolute remaining time rejects late completion", () => {
+  expect(remainingTime(100, 200, 200)).toBe(100);
+  expect(() => remainingTime(100, 300, 200)).toThrow("trajectory_deadline");
+});
+test("empty oracle spans and duplicate cases are rejected", () => {
+  expect(() => validateCases([])).toThrow();
+  expect(() =>
+    validateCases([
+      {
+        id: "x",
+        question: "x",
+        context: "",
+        mode: "binary",
+        expectedAnswer: "no",
+        requiredSpans: [],
+        category: "x",
+        oracleRationale: "x",
+        acceptableConclusion: "x",
+      },
+    ]),
+  ).toThrow();
 });

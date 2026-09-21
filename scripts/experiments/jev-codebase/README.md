@@ -157,3 +157,54 @@ questions with independently checked current-revision oracles; model failure
 and continuation handling; per-task parent+script+fallback metering; and paired
 staging task runs against the existing agent workflow. Preserve evidence-only,
 direct-answer and indecisive/yield modes in that tool contract.
+
+## Terra end-to-end trajectory comparison
+
+`trajectory-run.ts` compares `openai/gpt-5.6-terra` with ordinary bounded
+list/search/read tools against the same Terra model forced to invoke Jev once
+at the start, then allowed the same ordinary tools for verification/fallback.
+The final answer and explanation are produced by Terra in both arms. This
+tests a mandatory-delegation policy, not an optimal learned routing policy.
+It is a controlled API harness, not the complete OpenGeni/Codex runtime.
+
+```sh
+JEV_ALLOW_LIVE=1 bun trajectory-run.ts --root /path/to/opengeni \
+  --revision COMMIT --subdir apps/web/src/lib --cases /path/to/cases.json \
+  --out runs/terra-fresh --ledger runs/terra-shared.jsonl
+```
+
+Cases are independent JSON `BenchmarkCase[]` records as declared in
+`trajectory.ts`; only question/context/mode are given to the model. Freeze code
+before viewing fresh labels, alternate arm order, keep smoke/regression runs
+separate, and never overwrite output manifests. CLI work is read-only outside
+its output receipts. No staging integration or subscription billing is implied.
+
+The shared sequential journal caps this experiment at 200 inference requests
+and a conservative local $2 estimate, reserving each call before transport and stopping on failed/unsettled
+requests. Limits: 10 Terra turns per task, 2,200 output tokens per call, 60-second
+Terra timeout, 30-second Jev timeout, 240-second task deadline propagated to
+inference and checked before accepting results, no retries. Synchronous snapshot
+ingestion is timed but cannot be interrupted by that deadline. This is not a
+provider-enforced spending limit. Prices and reported costs fail closed when
+missing/invalid; Jev is supported only with its verified zero output-token rate.
+Terra reasoning uses the provider default; resolved model
+and available reasoning-token usage are recorded, without assuming an exact
+upstream weight version. Jev has its existing bounded controller limits.
+
+Measure ingestion/indexing, every model call, each local tool execution,
+delegation wall time, fallback calls and full task wall time. Nested Jev calls
+are inside delegation wall time: do not add them twice. Preflight/catalog work
+is recorded separately as shared setup. Local CPU has measured time but no
+invented dollar rate. Provider charges and catalog-equivalent cost are separate.
+Main-model cumulative input usage includes repeated history; cached input is
+separate. Tool-result bytes/chars are exact; `bytes/4` is only a token proxy,
+not Terra-tokenizer ground truth. Do not call all non-oracle source irrelevant.
+
+The automatic score distinguishes final label agreement, required source-span
+delivery, required citation coverage and valid citations into received lines.
+Evidence-mode enum violations are separate from wrong decisive binary answers.
+It does not judge prose
+correctness: a blinded source-based semantic review is needed, especially for
+evidence-only cases. No final answer is a failure, not a correct abstention.
+Ordinary tools stay available after Jev, so report Jev's intermediate result
+separately from final Terra accuracy. Keep each failure and fallback in totals.

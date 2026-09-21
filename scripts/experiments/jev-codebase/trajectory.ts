@@ -19,12 +19,67 @@ export type BenchmarkCase = {
   oracleRationale: string;
 };
 
+export function nonnegativeAmount(raw: unknown): number {
+  if (
+    (typeof raw !== "number" && typeof raw !== "string") ||
+    (typeof raw === "string" && !raw.trim())
+  )
+    throw new Error("invalid_amount");
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) throw new Error("invalid_amount");
+  return value;
+}
+
+export function remainingTime(start: number, now: number, limit = 240000): number {
+  const remaining = limit - (now - start);
+  if (remaining <= 0) throw new Error("trajectory_deadline");
+  return Math.ceil(remaining);
+}
+
+export function validateCases(cases: BenchmarkCase[]): void {
+  if (!Array.isArray(cases) || !cases.length) throw new Error("invalid_cases");
+  const ids = new Set<string>();
+  for (const c of cases) {
+    if (
+      !c.id ||
+      ids.has(c.id) ||
+      typeof c.question !== "string" ||
+      !c.question.trim() ||
+      typeof c.context !== "string" ||
+      !["binary", "evidence"].includes(c.mode) ||
+      !["yes", "no", "indecisive"].includes(c.expectedAnswer) ||
+      !Array.isArray(c.requiredSpans) ||
+      !c.requiredSpans.length
+    )
+      throw new Error("invalid_case");
+    ids.add(c.id);
+    for (const span of c.requiredSpans)
+      if (
+        !span.path ||
+        span.path.startsWith("/") ||
+        span.path.split("/").includes("..") ||
+        !Number.isInteger(span.startLine) ||
+        !Number.isInteger(span.endLine) ||
+        span.startLine < 1 ||
+        span.endLine < span.startLine ||
+        span.endLine > 100000
+      )
+        throw new Error("invalid_oracle_span");
+  }
+}
+
 /** Identical bounded primitives in both arms; no oracle is used by this class. */
 export class SourceTools {
   readonly files: Chunk[];
   readonly returned: Citation[] = [];
   constructor(readonly snapshot: Snapshot) {
-    this.files = fileEvidence(snapshot);
+    const files = fileEvidence(snapshot);
+    this.files = files.map((f) => {
+      // A final newline terminates the last physical line; it is not an extra citable line.
+      if (f.text.endsWith("\n") && files.filter((other) => other.path === f.path).length === 1)
+        return { ...f, text: f.text.slice(0, -1), endLine: f.endLine - 1 };
+      return f;
+    });
   }
   list(filter: string, offset: number) {
     const paths = [...new Set(this.files.map((f) => f.path))]
@@ -96,6 +151,7 @@ export function scoreTrajectory(
 ) {
   const citationsValid =
     !!final &&
+    final.citations.length > 0 &&
     final.citations.every(
       (s) =>
         Number.isInteger(s.startLine) &&
@@ -110,15 +166,25 @@ export function scoreTrajectory(
   return {
     completed: final !== null,
     answerAgreement: !!final && final.answer === c.expectedAnswer,
-    wrongDecisive: !!final && final.answer !== "indecisive" && final.answer !== c.expectedAnswer,
+    wrongDecisive:
+      c.mode === "binary" &&
+      !!final &&
+      final.answer !== "indecisive" &&
+      final.answer !== c.expectedAnswer,
+    outputContractPass: !!final && (c.mode !== "evidence" || final.answer === "indecisive"),
     requiredSpanRecall:
       c.requiredSpans.filter((s) => spanCovered(s, delivered)).length / c.requiredSpans.length,
     citationsValid,
+    requiredCitationRecall: final
+      ? c.requiredSpans.filter((s) => spanCovered(s, final.citations)).length /
+        c.requiredSpans.length
+      : 0,
     // Semantic explanation correctness requires a separate blinded review.
     evidenceAndLabelPass:
       !!final &&
       final.answer === c.expectedAnswer &&
       citationsValid &&
+      c.requiredSpans.every((s) => spanCovered(s, final.citations)) &&
       c.requiredSpans.every((s) => spanCovered(s, delivered)),
   };
 }

@@ -11,7 +11,15 @@ import {
 } from "ai";
 import { loadSnapshot, hash, type Judge, DEFAULT_LIMITS } from "./core";
 import { investigateV3 } from "./investigation";
-import { SourceTools, scoreTrajectory, type BenchmarkCase, type FinalAnswer } from "./trajectory";
+import {
+  SourceTools,
+  scoreTrajectory,
+  nonnegativeAmount,
+  remainingTime,
+  validateCases,
+  type BenchmarkCase,
+  type FinalAnswer,
+} from "./trajectory";
 
 const MODELS = { terra: "openai/gpt-5.6-terra", jev: "typesafe-ai/jev" };
 const MAX_USD = 2,
@@ -60,14 +68,17 @@ async function main() {
     Object.entries(models).map(([kind, m]) => [
       kind,
       {
-        input: Number(m.pricing.input),
-        output: Number(m.pricing.output),
-        cached: Number(m.pricing.input_cache_read ?? m.pricing.input),
+        input: nonnegativeAmount(m.pricing.input),
+        output: nonnegativeAmount(m.pricing.output),
+        cached: nonnegativeAmount(m.pricing.input_cache_read ?? m.pricing.input),
       },
     ]),
   ) as Record<keyof typeof MODELS, Price>;
+  // Evaluation has no generative output limit; only the verified zero-output-rate contract is supported.
+  if (prices.jev.output !== 0) throw new Error("unsupported_jev_output_pricing");
   const preflightMs = performance.now() - preflightStart;
   const cases = json(casePath) as BenchmarkCase[];
+  validateCases(cases);
   const implementationDigest = hash(
     ["trajectory-run.ts", "trajectory.ts", "core.ts", "investigation.ts", "bun.lock"]
       .map((p) => readFileSync(`${import.meta.dir}/${p}`, "utf8"))
@@ -149,7 +160,12 @@ async function main() {
       )
         throw new Error("invalid_usage");
       const cost = r.providerMetadata?.gateway?.cost;
-      const reportedUsd = cost === undefined ? null : Number(cost);
+      let reportedUsd: number | null = null;
+      try {
+        reportedUsd = nonnegativeAmount(cost);
+      } catch {
+        /* Preserve known usage before stopping. */
+      }
       const nominalUsd =
         (inputTokens - cachedTokens) * price.input +
         cachedTokens * price.cached +
@@ -170,6 +186,7 @@ async function main() {
       });
       if (reportedUsd === null || !Number.isFinite(reportedUsd) || reportedUsd < 0)
         throw new Error("cost_unavailable");
+      if (Math.max(nominalUsd, reportedUsd) > reservedUsd) throw new Error("reservation_exceeded");
       return r;
     } catch (error) {
       const safe = error as { name?: string; statusCode?: number };
@@ -284,20 +301,30 @@ async function main() {
       });
       try {
         for (let turn = 0; turn < MAX_TURNS && !final; turn++) {
-          if (performance.now() - start > 240000) throw new Error("trajectory_deadline");
+          remainingTime(start, performance.now());
           const tools: ToolSet =
-            arm === "jev-delegated" && !delegated
-              ? { ...definitions, investigate: delegateTool }
-              : definitions;
+            returnedChars >= 59936
+              ? { finish: definitions.finish }
+              : arm === "jev-delegated" && !delegated
+                ? { ...definitions, investigate: delegateTool }
+                : definitions;
           const toolChoice =
             arm === "jev-delegated" && turn === 0
               ? { type: "tool" as const, toolName: "investigate" }
               : ("required" as const);
+          const toolDefinitions = await Promise.all(
+            Object.entries(tools).map(async ([name, definition]) => ({
+              name,
+              description: definition.description,
+              schema: await (definition.inputSchema as any).jsonSchema,
+            })),
+          );
+          if (toolDefinitions.some((d) => !d.schema)) throw new Error("tool_schema_unavailable");
           const r = await call(
             "terra",
             turn === 0 ? "initial_routing" : "reasoning_or_finalization",
             { arm, caseId: c.id, turn },
-            { system, messages, toolNames: Object.keys(tools), toolChoice },
+            { system, messages, toolDefinitions, toolChoice },
             () =>
               generateText({
                 model: gateway(MODELS.terra),
@@ -307,15 +334,20 @@ async function main() {
                 toolChoice,
                 maxOutputTokens: MAX_OUTPUT,
                 maxRetries: 0,
-                abortSignal: AbortSignal.timeout(60000),
+                abortSignal: AbortSignal.timeout(
+                  Math.min(60000, remainingTime(start, performance.now())),
+                ),
                 providerOptions: { openai: { parallelToolCalls: false } },
               }),
           );
           messages.push(...r.response.messages);
+          remainingTime(start, performance.now());
           if (!r.toolCalls.length) throw new Error("no_tool_call");
           for (const tc of r.toolCalls) {
+            remainingTime(start, performance.now());
             const t = performance.now(),
               a = tc.input as any;
+            const deliveredBefore = source.returned.length;
             let output: any;
             if (tc.invalid) throw new Error("invalid_tool_call");
             if (tc.toolName === "finish") {
@@ -351,9 +383,12 @@ async function main() {
                       state: JSON.parse(JSON.stringify(state)),
                       questions,
                       maxRetries: 0,
-                      abortSignal: signal
-                        ? AbortSignal.any([signal, AbortSignal.timeout(30000)])
-                        : AbortSignal.timeout(30000),
+                      abortSignal: AbortSignal.any([
+                        ...(signal ? [signal] : []),
+                        AbortSignal.timeout(
+                          Math.min(30000, remainingTime(start, performance.now())),
+                        ),
+                      ]),
                     }),
                 );
                 return result.answers;
@@ -367,7 +402,11 @@ async function main() {
                   requestedOutput: c.mode === "evidence" ? "evidence" : "answer_if_supported",
                 },
                 judge,
-                { ...DEFAULT_LIMITS, maxSteps: 4, deadlineMs: 90000 },
+                {
+                  ...DEFAULT_LIMITS,
+                  maxSteps: 4,
+                  deadlineMs: Math.min(90000, remainingTime(start, performance.now())),
+                },
               );
               source.returned.push(...result.evidence);
               output = {
@@ -385,6 +424,11 @@ async function main() {
               if (ledger().some((receipt) => receipt.kind === "failed"))
                 throw new Error("provider_or_usage_failure");
             } else throw new Error("unexpected_tool");
+            remainingTime(start, performance.now());
+            if (tc.toolName !== "finish" && returnedChars + JSON.stringify(output).length > 60000) {
+              source.returned.length = deliveredBefore;
+              output = { error: "tool_result_budget_exhausted" };
+            }
             const text = JSON.stringify(output),
               bytes = Buffer.byteLength(text);
             if (tc.toolName !== "finish") returnedChars += text.length;
@@ -412,7 +456,9 @@ async function main() {
             });
           }
         }
+        if (!final) error = "turn_limit";
       } catch (e) {
+        final = null;
         error = e instanceof Error ? e.message : "unknown";
       }
       const own = ledger().filter((r) => r.runId === out && r.caseId === c.id && r.arm === arm);
