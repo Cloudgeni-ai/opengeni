@@ -5,7 +5,7 @@
 `0503_session_meaningful_attention.sql` is a maintenance migration. Stop all old
 API/control/turn workers, provide the exact application login list through
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`),
-and migrate before starting the matching binary. Do not restart pre-0502 writers:
+and migrate before starting the matching binary. Do not restart pre-0503 writers:
 they do not maintain the new personal `manually_unread_through` intent fence.
 The nullable sequence (not a sticky boolean) is necessary to distinguish replay
 of an old answer from consumption of activity newer than a human mark-unread.

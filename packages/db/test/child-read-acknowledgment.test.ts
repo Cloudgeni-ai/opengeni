@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import { MEANINGFUL_SESSION_EVENT_TYPES } from "../src/session-meaningful-events";
+import { toPostgresLosslessJson } from "../src/lossless-json";
 import {
   acknowledgeConsumedChildEvents,
   appendSessionEvents,
@@ -27,6 +28,7 @@ import {
   ensureManagedAccessForUserWithOrganizationMemberships,
   failSessionWorkBeforeAttemptClaim,
   getSessionForSubject,
+  getSessionHistoryItems,
   grantWorkspaceAccess,
   initializeSessionStartAtomically,
   listSessionsForSubject,
@@ -241,6 +243,7 @@ async function settle(
   grant: Grant,
   started: Started,
   status: "completed" | "failed",
+  output = "Test answer",
 ): Promise<void> {
   const settled = await applySessionTurnSettlement(client.db, grant.workspaceId, {
     sessionId: started.session.id,
@@ -252,7 +255,7 @@ async function settle(
     activeTurnId: null,
     events: [
       status === "completed"
-        ? { type: "turn.completed" as const, payload: { output: "Test answer" } }
+        ? { type: "turn.completed" as const, payload: { output } }
         : { type: "turn.failed" as const, payload: { error: "test failure" } },
     ],
   });
@@ -394,7 +397,12 @@ async function enqueueHumanTurn(grant: Grant, sessionId: string): Promise<void> 
   });
 }
 
-async function recordHistoricalResult(grant: Grant, parent: Started, child: Started) {
+async function recordHistoricalResult(
+  grant: Grant,
+  parent: Started,
+  child: Started,
+  answer = "Test answer",
+) {
   const sequence = await lastMeaningfulSequence(child.session.id);
   const id = crypto.randomUUID();
   await appendSessionEvents(client.db, grant.workspaceId, parent.session.id, [
@@ -417,7 +425,7 @@ async function recordHistoricalResult(grant: Grant, parent: Started, child: Star
         output: {
           view: "results",
           sourceExact: true,
-          events: [{ sequence, type: "turn.completed", text: "Test answer" }],
+          events: [{ sequence, type: "turn.completed", text: answer }],
         },
       },
     },
@@ -426,6 +434,107 @@ async function recordHistoricalResult(grant: Grant, parent: Started, child: Star
 }
 
 describe("child read acknowledgment on parent consumption", () => {
+  test.each([
+    ["NUL", "Answer\u0000tail"],
+    ["lone surrogate", "Answer\ud800tail"],
+    ["literal marker", toPostgresLosslessJson("literal\u0000marker") as string],
+  ])(
+    "%s lifecycle evidence delivers logical content and historical reads compare logical rows",
+    async (_label, answer) => {
+      const grant = await workspace();
+      const parent = await startSession(grant, { message: "parent" });
+      const child = await startSession(grant, { parent, message: "child" });
+      const legacySequence =
+        _label === "literal marker" ? (await lastSequence(child.session.id)) + 1 : null;
+      if (legacySequence !== null) {
+        await shared.admin`insert into session_events(account_id,workspace_id,session_id,sequence,type,payload,payload_codec_version)
+        values(${grant.accountId},${grant.workspaceId},${child.session.id},${legacySequence},'agent.message.completed',
+          jsonb_build_object('text',${answer}::text),null)`;
+      }
+      await settle(grant, child, "completed", answer);
+      const sequence = await lastMeaningfulSequence(child.session.id);
+      await deliverOutboxTo(parent.session.id);
+      await settleIdle(grant, parent);
+      await enqueueHumanTurn(grant, parent.session.id);
+      const parentClaim = await claim(grant, parent.session.id);
+      expect(parentClaim.action).toBe("claimed");
+      expect((await pinRow(grant.subjectId, child.session.id))?.acknowledged_sequence).toBe(
+        sequence,
+      );
+      const history = await getSessionHistoryItems(client.db, grant.workspaceId, parent.session.id);
+      const batch = history
+        .map(({ item }) => item.content)
+        .find(
+          (content) =>
+            typeof content === "string" &&
+            content.includes(child.session.id) &&
+            content.includes("childEventEvidence"),
+        );
+      if (typeof batch !== "string") throw new Error("claimed lifecycle history missing");
+      const updates = JSON.parse(batch.slice(batch.indexOf("{"))).updates as Array<{
+        payload: {
+          childSessionId?: string;
+          childEventEvidence?: Array<{
+            sequence: number;
+            payload: { output?: string; text?: string };
+          }>;
+        };
+      }>;
+      const result = updates
+        .find((update) => update.payload.childSessionId === child.session.id)
+        ?.payload.childEventEvidence?.find((event) => event.sequence === sequence);
+      expect(result?.payload.output).toBe(answer);
+      if (legacySequence !== null) {
+        const legacy = updates
+          .find((update) => update.payload.childSessionId === child.session.id)
+          ?.payload.childEventEvidence?.find((event) => event.sequence === legacySequence);
+        expect(legacy?.payload.text).toBe(answer);
+      }
+
+      // A separate child proves historical reconciliation independently of the
+      // already-acknowledged lifecycle child, including each row's own codec.
+      if (parentClaim.action !== "claimed") throw new Error("parent was not claimed");
+      const currentParent = {
+        session: parent.session,
+        turn: parentClaim.turn,
+        attemptId: parentClaim.attemptId,
+      };
+      const historicalChild = await startSession(grant, {
+        parent: currentParent,
+        message: "historical child",
+      });
+      await settle(grant, historicalChild, "completed", answer);
+      const input = await recordHistoricalResult(grant, currentParent, historicalChild, answer);
+      expect(await pinRow(grant.subjectId, historicalChild.session.id)).toBeNull();
+      expect(
+        (await reconcileHistoricalChildReadAcknowledgments(client.db, input)).provenEvents,
+      ).toBe(1);
+      expect(
+        (await pinRow(grant.subjectId, historicalChild.session.id))?.acknowledged_sequence,
+      ).toBe(await lastMeaningfulSequence(historicalChild.session.id));
+    },
+  );
+
+  test("historical null-version marker literals are never decoded as versioned source content", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "parent" });
+    const child = await startSession(grant, { parent, message: "legacy child" });
+    const answer = toPostgresLosslessJson("literal\u0000marker") as string;
+    // Seed one literal historical event in the disposable database. NULL is
+    // deliberate old-writer provenance, not inferred from the marker's shape.
+    await shared.admin`insert into session_events(account_id,workspace_id,session_id,sequence,type,payload,payload_codec_version)
+      select ${grant.accountId},${grant.workspaceId},${child.session.id},last_sequence+1,'turn.completed',
+        jsonb_build_object('output',${answer}::text),null
+      from session_event_cursors where session_id=${child.session.id}`;
+    const input = await recordHistoricalResult(grant, parent, child, answer);
+    expect((await reconcileHistoricalChildReadAcknowledgments(client.db, input)).provenEvents).toBe(
+      1,
+    );
+    expect((await pinRow(grant.subjectId, child.session.id))?.acknowledged_sequence).toBe(
+      await lastMeaningfulSequence(child.session.id),
+    );
+  });
+
   test("historical replay after membership removal cannot recreate the frozen human's personal rows", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { message: "parent" });

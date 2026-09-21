@@ -14,6 +14,10 @@ evidence budget, captured when the notice is created. Claim validates the retain
 source content before acknowledging it for the receiving turn's frozen human.
 An indexed materialized query takes the newest 32 meaningful candidates before
 payload size/completeness checks; the input budget favors the newest whole result.
+Each source payload is decoded using its own stored codec version before the
+logical 8 KiB evidence budget, parent rendering, or equality checks. The query's
+64 KiB raw inspection cap is only a bounded-read safeguard. Outbox/update payloads
+have their own independent versions; null-version legacy marker text stays literal.
 It never advances to the child's current cursor. A legacy terminal status notice
 without answer content is not proof that the parent consumed an answer.
 
@@ -57,6 +61,8 @@ Pass returned `nextAfter` as `--after` while `hasMore`; `--limit` is 1–100.
 The script pairs current, nonduplicate first-party call/output events on the same
 parent turn, derives its frozen human, verifies whole returned content against
 the exact current direct-child event, and uses the same protected monotone writer.
+Call, output, and child source payloads are decoded independently by their own
+version columns; storage-encoded strings are not treated as delivered answers.
 That writer rechecks the frozen human's current shared membership or exact active
 Personal-owner pointer inside the removal fence. Replay after removal cannot
 recreate deleted personal state; inactive humans remain untouched.

@@ -1,6 +1,6 @@
 -- deployment-mode: maintenance
 -- Old attention writers do not preserve explicit unread intent. Drain them;
--- do not restart pre-0502 API/control/turn workers after this migration.
+-- do not restart pre-0503 API/control/turn workers after this migration.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 DO $drain$

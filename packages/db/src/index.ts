@@ -30,7 +30,12 @@ import {
   meaningfulSessionEventSql,
   meaningfulSessionSequenceSql,
 } from "./session-meaningful-events";
-import { historicalChildReadItems, historicalChildReadMatches } from "./child-read-reconciliation";
+import {
+  boundedChildLifecycleEvidence,
+  logicalChildReadEvent,
+  historicalChildReadItems,
+  historicalChildReadMatches,
+} from "./child-read-reconciliation";
 import { createRetryFailedSessionInTransaction } from "./session-retry";
 export { SessionRetryConflictError, getSessionRetryReceiptInTransaction } from "./session-retry";
 import { retainedProviderCommandPersistence as retainedProviderCommandState } from "./retained-provider-commands";
@@ -66323,6 +66328,7 @@ async function acknowledgeConsumedChildLifecycleNotices(
         sequence: schema.sessionEvents.sequence,
         type: schema.sessionEvents.type,
         payload: schema.sessionEvents.payload,
+        payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
       })
       .from(schema.sessionEvents)
       .innerJoin(
@@ -66342,7 +66348,9 @@ async function acknowledgeConsumedChildLifecycleNotices(
           ]),
         ),
       );
-    const bySequence = new Map(events.map((event) => [event.sequence, event]));
+    const bySequence = new Map(
+      events.map((event) => [event.sequence, logicalChildReadEvent(event)]),
+    );
     const sequences = evidence
       .filter((proof) => {
         const event = bySequence.get(proof.sequence);
@@ -66414,7 +66422,7 @@ export async function reconcileHistoricalChildReadAcknowledgments(
     let provenEvents = 0;
     let unsupportedReceipts = 0;
     for (const output of outputs.slice(0, limit)) {
-      const payload = output.payload as Record<string, unknown> | null;
+      const payload = logicalChildReadEvent(output).payload as Record<string, unknown> | null;
       if (!output.turnId || !payload || typeof payload.id !== "string" || payload.truncation) {
         unsupportedReceipts += 1;
         continue;
@@ -66458,7 +66466,7 @@ export async function reconcileHistoricalChildReadAcknowledgments(
         unsupportedReceipts += 1;
         continue;
       }
-      const call = calls[0]!.payload as Record<string, unknown>;
+      const call = logicalChildReadEvent(calls[0]!).payload as Record<string, unknown>;
       const candidates = historicalChildReadItems(call.name, call.arguments, payload.output);
       const proven: ConsumedChildEvidence[] = [];
       for (const candidate of candidates.slice(0, 100)) {
@@ -66490,12 +66498,14 @@ export async function reconcileHistoricalChildReadAcknowledgments(
             ),
           )
           .limit(1);
-        if (!source || !historicalChildReadMatches(candidate, source.event)) continue;
+        if (!source) continue;
+        const logicalEvent = logicalChildReadEvent(source.event);
+        if (!historicalChildReadMatches(candidate, logicalEvent)) continue;
         proven.push({
           sessionId: candidate.sessionId,
           sequence: source.event.sequence,
           type: source.event.type,
-          payload: source.event.payload,
+          payload: logicalEvent.payload,
         });
       }
       if (proven.length === 0) unsupportedReceipts += 1;
@@ -76079,19 +76089,16 @@ async function enqueueChildLifecycleNoticeOutboxTx(
   // Oversized evidence is omitted, not truncated and then called consumed.
   // Bound index candidates before payload filters, and prefer the newest complete
   // result within the total budget. Explicit reads handle omitted evidence.
-  const candidates = await rawRows<{ sequence: number; type: string; payload: unknown }>(
-    tx,
-    childLifecycleEvidenceCandidatesSql(sql`${workspaceId}::uuid`, sql`${session.id}::uuid`),
-  );
-  const childEventEvidence: typeof candidates = [];
-  let evidenceBytes = 0;
-  for (const candidate of candidates) {
-    const bytes = Buffer.byteLength(JSON.stringify(candidate), "utf8");
-    if (evidenceBytes + bytes > 8192) continue;
-    childEventEvidence.push(candidate);
-    evidenceBytes += bytes;
-  }
-  const noticePayload = { ...input.payload, childEventEvidence: childEventEvidence.reverse() };
+  const candidates = await rawRows<{
+    sequence: number;
+    type: string;
+    payload: unknown;
+    payloadCodecVersion: number | null;
+  }>(tx, childLifecycleEvidenceCandidatesSql(sql`${workspaceId}::uuid`, sql`${session.id}::uuid`));
+  const noticePayload = {
+    ...input.payload,
+    childEventEvidence: boundedChildLifecycleEvidence(candidates),
+  };
   const inserted = await tx
     .insert(schema.sessionSystemUpdateOutbox)
     .values(

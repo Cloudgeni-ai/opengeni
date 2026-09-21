@@ -77,8 +77,11 @@ export function childLifecycleEvidenceCandidatesSql(
       and ${meaningfulSessionEventSql("meaningful")}
     order by meaningful.sequence desc limit 32
   )
-  select candidates.sequence, candidates.type, candidates.payload from candidates
+  select candidates.sequence, candidates.type, candidates.payload,
+    candidates.payload_codec_version as "payloadCodecVersion" from candidates
   where ${completeMeaningfulSessionEventSql("candidates")}
-    and octet_length(candidates.payload::text) <= 8192
+    -- Inspection cap only: the 8 KiB evidence budget applies after logical
+    -- decoding in boundedChildLifecycleEvidence, not to this stored encoding.
+    and octet_length(candidates.payload::text) <= 65536
   order by candidates.sequence desc`;
 }

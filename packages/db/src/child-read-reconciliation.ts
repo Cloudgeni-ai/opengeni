@@ -1,4 +1,38 @@
 import { isDeepStrictEqual } from "node:util";
+import { fromPostgresLosslessJson } from "./lossless-json";
+
+/** Decode a stored row exactly once, by its own out-of-band version. Removing
+ * the version at this boundary prevents literal marker text being decoded again
+ * after the logical payload is placed inside a separately versioned receipt. */
+export function logicalChildReadEvent<
+  T extends { payload: unknown; payloadCodecVersion: number | null },
+>(row: T): Omit<T, "payloadCodecVersion"> {
+  const { payloadCodecVersion, ...event } = row;
+  return { ...event, payload: fromPostgresLosslessJson(row.payload, payloadCodecVersion) };
+}
+
+/** Rows arrive newest first from the bounded indexed query. Budget what the
+ * parent actually reads, not the PostgreSQL string compatibility encoding. */
+export function boundedChildLifecycleEvidence(
+  rows: readonly {
+    sequence: number;
+    type: string;
+    payload: unknown;
+    payloadCodecVersion: number | null;
+  }[],
+): Array<{ sequence: number; type: string; payload: unknown }> {
+  const evidence: Array<{ sequence: number; type: string; payload: unknown }> = [];
+  let bytes = 0;
+  for (const row of rows.slice(0, 32)) {
+    const { sequence, type, payload } = logicalChildReadEvent(row);
+    const candidate = { sequence, type, payload };
+    const size = Buffer.byteLength(JSON.stringify(candidate), "utf8");
+    if (bytes + size > 8192) continue;
+    evidence.push(candidate);
+    bytes += size;
+  }
+  return evidence.reverse();
+}
 
 type RecordValue = Record<string, unknown>;
 const record = (value: unknown): RecordValue | null =>
