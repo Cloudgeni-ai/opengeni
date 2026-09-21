@@ -175,7 +175,9 @@ function RetainedArtifactDetail({
               {downloadError}
             </p>
           ) : null}
-          <RetainedFilePreview workspaceId={workspaceId} artifact={artifact} title={filename} />
+          <div className="min-h-48 rounded-lg bg-surface-2 p-4">
+            <RetainedFilePreview workspaceId={workspaceId} artifact={artifact} title={filename} />
+          </div>
         </>
       ) : null}
     </ContentPage>
