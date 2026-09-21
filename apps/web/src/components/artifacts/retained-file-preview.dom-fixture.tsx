@@ -29,7 +29,10 @@ const client = {
 };
 mock.module("@/context", () => ({ useAppContext: () => ({ client, accessKeyVersion }) }));
 mock.module("./pdf-file-preview", () => ({
-  default: ({ title }: { title: string }) => <span>{title} rendered PDF</span>,
+  default: ({ title }: { title: string }) => {
+    if (title === "Broken PDF") throw new Error("PDF renderer failed");
+    return <span>{title} rendered PDF</span>;
+  },
 }));
 const { InlineChatArtifact, RetainedFilePreview } = await import("./retained-file-preview");
 let root: Root;
@@ -62,6 +65,51 @@ afterEach(async () => {
   container.remove();
 });
 afterAll(() => GlobalRegistrator.unregister());
+
+test("equivalent receipts preserve playback while authorization changes refresh the source", async () => {
+  await act(async () =>
+    root.render(
+      <RetainedFilePreview workspaceId={workspaceId} artifact={artifact} title="Video" />,
+    ),
+  );
+  const video = container.querySelector("video");
+  await act(async () =>
+    root.render(
+      <RetainedFilePreview workspaceId={workspaceId} artifact={{ ...artifact }} title="Renamed" />,
+    ),
+  );
+  expect(container.querySelector("video")).toBe(video);
+  expect(client.createRetainedArtifactDownloadUrl).toHaveBeenCalledTimes(1);
+  accessKeyVersion++;
+  await act(async () =>
+    root.render(
+      <RetainedFilePreview workspaceId={workspaceId} artifact={{ ...artifact }} title="Video" />,
+    ),
+  );
+  expect(client.createRetainedArtifactDownloadUrl).toHaveBeenCalledTimes(2);
+  expect(container.querySelector("video")).not.toBe(video);
+  artifact = { ...artifact, sha256: "b".repeat(64) };
+  await act(async () =>
+    root.render(
+      <RetainedFilePreview workspaceId={workspaceId} artifact={artifact} title="Video" />,
+    ),
+  );
+  expect(client.createRetainedArtifactDownloadUrl).toHaveBeenCalledTimes(3);
+});
+
+test("PDF renderer failures stay inside the preview", async () => {
+  artifact = { ...artifact, contentType: "application/pdf" };
+  await act(async () =>
+    root.render(
+      <div>
+        <span>Conversation remains</span>
+        <RetainedFilePreview workspaceId={workspaceId} artifact={artifact} title="Broken PDF" />
+      </div>,
+    ),
+  );
+  expect(container.textContent).toContain("Conversation remains");
+  expect(container.textContent).toContain("PDF preview unavailable");
+});
 
 test("published link opens sidebar and embed renders playable video with stable chat space", async () => {
   const open = mock(() => true);

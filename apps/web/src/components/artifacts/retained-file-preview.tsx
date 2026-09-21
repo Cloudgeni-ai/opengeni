@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { Component, lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import { isRetainedImageContentType } from "@opengeni/react/artifacts";
 import { useAppContext } from "@/context";
@@ -21,15 +21,26 @@ export function retainedPreviewKind(contentType: string) {
 }
 
 /** The same authorized preview is used by the artifact page and chat. */
-export function RetainedFilePreview({
-  workspaceId,
-  artifact,
-  title,
-}: {
+type PreviewProps = {
   workspaceId: string;
   artifact: RetainedArtifactReference;
   title: string;
-}) {
+};
+
+export function RetainedFilePreview(props: PreviewProps) {
+  const { accessKeyVersion } = useAppContext();
+  if (!props.artifact.available) return <p role="status">Artifact unavailable.</p>;
+  return (
+    <RetainedFilePreviewBody
+      key={JSON.stringify([props.workspaceId, accessKeyVersion, props.artifact])}
+      {...props}
+    />
+  );
+}
+
+function RetainedFilePreviewBody({ workspaceId, artifact: initialArtifact, title }: PreviewProps) {
+  // The parent remounts on receipt changes, not object allocation on a rerender.
+  const [artifact] = useState(initialArtifact);
   const { client, accessKeyVersion } = useAppContext();
   const kind = retainedPreviewKind(artifact.contentType);
   const [retry, setRetry] = useState(0);
@@ -98,7 +109,7 @@ export function RetainedFilePreview({
   if (failed)
     return (
       <div role="status" className="p-4 text-sm">
-        Preview could not be loaded. You can still download the file.{" "}
+        Preview could not be loaded. Use the artifact action to open the file.{" "}
         <Button variant="ghost" size="sm" onClick={() => setRetry((n) => n + 1)}>
           Retry preview
         </Button>
@@ -136,10 +147,26 @@ export function RetainedFilePreview({
       />
     );
   return (
-    <Suspense fallback={<p role="status">Loading PDF…</p>}>
-      <PdfFilePreview key={source.url} url={source.url} title={title} />
-    </Suspense>
+    <PreviewErrorBoundary key={source.url}>
+      <Suspense fallback={<p role="status">Loading PDF…</p>}>
+        <PdfFilePreview key={source.url} url={source.url} title={title} />
+      </Suspense>
+    </PreviewErrorBoundary>
   );
+}
+
+class PreviewErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  render() {
+    return this.state.failed ? (
+      <p role="status">PDF preview unavailable. Download the file or reload to try again.</p>
+    ) : (
+      this.props.children
+    );
+  }
 }
 
 export function InlineChatArtifact({
