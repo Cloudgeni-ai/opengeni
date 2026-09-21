@@ -1354,6 +1354,10 @@ authority. File provenance stays separate from bytes; `kind:id` identifies list
 entries. Browsing never executes Sites or wakes compute. See
 [`artifact-library.md`](artifact-library.md).
 
+Published-file links use `Markdown.artifactHref`; `retained-file-preview.tsx`
+shares media/PDF previews through authorized storage APIs. Sandbox links remain
+workspace-inspector requests.
+
 Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
 [`connected-machines.md`](connected-machines.md).

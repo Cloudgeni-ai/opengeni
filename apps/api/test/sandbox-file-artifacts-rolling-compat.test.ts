@@ -83,6 +83,29 @@ const versions = {
     assertFile: assertSandboxArtifactFile,
   },
 };
+test("new media publications cannot collide with legacy binary metadata", () => {
+  for (const path of [
+    "demo.mp4",
+    "demo.webm",
+    "demo.ogv",
+    "voice.mp3",
+    "voice.m4a",
+    "voice.ogg",
+    "voice.wav",
+    "voice.flac",
+  ]) {
+    const input = {
+      workspaceId: "20000000-0000-4000-8000-000000000002",
+      sessionId: "30000000-0000-4000-8000-000000000003",
+      path,
+      sha256: "a".repeat(64),
+    };
+    expect(sandboxArtifactIdentity(input)).not.toEqual(baseIdentity(input));
+    expect(sandboxArtifactIdentity(input)).toEqual(sandboxArtifactIdentity(input));
+    expect(baseContentType(path)).toBe("application/octet-stream");
+    expect(sandboxFileContentType(path)).toMatch(/^(audio|video)\//);
+  }
+});
 const filenames = [
   "animation.gif",
   "picture.avif",

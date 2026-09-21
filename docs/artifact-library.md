@@ -52,6 +52,24 @@ or deleting the source file does not change the delivered image. Repeating the
 same sandbox path/content publication reuses its identity; changed bytes produce
 a distinct immutable output.
 
+Published-file links use `[Open file](artifact:<artifactId>)`; the console resolves
+them to the authenticated file page and opens the session artifact panel. Inline
+`![Preview](artifact:<artifactId>)` selects image, video, audio or PDF presentation
+from retained metadata. Other formats show file details/download through the same
+artifact link. HTML files remain non-executable. Source navigation continues to
+use `sandbox:` and the workspace inspector; it does not publish a file.
+
+The console permits validated `fromSession` return context when opening canonical
+artifact links in the panel. Version-specific, foreign-workspace and unknown
+query parameters keep their full-page behavior. Embedded `SessionConversation`
+hosts can supply `renderMessageText` with `Markdown.artifactHref` and `renderImage`
+to connect their own navigation and media surfaces.
+
+New MP4/WebM/OGV and MP3/M4A/OGG/WAV/FLAC sandbox publications carry media MIME
+types under a separate media identity namespace. Older binary-typed publications
+remain unchanged and downloadable; republishing creates the correctly typed
+media artifact. Existing non-media publication identities and receipts are unchanged.
+
 Image classification follows the retained file's authoritative content type.
 This rolling change preserves the sandbox publisher's existing PNG/JPEG/WebP
 format mapping. GIF, AVIF, and SVG are viewable when already retained with a

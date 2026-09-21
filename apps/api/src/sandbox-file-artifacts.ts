@@ -295,6 +295,14 @@ export function sandboxFileContentType(filename: string): string {
       ".jpg": "image/jpeg",
       ".json": "application/json",
       ".md": "text/markdown",
+      ".mp4": "video/mp4",
+      ".webm": "video/webm",
+      ".ogv": "video/ogg",
+      ".mp3": "audio/mpeg",
+      ".m4a": "audio/mp4",
+      ".ogg": "audio/ogg",
+      ".wav": "audio/wav",
+      ".flac": "audio/flac",
       ".pdf": "application/pdf",
       ".png": "image/png",
       ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -314,7 +322,13 @@ export function sandboxArtifactIdentity(input: {
   sha256: string;
 }): { fileId: string; uploadId: string } {
   const digest = createHash("sha256")
-    .update("opengeni-sandbox-file-artifact-v1\0")
+    // Newly classified media must not collide with old binary-typed publications.
+    // Preserve the v1 identity for every previously supported format.
+    .update(
+      /^(audio|video)\//.test(sandboxFileContentType(input.path))
+        ? "opengeni-sandbox-media-artifact-v1\0"
+        : "opengeni-sandbox-file-artifact-v1\0",
+    )
     .update(input.workspaceId)
     .update("\0")
     .update(input.sessionId)
