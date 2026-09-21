@@ -179,13 +179,14 @@ before viewing fresh labels, alternate arm order, keep smoke/regression runs
 separate, and never overwrite output manifests. CLI work is read-only outside
 its output receipts. No staging integration or subscription billing is implied.
 
-The shared sequential journal caps the authorized iteration at 400 inference requests
-and a conservative local $5 estimate, reserving each call before transport. Unsettled,
+The shared sequential journal caps the authorized reliability iteration at 496 cumulative inference requests
+and a conservative local $2.13 estimate, reserving each call before transport. This iteration
+started at 396 requests; earlier manifests retain their original ceilings. Unsettled,
 authentication, missing-usage and ambiguous failures stop the experiment. Explicit
 HTTP 429/502/503/504 failures get one retry, with the unknown bill reserved; exhausted
 Jev delegation yields empty evidence to ordinary Terra tools, while exhausted Terra
-calls end that case. The Jev yield was added and tested offline after the recorded
-compact-v6 live runs; those failed cases remain failures, not retroactively rescued.
+calls end that case. `--no-retry` disables the explicit retry for controlled reliability
+tests. Failed cases from earlier runs remain failures, not retroactively rescued.
 An old explicit
 transient failure requires `--resume-transient FAILED_REQUEST_UUID` in the same ledger;
 this records authorization, not settled billing. Never reset the ledger to bypass it.
@@ -209,6 +210,44 @@ source is retained with original ranges and disclosed as incomplete. Snapshot
 character limits never truncate a physical line and label it exact. This is bounded
 discovery, not repository-wide absence proof. A plausible wrong root can still miss
 other candidates. `--workflow legacy` remains available for explicit comparison.
+
+The runner partitions independent Jev questions into batches of at most eight,
+retaining identical full state in each batch and validating every answer. This is a
+workload mitigation, not a documented provider limit: an alternating diagnostic saw
+three 26-question controls fail with HTTP503 while all twelve calls in the equivalent
+three batched pipelines succeeded. It repeats source tokens and adds calls; both are
+metered, not treated as free. The subsequent no-retry end-to-end check still saw
+503s on an eight-question span batch and a two-question file selector: batching has
+not established reliable service or eliminated the failure. Any failed batch invalidates that delegation and yields
+only on explicit transient errors. Controller and task deadlines still apply.
+
+`gateway-call.ts` is shared by the runner and diagnostic utility. Its offline SDK
+integration test covers two 503s, reserved unknown bills, ordinary fallback, and
+rejection of request401 against a configured 400-request ceiling. Authentication
+and missing-cost errors fail closed. Transport receipts retain request correlation,
+body hashes/sizes and safe error fields, never authorization values. Jev state/question
+payloads are retained in private run files for exact replay; they contain source and
+must be handled with the same access controls as the repository. Each trajectory run
+retains its implementation sources and digest alongside its manifest.
+
+The Gateway-only diagnostic utility uses the same cumulative ledger and no retries:
+
+```sh
+JEV_ALLOW_LIVE=1 bun diagnose-gateway.ts minimal \
+  --out runs/diagnostic-new --ledger runs/terra-shared.jsonl
+JEV_ALLOW_LIVE=1 bun diagnose-gateway.ts code --root /path/to/opengeni \
+  --revision COMMIT --subdir apps/web/src/lib --cases /path/to/cases.json \
+  --out runs/diagnostic-code-new --ledger runs/terra-shared.jsonl
+JEV_ALLOW_LIVE=1 bun diagnose-gateway.ts batches \
+  --payloads runs/diagnostic-code-new/payloads.jsonl --payload-id REQUEST_UUID \
+  --out runs/diagnostic-batch-new --ledger runs/terra-shared.jsonl
+```
+
+`replay` accepts `--payloads` plus comma-separated `--payload-ids` and compares
+direct/combined abort signals three times. `batches` alternates whole versus
+eight-question batches three times; `code` repeats supplied cases three times.
+Do not use a new ledger to evade the cumulative authorization. These diagnostics
+cannot attribute an uncorrelated upstream503 to Gateway versus TypeSafe by themselves.
 
 The harness's task-bound investigate tool accepts only search hints; runtime supplies
 the active question/context. The underlying controller accepts an explicit Request

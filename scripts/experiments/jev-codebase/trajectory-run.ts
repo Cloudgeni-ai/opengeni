@@ -13,6 +13,9 @@ import { loadSnapshot, hash, type Judge, DEFAULT_LIMITS } from "./core";
 import { investigateV3 } from "./investigation";
 import { investigateCompact, COMPACT_VERSION } from "./compact-investigation";
 import { budgetState, transientStatus, withTransientDelegationFallback } from "./iteration-ledger";
+import { observedGatewayFetch } from "./gateway-diagnostics";
+import { batchedJudge } from "./batched-judge";
+import { meteredGatewayCall } from "./gateway-call";
 import {
   SourceTools,
   scoreTrajectory,
@@ -24,8 +27,8 @@ import {
 } from "./trajectory";
 
 const MODELS = { terra: "openai/gpt-5.6-terra", jev: "typesafe-ai/jev" };
-const MAX_USD = 5,
-  MAX_REQUESTS = 400,
+const MAX_USD = 2.13,
+  MAX_REQUESTS = 496,
   MAX_OUTPUT = 2200,
   MAX_TURNS = 10;
 type Arm = "ordinary" | "jev-delegated";
@@ -55,7 +58,13 @@ async function main() {
   const key = process.env.VERCEL_AI_GATEWAY_API_KEY;
   if (!key) throw new Error("credential_missing");
   mkdirSync(out, { recursive: true, mode: 0o700 });
-  const gateway = createGateway({ apiKey: key });
+  let activeRequestId: string | null = null;
+  const gateway = createGateway({
+    apiKey: key,
+    fetch: observedGatewayFetch((row) =>
+      append(out + "/transport.jsonl", { requestId: activeRequestId, ...row }),
+    ),
+  });
   const preflightStart = performance.now();
   const catalog = (await (
     await fetch("https://ai-gateway.vercel.sh/v1/models", { signal: AbortSignal.timeout(25000) })
@@ -100,18 +109,27 @@ async function main() {
         maxRequests: MAX_REQUESTS,
       });
   }
+  const implementationFiles = [
+    "trajectory-run.ts",
+    "trajectory.ts",
+    "core.ts",
+    "investigation.ts",
+    "compact-investigation.ts",
+    "iteration-ledger.ts",
+    "gateway-diagnostics.ts",
+    "gateway-call.ts",
+    "batched-judge.ts",
+    "package.json",
+    "bun.lock",
+  ];
+  mkdirSync(out + "/implementation", { recursive: true, mode: 0o700 });
+  for (const path of implementationFiles)
+    writeFileSync(out + "/implementation/" + path, readFileSync(`${import.meta.dir}/${path}`), {
+      flag: "wx",
+      mode: 0o600,
+    });
   const implementationDigest = hash(
-    [
-      "trajectory-run.ts",
-      "trajectory.ts",
-      "core.ts",
-      "investigation.ts",
-      "compact-investigation.ts",
-      "iteration-ledger.ts",
-      "bun.lock",
-    ]
-      .map((p) => readFileSync(`${import.meta.dir}/${p}`, "utf8"))
-      .join("\n"),
+    implementationFiles.map((p) => readFileSync(`${import.meta.dir}/${p}`, "utf8")).join("\n"),
   );
   const manifest = {
     createdAt: new Date().toISOString(),
@@ -128,8 +146,10 @@ async function main() {
     maxTurns: MAX_TURNS,
     maxOutputTokens: MAX_OUTPUT,
     concurrency: 1,
-    retries:
-      "One retry only for explicit HTTP429/502/503/504; unknown failed billing stays reserved. No SDK retries.",
+    maxQuestionsPerJevCall: 8,
+    retries: args.includes("--no-retry")
+      ? "No retries; explicit transient exhaustion yields to ordinary tools for Jev only."
+      : "One retry only for explicit HTTP429/502/503/504; unknown failed billing stays reserved. No SDK retries.",
     reasoning: "provider default; no override",
     revision: option("--revision"),
     subdir: option("--subdir"),
@@ -152,95 +172,29 @@ async function main() {
     attribution: Row,
     payload: unknown,
     invoke: () => Promise<any>,
-    attempt = 0,
-  ) => {
-    const budget = budgetState(ledger());
-    const bytes = Buffer.byteLength(JSON.stringify(payload));
-    if (bytes > 180000) throw new Error("request_size_budget");
-    const price = prices[kind];
-    const reservedUsd = (bytes + 8192) * price.input + MAX_OUTPUT * price.output;
-    if (budget.attempts >= MAX_REQUESTS || budget.used + reservedUsd > MAX_USD)
-      throw new Error("experiment_budget_exhausted");
-    const base = {
-      ...attribution,
-      runId: out,
-      id: crypto.randomUUID(),
-      stage,
-      attempt,
-      model: MODELS[kind],
-      timestamp: new Date().toISOString(),
-      payloadHash: hash(JSON.stringify(payload)),
-      payloadBytes: bytes,
-    };
-    append(ledgerPath, { ...base, kind: "started", reservedUsd });
-    const t = performance.now();
-    try {
-      const r = await invoke();
-      const inputTokens = r.usage.inputTokens,
-        outputTokens = r.usage.outputTokens;
-      const cachedTokens = r.usage.inputTokenDetails?.cacheReadTokens ?? 0;
-      const reasoningTokens = r.usage.outputTokenDetails?.reasoningTokens ?? null;
-      if (
-        ![inputTokens, outputTokens, cachedTokens].every((n) => Number.isFinite(n) && n >= 0) ||
-        cachedTokens > inputTokens
-      )
-        throw new Error("invalid_usage");
-      const cost = r.providerMetadata?.gateway?.cost;
-      let reportedUsd: number | null = null;
-      try {
-        reportedUsd = nonnegativeAmount(cost);
-      } catch {
-        /* Preserve known usage before stopping. */
-      }
-      const nominalUsd =
-        (inputTokens - cachedTokens) * price.input +
-        cachedTokens * price.cached +
-        outputTokens * price.output;
-      append(ledgerPath, {
-        ...base,
-        kind: "completed",
-        elapsedMs: performance.now() - t,
-        inputTokens,
-        outputTokens,
-        cachedTokens,
-        reasoningTokens,
-        usage: r.usage,
-        nominalUsd,
-        reportedUsd,
-        resolvedModel: r.response?.modelId,
-        finishReason: r.finishReason ?? null,
-      });
-      if (reportedUsd === null || !Number.isFinite(reportedUsd) || reportedUsd < 0)
-        throw new Error("cost_unavailable");
-      if (Math.max(nominalUsd, reportedUsd) > reservedUsd) throw new Error("reservation_exceeded");
-      return r;
-    } catch (error) {
-      const safe = error as { name?: string; statusCode?: number };
-      append(ledgerPath, {
-        ...base,
-        kind: "failed",
-        elapsedMs: performance.now() - t,
-        errorName: safe.name ?? "unknown",
-        statusCode: safe.statusCode ?? null,
-        billingUnknown: true,
-      });
-      if (transientStatus(safe.statusCode)) {
-        append(ledgerPath, {
-          kind: "transient_reserved",
-          failedId: base.id,
-          reservedUsd,
-          timestamp: new Date().toISOString(),
-          statusCode: safe.statusCode,
-        });
-        if (attempt < 1) {
-          await Bun.sleep(1000);
-          return call(kind, stage, attribution, payload, invoke, attempt + 1);
-        }
-        throw new Error("transient_provider_unavailable", { cause: error });
-      }
-      throw new Error("provider_or_usage_failure", { cause: error });
-    }
-  };
+  ) =>
+    meteredGatewayCall(
+      {
+        model: MODELS[kind],
+        stage,
+        runId: out,
+        attribution,
+        price: prices[kind],
+        maxUsd: MAX_USD,
+        maxRequests: MAX_REQUESTS,
+        maxOutput: MAX_OUTPUT,
+        retries: args.includes("--no-retry") ? 0 : 1,
+        secret: key,
+        history: ledger,
+        append: (row) => append(ledgerPath, row),
+        onStart: (id) => {
+          activeRequestId = id;
+          if (kind === "jev") append(out + "/payloads.jsonl", { id, ...(payload as object) });
+        },
+      },
+      payload,
+      invoke,
+    );
   for (const [index, c] of cases.entries())
     for (const arm of (index % 2
       ? ["jev-delegated", "ordinary"]
@@ -411,11 +365,12 @@ async function main() {
               output = source.read(a.path, a.startLine, a.endLine);
             else if (tc.toolName === "investigate" && !delegated) {
               delegated = true;
-              const judge: Judge = async (state, questions, signal) => {
+              const judge: Judge = batchedJudge(async (state, questions, signal) => {
                 const phase =
                   questions.primary || questions.companion
                     ? "file_selection"
-                    : questions.sufficiency
+                    : questions.sufficiency ||
+                        Object.keys(questions).some((id) => /^s\d+$/.test(id))
                       ? "span_selection"
                       : questions.entry
                         ? "entry"
@@ -444,7 +399,7 @@ async function main() {
                     }),
                 );
                 return result.answers;
-              };
+              });
               const compactRequest = {
                 question: a.question ?? c.question,
                 context: a.context ?? c.context,
