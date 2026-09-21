@@ -106,6 +106,13 @@ Main-agent invocation, final reasoning, verification, fallback, correction,
 research/setup costs and staging dispatch overhead are not measured here.
 Answer agreement and required-file recall must be reported separately; a right
 answer with insufficient evidence is not a fully successful investigation.
+Benchmark rows expose `operationalSuccess` (neither error nor budget exhaustion),
+`answerCorrect` (operational success plus oracle answer agreement), and
+`strictEvidenceSuccess` (answer correctness plus every required oracle path
+returned and no unresolved local dependencies). An empty required-path set has
+no path-recall obligation; recall remains null. These are file-level evidence
+checks, not proof that the excerpts establish the answer. Missing or excluded
+relative imports remain unresolved rather than silently satisfying completion.
 
 ## Future tool integration gate
 

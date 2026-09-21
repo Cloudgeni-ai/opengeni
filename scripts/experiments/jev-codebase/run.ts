@@ -11,6 +11,7 @@ import {
   type Request,
 } from "./core";
 import { createJudge, preflight, type Arm, type Receipt } from "./gateway";
+import { scoreInvestigation } from "./scoring";
 
 // This executable is an experiment, not a registered OpenGeni tool or authority boundary.
 // All output goes outside the investigated snapshot; raw source remains local.
@@ -67,7 +68,7 @@ async function main() {
   if (!Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > 80)
     throw new Error("invalid_request_budget");
   const implementationDigest = hash(
-    ["core.ts", "gateway.ts", "run.ts", "bun.lock"]
+    ["core.ts", "gateway.ts", "run.ts", "scoring.ts", "bun.lock"]
       .map((p) => readFileSync(`${import.meta.dir}/${p}`, "utf8"))
       .join("\n"),
   );
@@ -159,18 +160,13 @@ async function main() {
         createJudge(arm, setup, journal, maxRequests),
         manifest.limits,
       );
-      const paths = new Set(result.evidence.map((e) => e.path));
       const row = {
         caseId: c.id,
         split: c.split,
         category: c.category,
         arm,
         expectedAnswer: c.expectedAnswer,
-        answerCorrect: result.answer === c.expectedAnswer,
-        wrongDecisive: result.answer !== "indecisive" && result.answer !== c.expectedAnswer,
-        requiredPathRecall: c.requiredPaths.length
-          ? c.requiredPaths.filter((p) => paths.has(p)).length / c.requiredPaths.length
-          : null,
+        ...scoreInvestigation(result, c.expectedAnswer, c.requiredPaths),
         returnedChars: result.evidence.reduce((n, e) => n + e.text.length, 0),
         result,
       };
@@ -183,6 +179,8 @@ async function main() {
           status: result.status,
           answer: result.answer,
           correct: row.answerCorrect,
+          operationalSuccess: row.operationalSuccess,
+          strictEvidenceSuccess: row.strictEvidenceSuccess,
           recall: row.requiredPathRecall,
           elapsedMs: result.elapsedMs,
         }),

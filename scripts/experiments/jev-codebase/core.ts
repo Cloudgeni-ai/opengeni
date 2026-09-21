@@ -89,11 +89,11 @@ export function loadSnapshot(root: string, revision = "HEAD", subdir = ""): Snap
       excluded++;
       continue;
     }
-    const path = subdir ? match[3].slice(subdir.replace(/\/$/, "").length + 1) : match[3];
-    if (!allowedPath(path)) {
+    if (!allowedPath(match[3])) {
       excluded++;
       continue;
     }
+    const path = subdir ? match[3].slice(subdir.replace(/\/$/, "").length + 1) : match[3];
     const size = Number(git(absolute, ["cat-file", "-s", match[2]]).trim());
     if (size > 150000 || total + size > 8_000_000 || chunks.length >= 6000) {
       excluded++;
@@ -184,9 +184,8 @@ export function localDependencies(chunk: Chunk, snapshot: Snapshot): string[] {
       continue;
     const specifier = statement.moduleSpecifier.text;
     if (!specifier.startsWith(".")) continue;
-    const base = posix
-      .normalize(posix.join(posix.dirname(chunk.path), specifier))
-      .replace(/\.[cm]?js$/, "");
+    const importPath = posix.normalize(posix.join(posix.dirname(chunk.path), specifier));
+    const base = importPath.replace(/\.[cm]?js$/, "");
     const found = [
       base,
       `${base}.ts`,
@@ -195,7 +194,8 @@ export function localDependencies(chunk: Chunk, snapshot: Snapshot): string[] {
       `${base}/index.ts`,
       `${base}/index.js`,
     ].find((p) => paths.has(p));
-    if (found) result.push(found);
+    // Missing/excluded imports are still obligations, not evidence of completeness.
+    result.push(found ?? importPath);
   }
   return [...new Set(result)];
 }
@@ -303,13 +303,18 @@ export async function investigate(
   let terms = termsFor(request);
   const requiredPaths = new Set(namedEntryPaths(snapshot, request));
   const unresolved = () =>
-    [...requiredPaths].filter((p) => snapshot.chunks.some((c) => c.path === p && !seen.has(c.id)));
+    [...requiredPaths].filter((p) => {
+      const chunks = snapshot.chunks.filter((c) => c.path === p);
+      return chunks.length === 0 || chunks.some((c) => !seen.has(c.id));
+    });
   const ask = async (state: unknown, questions: Record<string, Question>) => {
     if (performance.now() - started >= limits.deadlineMs) throw new Error("deadline");
     const signal = AbortSignal.timeout(
       Math.max(1, Math.ceil(limits.deadlineMs - (performance.now() - started))),
     );
     const result = await judge(state, questions, signal);
+    if (signal.aborted || performance.now() - started >= limits.deadlineMs)
+      throw new Error("deadline");
     validateAnswers(questions, result);
     return result;
   };

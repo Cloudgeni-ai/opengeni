@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,6 +16,7 @@ import {
   type Question,
   type Snapshot,
 } from "./core";
+import { scoreInvestigation } from "./scoring";
 
 const snapshot: Snapshot = {
   revision: "fixed",
@@ -57,6 +58,38 @@ const judge =
     answer(qs, qs.next ? { next: "e0" } : choices);
 
 describe("read-only investigation contract", () => {
+  test("subdir scopes cannot bypass sensitive ancestor exclusions", async () => {
+    const root = mkdtempSync(join(tmpdir(), "jev-subdir-test-"));
+    const git = (...args: string[]) => {
+      const r = Bun.spawnSync(["git", "-C", root, ...args], { stdout: "pipe", stderr: "pipe" });
+      expect(r.exitCode).toBe(0);
+    };
+    try {
+      git("init");
+      for (const dir of ["secrets", "credentials", "nested/.env.private", "src"]) {
+        mkdirSync(join(root, dir), { recursive: true });
+        await Bun.write(join(root, dir, "config.ts"), "export const synthetic = true;\n");
+      }
+      git("add", ".");
+      git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-m",
+        "fixture",
+      );
+      for (const scope of ["secrets", "credentials/", "nested/.env.private"]) {
+        const s = loadSnapshot(root, "HEAD", scope);
+        expect(s.chunks).toEqual([]);
+        expect(s.excluded).toBe(1);
+      }
+      expect(loadSnapshot(root, "HEAD", "src").chunks.map((c) => c.path)).toEqual(["config.ts"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   test("snapshot ignores dirty files and does not follow committed symlinks", async () => {
     const root = mkdtempSync(join(tmpdir(), "jev-snapshot-test-"));
     const git = (...args: string[]) => {
@@ -69,10 +102,18 @@ describe("read-only investigation contract", () => {
       await Bun.write(join(root, ".env.json"), '{"token":"synthetic-do-not-read"}');
       symlinkSync(".env.json", join(root, "alias.ts"));
       git("add", ".");
-      git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture");
+      git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-m",
+        "fixture",
+      );
       await Bun.write(join(root, "source.ts"), "export const value = 2;\n");
       const s = loadSnapshot(root);
-      expect(s.chunks.map(c => c.path)).toEqual(["source.ts"]);
+      expect(s.chunks.map((c) => c.path)).toEqual(["source.ts"]);
       expect(s.chunks[0].text).toContain("value = 1");
       expect(s.excluded).toBe(2);
     } finally {
@@ -211,5 +252,95 @@ describe("read-only investigation contract", () => {
       text: "import type { Logger } from './log'; export function run() {}",
     };
     expect(localDependencies(c, snapshot)).toEqual([]);
+  });
+  test("missing or excluded relative imports remain unresolved and block completion", async () => {
+    for (const specifier of ["./missing", "../secrets/config.js", "../outside.ts"]) {
+      const s = {
+        ...snapshot,
+        excluded: 1,
+        limited: true,
+        chunks: [
+          {
+            ...snapshot.chunks[0],
+            text: `import { check } from '${specifier}'; export function run() { return check(); }`,
+          },
+        ],
+      };
+      const expected = specifier === "./missing" ? "src/missing" : specifier.slice(3);
+      expect(localDependencies(s.chunks[0], s)).toEqual([expected]);
+      const r = await investigate(
+        s,
+        { question: "Does run enforce authentication?" },
+        judge({ relevant: "keep", answer: "yes", basis: "witness", control: "finish" }),
+      );
+      expect(r.answer).toBe("indecisive");
+      expect(r.status).toBe("partial");
+      expect(r.coverage.unresolvedLocalPaths).toEqual([expected]);
+    }
+  });
+  test("rejects an assessment returned after the deadline even if the judge ignores abort", async () => {
+    let assessmentReturned = false;
+    const r = await investigate(
+      snapshot,
+      { question: "Does run check signal?" },
+      async (_, qs) => {
+        if (qs.next) return answer(qs, { next: "e0" });
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        assessmentReturned = true;
+        return answer(qs, { relevant: "keep", answer: "yes", basis: "witness", control: "finish" });
+      },
+      { maxSteps: 1, candidateBatch: 2, maxEvidenceChars: 1000, deadlineMs: 100 },
+    );
+    expect(assessmentReturned).toBe(true);
+    expect(r.status).toBe("error");
+    expect(r.reasonCode).toBe("deadline");
+    expect(r.answer).toBe("indecisive");
+  });
+  test("scores operational validity, answer agreement and strict evidence separately", async () => {
+    const r = await investigate(
+      snapshot,
+      { question: "Does run check signal?" },
+      judge({ relevant: "keep", answer: "yes", basis: "witness", control: "finish" }),
+    );
+    expect(scoreInvestigation(r, "yes", ["src/cancel.ts"])).toEqual({
+      operationalSuccess: true,
+      answerCorrect: true,
+      strictEvidenceSuccess: true,
+      wrongDecisive: false,
+      requiredPathRecall: 1,
+    });
+    const incomplete = scoreInvestigation(r, "yes", ["src/cancel.ts", "src/log.ts"]);
+    expect(incomplete.answerCorrect).toBe(true);
+    expect(incomplete.requiredPathRecall).toBe(0.5);
+    expect(incomplete.strictEvidenceSuccess).toBe(false);
+    expect(
+      scoreInvestigation(
+        {
+          ...r,
+          coverage: { ...r.coverage, unresolvedLocalPaths: ["src/missing"] },
+        },
+        "yes",
+        ["src/cancel.ts"],
+      ).strictEvidenceSuccess,
+    ).toBe(false);
+    for (const status of ["error", "budget_exhausted"] as const) {
+      const failed = scoreInvestigation({ ...r, status, answer: "indecisive" }, "indecisive", []);
+      expect(failed.operationalSuccess).toBe(false);
+      expect(failed.answerCorrect).toBe(false);
+      expect(failed.strictEvidenceSuccess).toBe(false);
+    }
+    const abstained = scoreInvestigation(
+      { ...r, status: "needs_guidance", answer: "indecisive" },
+      "indecisive",
+      [],
+    );
+    expect(abstained.operationalSuccess).toBe(true);
+    expect(abstained.answerCorrect).toBe(true);
+    expect(abstained.strictEvidenceSuccess).toBe(true);
+    const wrong = scoreInvestigation(r, "no", ["src/cancel.ts"]);
+    expect(wrong.operationalSuccess).toBe(true);
+    expect(wrong.answerCorrect).toBe(false);
+    expect(wrong.strictEvidenceSuccess).toBe(false);
+    expect(wrong.wrongDecisive).toBe(true);
   });
 });
