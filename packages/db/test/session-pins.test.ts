@@ -2029,6 +2029,60 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(page.sessions.map((row) => row.id)).toEqual([target.id]);
   });
 
+  test("acknowledges only the target frontier when a sibling has a higher meaningful sequence", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:correlated-attention";
+    await grantMember(workspace, subjectId);
+    const target = await session({ ...workspace, message: "short answer" });
+    const sibling = await session({ ...workspace, message: "longer conversation" });
+    const [answer] = await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      { type: "agent.message.completed", payload: { text: "Target answer" } },
+    ]);
+    await appendSessionEvents(
+      db,
+      workspace.workspaceId,
+      sibling.id,
+      Array.from({ length: 20 }, (_, index) => ({
+        type: "agent.message.completed" as const,
+        payload: { text: `Sibling answer ${index}` },
+      })),
+    );
+    const acknowledged = await setSessionAttention(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: target.id,
+      unread: false,
+      acknowledgedThroughSequence: answer!.sequence,
+    });
+    expect(acknowledged).toMatchObject({ id: target.id, unread: false });
+    const [persisted] = await admin<{ acknowledged: number; manual: number | null }[]>`
+      select acknowledged_sequence as acknowledged, manually_unread_through as manual
+      from session_pins where workspace_id = ${workspace.workspaceId}
+        and session_id = ${target.id} and subject_id = ${subjectId}
+    `;
+    expect(persisted).toEqual({ acknowledged: answer!.sequence, manual: null });
+    expect(
+      await getSessionForSubject(db, workspace.workspaceId, target.id, subjectId),
+    ).toMatchObject({ unread: false });
+    const page = await listSessionsForSubject(db, workspace.workspaceId, { subjectId, limit: 10 });
+    expect(page.sessions.find((row) => row.id === target.id)?.unread).toBe(false);
+    expect(page.sessions.find((row) => row.id === sibling.id)?.unread).toBe(true);
+
+    await appendSessionEvents(db, workspace.workspaceId, target.id, [
+      { type: "agent.message.completed", payload: { text: "New target answer" } },
+    ]);
+    expect(
+      await setSessionAttention(db, {
+        workspaceId: workspace.workspaceId,
+        subjectId,
+        sessionId: target.id,
+        unread: false,
+        acknowledgedThroughSequence: answer!.sequence,
+      }),
+    ).toMatchObject({ unread: true });
+  });
+
   test("keeps acknowledgment and actively-working state durable and subject-specific", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

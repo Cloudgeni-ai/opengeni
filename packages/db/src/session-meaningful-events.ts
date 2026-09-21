@@ -1,4 +1,14 @@
-import { sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { Column, getTableName, is, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+
+function correlatedReference(reference: SQLWrapper): SQLWrapper {
+  // Drizzle's single-table SELECT projection removes Column table qualifiers,
+  // including inside nested SQL. Here that would bind workspace_id/session_id
+  // to the inner event row and turn correlation into a tautology. Identifiers
+  // retain the exact outer table (or alias) through that projection rewrite.
+  return is(reference, Column)
+    ? sql`${sql.identifier(getTableName(reference.table))}.${sql.identifier(reference.name)}`
+    : reference;
+}
 
 /** Attention is conversational output or an actionable boundary, not activity.
  * Keep this allow-list shared by rail, tree and consumption queries. */
@@ -59,7 +69,7 @@ export function meaningfulSessionSequenceSql(
 ): SQL<number> {
   return sql<number>`coalesce((
       select meaningful.sequence from session_events meaningful
-      where meaningful.workspace_id = ${workspaceId} and meaningful.session_id = ${sessionId}
+      where meaningful.workspace_id = ${correlatedReference(workspaceId)} and meaningful.session_id = ${correlatedReference(sessionId)}
         and ${meaningfulSessionEventSql("meaningful")}
       order by meaningful.sequence desc limit 1
     ), 0)`;

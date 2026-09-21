@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { PgDialect } from "drizzle-orm/pg-core";
+import { alias, PgDialect } from "drizzle-orm/pg-core";
+import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
 import { readFile } from "node:fs/promises";
+import { sessionEventCursors } from "../src/schema";
 import {
   MEANINGFUL_SESSION_EVENT_TYPES,
   childLifecycleEvidenceCandidatesSql,
@@ -10,6 +12,22 @@ import {
 } from "../src/session-meaningful-events";
 
 describe("meaningful event frontier contract", () => {
+  test("single-table projection preserves outer cursor correlation inside the subquery", () => {
+    for (const table of [sessionEventCursors, alias(sessionEventCursors, "outer_cursor")]) {
+      const query = drizzle
+        .mock()
+        .select({
+          meaningfulSequence: meaningfulSessionSequenceSql(table.workspaceId, table.sessionId),
+        })
+        .from(table)
+        .toSQL();
+      const name = table === sessionEventCursors ? "session_event_cursors" : "outer_cursor";
+      expect(query.sql).toContain(`meaningful.workspace_id = "${name}"."workspace_id"`);
+      expect(query.sql).toContain(`meaningful.session_id = "${name}"."session_id"`);
+      expect(query.sql).not.toContain('meaningful.session_id = "session_id"');
+      expect(query.params).toEqual([]);
+    }
+  });
   test("maintenance migration index uses exactly the runtime predicate", async () => {
     const migration = await readFile(
       new URL("../drizzle/0503_session_meaningful_attention.sql", import.meta.url),
