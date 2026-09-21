@@ -336,6 +336,33 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null, personal = 
 }
 
 describe("unified Skill real PostgreSQL lifecycle", () => {
+  test("persists eightfold Skill folder limits and rejects files beyond them", async () => {
+    if (!client) return;
+    const f = await fixture("automatic");
+    const main = skillMarkdown("Large Skill");
+    const files = [
+      { path: "SKILL.md", content: main + "x".repeat(2 * 1024 * 1024 - main.length) },
+      ...Array.from({ length: 1023 }, (_, i) => ({ path: `refs/${i}.txt`, content: "x" })),
+    ];
+    const saved = await saveSkill(client.db, { ...f.input, files });
+    const read = await readSkill(client.db, f.context, saved.skillId);
+    expect(read?.files).toHaveLength(1024);
+    expect(read?.files.find((file) => file.path === "SKILL.md")?.content.length).toBe(2097152);
+    const validator = async (value: typeof files) =>
+      (
+        await shared!.admin`
+      SELECT skill_files_valid(${shared!.admin.json(value)}::jsonb) AS valid`
+      )[0]!.valid;
+    expect(await validator(files)).toBe(true);
+    expect(await validator([...files, { path: "overflow", content: "x" }])).toBe(false);
+    expect(await validator([{ path: "SKILL.md", content: "x".repeat(2097153) }])).toBe(false);
+    const total = Array.from({ length: 4 }, (_, i) => ({
+      path: i === 0 ? "SKILL.md" : `${i}.txt`,
+      content: "x".repeat(2097152),
+    }));
+    expect(await validator(total)).toBe(true);
+    expect(await validator([...total, { path: "overflow", content: "x" }])).toBe(false);
+  });
   test("personal removal follows the accepted user scope and cannot remove workspace Skills", async () => {
     if (!client) return;
     const f = await fixture("automatic", true);

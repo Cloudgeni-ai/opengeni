@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { SkillFile, type SkillWriteReceipt } from "@opengeni/contracts";
+import { SkillFile, SKILL_MAX_FILES, type SkillWriteReceipt } from "@opengeni/contracts";
 import { readSkillRemovalScope } from "@opengeni/db";
 import {
   approveSkill,
@@ -27,8 +27,8 @@ const saveRequest = z
     expectedScopeVersion: z.number().int().nonnegative(),
     scope: scopeSchema.default("workspace"),
     stableKey: z.string().min(1).max(96),
-    files: z.array(SkillFile).max(128),
-    deletions: z.array(z.string().min(1).max(512)).max(128).default([]),
+    files: z.array(SkillFile).max(SKILL_MAX_FILES),
+    deletions: z.array(z.string().min(1).max(512)).max(SKILL_MAX_FILES).default([]),
     reason: z.string().min(1).max(2000),
   })
   .strict();
