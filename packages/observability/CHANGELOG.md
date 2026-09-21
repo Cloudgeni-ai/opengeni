@@ -1,5 +1,53 @@
 # @opengeni/observability
 
+## 0.8.30
+
+### Patch Changes
+
+- c6f98cc: Preserve bounded provider error classifications and opaque lease correlation for drain capture failures, without exposing provider messages or allowing logging failures to interrupt recovery cleanup.
+- c702159: Stop retrying permanent runtime database posture and configuration failures as
+  connection errors. Validate local startup prerequisites, prevent overlapping
+  launchers from rotating live database credentials, and check database posture
+  before building the development sandbox.
+- 406a62e: Link each worker execution trace to one structured start log through a stable opaque correlation key derived from authorized workspace, session and attempt records. Keep raw identities out of public telemetry and correlation keys out of metric labels.
+- 9d9b94b: Keep the published dependency closure aligned with the updated plugin removal
+  contracts. The SDK exposes named removal outcomes and optional preview-token
+  confirmation alongside the existing installation-version check.
+- a6251eb: Add isolated async trace context, parent/link export, bounded trace batching and
+  retry health, and opt-in protected failure diagnostics independent of the
+  application database. Preserve the public telemetry privacy projection.
+- 6f82814: Retain bounded protected diagnostics for retained-process proof-write failures, linking public warnings without exporting process identities or error text.
+- d3672c0: Measure workspace capture gate waits on every routed sandbox operation, including
+  mid-turn and API-direct operations, without changing provider-call accounting or
+  admission guarantees. Record physical warm capture and publication duration at
+  actual settlement, including captures that outlive the initiating caller.
+- d84b1a3: Preserve sandbox visibility-check command evidence in durable turn failures and
+  expose bounded, explained failure categories on the Runtime Failures dashboard.
+- e261718: Preserve bounded provider error classifications in workspace snapshot diagnostics without logging provider messages, request identifiers or payloads.
+- b384b43: Record workflow wake transport and durable admission outcomes separately, with bounded blocker metrics and useful public log fields.
+- Updated dependencies [6d0a4de]
+- Updated dependencies [c64a94f]
+- Updated dependencies [1c924ed]
+- Updated dependencies [c31a951]
+- Updated dependencies [f90d628]
+- Updated dependencies [aa09567]
+- Updated dependencies [d1ab270]
+- Updated dependencies [c8bb974]
+- Updated dependencies [3fa175e]
+- Updated dependencies [332a02d]
+- Updated dependencies [132b945]
+- Updated dependencies [779b16b]
+- Updated dependencies [1cb688d]
+- Updated dependencies [621201d]
+- Updated dependencies [f90d628]
+- Updated dependencies [1bfb6a4]
+- Updated dependencies [7e2436a]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [c66ba31]
+- Updated dependencies [f7c9169]
+- Updated dependencies [0ea365c]
+  - @opengeni/contracts@5.0.0
+
 ## 0.8.29
 
 ### Patch Changes

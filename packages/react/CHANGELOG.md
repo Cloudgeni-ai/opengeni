@@ -1,5 +1,136 @@
 # @opengeni/react
 
+## 7.0.0
+
+### Major Changes
+
+- 1bfb6a4: Remove Packs and their Workflow templates from the application, public clients,
+  runtime, and active database schema. Plugins, Skills, Connections, sandbox
+  environments, Knowledge, scheduled tasks, and event automations remain independent.
+
+  PR Review now has its own setup authority and fixed automation template. Generic
+  automation routes cannot mutate review-owned sources or triggers. The API contract
+  revision changes; deploy matching server and client versions together.
+
+  Migration 0482 is a destructive maintenance cutover: drain all API and worker
+  database clients, settle Pack-related operations and queued Pack automation work,
+  then apply migrations and provision roles before starting only matching binaries.
+  It removes Pack data without a compatibility layer or data-preservation migration.
+  Historical events mixing Pack and independent automation work block the cutover
+  for explicit operator resolution; independent execution history is never silently deleted.
+  Customized, shared, and re-scoped Skills, Connections, and session history are
+  preserved; source-only Skills lose their active distribution owner.
+
+### Minor Changes
+
+- 3b73fc0: Add server-authoritative session-page sorting by last activity, creation date, or durable name and explicit active, archived, or all archive status. Pagination cursors bind these choices, and clients reject servers that do not acknowledge requested ordering or archive filtering.
+
+  The stock sidebar offers compact Status, Group by, Sort by, and Show empty groups controls with workspace- and subject-scoped persisted preferences.
+
+- 1c924ed: Add authorized, resumable literal search of saved user and completed assistant
+  messages, including unloaded history. Workspace search can return one
+  representative match per session; in-session Find returns every occurrence with
+  stable event identity and original-text UTF-16 offsets. Requests and browser
+  result batches remain bounded, with explicit continuation and provisional counts.
+
+  Expose bounded exact-sequence history navigation and message highlighting for
+  React hosts. The web console connects a contextual session-search dialog to
+  full-history Find, preserves search state across navigation, and keeps ended
+  conversations readable. Tool output, reasoning and unfinished delta-only
+  assistant messages are outside the initial searchable scope. Exact Markdown
+  matches use a labeled source excerpt that stays in place when Find closes;
+  readers can explicitly restore the formatted message.
+
+- c66ba31: Unify interactive and trusted-backend OAuth setup on native workspace connections
+  with optional canonical-user ownership, persisted lifecycle bindings, native
+  credential refresh, and captured execution authority.
+
+  Remove the superseded host binding, delegation, and credential-resolver API/SDK
+  surfaces and runtime configuration. Migrate integrations to ordinary OAuth
+  connections before upgrading; retired host selections are rejected rather than
+  translated or silently replaced. Apply the matching database migrations and role
+  provisioning with the runtime. Historical records remain preserved. See
+  `docs/remote-mcp-credentials.md` for the cutover contract.
+
+  Share connection setup, provider identity, loading states, conversation cards,
+  composer, and activity surfaces between the console and React SDK. Preserve
+  personal-account consent and native sharing authority, and keep interaction-only
+  connection and command panels outside the initial session bundle.
+
+### Patch Changes
+
+- cf9249d: Keep document typing and paste after a trailing newline, ignore IME composition Enter, and show spreadsheet General numbers without binary residue while leaving stored values and formula-bar source unchanged.
+- 4258aeb: Show browsable public Skill results before a search and align Skill and Plugin catalog grids across desktop and mobile.
+
+  Give connection setup a clear primary authorization action and quieter recovery controls, with shared responsive styling.
+
+  Reuse plugin and skill discovery results briefly across tab visits with client/workspace/query isolation, align installed shortcuts, and remove duplicate catalog headings and search affordances.
+
+  Keep All available in Capabilities navigation and cap its ordered category previews at six results, with explicit navigation to the full filtered category.
+
+- c64a94f: Support simultaneous authorized personal and workspace MCP account attachments with immutable account-qualified routing, sender isolation, and scheduled execution binding. Move attachment controls inside Connectors with readable ownership labels; keep account setup on the Capabilities page.
+- 667a90f: Keep available connection services usable when another catalogue fails or stalls, handle synchronous transport failures, and discard stale discovery results after scope changes.
+
+  Keep the console's Gmail logo fallback independent of the complete service registry so it does not bundle unused provider icons.
+
+- 47a37c8: Align the optional voice-model drill-in header and spacing with the composer's resource menus while preserving model availability and payment-source selection.
+- 348e54d: Use Sandbox Environment terminology in user-facing controls, errors, tool descriptions, and runtime guidance. Existing rig routes, tool names, IDs, permissions, and stored definitions remain unchanged.
+- aa09567: Preserve explicit host MCP delegation selections through durable composer Send and Steer admission, including exact retries after an uncertain response. Keep existing owner, generation, visibility, revocation and replay checks; omitted selections do not inherit authority.
+- 9de8e51: Route missing integration setup through provider-neutral catalog discovery and the shared human authorization card, with an explicit next action for every eligible catalog integration. Continue account selection and installation through owner authorization without an extra launch click, and open repository configuration in a separate tab.
+- f3920a7: Add a compact accessible mobile slide selector so presentation editors can jump to any slide when the desktop rail is hidden below `sm`, without changing desktop rail virtualization or keyboard selection.
+- 132b945: Add organization-owned integration acquisition policy with a discoverable catalog,
+  revisioned administration API and SDK, and organization settings. Enforce selected
+  provider and custom-protocol permissions on supported setup and installation paths
+  at preparation and persistence boundaries.
+
+  Preserve ordinary ownership and authorization, exact completed-request replay,
+  unchanged reconciliation, cancellation and other reducing operations. Existing
+  connection execution and credential refresh are not revoked by this policy.
+  Deployment-configured tools and embedding-host session-local MCP configuration
+  retain their existing admission rules; this is not a network or execution allowlist.
+
+  Apply the organization integration policy migration and matching role provisioning
+  with the matching runtime before enabling the setting. Older runtimes do not enforce
+  the new acquisition policy. See `docs/organization-integration-policy.md` for the
+  administration, identity, persistence and recovery contract.
+
+- 1cb688d: Add explicit permanent Skill removal review bindings and truthful removal receipts.
+  Deletion approval is bound to the exact removal proposal; existing save approvals
+  cannot authorize irreversible deletion. Review surfaces distinguish removal from
+  activation and preserve conversations.
+- 621201d: Distinguish queued sessions from running agents and expose durable dispatch wait
+  evidence in session detail reads, including retry timing and recorded errors.
+- 9d9b94b: Allow plugin discovery to choose an initial registry while preserving all registry filters. The OpenGeni web catalog initially selects OpenAI.
+- 6b32304: Reuse the shared activity row and running-command animation for incomplete previews, replacing the standalone loading card while preserving completion and interruption behavior.
+- c9e2743: Accept an explicit null skill-review reference on structured human-input questions, matching the contracts wire type without changing API runtime validation.
+- 0bf014d: Add a session-authorized Codex account projection. Capacity retry choices follow
+  the waiting turn's accepted subscription pool after source changes, including
+  Disabled. Running turns keep their accepted account label while next-turn
+  choices and workspace settings continue to use the current source.
+- c4a2775: Unify provider and MCP service discovery in the embedded connection panel. Preserve Gmail branding for personal accounts without workspace installation references, bundle Outlook branding, share service logo loading, and clarify ownership and tool-selection copy.
+- b88890f: Show a neutral pulsing dot and command count on the session activity button, with reduced-motion support. Open command details directly when background commands are present.
+- Updated dependencies [6d0a4de]
+- Updated dependencies [c64a94f]
+- Updated dependencies [3b73fc0]
+- Updated dependencies [1c924ed]
+- Updated dependencies [c31a951]
+- Updated dependencies [f90d628]
+- Updated dependencies [3fa175e]
+- Updated dependencies [132b945]
+- Updated dependencies [779b16b]
+- Updated dependencies [1cb688d]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [621201d]
+- Updated dependencies [1bfb6a4]
+- Updated dependencies [1641006]
+- Updated dependencies [c9e2743]
+- Updated dependencies [7e2436a]
+- Updated dependencies [0bf014d]
+- Updated dependencies [c66ba31]
+- Updated dependencies [0ea365c]
+  - @opengeni/sdk@7.0.0
+  - @opengeni/connect@0.3.0
+
 ## 6.1.0
 
 ### Minor Changes
