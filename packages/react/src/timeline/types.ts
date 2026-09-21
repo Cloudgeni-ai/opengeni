@@ -8,6 +8,7 @@ import type {
   TimelineAnnotationSource,
   ToolAuthNeededPayload,
   ToolRef,
+  ToolDisplayMetadata,
 } from "@opengeni/sdk";
 
 /* ----------------------------------------------------------------------------
@@ -129,6 +130,7 @@ export type ToolCallItem = {
   turnId: string | null;
   callId: string | null;
   name: string;
+  display?: ToolDisplayMetadata;
   arguments: unknown;
   output: unknown;
   truncation?: ToolCallTruncation | null;

@@ -17,6 +17,7 @@ import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   normalizeModelCallUsage,
   normalizeSdkEvent,
+  withMcpToolDisplayMetadata,
   extractOpenSuffixFromRunState,
   assertOpenSuffixResumable,
   interruptionKindForCallItem,
@@ -1304,6 +1305,11 @@ export async function runTurnStreamAttempt(
               : {},
           );
         for (const event of normalized) {
+          if (event.type === "agent.toolCall.created")
+            event.payload = withMcpToolDisplayMetadata(
+              eventing.preparedTools?.mcpServers ?? [],
+              event.payload,
+            );
           streamTiming.onEvent(event.type);
           await eventing.batcher.push(event);
         }
@@ -1641,7 +1647,14 @@ export async function runTurnStreamAttempt(
               ? [
                   {
                     type: "session.requiresAction" as const,
-                    payload: { approvals },
+                    payload: {
+                      approvals: approvals.map((approval) =>
+                        withMcpToolDisplayMetadata(
+                          eventing.preparedTools?.mcpServers ?? [],
+                          approval,
+                        ),
+                      ),
+                    },
                   },
                 ]
               : []),

@@ -11,6 +11,7 @@ export type {
 } from "./session-message-search";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
 export { pluginMcpUnavailableReason } from "@opengeni/contracts/plugin-discovery";
+export { ToolDisplayMetadata } from "@opengeni/contracts";
 export type {
   PluginDiscoveryItem,
   PluginDiscoveryPage,

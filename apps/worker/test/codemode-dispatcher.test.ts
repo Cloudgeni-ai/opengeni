@@ -311,7 +311,24 @@ describe("CodemodeAttemptDispatcher", () => {
       },
     });
     const bus = new MemoryEventBus();
-    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    const display = {
+      toolName: "search",
+      title: "Search documents",
+      accountLabel: "Documents — Personal",
+    };
+    const dispatcher = new CodemodeAttemptDispatcher(
+      client.db,
+      bus,
+      environment,
+      scope,
+      undefined,
+      undefined,
+      {},
+      (name) => {
+        expect(name).toBe(environment.catalog.entries[0]!.modelName);
+        return display;
+      },
+    );
     dispatcher.start();
     try {
       const request = encodeCodemodeDispatchRequest({
@@ -357,6 +374,11 @@ describe("CodemodeAttemptDispatcher", () => {
         "agent.toolCall.output",
       ]);
       expect(toolEvents[0]?.clientEventId).toBe(codemodeToolCallCreatedClientEventId(operationId));
+      expect(toolEvents[0]?.payload).toMatchObject({
+        id: operationId,
+        name: environment.catalog.entries[0]!.modelName,
+        display,
+      });
       expect(
         toolEvents.map((event) => (event.payload as { subjectId?: string } | undefined)?.subjectId),
       ).toEqual(["sandbox:test", "sandbox:test"]);
