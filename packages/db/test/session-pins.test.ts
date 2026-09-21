@@ -482,7 +482,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       sql`update sessions set status = 'failed', updated_at = now() where id = ${child.id}`,
     );
     await appendSessionEvents(db, workspace.workspaceId, child.id, [
-      { type: "session.title_set", payload: { title: "Failed child" } },
+      { type: "turn.failed", payload: { error: "Failed child" } },
     ]);
 
     const before = await listSessionsForSubject(db, workspace.workspaceId, {
@@ -2068,8 +2068,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       workspace.workspaceId,
       target.id,
       Array.from({ length: 5 }, (_, index) => ({
-        type: "session.title_set" as const,
-        payload: { title: `Attention event ${index + 1}` },
+        type: "agent.message.completed" as const,
+        payload: { text: `Attention event ${index + 1}` },
       })),
     );
 
@@ -2114,7 +2114,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(active).toMatchObject({ unread: false, activelyWorking: true, attentionVersion: 5 });
 
     await appendSessionEvents(db, workspace.workspaceId, target.id, [
-      { type: "session.title_set", payload: { title: "Attention event 6" } },
+      { type: "agent.message.completed", payload: { text: "Attention event 6" } },
     ]);
     expect(await getSessionForSubject(db, workspace.workspaceId, target.id, subject)).toMatchObject(
       { unread: true, activelyWorking: true, attentionVersion: 5 },

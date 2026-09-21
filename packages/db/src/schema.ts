@@ -1,4 +1,5 @@
 import type { StoredSessionAdmissionBlock } from "./session-admission-block";
+import { meaningfulSessionEventSql } from "./session-meaningful-events";
 import type {
   SandboxProviderCommand,
   CommandSupervisionReceipt,
@@ -5379,10 +5380,10 @@ export const sessionPins = pgTable(
     pinned: boolean("pinned").notNull().default(true),
     pinnedAt: timestamp("pinned_at", { withTimezone: true }).defaultNow(),
     version: integer("version").notNull().default(1),
-    // A session is unread for this subject whenever its durable event sequence
-    // has advanced beyond this explicit acknowledgment fence. Merely opening a
-    // route never changes the fence.
+    // Compare the meaningful event frontier, not the raw durable cursor.
+    // Merely opening a route never changes this per-subject fence.
     acknowledgedSequence: integer("acknowledged_sequence").notNull().default(0),
+    manuallyUnread: boolean("manually_unread").notNull().default(false),
     activelyWorking: boolean("actively_working").notNull().default(false),
     attentionVersion: integer("attention_version").notNull().default(0),
     archived: boolean("archived").notNull().default(false),
@@ -8824,6 +8825,9 @@ export const sessionEvents = pgTable(
       table.type,
       table.sequence,
     ),
+    meaningfulAttention: index("session_events_meaningful_attention_idx")
+      .on(table.workspaceId, table.sessionId, table.sequence)
+      .where(meaningfulSessionEventSql("session_events")),
     workspaceTurnType: index("session_events_workspace_turn_type_idx")
       .on(table.workspaceId, table.turnId, table.type)
       .where(sql`${table.turnId} is not null`),

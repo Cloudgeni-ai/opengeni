@@ -1,5 +1,20 @@
 # Deployment
 
+## Meaningful child attention (0502)
+
+`0502_session_meaningful_attention.sql` is a maintenance migration. Stop all old
+API/control/turn workers, provide the exact application login list through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`),
+and migrate before starting the matching binary. Do not restart pre-0502 writers:
+they do not maintain the new personal `manually_unread` intent field.
+
+The owner-only transactional NO FORCE windows cover both `session_pins` and
+`session_event_cursors` and restore FORCE RLS before commit. The backfill protects
+ambiguous historical human attention intent; it never advances an acknowledgement
+cursor. Meaningful frontier derivation clears bookkeeping-only dots without a
+backfill over event history. Optional bounded historical consumption repair is
+dry-run by default; see [session monitoring](session-monitoring-mcp.md#child-unread-and-consumption).
+
 ## Consented sandbox recovery (0495)
 
 Fresh bootstrap may migrate before runtime roles exist. Migration 0495 grants

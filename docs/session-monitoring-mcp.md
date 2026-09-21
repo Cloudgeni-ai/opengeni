@@ -1,5 +1,59 @@
 # Compact session monitoring over MCP
 
+## Child unread and consumption
+
+Unread is based on completed assistant messages, substantive final answers,
+and actionable failures/input/goal facts, not the raw event cursor. The same
+predicate drives child rows and ancestor counts. Raw deltas, status snapshots,
+`sandbox.box.terminated`, `workspace.revision.captured`, rejected late events,
+duplicates and maintenance/continuation completion markers do not create dots.
+The public `lastSequence` and replay/pagination cursors still include all events.
+
+Claimed lifecycle notices carry at most 32 whole event snapshots within an 8 KiB
+evidence budget, captured when the notice is created. Claim validates the retained
+source content before acknowledging it for the receiving turn's frozen human.
+It never advances to the child's current cursor. A legacy terminal status notice
+without answer content is not proof that the parent consumed an answer.
+
+For a live exact parent attempt, `session_events` and `session_wait` also
+acknowledge complete returned content for that same frozen human and a real
+direct child. Sessionless operators, service turns, siblings and grandchildren
+do not gain this behavior. `session_get` and status-only reads never acknowledge.
+Only a contiguous meaningful prefix advances: a filtered tail read cannot clear
+earlier unseen commentary. Exact duplicate final-message text is covered by its
+terminal answer, but different commentary is not. Truncated/omitted results,
+fragment tails and lossy summaries cannot clear unseen content. Fragment reads
+are not accumulated as consumption receipts; use an explicit human mark-read
+when a full item cannot fit in one tool response. Wait/compact acknowledgments
+are restricted to complete answers; use complete result/debug reads for detailed
+failures or human-input content. No read changes append-only history or observes
+background-command completion.
+
+An explicit mark-unread persists until an explicit mark-read, including across
+new parent consumption. Migration 0502 conservatively preserves historically
+unread, human-touched personal rows because the old revision did not record
+whether the last change was mark-unread, mark-read or follow-up intent.
+
+Historical bookkeeping-only dots derive away without advancing personal cursors.
+Additional proven historical reads can be reconciled in bounded operator batches:
+
+```sh
+# Uses the explicitly supplied OPENGENI_DATABASE_URL; never loads dotenv files.
+bun scripts/reconcile-child-read-attention.ts --workspace <uuid> --parent <uuid>
+# After inspecting the content-free dry-run counts, opt in to the same batch:
+bun scripts/reconcile-child-read-attention.ts --workspace <uuid> --parent <uuid> --apply
+```
+
+Pass returned `nextAfter` as `--after` while `hasMore`; `--limit` is 1–100.
+The script pairs current, nonduplicate first-party call/output events on the same
+parent turn, derives its frozen human, verifies whole returned content against
+the exact current direct-child event, and uses the same protected monotone writer.
+`provenEvents` counts matching evidence, not changed personal rows. Repeating a
+pass is safe and can fill prefixes where historical reads arrived out of order.
+Unknown provider/tool aliases, Codemode shell output, missing/truncated receipts,
+multipart fragments, oversized audit bodies, status-only notices and unmatched
+content are unsupported and remain unread. No child is blanket-marked read.
+
 ## Conversation and execution history
 
 `session_events` defaults to a conversation projection: actual user text and

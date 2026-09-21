@@ -57,10 +57,15 @@ per-session sequencing. Semantic writers lock the session row for atomic state/e
 commits. Accepted raw exact-attempt batches hold session identity
 with `FOR KEY SHARE`, serialize on the cursor, retain exact turn/attempt fences,
 and never update the wide session row. Public
-`lastSequence`, unread, child acknowledgment, and viewer-specific tree
-attention projections (including unacknowledged failed descendants) read the
-cursor; `sessions.last_sequence` remains only a semantic/legacy compatibility
-projection. Legacy SQL writers are rebased at the database boundary; late
+`lastSequence` reads the cursor; `sessions.last_sequence` remains only a
+semantic/legacy compatibility projection. Unread and viewer-specific tree
+attention use the same indexed, derived meaningful-event frontier in
+`packages/db/src/session-meaningful-events.ts`, not the raw cursor. Complete
+child content delivered in claimed lifecycle input or exact parent reads can
+advance only the frozen initiating human's contiguous meaningful read prefix.
+Explicit unread intent is durable and wins over automatic acknowledgments.
+See [`session-monitoring-mcp.md`](session-monitoring-mcp.md) for bounded-read and
+historical reconciliation limits. Legacy SQL writers are rebased at the database boundary; late
 raw events roll back, then retry the semantic gate before becoming
 rejected audit evidence. SSE clients replay durable events, subscribe to live
 fanout, and backfill sequence gaps from Postgres. NATS restarts may interrupt

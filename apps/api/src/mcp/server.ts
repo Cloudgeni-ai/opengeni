@@ -280,6 +280,8 @@ import {
   boundRigDetailMcp,
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
+import { completeChildReadSequences } from "./child-read-evidence";
+import { acknowledgeConsumedChildEvents } from "@opengeni/db";
 import {
   SESSION_WAIT_COMPLETION_EVENT_TYPES,
   SESSION_WAIT_DEFAULT_SECONDS,
@@ -4221,6 +4223,24 @@ function registerWorkspaceOrchestrationTools(
   sessionCreateVisible: boolean,
   json: JsonResult,
 ): void {
+  const acknowledgeReads = async (children: { sessionId: string; sequences: number[] }[]) => {
+    if (
+      !callerSessionId ||
+      !exactAgentAttemptClaims(grant) ||
+      !children.some((child) => child.sequences.length > 0)
+    )
+      return;
+    // Never use grant.subjectId, session creator, or the latest queue human.
+    // Reauthorize after the bounded read, including after a blocking wait.
+    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, callerSessionId);
+    if (!actor.initiatingHumanSubjectId) return;
+    await acknowledgeConsumedChildEvents(deps.db, {
+      workspaceId: grant.workspaceId,
+      sessionId: callerSessionId,
+      subjectId: actor.initiatingHumanSubjectId,
+      children,
+    });
+  };
   if (can("sessions:read")) {
     server.registerTool(
       "sessions_list",
@@ -4572,31 +4592,31 @@ function registerWorkspaceOrchestrationTools(
         if (view !== "debug" && !auditRequested) {
           const { readSessionEventView } = await import("./session-event-view");
           const { listSessionEventSlices } = await import("@opengeni/db/session-event-slices");
-          return json(
-            await readSessionEventView(
-              {
+          const page = await readSessionEventView(
+            {
+              sessionId,
+              view,
+              cursor,
+              callId,
+              includeArguments,
+              includeOutput,
+              after,
+              before,
+              direction: requestedDirection,
+              limit,
+            },
+            (options) =>
+              listSessionEventSlices(
+                deps.db,
+                grant.workspaceId,
                 sessionId,
-                view,
-                cursor,
-                callId,
-                includeArguments,
-                includeOutput,
-                after,
-                before,
-                direction: requestedDirection,
-                limit,
-              },
-              (options) =>
-                listSessionEventSlices(
-                  deps.db,
-                  grant.workspaceId,
-                  sessionId,
-                  options,
-                  (legacyOptions) =>
-                    listSessionEventPage(deps.db, grant.workspaceId, sessionId, legacyOptions),
-                ),
-            ),
+                options,
+                (legacyOptions) =>
+                  listSessionEventPage(deps.db, grant.workspaceId, sessionId, legacyOptions),
+              ),
           );
+          await acknowledgeReads([{ sessionId, sequences: completeChildReadSequences(page) }]);
+          return json(page);
         }
         if (
           cursor !== undefined ||
@@ -4640,33 +4660,48 @@ function registerWorkspaceOrchestrationTools(
         });
         if (requestedResultMode === "compact") {
           const event = dbPage.events[0];
-          return json(
-            event
-              ? boundSessionEventCompactResult(
-                  compactSessionEventResult(
-                    event,
-                    latestClass!,
-                    dbPage.coveredSequence ?? {
-                      first: event.sequence,
-                      last: event.sequence,
-                    },
-                  ),
-                )
-              : null,
-          );
+          const result = event
+            ? boundSessionEventCompactResult(
+                compactSessionEventResult(
+                  event,
+                  latestClass!,
+                  dbPage.coveredSequence ?? {
+                    first: event.sequence,
+                    last: event.sequence,
+                  },
+                ),
+              )
+            : null;
+          if (
+            result &&
+            ["turn.completed", "agent.message.completed"].includes(result.type) &&
+            !result.truncation.truncated &&
+            dbPage.fullPayloadsExact
+          ) {
+            await acknowledgeReads([{ sessionId, sequences: [result.sequence] }]);
+          }
+          return json(result);
         }
-        return json(
-          boundSessionEventMcpPage({
-            events: dbPage.events,
-            mode,
-            payloadMode,
-            direction,
-            sourceHasMore: dbPage.hasMore,
-            sourceTruncatedBy: dbPage.truncatedBy,
-            after: after ?? 0,
-            before: before ?? null,
-          }),
-        );
+        const page = boundSessionEventMcpPage({
+          events: dbPage.events,
+          mode,
+          payloadMode,
+          direction,
+          sourceHasMore: dbPage.hasMore,
+          sourceTruncatedBy: dbPage.truncatedBy,
+          after: after ?? 0,
+          before: before ?? null,
+        });
+        if (
+          payloadMode === "full" &&
+          dbPage.fullPayloadsExact &&
+          !page.truncation?.reasons.includes("model_payload")
+        ) {
+          await acknowledgeReads([
+            { sessionId, sequences: page.events.map((event) => event.sequence) },
+          ]);
+        }
+        return json(page);
       },
     );
 
@@ -4721,56 +4756,65 @@ function registerWorkspaceOrchestrationTools(
         // (tests) may pass no extra at all.
         const signal: AbortSignal | undefined = extra?.signal;
         const workspaceId = grant.workspaceId;
+        const incompleteWaitEvents = new Set<string>();
         // A NATS subscription is live fanout only; the durable session_events
         // read below is the authority. Bun.serve idleTimeout (255 s) and the
         // 60 s MCP client request timeout both exceed the 50 s cap.
-        return json(
-          await waitForSessionChanges({
-            targets,
-            ownSessionId,
-            maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
-            targetEventTypes,
-            targetEventMatches:
-              waitFor === "completion" ? sessionWaitCompletionEventMatches : undefined,
-            signal,
-            source: {
-              reauthorizeTargets: async (sessionIds) => {
-                for (const targetSessionId of sessionIds) {
-                  await authorizeFirstPartySession(
-                    deps,
-                    grant,
-                    targetSessionId,
-                    "session.events.read",
-                  );
-                }
-              },
-              readTargetEvents: async (target) => {
-                const page = await listSessionEventPage(deps.db, workspaceId, target.sessionId, {
-                  after: target.afterSequence,
-                  direction: "after",
-                  limit: SESSION_WAIT_EVENTS_PER_TARGET,
-                  payloadMode: "full",
-                  includeTypes: targetEventTypes,
-                  maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
-                });
-                return { events: page.events, hasMore: page.hasMore };
-              },
-              readOwnPendingUpdateKinds:
-                ownSessionId === null
-                  ? null
-                  : async () =>
-                      (
-                        await listOutstandingSessionSystemUpdates(
-                          deps.db,
-                          workspaceId,
-                          ownSessionId,
-                        )
-                      ).map((update) => update.kind),
-              subscribe: (targetSessionId, onEvents) =>
-                deps.bus.subscribe(workspaceId, targetSessionId, onEvents),
+        const result = await waitForSessionChanges({
+          targets,
+          ownSessionId,
+          maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
+          targetEventTypes,
+          targetEventMatches:
+            waitFor === "completion" ? sessionWaitCompletionEventMatches : undefined,
+          signal,
+          source: {
+            reauthorizeTargets: async (sessionIds) => {
+              for (const targetSessionId of sessionIds) {
+                await authorizeFirstPartySession(
+                  deps,
+                  grant,
+                  targetSessionId,
+                  "session.events.read",
+                );
+              }
             },
-          }),
-        );
+            readTargetEvents: async (target) => {
+              const page = await listSessionEventPage(deps.db, workspaceId, target.sessionId, {
+                after: target.afterSequence,
+                direction: "after",
+                limit: SESSION_WAIT_EVENTS_PER_TARGET,
+                payloadMode: "full",
+                includeTypes: targetEventTypes,
+                maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
+              });
+              if (!page.fullPayloadsExact) {
+                for (const event of page.events) incompleteWaitEvents.add(event.id);
+              }
+              return { events: page.events, hasMore: page.hasMore };
+            },
+            readOwnPendingUpdateKinds:
+              ownSessionId === null
+                ? null
+                : async () =>
+                    (
+                      await listOutstandingSessionSystemUpdates(deps.db, workspaceId, ownSessionId)
+                    ).map((update) => update.kind),
+            subscribe: (targetSessionId, onEvents) =>
+              deps.bus.subscribe(workspaceId, targetSessionId, onEvents),
+          },
+        });
+        if (!result.aborted && !result.truncated) {
+          await acknowledgeReads(
+            result.changed.map((target) => ({
+              sessionId: target.sessionId,
+              sequences: target.events
+                .filter((event) => event.contentComplete && !incompleteWaitEvents.has(event.id))
+                .map((event) => event.sequence),
+            })),
+          );
+        }
+        return json(result);
       },
     );
 
