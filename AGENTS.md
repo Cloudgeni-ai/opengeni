@@ -225,6 +225,11 @@ See `docs/run-lifecycle.md` for catalog refresh and prompt-placement boundaries.
 
 ## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
 
+Message-boundary forks may copy an active source's validated retained prefix
+under the existing exclusive tenancy and workspace/source row locks. Preserve
+fail-closed boundary checks, ordered history and receipt replay; do not relax
+whole-session fork quiescence or interrupt the source to obtain a copy.
+
 - **Route behavior before saving.** Persistent behavior belongs in scoped workspace instructions or applicable Skills, not retrieval-only Knowledge phrased as a preference fact. Keep this routing and instruction-edit safety in unconditional CORE, independent of active governance. Preserve owner scope and each destination's learning policy; never substitute another destination to bypass review, Off, limits or unavailable tools. See `docs/company-brain-write-routing.md`.
 
 Three principles here are load-bearing and easy to break by accident:

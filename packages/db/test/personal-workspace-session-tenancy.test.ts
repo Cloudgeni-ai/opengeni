@@ -5,6 +5,8 @@ import { sql } from "drizzle-orm";
 import type postgres from "postgres";
 import {
   addSessionSystemUpdate,
+  appendSessionHistoryItems,
+  applyContextCompaction,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
@@ -23,6 +25,7 @@ import {
   enqueueSessionWorkflowWake,
   markSessionWorkflowWakeDelivered,
   removeWorkspaceMember,
+  registerPendingSessionToolCall,
   resolveCompanyBrainContextSelection,
   setSubjectRlsContext,
   submitHumanPromptInTransaction,
@@ -1024,6 +1027,260 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
     await shared.admin`update session_history_items set item = ${shared.admin.json(controls[0]!)}, active = false
       where session_id = ${sourceSessionId} and position = 0.75`;
     await expect(fork()).rejects.toThrow("Session tenancy request is invalid");
+  }, 180_000);
+
+  test("active message forks preserve source execution, ordered prefix, authority and replay", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const workspaceId = human.personalWorkspaceId;
+    const sourceSessionId = await ownedSession(human, workspaceId);
+    const submitted = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      workspaceId,
+      human.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: human.accountId,
+            workspaceId,
+            sessionId: sourceSessionId,
+            subjectId: human.subjectId,
+            actor: { type: "human", subjectId: human.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "Active question",
+            resources: [],
+            model: "test-model",
+            reasoningEffort: "medium",
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+    );
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId: sourceSessionId,
+      workflowId: `session-${sourceSessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed" || claim.turn.id !== submitted.turnId) {
+      throw new Error("active fork fixture was not claimed");
+    }
+    const authority = {
+      accountId: human.accountId,
+      workspaceId,
+      sessionId: sourceSessionId,
+      turnId: claim.turn.id,
+      expectedExecutionGeneration: claim.turn.executionGeneration,
+      expectedAttemptId: attemptId,
+    };
+    // Use the real writer seams, including their attempt and shared tenancy fences.
+    const [last] = await shared.admin`select coalesce(max(position), 0)::integer as position
+      from session_history_items where session_id = ${sourceSessionId}`;
+    const boundary = Number(last!.position) + 1;
+    const orderedItem = {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Retained answer" }],
+      providerData: { z: 1, a: 2 },
+    };
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        ...authority,
+        items: [{ position: boundary, item: orderedItem }],
+      }),
+    ).toBe(true);
+    const replyEventId = crypto.randomUUID();
+    await shared.admin`insert into session_events
+      (id, account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+      select ${replyEventId}, ${human.accountId}, ${workspaceId}, ${sourceSessionId},
+        ${claim.turn.id}, coalesce(max(sequence), 0) + 1, 'agent.message.completed',
+        '{"text":"Retained answer"}' from session_events where session_id = ${sourceSessionId}`;
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: human.accountId,
+        workspaceId,
+        sessionId: sourceSessionId,
+        turnId: claim.turn.id,
+        executionGeneration: claim.turn.executionGeneration,
+        attemptId,
+        callId: "pending-after-boundary",
+        callType: "function_call",
+        callItem: {
+          type: "function_call",
+          call_id: "pending-after-boundary",
+          name: "test",
+          arguments: "{}",
+        },
+      }),
+    ).toMatchObject({ accepted: true, registered: true });
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        ...authority,
+        items: [
+          {
+            position: boundary + 1,
+            item: {
+              type: "function_call",
+              call_id: "unfinished-suffix",
+              name: "test",
+              arguments: "{}",
+            },
+          },
+        ],
+      }),
+    ).toBe(true);
+    const input = {
+      sourceWorkspaceId: workspaceId,
+      sourceSessionId,
+      actorSubjectId: human.subjectId,
+      destinationWorkspaceId: workspaceId,
+      destinationVisibility: "user_private" as const,
+      workspaceSharedAcknowledged: false,
+      operationKey: crypto.randomUUID(),
+      sourceEventId: replyEventId,
+    };
+    const sourceBefore =
+      await shared.admin`select to_jsonb(s) as value from sessions s where id = ${sourceSessionId}`;
+    const attemptBefore =
+      await shared.admin`select to_jsonb(a) as value from session_turn_attempts a where id = ${attemptId}`;
+    const pendingBefore =
+      await shared.admin`select to_jsonb(p) as value from session_pending_tool_calls p where session_id = ${sourceSessionId}`;
+    const fork = await forkSessionContent(client.db, input);
+    const prefix = await shared.admin`select item_ordered::text as item, active, position
+      from session_history_items where session_id = ${sourceSessionId} and position <= ${boundary} order by position`;
+    const copied = await shared.admin`select item_ordered::text as item, active, position
+      from session_history_items where session_id = ${fork.sessionId} order by position`;
+    expect(copied).toEqual(prefix);
+    expect(fork.copiedHistoryItemCount).toBe(prefix.length);
+    expect(copied.at(-1)!.item).toContain('"z":1,"a":2');
+    expect([
+      ...(await shared.admin`select to_jsonb(s) as value from sessions s where id = ${sourceSessionId}`),
+    ]).toEqual([...sourceBefore]);
+    expect([
+      ...(await shared.admin`select to_jsonb(a) as value from session_turn_attempts a where id = ${attemptId}`),
+    ]).toEqual([...attemptBefore]);
+    expect([
+      ...(await shared.admin`select to_jsonb(p) as value from session_pending_tool_calls p where session_id = ${sourceSessionId}`),
+    ]).toEqual([...pendingBefore]);
+    expect(
+      await shared.admin`select id from session_turn_attempts where session_id = ${fork.sessionId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared.admin`select id from session_pending_tool_calls where session_id = ${fork.sessionId}`,
+    ).toHaveLength(0);
+    await shared.admin`update session_history_items set position = -10
+      where session_id = ${sourceSessionId} and position = ${boundary + 1}`;
+    await expect(
+      forkSessionContent(client.db, {
+        ...input,
+        operationKey: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow("Session tenancy request is invalid");
+    await shared.admin`update session_history_items set position = ${boundary + 1}
+      where session_id = ${sourceSessionId} and position = -10`;
+    const userFork = await forkSessionContent(client.db, {
+      ...input,
+      sourceEventId: claim.turn.triggerEventId!,
+      operationKey: crypto.randomUUID(),
+    });
+    expect(userFork.copiedHistoryItemCount).toBe(prefix.length - 1);
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        ...authority,
+        items: [
+          {
+            position: boundary + 2,
+            item: {
+              type: "function_call_output",
+              call_id: "unfinished-suffix",
+              output: "continued",
+            },
+          },
+        ],
+      }),
+    ).toBe(true);
+    // Whole-session copying retains its stronger quiescence requirement.
+    const { sourceEventId: _boundaryEvent, ...wholeSessionInput } = input;
+    await expect(
+      forkSessionContent(client.db, {
+        ...wholeSessionInput,
+        operationKey: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow();
+    await expect(
+      forkSessionContent(client.db, {
+        ...input,
+        sourceEventId: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow();
+    const stranger = await provisionManagedHuman();
+    await expect(
+      forkSessionContent(client.db, {
+        ...input,
+        actorSubjectId: stranger.subjectId,
+      }),
+    ).rejects.toThrow();
+    // A racing compaction uses the real writer and must wait behind the fork's
+    // already-held exclusive tenancy fence. No timing-only assertion is used.
+    const entered = deferred();
+    const release = deferred();
+    let pid = 0;
+    const heldFork = withRlsContext(
+      client.db,
+      {
+        accountId: human.accountId,
+        workspaceId,
+      },
+      async (db) => {
+        await setSubjectRlsContext(db, human.subjectId);
+        await db.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
+        );
+        const backend = await db.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+        pid = backend[0]!.pid;
+        const result = await forkSessionContent(db, {
+          ...input,
+          operationKey: crypto.randomUUID(),
+        });
+        entered.resolve();
+        await release.promise;
+        return result;
+      },
+    );
+    // Surface setup failure without leaving the test waiting on a deferred.
+    await Promise.race([
+      entered.promise,
+      heldFork.then(() => {
+        throw new Error("fork did not hold transaction");
+      }),
+    ]);
+    const compaction = applyContextCompaction(client.db, {
+      ...authority,
+      replacementItems: [],
+      summaryItem: { type: "message", role: "assistant", content: "Compacted later content" },
+    });
+    try {
+      await waitUntilBlockedBy(pid);
+    } finally {
+      release.resolve();
+    }
+    const stableFork = await heldFork;
+    expect((await compaction).applied).toBe(true);
+    expect([
+      ...(await shared.admin`select item_ordered::text as item, active, position
+      from session_history_items where session_id = ${stableFork.sessionId} order by position`),
+    ]).toEqual([...prefix]);
+    await expect(
+      forkSessionContent(client.db, {
+        ...input,
+        operationKey: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow("Session tenancy request is invalid");
+    expect(await forkSessionContent(client.db, input)).toEqual({ ...fork, replay: true });
   }, 180_000);
 
   test("message fork copies the exact prefix and replays the same boundary", async () => {

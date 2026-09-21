@@ -705,7 +705,10 @@ path.
 `packages/db/src/session-execution-policy.ts` derives execution/display policy from the latest started turn, otherwise creation defaults.
 
 Message-point forks preserve canonical history through an uncompacted protocol
-boundary. See [organization tenancy](organization-tenancy.md#forking-at-a-message).
+boundary even while the source is active. The existing exclusive tenancy and
+workspace/source row locks serialize validation and copying against history
+writers and compaction; the source execution remains unchanged. Whole-session
+fork quiescence is unchanged. See [organization tenancy](organization-tenancy.md#forking-at-a-message).
 
 ### 5.2 Lifecycle overview
 
