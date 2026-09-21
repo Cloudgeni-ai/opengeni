@@ -1196,11 +1196,9 @@ approval classification, and execution. Runtime builds one enabled first-party
 and integration MCP catalog. Model, exact-attempt Codemode, current-human MCP,
 and workspace HTTP/SDK adapters share its executor closures. Friendly names and
 JavaScript paths project opaque `{serverId, toolName}` identities, never authority.
-Bounded MCP model aliases retain a readable action leaf and an identity-derived
-digest when the ordinary prefix is not provider-safe. Historical full-digest
-calls rehydrate only against the current authorized catalog. Native and Codemode
-events retain separate action/account display metadata for timeline and approval
-rendering; those labels never replace call IDs or confer execution authority.
+Bounded MCP aliases preserve readable actions; historical hashes resolve only
+against the current authorized catalog. Event display metadata never changes
+call identity or approval authority.
 Normalized paths receive identity-derived suffixes, remaining stable across
 neighbor changes. Allocation rejects namespace/tool-prefix and exact collisions
 before publication. Local model tools bind only to the final combined local/MCP

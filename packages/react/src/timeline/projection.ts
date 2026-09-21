@@ -1,6 +1,6 @@
 import {
   parseMediaGenerationResult,
-  ToolDisplayMetadata,
+  parseToolDisplayMetadata,
   type HumanInputAnswer,
   type HumanInputQuestion,
   type HumanInputResponse,
@@ -611,8 +611,7 @@ export function buildTimeline(
 
       case "agent.toolCall.created": {
         const name = typeof payload.name === "string" ? payload.name : "tool";
-        const parsedDisplay = ToolDisplayMetadata.safeParse(payload.display);
-        const display = parsedDisplay.success ? parsedDisplay.data : undefined;
+        const display = parseToolDisplayMetadata(payload.display);
         const callId = typeof payload.id === "string" ? payload.id : null;
         const args = payload.arguments ?? null;
         closeStreamingTail();
