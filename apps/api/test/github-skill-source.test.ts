@@ -4,6 +4,19 @@ import { testSettings } from "@opengeni/testing";
 import { createGitHubSkillSourceClient } from "../src/integrations/github-skill-source";
 
 describe("GitHub Skill source transport", () => {
+  test("allows base64 transport for a maximum-size Skill file", async () => {
+    const content = "x".repeat(2 * 1024 * 1024);
+    const payload = {
+      encoding: "base64",
+      content: Buffer.from(content).toString("base64"),
+      size: content.length,
+    };
+    const client = createGitHubSkillSourceClient(testSettings(), async (_path, maxBytes) => {
+      expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThan(maxBytes);
+      return payload;
+    });
+    expect((await client.readBlob("acme", "skills", "b".repeat(40))).length).toBe(content.length);
+  });
   test("uses exact GitHub APIs and validates commit, tree, and blob payloads", async () => {
     const requests: Array<{ path: string; maxBytes: number; label: string }> = [];
     const client = createGitHubSkillSourceClient(testSettings(), async (path, maxBytes, label) => {

@@ -1,7 +1,7 @@
 /** Shared text-folder limits for API admission, runtime imports and checkout. */
-export const SKILL_MAX_FILES = 128;
-export const SKILL_MAX_FILE_BYTES = 256 * 1024;
-export const SKILL_MAX_TOTAL_BYTES = 1024 * 1024;
+export const SKILL_MAX_FILES = 1024;
+export const SKILL_MAX_FILE_BYTES = 2 * 1024 * 1024;
+export const SKILL_MAX_TOTAL_BYTES = 8 * 1024 * 1024;
 
 export function isSafeSkillRelativePath(path: string): boolean {
   return (

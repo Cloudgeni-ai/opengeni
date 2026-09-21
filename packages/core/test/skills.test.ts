@@ -43,23 +43,26 @@ describe("unified Skill text folders", () => {
   });
   test("uses byte limits, rejects malformed Unicode and NUL", () => {
     expect(() =>
-      validateSkillFiles([main, { path: "data", content: "é".repeat(131073) }]),
+      validateSkillFiles([main, { path: "data", content: "é".repeat(1048577) }]),
     ).toThrow();
     expect(() => validateSkillFiles([main, { path: "data", content: "\ud800" }])).toThrow();
     expect(() => validateSkillFiles([main, { path: "data", content: "binary\0" }])).toThrow();
     expect(() =>
       validateSkillFiles([
         main,
-        ...Array.from({ length: 4 }, (_, i) => ({ path: `data${i}`, content: "x".repeat(262144) })),
+        ...Array.from({ length: 4 }, (_, i) => ({
+          path: `data${i}`,
+          content: "x".repeat(2097152),
+        })),
       ]),
     ).toThrow();
     expect(() =>
       validateSkillFiles([
         main,
-        ...Array.from({ length: 128 }, (_, i) => ({ path: `data${i}`, content: "" })),
+        ...Array.from({ length: 1024 }, (_, i) => ({ path: `data${i}`, content: "" })),
       ]),
     ).toThrow();
-    expect(validateSkillFiles([main, { path: "max", content: "x".repeat(262144) }])).toHaveLength(
+    expect(validateSkillFiles([main, { path: "max", content: "x".repeat(2097152) }])).toHaveLength(
       2,
     );
   });

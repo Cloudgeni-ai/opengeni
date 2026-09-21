@@ -125,7 +125,7 @@ skill_read({ skill, paths?, listFiles? })
   Never silently omit files or present truncation as complete content.
 - Resolve ambiguous names explicitly rather than choosing a source silently.
 - Set `listFiles: true` without `paths`: return only relative `paths` (at most
-  128) and available revision identity, with no file bodies and no sandbox.
+  1,024) and available revision identity, with no file bodies and no sandbox.
   Combining inventory with `paths` is rejected. Inventory is on demand, never
   part of the standing prompt; omitted/false `listFiles` preserves text reads.
 
@@ -429,7 +429,7 @@ document branch's checkout. These are source findings, not production tests.
 | Portable storage | `packages/db/src/schema.ts`: `capability_skill_facets` and `capability_skill_files`; relative paths and text in Postgres |
 | Installation | `packages/db/src/index.ts`: `installPortableSkill`; immutable plugin versions, installations and ownership |
 | Import | `packages/core/src/domain/skill-imports.ts`: `resolveSkillImport` resolves supplied URLs; this is not ecosystem search |
-| File limits | `packages/runtime/src/skill-library.ts`: 128 files, 256 KiB per file, 1 MiB total; imports strictly decode UTF-8 |
+| File limits | `packages/contracts/src/skill-files.ts`: 1,024 files, 2 MiB per file, 8 MiB total; imports strictly decode UTF-8 |
 | Human install | `apps/api/src/routes/skills.ts`: existing preview/install boundary |
 | Runtime | `packages/runtime/src/runtime-skills.ts`, `index.ts`: composed Skill sources and SDK lazy loading, not proof of eager sandbox copying |
 | Tool delivery | `packages/tool-gateway`, `packages/runtime/src/lazy-tool-transport.ts`: shared gateway and eager/lazy model surfaces |
