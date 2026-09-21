@@ -79,6 +79,8 @@ const withheldMigrationNames = [
   // Rewrites the original-file policy introduced by withheld 0461.
   "0499_session_attachment_access.sql",
   "0501_session_sharing_execution.sql",
+  // Reads the cursor table from withheld 0374; replay after its prerequisite.
+  "0503_session_meaningful_attention.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
