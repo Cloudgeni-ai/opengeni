@@ -1525,7 +1525,7 @@ Turn-end review capture yields to queued turns and fences late commits. Single-r
 `@opengeni/db` owns cross-service Postgres contracts, forward migrations, and
 runtime-role/RLS posture.
 
-Postgres owns file access/liveness; fork screenshot reads require ancestry plus copied receipts, preserving RLS.
+Postgres owns file access/liveness; fork screenshots require ancestry and copied receipts, preserving RLS.
 Storage endpoints and signed URLs are transport details; keep URLs, object keys,
 and provider identities out of prompt history when a provider-neutral receipt suffices.
 
