@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   allowedPath,
   investigate,
   localDependencies,
+  loadSnapshot,
   namedEntryPaths,
   rankChunks,
   requiresRuntimeEvidence,
@@ -53,6 +57,28 @@ const judge =
     answer(qs, qs.next ? { next: "e0" } : choices);
 
 describe("read-only investigation contract", () => {
+  test("snapshot ignores dirty files and does not follow committed symlinks", async () => {
+    const root = mkdtempSync(join(tmpdir(), "jev-snapshot-test-"));
+    const git = (...args: string[]) => {
+      const r = Bun.spawnSync(["git", "-C", root, ...args], { stdout: "pipe", stderr: "pipe" });
+      expect(r.exitCode).toBe(0);
+    };
+    try {
+      git("init");
+      await Bun.write(join(root, "source.ts"), "export const value = 1;\n");
+      await Bun.write(join(root, ".env.json"), '{"token":"synthetic-do-not-read"}');
+      symlinkSync(".env.json", join(root, "alias.ts"));
+      git("add", ".");
+      git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture");
+      await Bun.write(join(root, "source.ts"), "export const value = 2;\n");
+      const s = loadSnapshot(root);
+      expect(s.chunks.map(c => c.path)).toEqual(["source.ts"]);
+      expect(s.chunks[0].text).toContain("value = 1");
+      expect(s.excluded).toBe(2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
   test("excludes common sensitive and generated paths", () => {
     for (const path of [
       ".env",

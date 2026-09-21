@@ -111,7 +111,11 @@ async function main() {
   const casePath = option("--cases");
   if (!casePath) throw new Error("cases_required");
   const allCases = JSON.parse(readFileSync(casePath, "utf8")) as Case[];
-  const cases = allCases.filter((c) => !option("--split") || c.split === option("--split"));
+  const cases = allCases.filter(
+    (c) =>
+      (!option("--split") || c.split === option("--split")) &&
+      (!option("--case") || c.id === option("--case")),
+  );
   if (!cases.length) throw new Error("no_cases");
   writeFileSync(
     `${output}/cases-digest.json`,

@@ -7,6 +7,7 @@ export type Judgment = { choice: string; probabilities: Record<string, number> }
 export type Judge = (
   state: unknown,
   questions: Record<string, Question>,
+  signal?: AbortSignal,
 ) => Promise<Record<string, Judgment>>;
 export type Request = {
   question: string;
@@ -305,7 +306,10 @@ export async function investigate(
     [...requiredPaths].filter((p) => snapshot.chunks.some((c) => c.path === p && !seen.has(c.id)));
   const ask = async (state: unknown, questions: Record<string, Question>) => {
     if (performance.now() - started >= limits.deadlineMs) throw new Error("deadline");
-    const result = await judge(state, questions);
+    const signal = AbortSignal.timeout(
+      Math.max(1, Math.ceil(limits.deadlineMs - (performance.now() - started))),
+    );
+    const result = await judge(state, questions, signal);
     validateAnswers(questions, result);
     return result;
   };

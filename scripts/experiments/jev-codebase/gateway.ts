@@ -65,7 +65,7 @@ export function createJudge(
   maxUsd = 0.5,
 ): Judge {
   let stopped = false;
-  return async (state, questions) => {
+  return async (state, questions, signal) => {
     if (stopped) throw new Error("run_stopped");
     const history: Receipt[] = existsSync(journal)
       ? readFileSync(journal, "utf8")
@@ -115,7 +115,9 @@ export function createJudge(
           state: JSON.parse(JSON.stringify(state)),
           questions,
           maxRetries: 0,
-          abortSignal: AbortSignal.timeout(15000),
+          abortSignal: signal
+            ? AbortSignal.any([signal, AbortSignal.timeout(15000)])
+            : AbortSignal.timeout(15000),
         });
         answers = result.answers as Record<string, Judgment>;
         inputTokens = result.usage.inputTokens!;
@@ -128,7 +130,9 @@ export function createJudge(
           temperature: 0,
           maxOutputTokens: 1500,
           maxRetries: 0,
-          abortSignal: AbortSignal.timeout(15000),
+          abortSignal: signal
+            ? AbortSignal.any([signal, AbortSignal.timeout(15000)])
+            : AbortSignal.timeout(15000),
           schema: jsonSchema<Record<string, string>>({
             type: "object",
             properties: Object.fromEntries(
@@ -202,7 +206,7 @@ export function createJudge(
         reason: `provider_or_usage_failure:${safe.name ?? "unknown"}:${safe.statusCode ?? "unknown"}:billing_may_be_unknown`,
       });
       throw new Error("provider_or_usage_failure", {
-        cause: { name: safe.name, statusCode: safe.statusCode },
+        cause: error,
       });
     }
   };
