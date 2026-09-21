@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/artifact-tool",
-  "version": "0.3.29",
+  "version": "0.3.30",
   "description": "OpenGeni-owned document, spreadsheet, and presentation engine with skill-compatible authoring APIs.",
   "license": "Apache-2.0",
   "repository": {

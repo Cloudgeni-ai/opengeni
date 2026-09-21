@@ -1,5 +1,166 @@
 # @opengeni/sdk
 
+## 7.0.0
+
+### Major Changes
+
+- 1bfb6a4: Remove Packs and their Workflow templates from the application, public clients,
+  runtime, and active database schema. Plugins, Skills, Connections, sandbox
+  environments, Knowledge, scheduled tasks, and event automations remain independent.
+
+  PR Review now has its own setup authority and fixed automation template. Generic
+  automation routes cannot mutate review-owned sources or triggers. The API contract
+  revision changes; deploy matching server and client versions together.
+
+  Migration 0482 is a destructive maintenance cutover: drain all API and worker
+  database clients, settle Pack-related operations and queued Pack automation work,
+  then apply migrations and provision roles before starting only matching binaries.
+  It removes Pack data without a compatibility layer or data-preservation migration.
+  Historical events mixing Pack and independent automation work block the cutover
+  for explicit operator resolution; independent execution history is never silently deleted.
+  Customized, shared, and re-scoped Skills, Connections, and session history are
+  preserved; source-only Skills lose their active distribution owner.
+
+- c66ba31: Unify interactive and trusted-backend OAuth setup on native workspace connections
+  with optional canonical-user ownership, persisted lifecycle bindings, native
+  credential refresh, and captured execution authority.
+
+  Remove the superseded host binding, delegation, and credential-resolver API/SDK
+  surfaces and runtime configuration. Migrate integrations to ordinary OAuth
+  connections before upgrading; retired host selections are rejected rather than
+  translated or silently replaced. Apply the matching database migrations and role
+  provisioning with the runtime. Historical records remain preserved. See
+  `docs/remote-mcp-credentials.md` for the cutover contract.
+
+  Share connection setup, provider identity, loading states, conversation cards,
+  composer, and activity surfaces between the console and React SDK. Preserve
+  personal-account consent and native sharing authority, and keep interaction-only
+  connection and command panels outside the initial session bundle.
+
+### Minor Changes
+
+- 6d0a4de: Include opengeni-client in the default Skill catalog in local, self-hosted and
+  managed deployments. The repository guide is the sole authored source; generated
+  runtime assets include every reference and require no Pack, installation, network
+  fetch or sandbox to read. Explicit bundledSkillIds selections still narrow it.
+
+  Improve adaptive resource discovery, UI selection, runtime behavior, tool data
+  semantics, and outcome-based verification without prescribing a fixed product
+  architecture or answer format.
+
+- 3b73fc0: Add server-authoritative session-page sorting by last activity, creation date, or durable name and explicit active, archived, or all archive status. Pagination cursors bind these choices, and clients reject servers that do not acknowledge requested ordering or archive filtering.
+
+  The stock sidebar offers compact Status, Group by, Sort by, and Show empty groups controls with workspace- and subject-scoped persisted preferences.
+
+- 1c924ed: Add authorized, resumable literal search of saved user and completed assistant
+  messages, including unloaded history. Workspace search can return one
+  representative match per session; in-session Find returns every occurrence with
+  stable event identity and original-text UTF-16 offsets. Requests and browser
+  result batches remain bounded, with explicit continuation and provisional counts.
+
+  Expose bounded exact-sequence history navigation and message highlighting for
+  React hosts. The web console connects a contextual session-search dialog to
+  full-history Find, preserves search state across navigation, and keeps ended
+  conversations readable. Tool output, reasoning and unfinished delta-only
+  assistant messages are outside the initial searchable scope. Exact Markdown
+  matches use a labeled source excerpt that stays in place when Find closes;
+  readers can explicitly restore the formatted message.
+
+- 3fa175e: Provide bundled OpenGeni product help with official documentation links,
+  integration and billing boundaries, and dependency recovery guidance. Hosts can
+  exclude it with the existing bundledSkillIds selection, including an empty list
+  for embedded agents. Update the canonical integration guide.
+- 132b945: Add organization-owned integration acquisition policy with a discoverable catalog,
+  revisioned administration API and SDK, and organization settings. Enforce selected
+  provider and custom-protocol permissions on supported setup and installation paths
+  at preparation and persistence boundaries.
+
+  Preserve ordinary ownership and authorization, exact completed-request replay,
+  unchanged reconciliation, cancellation and other reducing operations. Existing
+  connection execution and credential refresh are not revoked by this policy.
+  Deployment-configured tools and embedding-host session-local MCP configuration
+  retain their existing admission rules; this is not a network or execution allowlist.
+
+  Apply the organization integration policy migration and matching role provisioning
+  with the matching runtime before enabling the setting. Older runtimes do not enforce
+  the new acquisition policy. See `docs/organization-integration-policy.md` for the
+  administration, identity, persistence and recovery contract.
+
+- 779b16b: Add an account-authorized organization usage summary with bounded UTC periods,
+  lossless metered totals, chart buckets, and paginated workspace totals. The
+  organization Billing dashboard uses this summary instead of recent-event sums.
+
+  Use a transaction-scoped, owner-only analytical capability to apply private
+  session visibility once per session before aggregating. Separate workspace-page
+  reads retain the selected cutoff and do not recompute organization totals.
+
+- 1cb688d: Add explicit permanent Skill removal review bindings and truthful removal receipts.
+  Deletion approval is bound to the exact removal proposal; existing save approvals
+  cannot authorize irreversible deletion. Review surfaces distinguish removal from
+  activation and preserve conversations.
+- 7e2436a: Keep ordinary chat attachments out of Knowledge unless selected as useful evidence or a reusable reference. Distinguish supporting evidence from discoverable references, preserve exact originals and revisions, and add read-only collection and duplicate discovery before saving. Includes maintenance migration 0469; old runtimes must be drained before activation.
+- 0bf014d: Add a session-authorized Codex account projection. Capacity retry choices follow
+  the waiting turn's accepted subscription pool after source changes, including
+  Disabled. Running turns keep their accepted account label while next-turn
+  choices and workspace settings continue to use the current source.
+- 0ea365c: Route user-facing reports, including secondary audit outputs, to native document
+  Artifacts before authoring. Persist explicit report requirements and require
+  server-verified current-head inspection evidence at goal completion, preserving
+  ordinary chat, internal worker findings, code navigation and explicitly requested
+  local-file workflows. Keep unavailable or failed report delivery incomplete
+  instead of silently substituting sandbox links.
+
+### Patch Changes
+
+- c64a94f: Support simultaneous authorized personal and workspace MCP account attachments with immutable account-qualified routing, sender isolation, and scheduled execution binding. Move attachment controls inside Connectors with readable ownership labels; keep account setup on the Capabilities page.
+- c31a951: Add connection-bound MCP tool permission discovery and Allow/Ask/Block management through the existing approval ledger, enforced consistently for direct tools and Codemode.
+
+  Let workspace-default sessions inherit newly connected apps while retaining per-session connector exclusions and exact explicit selections. Present connected apps, logos, health, and reconnection in the composer connector menu. Keep internal runtime controls out of workspace settings and use Capabilities consistently in settings navigation.
+
+- f90d628: Add explicit managed-human consent for same-session singleton Modal recovery from
+  an exact older CURRENT checkpoint. Protect membership, route and artifact identity,
+  retain durable replay receipts and generation provenance, and reconstruct a model
+  warning before later inference. Separate consent from verified restoration and
+  never replay failed commands. Refuse Retry on an unchanged blocked effective route
+  without blocking an independently selected Connected Machine. Additive migration
+  0495 keeps consent DB-disabled until operator-verified compatible rollout; permanent
+  consent receipts reject old inference claims even after disabling consent or lease
+  replacement. Only the warning-aware worker declares the scoped protocol.
+  Preserve explicit failed-turn Retry after verified recovery or Connected Machine
+  selection, and retain consent identity when post-accept status reads lose access.
+  Keep fresh migration-before-role-provisioning and later runtime-role provisioning
+  safe, with SELECT-only rollout access and owner-only activation.
+- 9d9b94b: Keep the published dependency closure aligned with the updated plugin removal
+  contracts. The SDK exposes named removal outcomes and optional preview-token
+  confirmation alongside the existing installation-version check.
+- 621201d: Distinguish queued sessions from running agents and expose durable dispatch wait
+  evidence in session detail reads, including retry timing and recorded errors.
+- 1641006: Recover serialized document and presentation edits after reload without treating an already committed local edit as a stale pending conflict.
+- c9e2743: Accept an explicit null skill-review reference on structured human-input questions, matching the contracts wire type without changing API runtime validation.
+- Updated dependencies [6d0a4de]
+- Updated dependencies [c64a94f]
+- Updated dependencies [1c924ed]
+- Updated dependencies [c31a951]
+- Updated dependencies [f90d628]
+- Updated dependencies [aa09567]
+- Updated dependencies [d1ab270]
+- Updated dependencies [c8bb974]
+- Updated dependencies [3fa175e]
+- Updated dependencies [332a02d]
+- Updated dependencies [132b945]
+- Updated dependencies [779b16b]
+- Updated dependencies [1cb688d]
+- Updated dependencies [621201d]
+- Updated dependencies [f90d628]
+- Updated dependencies [1bfb6a4]
+- Updated dependencies [7e2436a]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [c66ba31]
+- Updated dependencies [f7c9169]
+- Updated dependencies [0ea365c]
+  - @opengeni/contracts@5.0.0
+  - @opengeni/connect@0.3.0
+
 ## 6.1.0
 
 ### Minor Changes
