@@ -2818,6 +2818,7 @@ function SessionChatPane(props: {
                   onConnectorCustomizingChange={(next) => {
                     setConnectorCustomizingOverride(next);
                     if (next) return;
+                    connectionAccounts.resetEmptyChoices();
                     void applyDurableToolPolicy(
                       followWorkspaceConnectorPolicy(durableToolsSnapshot),
                     );

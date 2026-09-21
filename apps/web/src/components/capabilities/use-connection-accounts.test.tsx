@@ -146,3 +146,20 @@ test("failed inventory blocks sending and retry recovers without forgetting excl
   expect(state.error).toBeNull();
   expect(state.selections).toEqual([{ serverId: "mail", connectionId: "two" }]);
 });
+
+test("returning to connector defaults restores emptied accounts but preserves nonempty narrowing", async () => {
+  const client = clientFor(async () => accounts);
+  await act(async () => root.render(<Harness client={client} />));
+  await act(async () => state.selectAccount("mail", []));
+  await act(async () => root.render(<Harness client={client} selectedIds={[]} />));
+  expect(state.requiresAccountChoice).toBe(false);
+  await act(async () => {
+    state.resetEmptyChoices();
+    root.render(<Harness client={client} />);
+  });
+  expect(state.requiresAccountChoice).toBe(false);
+  expect(state.selections).toHaveLength(2);
+  await act(async () => state.selectAccount("mail", ["two"]));
+  await act(async () => state.resetEmptyChoices());
+  expect(state.selections).toEqual([{ serverId: "mail", connectionId: "two" }]);
+});

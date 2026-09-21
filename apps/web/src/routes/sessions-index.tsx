@@ -600,6 +600,7 @@ function SessionsIndexRouteContent({
   const [connectorCustomizing, setConnectorCustomizing] = useState(false);
   const [connectorExclusions, setConnectorExclusions] = useState<string[]>([]);
   const followWorkspaceConnectors = () => {
+    connectionAccounts.resetEmptyChoices();
     setConnectorCustomizing(false);
     setToolSelectionExplicit(false);
     setConnectorExclusions([]);

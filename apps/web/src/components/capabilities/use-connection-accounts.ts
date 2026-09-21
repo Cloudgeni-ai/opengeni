@@ -90,6 +90,14 @@ export function useConnectionAccounts(
     accountGroups,
     availableAccountGroups: matches ? result.groups : [],
     accountChoices,
+    resetEmptyChoices: () =>
+      setChoices({
+        client,
+        identity,
+        accounts: Object.fromEntries(
+          Object.entries(accountChoices).filter(([, ids]) => ids.length > 0),
+        ),
+      }),
     requiresAccountChoice: selection.unresolved.length > 0,
     accountChoiceMessage: selection.unresolved.length
       ? `Review accounts for ${selection.unresolved.map((group) => group.name).join(", ")} in + → Connectors. Select an available account or turn off the connector for this chat.`
