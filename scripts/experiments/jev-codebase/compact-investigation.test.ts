@@ -1,4 +1,10 @@
 import { expect, test } from "bun:test";
+test("selected same-line declaration retains its opening line", () => {
+  const text = "const unrelated = 0; export function target(flag: boolean) {\n  return flag;\n}";
+  const spans = sourceSpans({ id: "same", path: "same.ts", startLine: 1, endLine: 3, text });
+  expect(spans[1].startLine).toBe(1);
+  expect(spans[1].text).toBe(text);
+});
 import {
   investigateCompact,
   indexFiles,
@@ -63,6 +69,50 @@ test("span failure preserves discovered paths without claiming selected evidence
   expect(r.evidence).toEqual([]);
   expect(r.status).toBe("needs_guidance");
   expect("continuation" in r && r.continuation?.candidatePaths).toEqual(["selection.ts"]);
+});
+test("input-budget yield preserves selected paths without fabricated evidence", async () => {
+  const r = await investigateCompact(
+    snapshot,
+    { question: "How is a machine selected?" },
+    async (_, qs) => {
+      if (qs.primary) return answers(qs, (id) => (id === "primary" ? "f1" : "none"));
+      throw new Error("compact_input_budget");
+    },
+  );
+  expect(r.status).toBe("needs_guidance");
+  expect(r.evidence).toEqual([]);
+  expect("continuation" in r && r.continuation?.candidatePaths).toEqual(["selection.ts"]);
+});
+test("controller really partitions an oversized question payload without losing source", async () => {
+  const text = Array.from(
+    { length: 240 },
+    (_, i) => `export function f${i}() { return ${i}; }`,
+  ).join("\n");
+  const big = {
+    ...snapshot,
+    chunks: [{ id: "big", path: "large.ts", startLine: 1, endLine: 240, text }],
+  };
+  let spanBatches = 0;
+  let sourceState: unknown;
+  const r = await investigateCompact(
+    big,
+    { question: "What does f0 return?" },
+    async (state, qs) => {
+      expect(Buffer.byteLength(JSON.stringify({ state, questions: qs }))).toBeLessThanOrEqual(
+        96000,
+      );
+      if (qs.primary) return answers(qs, (id) => (id === "primary" ? "f0" : "none"));
+      spanBatches++;
+      if (sourceState) expect(state).toBe(sourceState);
+      else sourceState = state;
+      return answers(qs, (id) =>
+        id === "sufficiency" ? "source" : id === "s0" ? "essential" : "irrelevant",
+      );
+    },
+  );
+  expect(spanBatches).toBeGreaterThan(1);
+  expect(r.status).toBe("evidence_ready");
+  expect(r.evidence[0].text).toContain("function f0");
 });
 test("completed validated batches retain exact evidence after a later transient", async () => {
   const r = await investigateCompact(

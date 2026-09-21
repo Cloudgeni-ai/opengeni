@@ -5,3 +5,11 @@ export const DIRECT_PASS_BUDGET = {
   maxAdditionalAttempts: 40,
   maxAdditionalUsd: 1,
 };
+
+/** New improvement pass, retaining all previous native/Gateway attempts. */
+export const IMPROVEMENT_PASS_BUDGET = {
+  baselineAttempts: 530,
+  baselineUsd: 1.3418997759999984,
+  maxAdditionalAttempts: 100,
+  maxAdditionalUsd: 1,
+};

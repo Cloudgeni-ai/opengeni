@@ -62,6 +62,39 @@ test("span audit accepts combined ranges and rejects holes", () => {
     ]),
   ).toBe(false);
 });
+test("huge and unsafe citation ranges reject without line-sized allocation", () => {
+  const source = [{ path: "a", startLine: 1, endLine: 100 }];
+  expect(spanCovered({ path: "a", startLine: 1, endLine: 1e12 }, source)).toBe(false);
+  expect(
+    spanCovered({ path: "a", startLine: 1, endLine: Number.MAX_SAFE_INTEGER + 1 }, source),
+  ).toBe(false);
+});
+test("merged citation validates against union of source fragments but not holes", () => {
+  const span = { path: "a.ts", startLine: 1, endLine: 3 };
+  const c: BenchmarkCase = {
+    id: "merged",
+    question: "q",
+    context: "",
+    mode: "evidence",
+    expectedAnswer: "indecisive",
+    requiredSpans: [span],
+    acceptableConclusion: "x",
+    category: "x",
+    oracleRationale: "source",
+  };
+  const final = { answer: "indecisive" as const, explanation: "x", citations: [span] };
+  const source = new SourceTools(snapshot);
+  source.files.splice(
+    0,
+    source.files.length,
+    { ...snapshot.chunks[0], endLine: 2, text: "a\nb" },
+    { ...snapshot.chunks[0], startLine: 2, text: "b\nc" },
+  );
+  expect(scoreTrajectory(c, final, [span], source).citationsValid).toBe(true);
+  source.files[0].endLine = 1;
+  source.files[1].startLine = 3;
+  expect(scoreTrajectory(c, final, [span], source).citationsValid).toBe(false);
+});
 test("matching abstention without evidence or a final response is not success", () => {
   const t = new SourceTools(snapshot);
   const c: BenchmarkCase = {

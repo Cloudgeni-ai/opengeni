@@ -179,10 +179,11 @@ before viewing fresh labels, alternate arm order, keep smoke/regression runs
 separate, and never overwrite output manifests. CLI work is read-only outside
 its output receipts. No staging integration or subscription billing is implied.
 
-The shared sequential journal caps the authorized direct-route iteration at 536 cumulative inference requests
-and a conservative local $2.28 estimate, reserving each call before transport. This pass
-also enforces at most 40 additional attempts/$1 above the retained baseline of
-496 attempts/$1.287299332 known-or-reserved. Earlier manifests retain their original ceilings. Unsettled,
+The shared sequential journal caps the current improvement iteration at 630 cumulative inference requests
+and $2.341899776 known-or-reserved, reserving each call before transport. This pass
+also enforces at most 100 additional attempts/$1 above the retained baseline of
+530 attempts/$1.341899776 known-or-reserved. The historical direct-route comparator
+retains its 536/$2.28 ceiling and 496-attempt baseline; earlier manifests retain their original ceilings. Unsettled,
 authentication, missing-usage and ambiguous failures stop the experiment. Explicit
 HTTP 429/502/503/504/529 failures are retained with the unknown bill reserved; failed
 Jev discovery yields empty evidence to ordinary Terra tools, while exhausted Terra
@@ -212,6 +213,27 @@ character limits never truncate a physical line and label it exact. This is boun
 discovery, not repository-wide absence proof. A plausible wrong root can still miss
 other candidates. `--workflow legacy` remains available for explicit comparison.
 
+Compact v10 merges overlapping exact source before charging its return budget,
+preserves referenced import bindings, and adds one hop of small (at most 1,500
+characters) referenced same-file function declarations. This syntactic context
+expansion is not symbol resolution or dependency closure: shadowing can add extra
+context; arrow helpers, large helpers and deeper dependencies may still be omitted.
+Budget-dropped context is disclosed. Same-line declarations retain their opening
+physical line. Source classification automatically partitions questions only when
+the serialized state plus questions would exceed 96,000 bytes; each batch keeps
+the identical full source, shares the deadline and is metered separately. Oversized
+single questions/state still yield; selected candidate paths survive that yield.
+Repeated source tokens in batches are not free. No retries are added.
+
+Both arms default to `--citation-mode ids`: each delivered excerpt has a stable
+handle, and Terra selects handles that the runtime resolves to exact source ranges.
+`--citation-mode ranges` retains the earlier explicit-line interface for ablation.
+Handles reduce line arithmetic, not semantic mistakes; broad excerpt citations can
+raise mechanical recall without improving reasoning. Source and delivered coverage
+are checked across contiguous unions, never unread gaps. Exception paths roll back
+undelivered excerpts, and every arm must match the first snapshot digest. A missed
+helper citation still fails strict coverage even when its source was returned.
+
 The optional `--jev-question-batch 8` partitions independent Jev questions into batches of at most eight,
 retaining identical full state in each batch and validating every answer. This is a
 workload mitigation, not a documented provider limit: an alternating diagnostic saw
@@ -237,8 +259,9 @@ retains its implementation sources and digest alongside its manifest.
 
 The Gateway-only diagnostic utility uses the same cumulative ledger and no retries:
 
-Its historical 496-request ceiling remains unchanged. The newer `compare-routes.ts`
-and `trajectory-run.ts` use the explicit direct-pass authorization above.
+Its historical 496-request ceiling remains unchanged. `compare-routes.ts` retains
+the earlier direct-pass authorization; `trajectory-run.ts` uses the improvement
+authorization above. New directories never reset the shared budget.
 
 ```sh
 JEV_ALLOW_LIVE=1 bun diagnose-gateway.ts minimal \

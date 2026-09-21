@@ -10,10 +10,11 @@ import {
   type Judgment,
 } from "./core";
 import { fileEvidence } from "./investigation";
-import { partialJudgments } from "./batched-judge";
+import { partialJudgments, byteBoundedJudge } from "./batched-judge";
 import { transientReceipt } from "./transient-failure";
+import { packEvidence } from "./evidence-package";
 
-export const COMPACT_VERSION = "compact-evidence-v7";
+export const COMPACT_VERSION = "compact-evidence-v10";
 const INTERNAL_CHARS = 48000,
   RETURN_CHARS = 6500;
 const isTest = (path: string) => /\.(test|spec)\.[cm]?[jt]sx?$/.test(path);
@@ -29,7 +30,8 @@ export function sourceSpans(file: Chunk): Chunk[] {
       tree.getPositionOfLineAndCharacter(position.line, 0),
       statement.getFullStart(),
     );
-    const start = Math.min(end, position.line + (prefix.trim() ? 1 : 0));
+    const tokenLine = tree.getLineAndCharacterOfPosition(statement.getStart(tree)).line;
+    const start = Math.min(tokenLine, position.line + (prefix.trim() ? 1 : 0));
     // Complete top-level definitions preserve conditions and early-return ordering.
     for (let n = start; n <= end; n += 70) {
       const last = Math.min(end, n + 89);
@@ -175,9 +177,11 @@ async function runCompact(snapshot: Snapshot, request: Request, judge: Judge, de
     );
     const remaining = deadlineMs - (performance.now() - start);
     if (remaining <= 0) throw new Error("compact_deadline");
-    if (Buffer.byteLength(JSON.stringify({ state, questions })) > 96000)
-      throw new Error("compact_input_budget");
-    const answer = await judge(state, questions, AbortSignal.timeout(Math.ceil(remaining)));
+    const answer = await byteBoundedJudge(judge)(
+      state,
+      questions,
+      AbortSignal.timeout(Math.ceil(remaining)),
+    );
     if (performance.now() - start >= deadlineMs) throw new Error("compact_deadline");
     validateAnswers(questions, answer);
     return answer;
@@ -327,6 +331,22 @@ async function runCompact(snapshot: Snapshot, request: Request, judge: Judge, de
       questions,
     );
   } catch (error) {
+    if (error instanceof Error && error.message === "compact_input_budget")
+      return {
+        version: COMPACT_VERSION,
+        status: "needs_guidance",
+        answer: "indecisive",
+        reasonCode: "compact_input_budget",
+        evidence: [] as Chunk[],
+        trace,
+        internalChars,
+        coverage: undefined,
+        continuation: {
+          candidatePaths: roots,
+          instruction:
+            "Discovery selected these candidate paths, not a proven complete answer. Read these paths for evidence before repeating broad search. No source-span judgments were completed.",
+        },
+      };
     if (!transientReceipt(error)) throw error;
     if (performance.now() - start >= deadlineMs)
       throw new Error("compact_deadline", { cause: error });
@@ -346,17 +366,9 @@ async function runCompact(snapshot: Snapshot, request: Request, judge: Judge, de
     inspectedPaths: [...new Set([...internal.values()].map((f) => f.path))],
   });
   const candidates = spans.filter((s) => judgments[s.id]?.choice === "essential");
-  const evidence: Chunk[] = [];
-  let chars = 0,
-    truncated = false;
-  for (const span of candidates) {
-    if (chars + span.text.length > RETURN_CHARS) {
-      truncated = true;
-      continue;
-    }
-    evidence.push(span);
-    chars += span.text.length;
-  }
+  const packed = packEvidence(candidates, [...internal.values()], RETURN_CHARS);
+  const { evidence } = packed;
+  const truncated = packed.omittedEssentialSpans || packed.omittedContextSpans;
   const status =
     judgments.sufficiency?.choice === "missing" || !evidence.length
       ? "needs_guidance"
@@ -385,7 +397,10 @@ async function runCompact(snapshot: Snapshot, request: Request, judge: Judge, de
     coverage: {
       inspectedFiles: new Set([...internal.values()].map((f) => f.path)).size,
       selectedSpans: evidence.length,
-      omittedEssentialSpans: truncated,
+      omittedEssentialSpans: packed.omittedEssentialSpans,
+      omittedContextSpans: packed.omittedContextSpans,
+      contextImportsAdded: packed.contextImportsAdded,
+      contextHelpersAdded: packed.contextHelpersAdded,
       unresolvedLocalPaths: [...unresolved],
       snapshotLimited: snapshot.limited,
     },

@@ -132,12 +132,22 @@ export class SourceTools {
 }
 
 export function spanCovered(span: Citation, delivered: Citation[]): boolean {
-  return Array.from(
-    { length: span.endLine - span.startLine + 1 },
-    (_, i) => span.startLine + i,
-  ).every((line) =>
-    delivered.some((d) => d.path === span.path && d.startLine <= line && d.endLine >= line),
-  );
+  const valid = (s: Citation) =>
+    Number.isSafeInteger(s.startLine) &&
+    Number.isSafeInteger(s.endLine) &&
+    s.startLine > 0 &&
+    s.endLine >= s.startLine;
+  if (!valid(span)) return false;
+  let next = span.startLine;
+  for (const d of delivered
+    .filter((candidate) => candidate.path === span.path && valid(candidate))
+    .sort((a, b) => a.startLine - b.startLine)) {
+    if (d.endLine < next) continue;
+    if (d.startLine > next) return false;
+    if (d.endLine >= span.endLine) return true;
+    next = d.endLine + 1;
+  }
+  return false;
 }
 export function scoreTrajectory(
   c: BenchmarkCase,
@@ -154,9 +164,7 @@ export function scoreTrajectory(
         Number.isInteger(s.endLine) &&
         s.startLine > 0 &&
         s.endLine >= s.startLine &&
-        source.files.some(
-          (f) => f.path === s.path && f.startLine <= s.startLine && f.endLine >= s.endLine,
-        ) &&
+        spanCovered(s, source.files) &&
         spanCovered(s, delivered),
     );
   return {
