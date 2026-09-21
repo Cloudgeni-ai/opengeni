@@ -1,4 +1,5 @@
 import { newSessionDraftToolPolicy } from "./session-tools";
+import { sessionPolicyPickerIds } from "./session-tools";
 import { describe, expect, test } from "bun:test";
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
 import {
@@ -112,6 +113,65 @@ describe("composer connector inventory", () => {
 });
 
 describe("connector selection policy", () => {
+  test("all visible connectors off round-trips as exclusions, retaining builtins and future defaults", () => {
+    const defaults = ["files", "slack", "linear"];
+    const excluded = changedConnectorExclusions([], new Set(defaults), new Set(["files"]));
+    const persisted = JSON.parse(
+      JSON.stringify(
+        newSessionDraftToolPolicy({
+          selectedMcpServerIds: ["files"],
+          workspaceDefaultMcpServerIds: defaults,
+          catalogReady: true,
+          customizing: true,
+          explicit: false,
+          excludedMcpServerIds: excluded,
+        }),
+      ),
+    );
+    expect(persisted).toEqual({
+      tools: [],
+      toolsProvided: true,
+      excludedMcpServerIds: ["linear", "slack"],
+    });
+    expect(newSessionConnectorCustomizeState(persisted)).toEqual({
+      customizing: true,
+      explicit: false,
+    });
+    const future = [...defaults, "new-connector"];
+    expect(
+      sessionPolicyPickerIds(
+        {
+          tools: [],
+          toolPolicy: {
+            mode: "workspace_default",
+            inheritedFromSessionId: null,
+            excludedMcpServerIds: persisted.excludedMcpServerIds,
+          },
+          effectiveToolPolicy: undefined,
+        },
+        future,
+        future,
+      ),
+    ).toEqual(new Set(["files", "new-connector"]));
+    const fixed = newSessionDraftToolPolicy({
+      selectedMcpServerIds: [],
+      workspaceDefaultMcpServerIds: defaults,
+      catalogReady: true,
+      customizing: true,
+      explicit: true,
+    });
+    expect(fixed).toEqual({ tools: [], toolsProvided: true });
+    expect(newSessionConnectorCustomizeState(fixed)).toEqual({ customizing: true, explicit: true });
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: [],
+        workspaceDefaultMcpServerIds: defaults,
+        catalogReady: true,
+        customizing: false,
+        explicit: false,
+      }),
+    ).toEqual({ tools: [], toolsProvided: false });
+  });
   test("enabling outside defaults preserves effective and hidden choices without re-enabling exclusions", () => {
     const session = {
       toolPolicy: {

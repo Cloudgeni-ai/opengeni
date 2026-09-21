@@ -449,7 +449,6 @@ export function useChatComposerController({
   }, [id, paused]);
 
   const blockedByAttachment = attachments?.hasUnresolved === true;
-  const hasReadyAttachment = (attachments?.readyResources.length ?? 0) > 0;
 
   const [dragging, setDragging] = useState(false);
   const dragCarriesFiles = (event: { dataTransfer: DataTransfer | null }): boolean =>
@@ -573,7 +572,7 @@ export function useChatComposerController({
           ? "command"
           : annotationsIncomplete
             ? "annotations"
-            : delivery.canSend || hasReadyAttachment
+            : delivery.canSend
               ? null
               : "empty";
   const canSubmit = submitBlocker === null;
@@ -593,7 +592,7 @@ export function useChatComposerController({
         delivery.requestAnnotationReview?.();
         return false;
       }
-      if (!delivery.canSend && !hasReadyAttachment) return false;
+      if (!delivery.canSend) return false;
       submittingRef.current = true;
       setSubmitting(true);
       try {
@@ -609,7 +608,6 @@ export function useChatComposerController({
       commandDraftBlocked,
       delivery,
       disabled,
-      hasReadyAttachment,
       messages.annotationNotesRequired,
       messages.slashCommandBlocked,
     ],

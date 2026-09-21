@@ -98,6 +98,15 @@ describe("composer connector account controls (local fixture)", () => {
         await page.getByRole("menuitem", { name: /Connectors/ }).click();
         await page.getByRole("switch", { name: "Customize connectors" }).click();
         const connector = page.getByRole("menuitemcheckbox", { name: "Linear", exact: true });
+        const slack = page.getByRole("menuitemcheckbox", { name: "Slack", exact: true });
+        const settings = page.getByRole("menuitem", { name: "Slack account settings" });
+        const settingsBefore = await settings.boundingBox();
+        const toggleBefore = await slack.boundingBox();
+        expect(settingsBefore!.x + settingsBefore!.width).toBeLessThanOrEqual(toggleBefore!.x);
+        await slack.click();
+        expect(await settings.boundingBox()).toEqual(settingsBefore);
+        expect(await slack.boundingBox()).toEqual(toggleBefore);
+        await slack.click();
         expect(await connector.getAttribute("aria-checked")).toBe("true");
         if (process.env.CONNECTOR_SCREENSHOT_DIR) {
           await page.screenshot({
@@ -142,7 +151,7 @@ describe("composer connector account controls (local fixture)", () => {
         await page.getByRole("menuitem", { name: "Slack account settings" }).click();
         expect(await personal.getAttribute("aria-checked")).toBe("false");
         await workspace.click();
-        await page.getByText("Attach an account or turn off this connector.").waitFor();
+        await page.getByText("No accounts selected.").waitFor();
         await personal.click();
         expect(await personal.getAttribute("aria-checked")).toBe("true");
         expect(await workspace.getAttribute("aria-checked")).toBe("false");

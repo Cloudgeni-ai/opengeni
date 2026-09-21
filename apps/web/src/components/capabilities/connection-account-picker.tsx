@@ -144,7 +144,7 @@ export function ConnectionAccountPicker(props: ConnectionAccountPickerProps) {
         ) : null}
         {!chosen.length && group.accounts.length > 0 ? (
           <p role="status" className="px-2 py-2 text-xs text-fg-muted">
-            Attach an account or turn off this connector.
+            No accounts selected.
           </p>
         ) : null}
       </div>

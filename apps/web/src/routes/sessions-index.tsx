@@ -608,7 +608,9 @@ function SessionsIndexRouteContent({
     );
   };
   const changeConnectorSelection = (selection: SessionToolSelection) => {
-    if (!connectorCustomizing) return;
+    // Choosing accounts is also an explicit connector customization. Apply it
+    // in this event, rather than waiting for the header switch to re-render.
+    if (!connectorCustomizing) setConnectorCustomizing(true);
     if (
       !toolSelectionExplicit &&
       addsConnectorOutsideDefaults(
@@ -1427,7 +1429,7 @@ function SessionsIndexRouteContent({
               <ComposerMobilePlus
                 connectorActions={{
                   accountControls: {
-                    groups: connectionAccounts.accountGroups,
+                    groups: connectionAccounts.availableAccountGroups,
                     choices: connectionAccounts.accountChoices,
                     onChoose: connectionAccounts.selectAccount,
                     loading: connectionAccounts.loading,
@@ -1573,6 +1575,33 @@ function SessionsIndexRouteContent({
               />
             }
           />
+
+          {connectionAccounts.loading ||
+          connectionAccounts.error ||
+          connectionAccounts.accountChoiceMessage ? (
+            <div role={connectionAccounts.loading ? "status" : "alert"} className="mt-3">
+              <Notice
+                tone={connectionAccounts.loading ? "muted" : "waiting"}
+                action={
+                  connectionAccounts.error ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void connectionAccounts.refresh()}
+                    >
+                      Retry
+                    </Button>
+                  ) : undefined
+                }
+              >
+                {connectionAccounts.loading
+                  ? "Checking connected accounts…"
+                  : connectionAccounts.error
+                    ? "Couldn't check connected accounts. Retry to send your message."
+                    : connectionAccounts.accountChoiceMessage}
+              </Notice>
+            </div>
+          ) : null}
 
           <SessionVisibilityPicker
             id="new-session"
