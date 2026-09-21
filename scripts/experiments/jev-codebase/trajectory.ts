@@ -74,13 +74,8 @@ export class SourceTools {
   readonly files: Chunk[];
   readonly returned: Citation[] = [];
   constructor(readonly snapshot: Snapshot) {
-    const files = fileEvidence(snapshot);
-    this.files = files.map((f) => {
-      // A final newline terminates the last physical line; it is not an extra citable line.
-      if (f.text.endsWith("\n") && files.filter((other) => other.path === f.path).length === 1)
-        return { ...f, text: f.text.slice(0, -1), endLine: f.endLine - 1 };
-      return f;
-    });
+    // Snapshot loader owns physical-line normalization, including real trailing blank lines.
+    this.files = fileEvidence(snapshot);
   }
   list(filter: string, offset: number) {
     const paths = [...new Set(this.files.map((f) => f.path))]

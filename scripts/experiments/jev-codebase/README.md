@@ -179,17 +179,43 @@ before viewing fresh labels, alternate arm order, keep smoke/regression runs
 separate, and never overwrite output manifests. CLI work is read-only outside
 its output receipts. No staging integration or subscription billing is implied.
 
-The shared sequential journal caps this experiment at 200 inference requests
-and a conservative local $2 estimate, reserving each call before transport and stopping on failed/unsettled
-requests. Limits: 10 Terra turns per task, 2,200 output tokens per call, 60-second
+The shared sequential journal caps the authorized iteration at 400 inference requests
+and a conservative local $5 estimate, reserving each call before transport. Unsettled,
+authentication, missing-usage and ambiguous failures stop the experiment. Explicit
+HTTP 429/502/503/504 failures get one retry, with the unknown bill reserved; a second
+transient failure ends that case while unrelated cases may continue. An old explicit
+transient failure requires `--resume-transient FAILED_REQUEST_UUID` in the same ledger;
+this records authorization, not settled billing. Never reset the ledger to bypass it.
+Limits: 10 Terra turns per task, 2,200 output tokens per call, 60-second
 Terra timeout, 30-second Jev timeout, 240-second task deadline propagated to
-inference and checked before accepting results, no retries. Synchronous snapshot
+inference and checked before accepting results, no SDK retries. Synchronous snapshot
 ingestion is timed but cannot be interrupted by that deadline. This is not a
 provider-enforced spending limit. Prices and reported costs fail closed when
 missing/invalid; Jev is supported only with its verified zero output-token rate.
 Terra reasoning uses the provider default; resolved model
 and available reasoning-token usage are recorded, without assuming an exact
-upstream weight version. Jev has its existing bounded controller limits.
+upstream weight version. The earlier $2/200-request no-retry manifests remain historical evidence.
+
+The default `--workflow compact` controller ranks a source path/export index locally,
+lets Jev choose a primary/companion from 40 candidates, and broadens on unknown
+within six pages. If both choices duplicate the same file, a conditional judgment
+selects a distinct companion or none; that extra call is metered. It reads at most 48,000 source characters internally, includes
+relative dependencies, and asks Jev to select exact AST-based source spans. At most
+6,500 source characters return to Terra. Imports/types are selectable; fragmented
+source is retained with original ranges and disclosed as incomplete. Snapshot
+character limits never truncate a physical line and label it exact. This is bounded
+discovery, not repository-wide absence proof. A plausible wrong root can still miss
+other candidates. `--workflow legacy` remains available for explicit comparison.
+
+The harness's task-bound investigate tool accepts only search hints; runtime supplies
+the active question/context. The underlying controller accepts an explicit Request
+and remains reusable for general tools. Jev does not generate summaries: it selects
+typed choices and source IDs. Terra inspects those excerpts and owns the final answer.
+Both arms receive the same instruction to avoid rereading sufficient evidence.
+Evidence-only answer labels are schema-restricted to indecisive in both arms; semantic
+explanation correctness must still be reviewed independently. Ordinary fallback stays
+available. Local compact input/deadline exhaustion yields, but an in-flight provider
+abort can still stop the experiment conservatively for unknown billing.
 
 Measure ingestion/indexing, every model call, each local tool execution,
 delegation wall time, fallback calls and full task wall time. Nested Jev calls

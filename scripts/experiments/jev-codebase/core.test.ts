@@ -12,11 +12,13 @@ import {
   requiresRuntimeEvidence,
   termsFor,
   validateAnswers,
+  wholeLineWindow,
   type Judge,
   type Question,
   type Snapshot,
 } from "./core";
 import { scoreInvestigation } from "./scoring";
+import { SourceTools } from "./trajectory";
 
 const snapshot: Snapshot = {
   revision: "fixed",
@@ -58,6 +60,13 @@ const judge =
     answer(qs, qs.next ? { next: "e0" } : choices);
 
 describe("read-only investigation contract", () => {
+  test("character budgets never label a truncated line as exact source", () => {
+    const line = "export const x = '" + "x".repeat(9500) + "';";
+    const decisive = "export const y = '" + "y".repeat(900) + "'; deny();";
+    expect(wholeLineWindow([line, decisive])).toEqual([line]);
+    expect(wholeLineWindow(["x".repeat(10001)])).toEqual([]);
+    expect(wholeLineWindow(["one", "two"], 7)).toEqual(["one", "two"]);
+  });
   test("subdir scopes cannot bypass sensitive ancestor exclusions", async () => {
     const root = mkdtempSync(join(tmpdir(), "jev-subdir-test-"));
     const git = (...args: string[]) => {
@@ -98,7 +107,7 @@ describe("read-only investigation contract", () => {
     };
     try {
       git("init");
-      await Bun.write(join(root, "source.ts"), "export const value = 1;\n");
+      await Bun.write(join(root, "source.ts"), "export const value = 1;\n\n");
       await Bun.write(join(root, ".env.json"), '{"token":"synthetic-do-not-read"}');
       symlinkSync(".env.json", join(root, "alias.ts"));
       git("add", ".");
@@ -116,6 +125,12 @@ describe("read-only investigation contract", () => {
       expect(s.chunks.map((c) => c.path)).toEqual(["source.ts"]);
       expect(s.chunks[0].text).toContain("value = 1");
       expect(s.excluded).toBe(2);
+      expect(new SourceTools(s).read("source.ts", 1, 5)).toEqual({
+        path: "source.ts",
+        startLine: 1,
+        endLine: 2,
+        text: "export const value = 1;\n",
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

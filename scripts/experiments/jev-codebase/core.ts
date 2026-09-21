@@ -60,6 +60,18 @@ function git(root: string, args: string[], maxBytes = 8_000_000): string {
 }
 
 // Reads immutable committed blobs only: no worktree files, symlink targets, hooks or shell expansion.
+export function wholeLineWindow(lines: string[], maxChars = 10000): string[] {
+  const selected: string[] = [];
+  let length = 0;
+  for (const line of lines) {
+    const next = length + (selected.length ? 1 : 0) + line.length;
+    if (next > maxChars) break;
+    selected.push(line);
+    length = next;
+  }
+  return selected;
+}
+
 export function loadSnapshot(root: string, revision = "HEAD", subdir = ""): Snapshot {
   if (
     !/^[A-Za-z0-9_./-]+$/.test(revision) ||
@@ -107,15 +119,18 @@ export function loadSnapshot(root: string, revision = "HEAD", subdir = ""): Snap
     }
     total += size;
     const lines = text.split("\n");
+    if (text.endsWith("\n")) lines.pop();
     for (let start = 0; start < lines.length; start += 70) {
-      const original = lines.slice(start, start + 90).join("\n");
-      const excerpt = original.slice(0, 10000);
-      if (excerpt.length !== original.length) limited = true;
+      const original = lines.slice(start, start + 90);
+      const selected = wholeLineWindow(original);
+      if (selected.length !== original.length) limited = true;
+      if (!selected.length) continue;
+      const excerpt = selected.join("\n");
       chunks.push({
         id: `e${chunks.length}`,
         path,
         startLine: start + 1,
-        endLine: start + excerpt.split("\n").length,
+        endLine: start + selected.length,
         text: excerpt,
       });
     }

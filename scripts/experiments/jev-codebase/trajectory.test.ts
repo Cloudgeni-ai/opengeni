@@ -34,13 +34,13 @@ test("source tools paginate paths and return exact bounded lines", () => {
     text: "const value = 2;\nexport { value };",
   });
 });
-test("terminal newline is not an additional citable source line", () => {
+test("snapshot physical blank lines are not normalized a second time", () => {
   const t = new SourceTools({
     ...snapshot,
     chunks: [{ id: "e0", path: "a.ts", startLine: 1, endLine: 3, text: "one\ntwo\n" }],
   });
-  expect(t.files[0].endLine).toBe(2);
-  expect(t.read("a.ts", 3, 3)).toEqual({ error: "path_or_range_not_in_snapshot" });
+  expect(t.files[0].endLine).toBe(3);
+  expect(t.read("a.ts", 3, 3)).toEqual({ path: "a.ts", startLine: 3, endLine: 3, text: "" });
 });
 test("search is literal and no-match does not become absence proof", () => {
   const t = new SourceTools(snapshot);
