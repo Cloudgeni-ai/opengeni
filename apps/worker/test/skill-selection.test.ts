@@ -16,6 +16,8 @@ test("bundled selection uses configured names, not prepared schemas or optional 
     },
   };
   expect(configuredBundledSkillNames(context)).toEqual([
+    "opengeni-help",
+    "opengeni-client",
     "opengeni-visualize",
     "document-parsing",
     "opengeni-skills",
@@ -32,10 +34,19 @@ test("bundled selection uses configured names, not prepared schemas or optional 
 test("Sites, video and artifact defaults have independent inclusion conditions", () => {
   expect(
     configuredBundledSkillNames({ firstPartyTools: [], videoGenerationEnabled: false }),
-  ).toEqual(["opengeni-visualize", "document-parsing", "opengeni-skills", "opengeni-projects"]);
+  ).toEqual([
+    "opengeni-help",
+    "opengeni-client",
+    "opengeni-visualize",
+    "document-parsing",
+    "opengeni-skills",
+    "opengeni-projects",
+  ]);
   expect(
     configuredBundledSkillNames({ firstPartyTools: [], videoGenerationEnabled: true }),
   ).toEqual([
+    "opengeni-help",
+    "opengeni-client",
     "opengeni-visualize",
     "document-parsing",
     "opengeni-skills",
@@ -48,6 +59,8 @@ test("Sites, video and artifact defaults have independent inclusion conditions",
       videoGenerationEnabled: false,
     }),
   ).toEqual([
+    "opengeni-help",
+    "opengeni-client",
     "opengeni-visualize",
     "document-parsing",
     "opengeni-skills",
@@ -59,7 +72,14 @@ test("Sites, video and artifact defaults have independent inclusion conditions",
       firstPartyTools: ["editable_artifact_get"],
       videoGenerationEnabled: false,
     }),
-  ).toEqual(["opengeni-visualize", "document-parsing", "opengeni-skills", "opengeni-projects"]);
+  ).toEqual([
+    "opengeni-help",
+    "opengeni-client",
+    "opengeni-visualize",
+    "document-parsing",
+    "opengeni-skills",
+    "opengeni-projects",
+  ]);
 });
 
 test("host selection narrows every bundled source without forcing unavailable workflows", () => {

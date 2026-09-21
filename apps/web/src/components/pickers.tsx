@@ -1,22 +1,15 @@
-import { CheckIcon, ChevronDownIcon, MinusIcon, PlugIcon } from "lucide-react";
+import { ChevronDownIcon, PlugIcon } from "lucide-react";
+import { lazy, Suspense } from "react";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
-import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { McpServerOption } from "@/lib/session-tools";
-import {
-  builtInMcpCapability,
-  capabilityGroupSelection,
-  sessionCapabilityGroupsFor,
-  type SessionCapabilityGroup,
-} from "@/lib/session-capabilities";
+import { capabilityGroupSelection, sessionCapabilityGroupsFor } from "@/lib/session-capabilities";
 import { cn } from "@/lib/utils";
 
 export {
@@ -58,175 +51,34 @@ export function visibleSessionToolSelection(
   };
 }
 
-/** Shared tools list body — used by the bar picker and the mobile “+” drill-in. */
-export function SessionToolsMenuBody(props: {
-  presentation?: "menu" | "dialog";
-  servers: McpServerOption[];
-  firstPartyTools: ReadonlyArray<{ id: FirstPartyMcpToolName; name: string }>;
-  selection: SessionToolSelection;
-  onChange: (selection: SessionToolSelection) => void;
-  /** Optional leading chrome (e.g. Back) rendered beside the title. */
-  leading?: ReactNode;
-}) {
-  const visibleSelection = visibleSessionToolSelection(
-    props.selection,
-    props.servers,
-    props.firstPartyTools,
-  );
-  const total = props.servers.length + props.firstPartyTools.length;
-  const selectedMcpIds = visibleSelection.mcpServerIds;
-  const selectedFirstPartyIds = visibleSelection.firstPartyToolIds;
-  const selected = selectedMcpIds.size + selectedFirstPartyIds.size;
+import type { SessionConnectorsMenuProps } from "@/components/session-connectors-menu-body";
+import { COMPOSER_MENU_PANEL_CLASS, ComposerMenuHeader } from "@/components/ui/composer-menu";
 
-  const capabilityGroups = sessionCapabilityGroupsFor(props.firstPartyTools);
-  const openGeniGroups = capabilityGroups.filter((group) => group.kind === "opengeni");
-  const connectedAppGroups = capabilityGroups.filter((group) => group.kind === "connected_app");
-  const builtInServers = props.servers.flatMap((server) => {
-    const capability = builtInMcpCapability(server);
-    return capability ? [{ server, capability }] : [];
-  });
-  const connectedServers = props.servers.filter((server) => !builtInMcpCapability(server));
+const LazySessionConnectorsMenuBody = lazy(() =>
+  import("@/components/session-connectors-menu-body").then((module) => ({
+    default: module.SessionConnectorsMenuBody,
+  })),
+);
 
-  const toggleMcp = (id: string) => {
-    const next: SessionToolSelection = {
-      mcpServerIds: new Set(selectedMcpIds),
-      firstPartyToolIds: new Set(selectedFirstPartyIds),
-    };
-    if (next.mcpServerIds.has(id)) next.mcpServerIds.delete(id);
-    else next.mcpServerIds.add(id);
-    props.onChange(next);
-  };
-  const toggleGroup = (group: SessionCapabilityGroup) => {
-    const nextFirstPartyIds = new Set(selectedFirstPartyIds);
-    const enabled = capabilityGroupSelection(group, selectedFirstPartyIds) !== "all";
-    for (const tool of group.toolIds) {
-      if (enabled) nextFirstPartyIds.add(tool);
-      else nextFirstPartyIds.delete(tool);
-    }
-    props.onChange({
-      mcpServerIds: new Set(selectedMcpIds),
-      firstPartyToolIds: nextFirstPartyIds,
-    });
-  };
-  const setAll = (enabled: boolean) =>
-    props.onChange({
-      mcpServerIds: new Set(enabled ? props.servers.map((server) => server.id) : []),
-      firstPartyToolIds: new Set(enabled ? props.firstPartyTools.map((tool) => tool.id) : []),
-    });
-
+/** Secondary connector/account controls load only when their menu is opened. */
+export function SessionToolsMenuBody(props: SessionConnectorsMenuProps) {
   return (
-    <>
-      <div className="flex shrink-0 items-start justify-between gap-2 px-2 pt-1 pb-1.5">
-        <div className="flex min-w-0 items-start gap-1">
-          {props.leading}
-          <div className="min-w-0">
-            <DropdownMenuLabel className="p-0 text-sm font-medium text-fg">
-              Tools for this session
-            </DropdownMenuLabel>
-            <p className="mt-0.5 text-xs text-fg-subtle">Choose capabilities and connected apps.</p>
-          </div>
-        </div>
-        <button
-          type="button"
-          className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-fg-muted hover:bg-surface-2 hover:text-fg"
-          onClick={(event) => {
-            event.preventDefault();
-            setAll(selected !== total);
-          }}
-        >
-          {selected === total ? "Clear all" : "Enable all"}
-        </button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-        {connectedServers.length > 0 || connectedAppGroups.length > 0 ? (
-          <>
-            <DropdownMenuLabel className="px-2 pt-2 pb-1 text-xs font-normal text-fg-subtle">
-              Connected apps
-            </DropdownMenuLabel>
-            {connectedServers.map((server) => (
-              <SessionToolPickerItem
-                presentation={props.presentation}
-                key={`mcp:${server.id}`}
-                id={server.id}
-                name={server.name}
-                selected={props.selection.mcpServerIds.has(server.id)}
-                onToggle={() => toggleMcp(server.id)}
-              />
-            ))}
-            {connectedAppGroups.map((group) => (
-              <SessionCapabilityPickerItem
-                presentation={props.presentation}
-                key={`app:${group.id}`}
-                group={group}
-                state={capabilityGroupSelection(group, selectedFirstPartyIds)}
-                onToggle={() => toggleGroup(group)}
-              />
-            ))}
-          </>
-        ) : null}
-        <DropdownMenuLabel className="px-2 pt-2 pb-1 text-xs font-normal text-fg-subtle">
-          OpenGeni capabilities
-        </DropdownMenuLabel>
-        {builtInServers.map(({ server, capability }) => (
-          <SessionToolPickerItem
-            presentation={props.presentation}
-            key={`mcp:${server.id}`}
-            id={server.id}
-            name={capability.name}
-            description={capability.description}
-            selected={props.selection.mcpServerIds.has(server.id)}
-            onToggle={() => toggleMcp(server.id)}
-          />
-        ))}
-        {openGeniGroups.map((group) => (
-          <SessionCapabilityPickerItem
-            presentation={props.presentation}
-            key={`opengeni:${group.id}`}
-            group={group}
-            state={capabilityGroupSelection(group, selectedFirstPartyIds)}
-            onToggle={() => toggleGroup(group)}
-          />
-        ))}
-      </div>
-    </>
-  );
-}
-
-function SessionCapabilityPickerItem(props: {
-  presentation?: "menu" | "dialog";
-  group: SessionCapabilityGroup;
-  state: "all" | "some" | "none";
-  onToggle: () => void;
-}) {
-  return (
-    <ToolSelectionItem
-      presentation={props.presentation}
-      pressed={props.state === "some" ? "mixed" : props.state === "all"}
-      onToggle={props.onToggle}
-      className="min-h-11 cursor-pointer rounded-md px-2 py-2 text-sm"
+    <Suspense
+      fallback={
+        <>
+          <ComposerMenuHeader title="Connectors" leading={props.leading} />
+          <p role="status" className="px-4 py-4 text-xs text-fg-muted">
+            Loading connectors…
+          </p>
+        </>
+      }
     >
-      <span className="min-w-0 flex-1">
-        <span className="block truncate font-medium text-fg">{props.group.name}</span>
-        <span className="mt-0.5 block whitespace-normal text-xs leading-4 text-fg-subtle">
-          {props.group.description}
-        </span>
-      </span>
-      <span
-        className={cn(
-          "ml-2 flex size-4 shrink-0 items-center justify-center rounded border",
-          props.state === "none" ? "border-border bg-surface" : "border-brand bg-brand text-white",
-        )}
-        aria-hidden
-      >
-        {props.state === "all" ? <CheckIcon className="size-3" /> : null}
-        {props.state === "some" ? <MinusIcon className="size-3" /> : null}
-      </span>
-    </ToolSelectionItem>
+      <LazySessionConnectorsMenuBody {...props} />
+    </Suspense>
   );
 }
 
-export const SESSION_TOOLS_PANEL_CLASS =
-  "flex max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] w-[min(20rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border-border bg-surface p-2 shadow-xl";
+export const SESSION_TOOLS_PANEL_CLASS = COMPOSER_MENU_PANEL_CLASS;
 
 export function sessionToolSelectionSummary(props: {
   servers: McpServerOption[];
@@ -259,6 +111,8 @@ export function SessionToolPicker(props: {
   selection: SessionToolSelection;
   disabled?: boolean;
   saving?: boolean;
+  customizing?: boolean;
+  onCustomizingChange?: (customizing: boolean) => void;
   /** Prefer `bottom` on home/new-chat; `top` when composer is docked at bottom. */
   menuSide?: "top" | "bottom";
   /** Extra classes on the bar trigger (e.g. `max-sm:hidden` when opened from +). */
@@ -298,84 +152,11 @@ export function SessionToolPicker(props: {
           servers={props.servers}
           firstPartyTools={props.firstPartyTools}
           selection={props.selection}
+          customizing={props.customizing}
+          onCustomizingChange={props.onCustomizingChange}
           onChange={props.onChange}
         />
       </DropdownMenuContent>
     </DropdownMenu>
-  );
-}
-
-function SessionToolPickerItem(props: {
-  presentation?: "menu" | "dialog";
-  id: string;
-  name: string;
-  description?: string;
-  selected: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <ToolSelectionItem
-      presentation={props.presentation}
-      pressed={props.selected}
-      title={props.id}
-      onToggle={props.onToggle}
-      className="min-h-9 cursor-pointer rounded-md px-2 py-1.5 text-sm"
-    >
-      <span className="min-w-0 flex-1">
-        <span className="block truncate font-medium text-fg">{props.name}</span>
-        {props.description ? (
-          <span className="mt-0.5 block whitespace-normal text-xs leading-4 text-fg-subtle">
-            {props.description}
-          </span>
-        ) : null}
-      </span>
-      <span
-        className={cn(
-          "ml-2 flex size-4 shrink-0 items-center justify-center rounded border",
-          props.selected ? "border-brand bg-brand text-white" : "border-border bg-surface",
-        )}
-        aria-hidden
-      >
-        {props.selected ? <CheckIcon className="size-3" /> : null}
-      </span>
-    </ToolSelectionItem>
-  );
-}
-
-function ToolSelectionItem(props: {
-  presentation?: "menu" | "dialog";
-  pressed: boolean | "mixed";
-  title?: string;
-  className: string;
-  onToggle: () => void;
-  children: ReactNode;
-}) {
-  if (props.presentation === "dialog") {
-    return (
-      <button
-        type="button"
-        title={props.title}
-        aria-pressed={props.pressed}
-        onClick={props.onToggle}
-        className={cn(
-          "flex w-full items-center gap-2 text-left hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:outline-ring",
-          props.className,
-        )}
-      >
-        {props.children}
-      </button>
-    );
-  }
-  return (
-    <DropdownMenuItem
-      title={props.title}
-      className={props.className}
-      onSelect={(event) => {
-        event.preventDefault();
-        props.onToggle();
-      }}
-    >
-      {props.children}
-    </DropdownMenuItem>
   );
 }

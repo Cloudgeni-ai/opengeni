@@ -57,7 +57,7 @@ describe("personal resource attachments in Chromium", () => {
     await Promise.allSettled([browserContext?.close(), browser?.close(), web?.stop()]);
   }, 30_000);
 
-  test("Create, Send, Steer and Continue authorize attached resources without another control", async () => {
+  test("Create, Send and Steer authorize attachments without inventing retry input", async () => {
     const control = page.locator("[data-personal-resource-attachment]");
     expect(await control.count()).toBe(0);
     expect(await page.getByRole("radio").count()).toBe(0);
@@ -96,14 +96,17 @@ describe("personal resource attachments in Chromium", () => {
     expect(await existing.getByText("The child reports that its reviewed PR merged.").count()).toBe(
       1,
     );
-    await existing.getByRole("button", { name: "Continue", exact: true }).click();
+    // This attachment-only fixture has no retained failed turn. It must not
+    // pretend that a continuation message is an execution retry.
+    expect(await existing.getByRole("button", { name: "Try again", exact: true }).count()).toBe(0);
+    expect(await existing.getByRole("button", { name: "Continue", exact: true }).count()).toBe(0);
     expect(await existing.getByTestId("failed-session-banner").count()).toBe(1);
     expect(await existing.getByText("The child reports that its reviewed PR merged.").count()).toBe(
       1,
     );
     expect(
       JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}"),
-    ).toMatchObject({ delivery: "continue", mode: "session", expectedAuthorityEpoch: 3 });
+    ).toMatchObject({ delivery: "steer", mode: "session", expectedAuthorityEpoch: 3 });
     await existing.getByRole("button", { name: "Send", exact: true }).click();
     expect(JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}").mode).toBe(
       "session",

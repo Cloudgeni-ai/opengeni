@@ -1,13 +1,22 @@
 ---
 name: opengeni-skills
-description: Find, install, create, and edit workspace Skills; understand reading, file changes, Agent learning settings, and optional sandbox checkout.
+description: Find, install, create, edit, and permanently remove Skills; understand reading, file changes, Agent learning settings, and optional sandbox checkout.
 ---
 
 # Managing Skills
 
 A Skill is a folder containing `SKILL.md` and supporting UTF-8 text files.
-Use Skills for reusable instructions and procedures. Use Knowledge for facts and
-outcomes, and workspace instructions for short always-on rules.
+Use Skills for reusable procedures and context-specific or personal behavioral
+preferences. Use workspace instructions for short always-on rules within their
+authorized scope. A request to remember how to behave belongs in one of those
+destinations, not Knowledge, even when phrased as "the user prefers concise replies."
+Knowledge holds facts and outcomes for retrieval, not standing behavior.
+
+Make the Skill description state when it applies: only that descriptor enters
+the prompt index; the agent reads the full instructions with `skill_read` when
+relevant. Do not promise that the full Skill body is always in the prompt.
+For mixed requests, keep the short rule in workspace instructions and the detailed
+procedure in a Skill. Do not duplicate either as a Knowledge entry.
 
 ## Read
 
@@ -79,10 +88,31 @@ change; Review first saves an inactive revision and the task continues; Off
 prevents agent authoring. Existing Skills remain readable and usable, and an
 authorized human can still manage or install Skills in the UI. Do not change
 settings or infer an override from “the user asked.” Report the actual receipt.
+Do not widen a personal preference into a workspace-wide rule. If the intended
+scope is unavailable, explain the limitation. Do not fall back to Knowledge or
+another destination to bypass learning settings, review, scope or size limits.
 
 Saved history supports restoration. Upstream updates must preserve workspace
 customizations; report an available update instead of replacing customized
 content silently. Platform-owned built-in Skills are not workspace-editable.
+
+## Permanently remove
+
+Discover `skill_remove` when a Skill and all its stored revisions should be
+permanently deleted. This is irreversible, not an uninstall or recoverable hide.
+Read the exact saved Skill first and supply its UUID, current active revision
+(null for an inactive head), scope version, reason and a fresh operation UUID.
+Reuse that operation UUID and the exact arguments after an uncertain result;
+never change the arguments merely to get past a stale-write error.
+
+The same Skills Learning setting and personal/workspace authority as `skill_save`
+apply. Automatic deletes; Review first retains an explicitly labeled deletion
+proposal in Knowledge > Needs review; Off refuses. Report the actual receipt:
+pending does not mean removed. Built-in, repository and inline session Skills
+cannot be removed through this tool. Another distribution owner's Skill is
+refused until that owner is released; do not bypass this protection. Conversations
+and their historical context remain unchanged. Shared upstream source packages
+are not erased by deleting a workspace's Skill.
 
 Do not encode binary files as text to bypass the text-only boundary. Unsupported
 files and size limits are explicit errors, not permission to drop files silently.

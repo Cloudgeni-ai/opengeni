@@ -181,10 +181,16 @@ body {
   textarea,
   [role="button"],
   [tabindex]:not([tabindex="-1"])
-):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]) {
+):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control) {
   outline: 2px solid color-mix(in oklch, var(--color-ring) 55%, transparent);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
+}
+
+/* Connector controls own a bounded inset ring, so adjacent actions never overlap. */
+.connector-control:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--color-ring) 55%, transparent);
+  outline-offset: -3px;
 }
 
 :where(button, a[href], [role="button"], [role="menuitem"], [role="option"], summary):not(:disabled, [aria-disabled="true"]) {
@@ -307,17 +313,20 @@ body {
   .session-tools-trigger { width: 2rem; padding-inline: 0; gap: 0; }
   .session-tools-label, .session-tools-chevron { display: none; }
 }
+.capabilities-tab-bar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px 16px; border-bottom:1px solid var(--color-border); }
+.capabilities-tab-action { display:flex; align-items:center; margin-left:auto; padding-block:4px; }
+.capabilities-tab-action:empty { display:none; }
 .capabilities-tabs { margin-top: 16px; gap: 20px; }
-.capabilities-tabs > [data-slot="tabs-list"] {
-  width: 100%; height: auto; min-height: 44px; justify-content: flex-start;
-  gap: 24px; padding: 0; border-bottom: 1px solid var(--color-border);
+.capabilities-tab-bar > [data-slot="tabs-list"] {
+  width: auto; height: auto; min-height: 44px; justify-content: flex-start;
+  gap: 24px; padding: 0; border-bottom: 0;
   border-radius: 0; background: transparent;
 }
-.capabilities-tabs > [data-slot="tabs-list"] > [data-slot="tabs-trigger"] {
+.capabilities-tab-bar > [data-slot="tabs-list"] > [data-slot="tabs-trigger"] {
   flex: none; height: 44px; padding: 0 2px; border: 0; border-radius: 0;
   background: transparent; box-shadow: none;
 }
-.capabilities-tabs > [data-slot="tabs-list"] > [data-slot="tabs-trigger"]::after {
+.capabilities-tab-bar > [data-slot="tabs-list"] > [data-slot="tabs-trigger"]::after {
   bottom: -1px; height: 2px; border-radius: 2px;
 }
 

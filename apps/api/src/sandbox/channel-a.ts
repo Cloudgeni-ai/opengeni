@@ -51,6 +51,7 @@ import {
   recordTenancyCompatibilityLaneUse,
   sandboxLeaseTelemetryKey,
   sandboxOperationMetricObserver,
+  sandboxCaptureWaitMetricObserver,
   type Observability,
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
@@ -531,6 +532,9 @@ async function withChannelAOperation<T>(
   const onSandboxOperation = services.observability
     ? sandboxOperationMetricObserver(services.observability)
     : undefined;
+  const onSandboxCaptureWait = services.observability
+    ? sandboxCaptureWaitMetricObserver(services.observability)
+    : undefined;
   const { accountId, workspaceId, session } = ctx;
 
   if (session.sandboxBackend === "none") {
@@ -753,6 +757,7 @@ async function withChannelAOperation<T>(
           settings,
           bus,
           ...(onSandboxOperation ? { onSandboxOperation } : {}),
+          ...(onSandboxCaptureWait ? { onSandboxCaptureWait } : {}),
           ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
         },
         {
@@ -787,7 +792,7 @@ async function withChannelAOperation<T>(
 
   // One session has one logical runtime across turns and every API-direct
   // surface. Without this, Terminal/Files/Browser/Computer/viewers could rearm
-  // a stale deployment image after the worker had resolved a newer Pack/Rig or
+
   // deployment image for the same durable sandbox group.
   const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
 
@@ -1060,6 +1065,7 @@ async function withChannelAOperation<T>(
           settings,
           bus,
           ...(onSandboxOperation ? { onSandboxOperation } : {}),
+          ...(onSandboxCaptureWait ? { onSandboxCaptureWait } : {}),
           ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
         },
         {

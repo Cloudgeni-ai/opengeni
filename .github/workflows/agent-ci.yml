@@ -35,6 +35,17 @@ defaults:
     working-directory: agent
 
 jobs:
+  native-command-supervisor:
+    name: Linux native command supervisor
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Compile and exercise native protocol and failure cases
+        timeout-minutes: 5
+        run: make -C native/command-supervisor test CFLAGS='-O2 -g'
+
   # The workspace publishes Rust 1.82 as its minimum. Resolve from the committed
   # lock and compile every target/feature on that exact toolchain so a transitive
   # edition/MSRV bump cannot hide behind the stable-toolchain matrix.

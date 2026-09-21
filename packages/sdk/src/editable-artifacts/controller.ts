@@ -714,8 +714,15 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
       stored.snapshot.modality === "spreadsheet" ? stored.snapshot.causalFrontier : null;
     let nativeRevision =
       stored.snapshot.modality === "spreadsheet" ? null : stored.snapshot.nativeRevision;
+    const retainedAcceptances: {
+      transaction: EditableArtifactCommittedTransaction;
+      pending: Pick<
+        EditableArtifactPendingTransaction,
+        "clientTransactionId" | "requestHash" | "intentBytes"
+      >;
+    }[] = [];
     for (const transaction of stored.tail) {
-      validateCommittedTransaction(
+      const embeddedPending = validateCommittedTransaction(
         transaction,
         this.artifactId,
         this.modality,
@@ -728,6 +735,15 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
       requireStateHash(transaction.priorStateHash, stateHash, "retained transaction prior state");
       const applied = await this.kernel.applyRecovered(transaction);
       requireStateHash(applied.stateHash, transaction.stateHash, "retained transaction");
+      if (embeddedPending) {
+        const pending = this.pending.get(embeddedPending.clientTransactionId);
+        if (
+          pending?.requestHash === embeddedPending.requestHash &&
+          bytesEqual(pending.intentBytes, embeddedPending.intentBytes)
+        ) {
+          retainedAcceptances.push({ transaction, pending: embeddedPending });
+        }
+      }
       cursor = transaction.endSequence;
       stateHash = transaction.stateHash;
       if (transaction.modality === "spreadsheet") {
@@ -763,6 +779,14 @@ class EditableArtifactSyncControllerImpl implements EditableArtifactSyncControll
     this.retainedTailTransactions = stored.tail.length;
     this.cursor = cursor;
     this.headSequence = cursor;
+    // Reload may interrupt between retaining a commit and deleting its WAL entry.
+    // Only settle exact embedded identities after the entire retained head verifies;
+    // otherwise speculative replay mistakes our own committed edit for a conflict.
+    // Callers restore the pending overlay after this confirmed projection is ready.
+    for (const { transaction, pending } of retainedAcceptances) {
+      this.recordAcceptedMappingIdentity(transaction.transactionId, pending);
+      await this.settlePending(transaction, true);
+    }
   }
 
   private async run(): Promise<void> {

@@ -63,6 +63,7 @@ describe("organization administration surface", () => {
     for (const section of [
       "overview",
       "knowledge",
+      "integrations",
       "people",
       "recovery",
       "retention",
@@ -72,6 +73,8 @@ describe("organization administration surface", () => {
       expect(shellSource).toContain(`id: "${section}"`);
     }
     expect(routeSource).toContain('section === "knowledge"');
+    expect(routeSource).toContain('section === "integrations"');
+    expect(routeSource).toContain("<OrganizationIntegrationsSection");
     expect(routeSource).toContain('section === "recovery"');
     expect(routeSource).toContain("OrganizationRecoverySection");
     expect(routeSource).toContain("OrganizationKnowledgePrompt");

@@ -108,7 +108,14 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       expect(searchBody.matches[0]).toMatchObject({
         capabilityId: "api:github-app",
         providerDomain: "github.com",
-        setup: { status: "authorization_required", action: "connect" },
+        setup: {
+          status: "authorization_required",
+          action: "connect",
+          nextAction: {
+            toolName: "capability_authorization_request",
+            capabilityId: "api:github-app",
+          },
+        },
       });
 
       const request = await mcp.callTool({
@@ -153,7 +160,121 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       await Promise.all([mcp.close(), server.close()]);
     }
   }, 60_000);
-  test("enabled personal Gmail requires consent unless this exact attempt exposes its tools", async () => {
+  for (const scenario of [
+    {
+      name: "Arbitrary metrics service",
+      authModel: "api_key",
+      endpoint: true,
+      action: "add_credentials",
+    },
+    { name: "Arbitrary public search", authModel: null, endpoint: true, action: "enable" },
+    { name: "Arbitrary offline service", authModel: null, endpoint: false, action: null },
+  ] as const)
+    test(`generic setup handoff: ${scenario.name}`, async () => {
+      if (!shared) throw new Error("Real PostgreSQL fixture required");
+      const capabilityId = `mcp:fixture-${crypto.randomUUID()}`;
+      const serverId = `fixture-${crypto.randomUUID()}`;
+      await upsertCapabilityCatalogItem(client.db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        id: capabilityId,
+        kind: "mcp",
+        source: "manual",
+        name: scenario.name,
+        endpointUrl: scenario.endpoint ? "https://arbitrary.example.test/mcp" : null,
+        authModel: scenario.authModel,
+        metadata: { mcpServerId: serverId },
+      });
+      const attempt = await seedAttempt();
+      const server = buildOpenGeniMcpServer(
+        {
+          settings: testSettings(),
+          db: client.db,
+          bus: new MemoryEventBus(),
+        } as ApiRouteDeps,
+        {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          subjectId: "worker:first-party-mcp",
+          permissions: ["workspace:read"],
+          principalKind: "agent_attempt",
+          metadata: {
+            ...attempt,
+            firstPartyMcpTools: ["capability_catalog_search", "capability_authorization_request"],
+          },
+        },
+      );
+      const [ct, st] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: "generic-connect-test", version: "1" });
+      await server.connect(st);
+      await mcp.connect(ct);
+      try {
+        const search = await mcp.callTool({
+          name: "capability_catalog_search",
+          arguments: { query: scenario.name },
+        });
+        expect(search.isError).not.toBe(true);
+        const body = mcpJson(search) as {
+          matches: Array<{
+            capabilityId: string;
+            setup: { nextAction: { toolName: string; capabilityId: string } | null };
+          }>;
+        };
+        const match = body.matches.find((item) => item.capabilityId === capabilityId)!;
+        expect(match).toBeDefined();
+        expect(match.setup).toMatchObject({
+          status: scenario.action ? "authorization_required" : "unavailable",
+          action: scenario.action,
+          nextAction: scenario.action
+            ? { toolName: "capability_authorization_request", capabilityId }
+            : null,
+        });
+        expect(
+          (await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)).filter(
+            (event) => event.type === "tool.auth_needed",
+          ),
+        ).toHaveLength(0);
+        const request = await mcp.callTool({
+          name: match.setup.nextAction?.toolName ?? "capability_authorization_request",
+          arguments: {
+            capabilityId: match.setup.nextAction?.capabilityId ?? capabilityId,
+            rationale: "Access the data requested by the user.",
+          },
+        });
+        expect(request.isError).not.toBe(true);
+        expect(mcpJson(request)).toMatchObject({
+          status: scenario.action ? "authorization_requested" : "unavailable",
+        });
+        const events = (
+          await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
+        ).filter((event) => event.type === "tool.auth_needed");
+        expect(events).toHaveLength(scenario.action ? 1 : 0);
+        if (scenario.action)
+          expect(events[0]).toMatchObject({
+            turnId: attempt.turnId,
+            turnAttemptId: attempt.attemptId,
+            payload: {
+              serverId,
+              toolName: "capability_authorization_request",
+              providerDomain: "arbitrary.example.test",
+              capability: {
+                id: capabilityId,
+                name: scenario.name,
+                kind: "mcp",
+                source: "manual",
+                action: scenario.action,
+              },
+            },
+          });
+        const [installed] = await shared.admin<
+          { count: number }[]
+        >`select count(*)::int as count from capability_installations where workspace_id=${workspace.workspaceId} and capability_id=${capabilityId}`;
+        expect(installed?.count).toBe(0);
+      } finally {
+        await Promise.all([mcp.close(), server.close()]);
+      }
+    });
+  test("legacy missing tools do not manufacture reconnect requests; explicit empty account selection requests setup", async () => {
     if (!shared) throw new Error("Real PostgreSQL fixture required");
     const capabilityId = "mcp:gmail-consent-test";
     const serverId = "gmail-consent-test";
@@ -182,8 +303,10 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         },
       },
     });
-    for (const exposed of ["none", "other-server", serverId]) {
-      const attempt = await seedAttempt();
+    for (const exposed of ["none", "other-server", serverId, "no-accepted-account"]) {
+      const knownEmpty = exposed === "no-accepted-account";
+      const attempt = await seedAttempt(knownEmpty);
+      const ready = exposed === serverId;
       if (exposed !== "none") {
         await persistAttemptToolCatalog(
           client.db,
@@ -243,8 +366,11 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         expect(
           body.matches.find((entry) => entry.capabilityId === capabilityId)?.setup,
         ).toMatchObject({
-          status: exposed === serverId ? "ready" : "authorization_required",
-          action: exposed === serverId ? null : "connect",
+          status: ready ? "ready" : knownEmpty ? "authorization_required" : "unavailable",
+          action: knownEmpty ? "connect" : null,
+          nextAction: knownEmpty
+            ? { toolName: "capability_authorization_request", capabilityId }
+            : null,
         });
         const request = await mcp.callTool({
           name: "capability_authorization_request",
@@ -252,12 +378,12 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
         });
         expect(request.isError).not.toBe(true);
         expect(mcpJson(request)).toMatchObject({
-          status: exposed === serverId ? "ready" : "authorization_requested",
+          status: ready ? "ready" : knownEmpty ? "authorization_requested" : "unavailable",
         });
         const events = await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId);
         const notices = events.filter((event) => event.type === "tool.auth_needed");
-        expect(notices).toHaveLength(exposed === serverId ? 0 : 1);
-        if (exposed !== serverId)
+        expect(notices).toHaveLength(knownEmpty ? 1 : 0);
+        if (knownEmpty)
           expect(notices[0]).toMatchObject({
             turnId: attempt.turnId,
             turnAttemptId: attempt.attemptId,
@@ -285,7 +411,7 @@ function mcpJson(result: Awaited<ReturnType<Client["callTool"]>>): unknown {
   return JSON.parse(item.text) as unknown;
 }
 
-async function seedAttempt(): Promise<{
+async function seedAttempt(knownEmpty = false): Promise<{
   sessionId: string;
   turnId: string;
   attemptId: string;
@@ -310,12 +436,12 @@ async function seedAttempt(): Promise<{
     INSERT INTO session_turns (
       account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
       status, position, prompt, model, reasoning_effort, sandbox_backend,
-      execution_generation, initiator_kind, initiator_subject_id, initiator_context
+      execution_generation, initiator_kind, initiator_subject_id, initiator_context, mcp_account_bindings
     ) VALUES (
       ${workspace.accountId}, ${workspace.workspaceId}, ${session.id}, gen_random_uuid(),
       ${`capability-wf-${crypto.randomUUID()}`}, 'running', 0, 'Use GitHub',
       'gpt-5.6-sol', 'medium', 'none', ${executionGeneration}, 'subject',
-      ${workspace.subjectId}, '{"accepted":true}'::jsonb
+      ${workspace.subjectId}, '{"accepted":true}'::jsonb, ${knownEmpty ? shared!.admin.json([]) : null}::jsonb
     ) RETURNING id`;
   const attemptId = crypto.randomUUID();
   await shared!.admin.begin(async (tx) => {

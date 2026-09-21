@@ -73,15 +73,24 @@ function isChatIncompatibleHostedToolCall(item: Record<string, unknown>): boolea
 
 /**
  * Build the one attempt-local history view required by the target wire API.
- * Canonical history remains untouched. Responses history is returned by
- * reference. Chat-compatible history is also returned by reference when every
+ * Canonical history remains untouched. SDK-unsupported developer messages use
+ * the Responses pass-through item. Other history is returned by reference when every
  * item is already representable by the SDK's Chat Completions converter.
  */
 export function projectHistoryForProvider(
   items: Array<Record<string, unknown>>,
   providerApi: HistoryProviderApi,
 ): Array<Record<string, unknown>> {
-  if (providerApi === "responses") return items;
+  if (providerApi === "responses") {
+    if (!items.some((item) => item.type === "message" && item.role === "developer")) return items;
+    // agents-js 0.14's message converter supports system/user/assistant only.
+    // The Responses API itself supports developer; use the SDK's raw-item adapter.
+    return items.map((item) =>
+      item.type === "message" && item.role === "developer"
+        ? { type: "unknown", providerData: item }
+        : item,
+    );
+  }
 
   const incompatibleCallIds = new Set<string>();
   for (const item of items) {

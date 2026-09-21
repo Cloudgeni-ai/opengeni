@@ -355,6 +355,26 @@ describe("query-independent tool discovery", () => {
     expect(JSON.stringify(model.requests[2]!.input)).toContain("records__b");
     expect(JSON.stringify(model.requests[3]!.input)).toContain("invalid_cursor");
   });
+
+  test("an unmatched literal prefix explains how to recover without inventing names", async () => {
+    const agent = agentWith(weatherTool());
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set([SERVER_ID]));
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "wrong-prefix",
+          name: "tool_list",
+          arguments: '{"namePrefix":"weather."}',
+        },
+      ],
+      [{ type: "function_call", callId: "browse", name: "tool_list", arguments: "{}" }],
+      [finalMessage("done")],
+    ]);
+    await runStreamed(agent, model, runtime);
+    expect(JSON.stringify(model.requests[1]!.input)).toContain("without namePrefix");
+    expect(JSON.stringify(model.requests[2]!.input)).toContain(WEATHER_TOOL);
+  });
 });
 
 describe("application-owned Agents SDK history", () => {

@@ -1,5 +1,5 @@
+import { getSessionAuthorityProjection } from "@opengeni/db";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
-import { prepareTurnKnowledgeSources } from "./knowledge-sources";
 import {
   assertModelConnectionAllowsTurn,
   freezeAgentLearningPolicy,
@@ -11,7 +11,11 @@ import {
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
 } from "@opengeni/db";
-import { sandboxOperationMetricObserver } from "@opengeni/observability";
+import {
+  sandboxOperationMetricObserver,
+  turnExecutionTelemetryKey,
+  withTraceContext,
+} from "@opengeni/observability";
 import {
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
@@ -152,7 +156,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
   // final model checkpoint happens while the activity still owns its complete
   // turn graph and must not suppress collection after that graph is released.
   const turnCompletionMemoryCollector = createModelCheckpointMemoryCollector();
-  return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
+  const runAgentTurn = async (
+    input: RunAgentTurnInput,
+    resolvedServices: ActivityServices,
+    activitySpan: ReturnType<ActivityServices["observability"]["startSpan"]>,
+  ): Promise<RunAgentTurnResult> => {
     const {
       settings,
       catalogSourceSettings = settings,
@@ -169,7 +177,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       connectionCredentials,
       personalGitHubCredentials,
       startVideoGenerationWorkflow,
-    } = await services();
+    } = resolvedServices;
     const activityContext = currentActivityContext();
     const cancellationSignal = activityContext?.cancellationSignal;
     // Temporal cancellation is not the only way an activity loses ownership:
@@ -207,11 +215,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     });
     const dispatchId = activityContext?.info.activityId ?? randomUUID();
     const activityStarted = performance.now();
-    const activitySpan = observability.startSpan("worker.run_agent_segment", {
-      "opengeni.session_id": input.sessionId,
-      "opengeni.workflow_id": input.workflowId,
-      "opengeni.trigger_kind": input.trigger.kind,
-    });
     const acknowledgeLostAttemptOwnership = (): void => {
       // A stale terminal/recovery settlement can lose either to a benign
       // successor or to Pause/Steer closing this exact attempt. Only the
@@ -434,8 +437,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           executionGeneration: attempt.executionGeneration,
         },
       });
+      const attachmentAuthority = await getSessionAuthorityProjection(
+        db,
+        input.workspaceId,
+        input.sessionId,
+      );
+      if (!attachmentAuthority) throw new Error("Session attachment authority unavailable");
       return await withSessionRlsActorContext(
         {
+          sessionAttachmentReadAccess: {
+            sessionId: input.sessionId,
+            authorityEpoch: attachmentAuthority.authorityEpoch,
+            actor: {
+              kind: "agent_attempt",
+              subjectId: "service:agent-turn",
+              callerSessionId: input.sessionId,
+              turnId: attempt.turnId,
+              attemptId: input.attemptId,
+              executionGeneration: attempt.executionGeneration,
+            },
+          },
           subjectId: "service:agent-turn",
           initiatingHumanSubjectId: fileAuthoritySubjectId,
           privateFileOwnerSubjectId:
@@ -511,7 +532,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           });
           const {
             runtimePreparationStartedAt,
-            packRuntime,
             rigVersion,
             rigName,
             agentHumanInputEnabled,
@@ -556,6 +576,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     runSettings,
                     input.workspaceId,
                     providerTurn.effectiveCodexCredentialId ?? "",
+                    undefined,
+                    {
+                      turnId: turn.id,
+                      holderId: leases.codex.holderId!,
+                      generation: leases.codex.generation!,
+                    },
                   );
                   const resolveTrackedToken = async (
                     resolve: () => ReturnType<typeof resolver.getToken>,
@@ -1030,44 +1056,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             knowledgeRecoveryNote =
               "[OpenGeni confirmation recovery unavailable] Do not assume an earlier remember confirmation was published. Inspect the current Knowledge or instruction review.";
           }
-          const attachmentPreparationNote = await prepareTurnKnowledgeSources({
-            settings: runSettings,
-            scope: {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              attemptId: input.attemptId,
-              executionGeneration: attempt.executionGeneration,
-            },
-            // Only attachments on this accepted turn are new source inputs.
-            // Session-level file receipts remain historical context and must
-            // never trigger metadata reads, downloads, or re-preparation.
-            resources: turn.resources,
-            selectedTools: session.firstPartyMcpTools,
-            permissions: session.firstPartyMcpPermissions,
-            learningMode: learning.effective.knowledge,
-            signal: cancellationSignal,
-            onOutcome: async (outcome) => {
-              if (outcome.status === "disabled") return;
-              await eventing.publish!(
-                [
-                  {
-                    type:
-                      outcome.status === "failed"
-                        ? "knowledge.source.failed"
-                        : "knowledge.source.prepared",
-                    payload: outcome,
-                  },
-                ],
-                true,
-              );
-            },
-          });
-
-          const knowledgeSourcePreparationNote =
-            [knowledgeRecoveryNote, attachmentPreparationNote].filter(Boolean).join("\n\n") ||
-            undefined;
+          const knowledgeSourcePreparationNote = knowledgeRecoveryNote;
 
           const sandboxRoute = await resolveSandboxRoute({
             input,
@@ -1148,7 +1137,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             establishPolicy,
             initialRunCredentialMaterial,
             runCredentialsNote,
-            hostCredentialRootSessionId,
             codemodeAuthority,
             sandboxArtifactRuntime,
             sandboxEnvironment,
@@ -1268,7 +1256,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           ];
           const toolRuntime = await prepareTurnToolRuntime({
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
-            selectedSkillActivations: packRuntime.skillActivations,
             input,
             catalogSourceSettings,
             db,
@@ -1277,7 +1264,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             objectStorage,
             observability,
             cancellationSignal,
-            connectionCredentials,
             eventing,
             attempt,
             sandboxState,
@@ -1295,7 +1281,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             lazyToolTransport,
             turnTools,
             connectionScope,
-            hostCredentialRootSessionId,
             sandboxArtifactRuntime,
             activeSandboxBackend,
             groupBoxBackend,
@@ -1769,6 +1754,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         stopLeaseHeartbeat,
         turnCompletionMemoryCollector,
       });
+    }
+  };
+  return async (input: RunAgentTurnInput): Promise<RunAgentTurnResult> => {
+    const resolvedServices = await services();
+    const correlationId = turnExecutionTelemetryKey(
+      input.workspaceId,
+      input.sessionId,
+      input.attemptId,
+    );
+    const span = resolvedServices.observability.startSpan(
+      "worker.run_agent_segment",
+      {
+        "opengeni.trigger_kind": input.trigger.kind,
+        correlationId,
+      },
+      { parent: null },
+    );
+    try {
+      return await withTraceContext(span, () => {
+        try {
+          resolvedServices.observability.info("worker execution started", { correlationId });
+        } catch {
+          // Correlation diagnostics never affect execution or admission.
+        }
+        return runAgentTurn(input, resolvedServices, span);
+      });
+    } catch (error) {
+      span.end({ error });
+      throw error;
+    } finally {
+      span.end();
     }
   };
 }

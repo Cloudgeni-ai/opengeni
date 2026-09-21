@@ -137,6 +137,10 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
       subjectId: "user:scheduled-model-owner",
     });
     const grant = access.workspaceGrants[0]!;
+    const [personal] = await shared!
+      .admin`insert into workspaces (account_id, name) values (${grant.accountId}, 'Personal model fixture') returning id`;
+    await shared!
+      .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id) values (${grant.accountId}, ${grant.subjectId}, 'active', ${personal!.id})`;
     const upstreamModelId = "anthropic/claude-sonnet-4.6";
     const productModelId = `workspace-gateway/${upstreamModelId}`;
     const customModel = await createWorkspaceGatewayCustomModel(client.db, {
@@ -221,6 +225,10 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
       subjectId: "user:scheduled-model-race-owner",
     });
     const grant = access.workspaceGrants[0]!;
+    const [personal] = await shared!
+      .admin`insert into workspaces (account_id, name) values (${grant.accountId}, 'Personal model fixture') returning id`;
+    await shared!
+      .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id) values (${grant.accountId}, ${grant.subjectId}, 'active', ${personal!.id})`;
     const upstreamModelId = `race/scheduled-occurrence-${crypto.randomUUID()}`;
     const productModelId = `workspace-gateway/${upstreamModelId}`;
     const customModel = await createWorkspaceGatewayCustomModel(client.db, {
@@ -299,6 +307,10 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
       subjectId: "user:scheduled-model-lock-order-owner",
     });
     const grant = access.workspaceGrants[0]!;
+    const [personal] = await shared!
+      .admin`insert into workspaces (account_id, name) values (${grant.accountId}, 'Personal model fixture') returning id`;
+    await shared!
+      .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id) values (${grant.accountId}, ${grant.subjectId}, 'active', ${personal!.id})`;
     const upstreamModelId = `race/scheduled-lock-order-${crypto.randomUUID()}`;
     const productModelId = `workspace-gateway/${upstreamModelId}`;
     const customModel = await createWorkspaceGatewayCustomModel(client.db, {
@@ -419,6 +431,10 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
       subjectId: "user:scheduled-model-overlap-owner",
     });
     const grant = access.workspaceGrants[0]!;
+    const [personal] = await shared!
+      .admin`insert into workspaces (account_id, name) values (${grant.accountId}, 'Personal model fixture') returning id`;
+    await shared!
+      .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id) values (${grant.accountId}, ${grant.subjectId}, 'active', ${personal!.id})`;
     const upstreamModelId = `race/scheduled-overlap-${crypto.randomUUID()}`;
     const productModelId = `workspace-gateway/${upstreamModelId}`;
     const customModel = await createWorkspaceGatewayCustomModel(client.db, {
@@ -545,6 +561,10 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
       subjectId: "user:scheduled-model-replay-owner",
     });
     const grant = access.workspaceGrants[0]!;
+    const [personal] = await shared!
+      .admin`insert into workspaces (account_id, name) values (${grant.accountId}, 'Personal model fixture') returning id`;
+    await shared!
+      .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id) values (${grant.accountId}, ${grant.subjectId}, 'active', ${personal!.id})`;
     const upstreamModelId = `race/scheduled-replay-${crypto.randomUUID()}`;
     const productModelId = `workspace-gateway/${upstreamModelId}`;
     const customModel = await createWorkspaceGatewayCustomModel(client.db, {

@@ -14,7 +14,11 @@ afterEach(async () => {
   );
 });
 
-async function resolveBackend(requested: string, dockerExitCode: number) {
+async function resolveBackend(
+  requested: string | undefined,
+  dockerExitCode: number,
+  fileBackend?: string,
+) {
   const root = await mkdtemp(join(tmpdir(), "opengeni-backend-"));
   temporaryRoots.push(root);
   const docker = join(root, "docker");
@@ -26,15 +30,26 @@ exit ${dockerExitCode}
 `,
   );
   await chmod(docker, 0o755);
+  const dotenv = join(root, ".env");
+  if (fileBackend !== undefined) await writeFile(dotenv, `OPENGENI_DEV_BACKEND=${fileBackend}\n`);
+  const env: Record<string, string | undefined> = {
+    ...Bun.env,
+    PATH: `${root}:/usr/bin:/bin`,
+    OPENGENI_DOCKER_PROBE_TIMEOUT_SECONDS: "1",
+  };
+  if (requested === undefined) delete env.OPENGENI_DEV_BACKEND;
+  else env.OPENGENI_DEV_BACKEND = requested;
   const child = Bun.spawn(
-    ["bash", "-c", 'source "$1"; opengeni_resolve_dev_backend', "bash", backendPath],
+    [
+      "bash",
+      "-c",
+      'set -eu; source "$1"; if [ -f "$2" ]; then opengeni_load_dev_environment "$2"; fi; opengeni_resolve_dev_backend',
+      "bash",
+      backendPath,
+      dotenv,
+    ],
     {
-      env: {
-        ...Bun.env,
-        PATH: `${root}:/usr/bin:/bin`,
-        OPENGENI_DEV_BACKEND: requested,
-        OPENGENI_DOCKER_PROBE_TIMEOUT_SECONDS: "1",
-      },
+      env,
       stdout: "pipe",
       stderr: "pipe",
     },
@@ -48,6 +63,31 @@ exit ${dockerExitCode}
 }
 
 describe("development infrastructure backend", () => {
+  test("explicit Docker cannot silently become native through dotenv auto", async () => {
+    const result = await resolveBackend("docker", 1, "auto");
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Docker daemon is unavailable");
+    expect(result.stdout).not.toContain("native");
+  });
+
+  test("explicit native wins over a file Docker setting", async () => {
+    const result = await resolveBackend("native", 0, "docker");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("native");
+  });
+
+  test("unset invocation retains the configured file backend", async () => {
+    const result = await resolveBackend(undefined, 0, "native");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("native");
+  });
+
+  test("explicit auto remains automatic even when the file requests Docker", async () => {
+    const result = await resolveBackend("auto", 1, "docker");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("native");
+  });
+
   test("auto chooses native when a Docker client cannot reach its daemon", async () => {
     const result = await resolveBackend("auto", 1);
     expect(result.exitCode).toBe(0);
@@ -84,6 +124,7 @@ describe("development infrastructure backend", () => {
 
   test("the full launcher records native backend, sandbox, and MinIO authority", async () => {
     const source = await Bun.file(devStackPath).text();
+    expect(source).toContain("opengeni_load_dev_environment ./.env");
     expect(source).toContain('OPENGENI_DEV_BACKEND="$(opengeni_resolve_dev_backend)"');
     expect(source).toContain("OPENGENI_SANDBOX_BACKEND=local");
     expect(source).toContain("OPENGENI_OBJECT_STORAGE_FIXTURE=minio");

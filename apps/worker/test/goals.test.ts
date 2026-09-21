@@ -7,6 +7,21 @@ import {
 import { testSettings } from "@opengeni/testing";
 
 describe("goalContinuationPrompt", () => {
+  test("audits durable report delivery without classifying every answer or file as a report", () => {
+    const prompt = goalContinuationPrompt(
+      { text: "Organize Knowledge" } as Parameters<typeof goalContinuationPrompt>[0],
+      1,
+      null,
+    );
+    expect(prompt).toContain("including reports produced during another task");
+    expect(prompt).toContain("create the durable native document first");
+    expect(prompt).toContain("inspect its relevant final head after the last edit");
+    expect(prompt).toContain("satisfy every persisted report requirement");
+    expect(prompt).toContain("Sandbox paths and raw file IDs do not prove report delivery");
+    expect(prompt).toContain("keep that deliverable incomplete and state the blocker");
+    expect(prompt).toContain("explicitly requested local-file work remain outside");
+  });
+
   test("continues from frozen goal context without duplicating mutable goal fields", () => {
     const prompt = goalContinuationPrompt(
       {

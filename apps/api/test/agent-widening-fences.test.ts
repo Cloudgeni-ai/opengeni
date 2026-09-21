@@ -324,6 +324,53 @@ describe("child first-party tool selection may only narrow (real PostgreSQL)", (
 });
 
 describe("parentless tool policy: agents narrow, humans may widen (real PostgreSQL)", () => {
+  test("agent connector switches may add exclusions but cannot remove a disconnected exclusion", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const root = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "connector exclusions",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: settings().openaiModel,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      firstPartyMcpTools: ["set_session_title"],
+      toolPolicy: {
+        mode: "workspace_default",
+        inheritedFromSessionId: null,
+        excludedMcpServerIds: ["disconnected-connector"],
+      },
+      createdBy: { kind: "subject", subjectId: grant.subjectId, label: "Test owner" },
+      createdByContext: {},
+    });
+    const attempt = await liveAttempt(grant, root.id);
+    const app = sessionRoutesApp();
+    const authorization = await agentBearer(grant, attempt, ["set_session_title"]);
+    const put = (excludedMcpServerIds: string[]) =>
+      app.request(`/v1/workspaces/${grant.workspaceId}/sessions/${root.id}/tool-policy`, {
+        method: "PUT",
+        headers: { authorization, "content-type": "application/json" },
+        body: JSON.stringify({
+          mode: "workspace_default",
+          excludedMcpServerIds,
+          expectedVersion: 1,
+        }),
+      });
+    const widened = await put([]);
+    expect(widened.status).toBe(403);
+    expect(await widened.text()).toContain("an agent may not remove session connector exclusions");
+    const narrowed = await put(["disconnected-connector", "another-connector"]);
+    expect(narrowed.status).toBe(200);
+    expect(await narrowed.json()).toMatchObject({
+      toolPolicy: { excludedMcpServerIds: ["another-connector", "disconnected-connector"] },
+      firstPartyMcpTools: ["set_session_title"],
+    });
+  });
+
   test("an agent attempt cannot widen its own top-level session through PUT /tool-policy", async () => {
     if (!available) return;
     const grant = await fixture();

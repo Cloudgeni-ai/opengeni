@@ -20,7 +20,8 @@ The **effective credential pool is the complete scheduling boundary**.
   without copying or reconnecting credentials.
 - Session pins, last-used pointers, capacity waiters, and lease rows remain in
   the target workspace. Schema guards accept an organization credential only
-  while that workspace's effective source is `organization`.
+  for that workspace's current organization source or the exact turn's accepted
+  organization source. A turn never borrows another turn's source authority.
 - Workspace-local duplicate connections remain independent. OpenGeni does not
   correlate a ChatGPT account connected separately in multiple workspace pools
   or across managed organizations.
@@ -42,6 +43,17 @@ Personal workspaces. The Codex-only `list_organization_codex_workspace_ids`
 inventory includes all same-organization workspaces for source locks, active-turn
 checks, and capacity wakeups. The general organization API-key inventory still
 excludes Personal workspaces; neither inventory grants workspace access.
+
+Migration `0492_codex_accepted_source_authority.sql` is a forward-only maintenance
+cutover. Stop every old/new API, control-worker, and turn-worker process; provide
+the complete `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` login list. The
+migration checks it before and after activation and rejects any live listed
+database session. Converge runtime role grants and start only matching binaries.
+Never restart pre-0492 binaries: they cannot pass exact-turn authority to token
+loading after a source switch. This is a one-time process drain, not a request
+to cancel or finish accepted turns. Normal checkpoint/recovery retains their
+logical identity and source binding; normal settings changes require no idle
+window after activation.
 
 ## Atomic selection and fairness
 
@@ -95,15 +107,22 @@ relevant locks are acquired.
    current account health and cooldowns. Later workspace/session policy changes
    therefore do not change the constraints of an already accepted logical turn,
    except an explicit in-session account switch while the turn is capacity-blocked.
-   Pre-source snapshots remain readable and use their historical live-source
-   behavior; all newly accepted turns persist the source explicitly.
+   Pre-source snapshots remain readable. Before a source-changing mutation,
+   active legacy turns receive an immutable pre-change source in the
+   `codex_turn_source_bindings` sidecar. This does not edit their metadata or
+   history. Source-bearing snapshots take precedence; newly allocated turns
+   persist the source explicitly.
 
-An effective source transition is a hard cutover boundary. The source lock
-serializes it and the write is rejected while any Codex turn is running,
-awaiting action, recovering, or in `waiting_capacity`, or while a credential
-lease is still live. This prevents an accepted capacity waiter from resuming
-against a different workspace or organization pool; cancel or finish that
-turn before changing its effective source. Same-source pointer, rotation, and
+An effective source transition is a new-work setting, not a cancellation or an
+idle-turn barrier. The source lock serializes the pre-change legacy binding and
+the setting/credential mutation. Running, awaiting-action, recovering, and
+capacity-waiting turns retain their accepted pool, including disabled. Lease
+inserts and organization load counts check the exact accepted turn; provider
+token loading and refresh additionally prove its live holder and lease generation.
+Ordinary workspace credential reads still obey the current source. Connecting
+a local credential preserves the preference: Automatic naturally prefers local
+capacity, while explicit organization and disabled remain unchanged.
+Same-source pointer, rotation, and
 background pin mutations may wake a waiter for re-evaluation, but they never rewrite its
 accepted snapshot. The explicit session account-switch command is different:
 under the allocator/session/turn/waiter locks, it revises a capacity-blocked
@@ -116,6 +135,19 @@ unchanged. Reconciliation, lease reacquisition, and failure recovery all read
 the revised selection. Running attempts retain their lease and use the new
 preference only on a subsequent turn. Selecting the same preference again is
 allowed, including recovery of waits created before this override existed.
+
+`GET /v1/workspaces/:workspaceId/sessions/:sessionId/codex-accounts` authorizes
+the target session plus `sessions:read` and `workspace:read`. The locked session
+pointer selects the active turn and its accepted source, including legacy sidecar
+bindings; clients cannot nominate a turn or source. Retry choices use the accepted
+pool even after switching sources or disabling Codex. Running and idle sessions
+receive current-pool choices for new work, with the running accepted account
+projected separately for its label and cached usage. The response contains no
+tokens, owner subject IDs, or Apps-management grants. Workspace account lists
+remain current-source-only. SDK `listSessionCodexAccounts` and the session-scoped
+React hook consume this projection, refresh on lifecycle events, and clear stale
+metadata if authorization fails; custom hook adapters must implement the method
+instead of falling back to the workspace list.
 
 Stored legacy strategy values are normalized at every worker read to the
 effective `sharded` behavior. The old column values and API input compatibility
@@ -174,6 +206,46 @@ same-turn reuse, so a later membership/default change cannot move an already
 accepted holder.
 
 ## Public status semantics
+
+### Same-turn capacity recovery
+
+Capacity reconciliation and credential acquisition apply the same accepted model,
+failure exclusions and failover limit, including manual pins and rotation-off.
+Quota refusals require a newer verified cooldown clear; elapsed time or an account
+wake alone does not clear them. Typed rate-limit refusals can recover after the
+same or a newer rate-limit revision's deadline expires. Auth/status refusals
+require active health at a newer credential version, produced by reconnect or
+explicit status repair. Status repair advances that version and wakes waiters.
+Legacy ID-only refusals remain excluded when their ordering cannot be proven.
+Typed quota cooldowns remain eligible for the
+existing bounded control-plane refresh even after their reset time passes.
+
+Genuine `waiting_capacity` has no elapsed-time expiry. Provider resets and durable
+account revisions re-evaluate the same turn, without a model call or retry-budget
+charge. Manual pins, rotation-off, selected model and accepted source policy stay
+binding, and Pause prevents resumption.
+
+The turn's `codexCapacityRecoveryV1` metadata separately tracks false resumptions:
+an available decision followed by its resumed execution returning to capacity
+waiting without a completed model request. Each such failure spends
+one of ten attempts. A persisted equal-jitter exponential delay starts at 30–60
+seconds and caps at 15 minutes; account wakes acknowledge their revisions but do
+not bypass that delay. Wait timers and metadata checks do not spend or reset the
+budget. A current, exact-attempt completed model-request event clears it only
+with transport-proven substantive assistant/tool output. Empty, reasoning-only,
+failed or stale completion events cannot clear it. A worker redispatch or credential failover preserves
+the outstanding resumption receipt, but only its exact current attempt may close
+it; stale predecessor attempts cannot charge the budget.
+
+The tenth false resumption atomically closes the attempt and turn as failed,
+supersedes the waiter, emits `codex_capacity_recovery_exhausted`, and suppresses
+automatic goal continuation. The session is failed (or queued for already accepted
+human input), not falsely presented as still recovering. The authorized exact
+failure-event Retry reopens the retained turn, replenishes only its capacity
+budget and clears only its matching goal suppression; accepted credential policy
+and refusal ledgers remain intact. Pause, unresolved execution and receipt replay
+cannot reset the budget. A new Continue message starts a new turn; no credits are redeemed, model is
+switched, or pause is overridden automatically.
 
 `GET /v1/workspaces/:id/codex/status` keeps the backward-compatible
 `activeAccount` and `valid` fields. `valid` is a live model-catalog probe of the
@@ -329,10 +401,10 @@ provider body. Every worker arm site immediately runs one allocator
 reconciliation before returning the waiter to the workflow. That closes the
 mutation-before-insert edge: a rotation/account change that committed just
 before the waiter existed is observed under the allocator lock, while any
-later same-source capacity change advances the waiter's durable wake revision
-normally. An effective-source change is serialized by the source lock and is
-fenced while this accepted turn or its lease is live, so it cannot leave the
-waiter holding an obsolete pool snapshot.
+later capacity change advances the waiter's durable wake revision normally.
+Organization mutations also wake accepted organization waiters in workspaces
+that now select a different source for new work. A wake grants no new source:
+reconciliation and bounded quota refresh use the blocked turn's accepted pool.
 
 `reconcileCodexCapacityWait` runs the normal metadata-only allocator decision
 under the same rotation-row transaction. It accepts the same opaque
@@ -421,8 +493,8 @@ accepted source remains immutable. Background active-pointer, rotation-setting,
 and pin writes do not revise accepted turn selection, so a background policy
 write that does not make the accepted pool eligible leaves it waiting. Explicit
 in-session switching can override the blocked selection as described above.
-An effective-source change is fenced while the
-turn/waiter is live; cancel or finish it before changing source. An
+An effective-source change leaves the live
+turn/waiter on its original source; no cancel or finish step is required. An
 auth/forbidden refusal is terminal only when the pool is truly empty or has no
 allocatable account to wait for.
 

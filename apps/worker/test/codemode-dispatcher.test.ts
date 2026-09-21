@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   AttemptToolApprovalRequiredError,
   codemodeDispatchSubject,
@@ -12,6 +13,8 @@ import {
   claimCodemodeOperation,
   claimSessionWorkForAttempt,
   createDb,
+  createConnection,
+  encryptEnvironmentValue,
   createSession,
   getCodemodeOperation,
   initializeSessionStartAtomically,
@@ -167,60 +170,77 @@ async function waitForToolEventCount(
 }
 
 describe("CodemodeAttemptDispatcher", () => {
-  test("host credentials use the live canonical attempt during Codemode dispatch", async () => {
-    if (!available) throw new Error("This host execution test requires PostgreSQL");
-    let resolveHost!: ReturnType<typeof connectionTokenResolverForTurn>;
-    let hostCalls = 0;
+  test("native OAuth credentials use the live canonical attempt during Codemode dispatch", async () => {
+    if (!available) throw new Error("This execution test requires PostgreSQL");
+    let resolveNative!: ReturnType<typeof connectionTokenResolverForTurn>;
+    let credentialCalls = 0;
+    let connectionId: string;
     let effects = 0;
     let authorizePhysical: (() => Promise<boolean>) | undefined;
     const { scope, environment, turn } = await fixture(async () => {
-      const resolution = await resolveHost({
+      const resolution = await resolveNative({
         workspaceId: scope.workspaceId,
-        serverId: "host-tools",
+        serverId: "example-tools",
         destinationUrl: "https://tools.example.test/mcp",
         connectionRef: {
-          authoritySource: "host",
-          connectionId: "opaque-host-id",
+          connectionId,
           providerDomain: "tools.example.test",
+          kind: "oauth2",
         },
       });
       expect(resolution.status).toBe("ok");
-      if (resolution.status !== "ok") throw new Error("Host credentials unavailable");
+      if (resolution.status !== "ok")
+        throw new Error(`Native credentials unavailable: ${resolution.reason}`);
+      credentialCalls++;
       authorizePhysical = resolution.authorizeProviderRequest;
       expect(await resolution.authorizeProviderRequest?.()).toBe(true);
       effects++;
-      return "host-authorized";
+      return "native-authorized";
     });
-    resolveHost = connectionTokenResolverForTurn({
+    const settings = testSettings({
+      environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
+    });
+    const connection = await createConnection(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      providerDomain: "tools.example.test",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        environmentsEncryptionKeyBytes(settings)!,
+        JSON.stringify({
+          access_token: "synthetic-local-test-token",
+          token_type: "Bearer",
+        }),
+      ),
+      expiresAt: new Date(Date.now() + 3_600_000),
+    });
+    connectionId = connection.id;
+    resolveNative = connectionTokenResolverForTurn({
       ...scope,
       db: client.db,
-      settings: testSettings(),
-      rootSessionId: scope.sessionId,
+      settings,
       turn,
-      connectionCredentials: {
-        mcpAuthoritySource: "host",
-        mcpCredentials: async (request) => {
-          hostCalls++;
-          expect(request).toMatchObject({
-            accountId: scope.accountId,
-            workspaceId: scope.workspaceId,
-            sessionId: scope.sessionId,
-            turnId: scope.turnId,
-            attemptId: scope.attemptId,
-            executionGeneration: scope.executionGeneration,
-          });
-          return {
-            status: "ok",
-            accountId: request.accountId,
-            workspaceId: request.workspaceId,
-            sessionId: request.sessionId,
-            providerDomain: request.connectionRef.providerDomain,
-            connectionId: request.connectionRef.connectionId,
-            headers: { Authorization: "Bearer synthetic" },
-          };
-        },
-      },
     });
+    for (const changed of [
+      { attemptId: crypto.randomUUID(), turn },
+      { turn: { ...turn, id: crypto.randomUUID() } },
+      { turn: { ...turn, executionGeneration: turn.executionGeneration + 1 } },
+    ]) {
+      const stale = connectionTokenResolverForTurn({
+        ...scope,
+        db: client.db,
+        settings,
+        ...changed,
+      });
+      const result = await stale({
+        workspaceId: scope.workspaceId,
+        serverId: "example-tools",
+        destinationUrl: "https://tools.example.test/mcp",
+        connectionRef: { connectionId, providerDomain: "tools.example.test", kind: "oauth2" },
+      });
+      expect(result.status).toBe("auth_needed");
+      expect(result).not.toHaveProperty("headers");
+    }
     const operationId = crypto.randomUUID();
     await submitCodemodeOperation(client.db, {
       ...scope,
@@ -247,9 +267,9 @@ describe("CodemodeAttemptDispatcher", () => {
       );
       expect(await waitForTerminal(scope, operationId)).toMatchObject({
         state: "completed",
-        result: { content: [{ type: "text", text: "host-authorized" }] },
+        result: { content: [{ type: "text", text: "native-authorized" }] },
       });
-      expect(hostCalls).toBe(1);
+      expect(credentialCalls).toBe(1);
       expect(effects).toBe(1);
       await withWorkspaceSessionActivityRls(client.db, scope.workspaceId, (db) =>
         db.transaction((tx) =>
@@ -257,15 +277,15 @@ describe("CodemodeAttemptDispatcher", () => {
             accountId: scope.accountId,
             workspaceId: scope.workspaceId,
             sessionId: scope.sessionId,
-            actor: { type: "service", subjectId: "host-liveness-fixture" },
+            actor: { type: "service", subjectId: "native-liveness-fixture" },
             operationKey: crypto.randomUUID(),
             action: "pause",
-            reason: "verify resolved host credentials cannot outlive an interruption",
+            reason: "verify resolved native credentials cannot outlive an interruption",
           }),
         ),
       );
       expect(await authorizePhysical?.()).toBe(false);
-      expect(hostCalls).toBe(1);
+      expect(credentialCalls).toBe(1);
       expect(effects).toBe(1);
     } finally {
       await dispatcher.close();

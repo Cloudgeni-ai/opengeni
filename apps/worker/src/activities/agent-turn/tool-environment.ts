@@ -38,6 +38,11 @@ import {
   resolveGoogleDrivePublicationTarget,
 } from "../google-drive-publication";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
+import {
+  accountRouteAuthNeededPayload,
+  expandApiIntegrationAccountRoutes,
+  expandMcpAccountRoutes,
+} from "../mcp-account-routes";
 import { createMcpOperationPersistence } from "@opengeni/db/mcp-operations";
 import { createMcpOperationReadStore } from "../mcp-operation-store";
 import { createMcpOperationObserverResolver } from "../mcp-operation-observer";
@@ -51,7 +56,7 @@ import { buildCodexTokenResolver } from "../codex-auth";
 import { CODEX_CLIENT_VERSION } from "@opengeni/codex";
 import { mergeResourceRefs } from "../common";
 import {
-  defaultSessionMcpServerIds,
+  workspaceSessionToolPolicyDefaultServerIds,
   loadRigDefaultVariableSetEnvironment,
   mergeRigDefaultVariableSetEnvironment,
   buildApiIntegrationMcpServers,
@@ -64,7 +69,7 @@ import {
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
-import { recordTurnStartupPhase } from "../../observability-metrics";
+import { recordToolPreparationPhase, recordTurnStartupPhase } from "../../observability-metrics";
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
@@ -103,7 +108,6 @@ import { createListModelsAttemptToolDefinition } from "./list-models";
 import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
-import type { RuntimeSkillActivation } from "@opengeni/runtime";
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -125,7 +129,6 @@ export type PrepareTurnToolRuntimeDeps = {
         input: import("../types").RunKnowledgeSourceSyncBatchInput,
       ) => Promise<import("../types").RunKnowledgeSourceSyncBatchResult>)
     | undefined;
-  selectedSkillActivations: readonly RuntimeSkillActivation[];
   input: RunAgentTurnInput;
   catalogSourceSettings: Settings;
   db: ActivityServices["db"];
@@ -134,7 +137,6 @@ export type PrepareTurnToolRuntimeDeps = {
   objectStorage: ActivityServices["objectStorage"];
   observability: ActivityServices["observability"];
   cancellationSignal: AbortSignal | undefined;
-  connectionCredentials: ActivityServices["connectionCredentials"];
   eventing: EventingState;
   attempt: AttemptIdentityState;
   sandboxState: SandboxRuntimeState;
@@ -152,7 +154,6 @@ export type PrepareTurnToolRuntimeDeps = {
   lazyToolTransport: GovernanceModelOk["lazyToolTransport"];
   turnTools: ReturnType<typeof withFirstPartyTools>;
   connectionScope: { accountId: string; workspaceId: string };
-  hostCredentialRootSessionId: string | null;
   sandboxArtifactRuntime: ReturnType<typeof sandboxArtifactRuntimeAdmission>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
@@ -212,7 +213,15 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
       ? scheduledEffectiveMcpServerIds.filter((id) => currentMcpServerIds.has(id))
       : [...currentMcpServerIds],
     defaultMcpServerIds:
-      scheduledEffectiveMcpServerIds ?? defaultSessionMcpServerIds(capabilitySettings.mcpServers),
+      scheduledEffectiveMcpServerIds ??
+      (session.toolPolicy.mode === "workspace_default"
+        ? await workspaceSessionToolPolicyDefaultServerIds(
+            db,
+            input.workspaceId,
+            capabilitySettings,
+            fileAuthoritySubjectId ?? undefined,
+          )
+        : []),
   });
   const mcpAvailabilityNote = unavailableMcpOperationalContext({
     droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,
@@ -349,7 +358,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     objectStorage,
     observability,
     cancellationSignal,
-    connectionCredentials,
     eventing,
     attempt,
     sandboxState,
@@ -361,10 +369,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     codexAppsCredentialId,
     turnExecutionPolicy,
     trigger,
-    runSettings,
+    runSettings: canonicalRunSettings,
     lazyToolTransport,
-    turnTools,
-    hostCredentialRootSessionId,
+    turnTools: canonicalTurnTools,
     sandboxArtifactRuntime,
     activeSandboxBackend,
     groupBoxBackend,
@@ -377,26 +384,29 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     throwIfTurnCancelled,
   } = deps;
 
+  const accountRoutes = expandMcpAccountRoutes({
+    settings: canonicalRunSettings,
+    tools: canonicalTurnTools,
+    bindings: turn.mcpAccountBindings,
+  });
+  const runSettings = accountRoutes.settings;
+  const turnTools = accountRoutes.tools;
   const toolContextPreparationStartedAt = performance.now();
   throwIfWorkerShuttingDown();
   throwIfTurnCancelled();
-  const mcpCredentialRootSessionId =
-    connectionCredentials?.mcpCredentials && hostCredentialRootSessionId
-      ? hostCredentialRootSessionId
-      : input.sessionId;
   // Connection credentials and the optional Apps credential are resolved
   // independently. Inference auth is never an Apps fallback.
   const rawResolveCredential = connectionTokenResolverForTurn({
     db,
     settings: runSettings,
-    connectionCredentials: connectionCredentials ?? null,
+    canonicalMcpServerIds: canonicalRunSettings.mcpServers
+      .filter((server) => server.connectionRef)
+      .map((server) => server.id),
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
-    rootSessionId: mcpCredentialRootSessionId,
     attemptId: input.attemptId,
     turn,
-    observability,
   });
   const personalConnectionDelegations = turn.personalConnectionDelegations;
   const delegatedMembershipChecks = new Map<string, Promise<boolean>>();
@@ -463,16 +473,24 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       return;
     }
     await eventing.publish!(
-      [{ type: "tool.auth_needed", payload: rollingSafeToolAuthNeededPayload(payload) }],
+      [
+        {
+          type: "tool.auth_needed",
+          payload: rollingSafeToolAuthNeededPayload(
+            accountRouteAuthNeededPayload(payload, turn.mcpAccountBindings),
+          ),
+        },
+      ],
       true,
     );
   };
-  const selectedApiIntegrationServerIds = new Set(turnTools.map((tool) => tool.id));
   const apiIntegrationMcpServers = buildApiIntegrationMcpServers({
     settings: runSettings,
-    integrations: installedApiIntegrations.filter((integration) =>
-      selectedApiIntegrationServerIds.has(integration.serverId),
-    ),
+    integrations: expandApiIntegrationAccountRoutes({
+      integrations: installedApiIntegrations,
+      bindings: turn.mcpAccountBindings,
+      tools: turnTools,
+    }),
     authority: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -608,7 +626,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   });
   const selectedSkills = [
     ...bundledSkills,
-    ...deps.selectedSkillActivations.map((entry) => ({ id: entry.id, artifact: entry.artifact })),
     ...session.skills.map((skill) => ({
       id: `session:${session.id}:${skill.name}`,
       artifact: skill,
@@ -950,6 +967,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   try {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
+        mcpAccountLabels: accountRoutes.accountLabels,
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
@@ -1002,13 +1020,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         localMcpServers,
         ...(deferNonEagerToolPreparation ? { deferNonEagerUntilToolDemand: true } : {}),
         onPreparationPhase: (measurement) => {
-          recordTurnStartupPhase(observability, {
-            phase: `tool_${measurement.phase}`,
+          recordToolPreparationPhase(observability, {
+            ...measurement,
             provider: turnExecutionPolicy.providerId,
             backend: activeSandboxBackend ?? groupBoxBackend,
-            outcome: measurement.outcome,
-            durationSeconds: measurement.durationSeconds,
-            count: githubRestMcp.tools.length,
           });
         },
         onAttemptToolCatalog: async (catalog) => {

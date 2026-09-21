@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { truncateOutput } from "@openai/agents-core/sandbox/internal";
 import type { ChannelASession } from "../channel-a";
 import { ModalProcessObservationUnavailableError } from "../errors";
@@ -11,6 +12,7 @@ import {
   admittedProviderCommandHandle,
 } from "../provider-command-session";
 import type { ModalCommandControl, ModalProviderCommand } from "./modal-command-control";
+import { verifyModalMaterializedPath } from "./modal-materialization-verification";
 
 type Entry = {
   command: ModalProviderCommand;
@@ -19,9 +21,14 @@ type Entry = {
 
 function sameExecution(a: ModalProviderCommand, b: ModalProviderCommand): boolean {
   return (
+    a.kind === b.kind &&
     a.sandboxId === b.sandboxId &&
     a.taskId === b.taskId &&
     a.execId === b.execId &&
+    isDeepStrictEqual(
+      "supervision" in a ? a.supervision : undefined,
+      "supervision" in b ? b.supervision : undefined,
+    ) &&
     Boolean(a.pty) === Boolean(b.pty)
   );
 }
@@ -33,14 +40,23 @@ export function installModalCommandSession(
   session: ProviderCommandSession & {
     execCommand?: ChannelASession["execCommand"];
     writeStdin?: ChannelASession["writeStdin"];
+    verifyMaterializedPath?: (path: string, workdir: string) => Promise<void>;
   },
-  control: ModalCommandControl,
+  control: Pick<ModalCommandControl, "start" | "read" | "readProbe" | "write"> &
+    Partial<Pick<ModalCommandControl, "supervisionControl" | "verifySupervisionCapability">>,
 ): void {
   markTypedExecHandleLoss(session);
   const originalExec = session.execCommand?.bind(session);
   const originalWrite = session.writeStdin?.bind(session);
   const cancelLegacyStart = session.cancelPendingExecCommand?.bind(session);
   const pendingStarts = new Set<AbortController>();
+  session.verifyCommandSupervisionCapability = async () => {
+    if (!control.verifySupervisionCapability)
+      throw new Error("Modal instance lacks supervised command capability verification");
+    return await control.verifySupervisionCapability();
+  };
+  session.verifyMaterializedPath = (path, workdir) =>
+    verifyModalMaterializedPath(control, path, workdir, pendingStarts);
   const entries = new Map<number, Entry>();
   // Current SDK setup commands are not retained/admitted commands. Give their
   // live observer handles a disjoint, adapter-local range; never use a missing
@@ -48,6 +64,64 @@ export function installModalCommandSession(
   const setupHandles = new Map<number, number>();
   let nextSetupHandle = MAX_PROVIDER_COMMAND_HANDLE + 1;
   const receipts = new Map<string, { handle: number; page: ProviderCommandOutput }>();
+  const atomicallyCaptured = new WeakSet<ProviderCommandOutput>();
+
+  const supervise = async (entry: Entry, release = false): Promise<void> => {
+    if (entry.command.kind !== "modal-router-v1" || !entry.command.supervision) return;
+    const persistence = entry.persistence;
+    if (
+      !persistence?.recordSupervisionReceipt ||
+      !persistence.loadSupervisionReceipt ||
+      !persistence.cancellationRequested ||
+      !control.supervisionControl
+    )
+      throw new Error("Supervised command requires durable control persistence");
+    let receipt = await persistence.loadSupervisionReceipt();
+    if (!receipt) {
+      const action = (await persistence.cancellationRequested())
+        ? "cancel"
+        : release
+          ? "release"
+          : "status";
+      const observation = await control.supervisionControl(entry.command, action);
+      receipt = observation.receipt ?? null;
+      if (receipt) await persistence.recordSupervisionReceipt(receipt);
+    }
+    if (receipt) {
+      // Lost ACK responses are safe to retry. A dead control socket is not
+      // terminal proof: the subsequent authenticated provider read still must
+      // prove exit and commit every output byte.
+      await control
+        .supervisionControl(entry.command, "ack", receipt.receiptId)
+        .catch(() => undefined);
+    }
+  };
+
+  const captureRouterPage = async (entry: Entry, page: ProviderCommandOutput): Promise<boolean> => {
+    if (
+      page.command.kind !== "modal-router-v1" ||
+      !page.expected ||
+      !entry.persistence?.captureRouterPage
+    )
+      throw new Error("Modal byte-offset output requires atomic retained capture");
+    const result = await entry.persistence.captureRouterPage({
+      expected: page.expected,
+      command: page.command,
+      stdout: page.chunks
+        .filter((chunk) => chunk.stream === "stdout")
+        .map((chunk) => chunk.text)
+        .join(""),
+      stderr: page.chunks
+        .filter((chunk) => chunk.stream === "stderr")
+        .map((chunk) => chunk.text)
+        .join(""),
+    });
+    if (!sameExecution(entry.command, result.command))
+      throw new Error("Modal output capture changed execution identity");
+    entry.command = result.command;
+    if (result.captured) atomicallyCaptured.add(page);
+    return result.captured;
+  };
 
   const setupPage = (raw: string, handle: number, sdkHandle: number): string => {
     const banner = parseExecResponseBanner(raw);
@@ -97,8 +171,30 @@ export function installModalCommandSession(
       if (!retained || !sameExecution(entry.command, retained))
         throw new Error("Original Modal command identity is unavailable");
       entry.command = retained;
+      // Output observation stays available when control/proof persistence is
+      // unavailable. Terminal exposure below remains fenced by durable proof.
+      await supervise(entry).catch(() => undefined);
     }
-    const page = await control.read(entry.command, yieldTimeMs, signal);
+    let page = await control.read(entry.command, yieldTimeMs, signal);
+    if (entry.persistence && page.command.kind === "modal-router-v1") {
+      // A stale concurrent observer must reread from the committed cursor before
+      // exposing a terminal receipt; its uncommitted tail is not settlement proof.
+      let captured = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (await captureRouterPage(entry, page)) {
+          captured = true;
+          break;
+        }
+        if (attempt < 2) page = await control.read(entry.command, yieldTimeMs, signal);
+      }
+      if (!captured) throw new Error("Modal command output cursor changed during bounded capture");
+    }
+    if (page.command.kind === "modal-router-v1" && page.command.supervision) {
+      const receipt = await entry.persistence?.loadSupervisionReceipt?.();
+      // The supervisor exits 0 after ACK; that is provider terminal evidence,
+      // not the original shell result. Retain both without conflating them.
+      page = { ...page, exitCode: receipt && page.exitCode === 0 ? receipt.leaderExitCode : null };
+    }
     // The receipt is generated here, not parsed from command output. Its only
     // purpose is correlating this return value with a trusted in-memory page.
     return formatPage(handle, page, maxOutputTokens);
@@ -122,8 +218,17 @@ export function installModalCommandSession(
     const cancellation = new AbortController();
     pendingStarts.add(cancellation);
     try {
-      const entry = { command: await control.start(args, cancellation.signal) };
+      const command = await control.start(args, cancellation.signal);
+      // Pre-dispatch reservation can already bind protected persistence.
+      const entry = entries.get(handle) ?? { command };
+      if (!sameExecution(entry.command, command))
+        throw new Error("Reserved Modal command changed during dispatch");
       entries.set(handle, entry);
+      if (entry.command.kind === "modal-router-v1" && entry.command.supervision) {
+        // The launch cannot run user code until the routing layer commits
+        // initial retention and calls releaseSupervisedCommand.
+        return formatPage(handle, { command: entry.command, chunks: [], exitCode: null });
+      }
       try {
         return await read(
           handle,
@@ -160,6 +265,25 @@ export function installModalCommandSession(
     const entry = entries.get(handle);
     return entry ? structuredClone(entry.command) : null;
   };
+  session.releaseSupervisedCommand = async (handle) => {
+    const entry = entries.get(handle);
+    if (!entry || entry.command.kind !== "modal-router-v1" || !entry.command.supervision) return;
+    const retained = await entry.persistence?.load();
+    if (!retained || !sameExecution(entry.command, retained))
+      throw new Error("Supervisor release requires committed initial retention");
+    entry.command = retained;
+    await supervise(entry, true);
+  };
+  session.cancelSupervisedCommand = async (handle, reason) => {
+    const entry = entries.get(handle);
+    if (!entry || entry.command.kind !== "modal-router-v1" || !entry.command.supervision)
+      return false;
+    if (!entry.persistence?.requestCancellation)
+      throw new Error("Supervisor cancellation requires durable intent");
+    await entry.persistence.requestCancellation(reason);
+    await supervise(entry);
+    return true;
+  };
   session.bindProviderCommand = (handle, command, persistence) => {
     if (!Number.isSafeInteger(handle) || handle <= 0 || handle > MAX_PROVIDER_COMMAND_HANDLE)
       throw new Error("Invalid retained Modal command handle");
@@ -170,6 +294,55 @@ export function installModalCommandSession(
   };
   session.getProviderCommandOutput = (result) =>
     typeof result === "string" ? (receipts.get(result)?.page ?? null) : null;
+  session.captureCommandOutput = async (result) => {
+    const receipt = receipts.get(result);
+    if (!receipt || receipt.page.command.kind !== "modal-router-v1") return false;
+    if (
+      receipt.page.command.supervision &&
+      !receipt.page.expected &&
+      receipt.page.exitCode === null &&
+      receipt.page.chunks.length === 0
+    ) {
+      // Idle-launch receipt carries identity only; there are no bytes to ACK.
+      receipts.delete(result);
+      return true;
+    }
+    if (atomicallyCaptured.has(receipt.page)) {
+      receipts.delete(result);
+      return true;
+    }
+    const entry = entries.get(receipt.handle);
+    if (!entry?.persistence?.captureRouterPage || !receipt.page.expected)
+      throw new Error("Modal byte-offset output requires atomic retained capture");
+    if (!(await captureRouterPage(entry, receipt.page))) {
+      const target = receipt.page.command;
+      const covered = () =>
+        entry.command.kind === "modal-router-v1" &&
+        (["stdout", "stderr"] as const).every((stream) => {
+          const current = entry.command.streams[stream];
+          // This narrowing stays inside the discriminator's synchronous scope.
+          if (!("byteOffset" in current)) return false;
+          const wanted = target.streams[stream];
+          return (
+            current.byteOffset >= wanted.byteOffset &&
+            (!wanted.eof || current.eof) &&
+            (wanted.exitCode === null || current.exitCode === wanted.exitCode)
+          );
+        });
+      for (let attempt = 0; !covered() && attempt < 3; attempt++) {
+        // Initial promotion can race reconciliation before background adoption.
+        // Re-read, never re-execute; only a committed cursor covering the original
+        // page makes that page's terminal proof eligible for settlement.
+        const refreshedReceipt = await read(receipt.handle, entry, 250);
+        const refreshed = receipts.get(refreshedReceipt);
+        if (refreshed && atomicallyCaptured.has(refreshed.page)) receipts.delete(refreshedReceipt);
+      }
+      if (!covered())
+        throw new Error("Initial Modal output tail remains uncommitted after bounded capture");
+    }
+    receipts.delete(result);
+    return true;
+  };
   session.acknowledgeCommandOutput = async (result) => {
     const receipt = receipts.get(result);
     if (!receipt) return;
@@ -197,7 +370,7 @@ export function installModalCommandSession(
       const retained = await entry.persistence.load();
       if (!retained || !sameExecution(entry.command, retained))
         throw new Error("Original Modal command identity is unavailable");
-      const index = await entry.persistence.reserveInput();
+      const index = await entry.persistence.reserveInput(Buffer.byteLength(args.chars));
       await control.write(retained, args.chars, index);
     }
     return read(args.sessionId, entry, args.yieldTimeMs ?? 250, args.maxOutputTokens);

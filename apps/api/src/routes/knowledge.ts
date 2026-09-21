@@ -5,6 +5,7 @@ import {
   AgentLearningContext,
   AgentLearningOverridePatch,
   KnowledgeEntryListRequest,
+  KnowledgeSavePreparationRequest,
   KnowledgeReviewBatchListRequest,
   KnowledgeEntryBatchReviewRequest,
   AgentInstructionReviewRequest,
@@ -15,6 +16,7 @@ import {
 } from "@opengeni/contracts";
 import {
   prepareKnowledgeFile,
+  prepareKnowledgeSave,
   searchKnowledgeEntries,
   hasPermission,
   knowledgeContextForAccess,
@@ -125,7 +127,20 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
         throw new HTTPException(403, {
           message: "Source preparation is unavailable for this task",
         });
-      return c.json(await prepareKnowledgeFile(deps, context, Id.parse(c.req.param("fileId"))));
+      const body = await c.req.text();
+      let input: unknown = {};
+      try {
+        input = body ? JSON.parse(body) : {};
+      } catch {
+        throw new HTTPException(400, { message: "Invalid source preparation JSON" });
+      }
+      const { purpose } = z
+        .object({ purpose: z.enum(["evidence", "reference"]).default("evidence") })
+        .strict()
+        .parse(input);
+      return c.json(
+        await prepareKnowledgeFile(deps, context, Id.parse(c.req.param("fileId")), purpose),
+      );
     }),
   );
   app.post(`${base}/:entryId/file/download-url`, (c) =>
@@ -170,6 +185,38 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
           contentType: file.contentType,
           sizeBytes: file.sizeBytes,
         }),
+      );
+    }),
+  );
+  app.post(`${base}/prepare-save`, (c) =>
+    run(c, false, async (context) => {
+      if (context.actor.kind === "agent") {
+        const access = await requireAccessGrantAuthorization(
+          c,
+          deps,
+          context.workspaceId,
+          "documents:search",
+        );
+        const selected = access.grant.metadata?.firstPartyMcpTools as
+          | FirstPartyMcpToolName[]
+          | undefined;
+        if (
+          !selected ||
+          !allowedFirstPartyMcpToolsForSession(deps.settings, selected).includes(
+            "knowledge_prepare_save",
+          )
+        )
+          throw new HTTPException(403, {
+            message: "Knowledge preparation is unavailable for this task",
+          });
+      }
+      return c.json(
+        await prepareKnowledgeSave(
+          deps.db,
+          context,
+          KnowledgeSavePreparationRequest.parse(await c.req.json()),
+          () => deps.getDocumentServices().embedder,
+        ),
       );
     }),
   );

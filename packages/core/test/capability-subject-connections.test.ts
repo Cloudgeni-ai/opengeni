@@ -4,9 +4,11 @@ import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config"
 import { CapabilityCatalogItem, type AccessGrant } from "@opengeni/contracts";
 import {
   createConnection,
+  beginConnectAttempt,
   createDb,
   createSocialConnection,
   enableCapabilityInstallation,
+  disableCapabilityInstallation,
   encryptEnvironmentValue,
   getCapabilityInstallation,
   listEnabledMcpCapabilityServers,
@@ -28,6 +30,10 @@ import {
   codexAppsCatalogItem,
   enableCapability,
   prepareCapabilityEnable,
+  executeConnectOperation,
+  getConnectorToolPermissions,
+  settingsWithMcpCapabilityServers,
+  freezeConnectionAccounts,
 } from "../src";
 
 let available = true;
@@ -129,6 +135,380 @@ async function createMcpCapability(
 }
 
 describe("subject-owned capability connection references", () => {
+  test("new Slack catalog selectors survive enable/storage/projection and admit workspace plus only the sender's accounts", async () => {
+    if (!available) throw new Error("Real PostgreSQL fixture required");
+    const workspace = await freshWorkspace();
+    for (const subjectId of ["subject-alice", "subject-bob"]) {
+      const [personal] = await shared!
+        .admin`insert into workspaces (account_id, name) values (${workspace.accountId}, 'personal selector fixture') returning id`;
+      await shared!
+        .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id) values (${workspace.accountId}, ${subjectId}, 'active', ${personal!.id})`;
+      await shared!
+        .admin`insert into workspace_memberships (account_id, workspace_id, subject_id) values (${workspace.accountId}, ${workspace.workspaceId}, ${subjectId})`;
+    }
+    const capabilityId = `mcp:slack-selector-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId);
+    const connections = await Promise.all(
+      [null, "subject-alice", "subject-bob"].map((subjectId) =>
+        createConnection(db, {
+          ...workspace,
+          subjectId,
+          providerDomain: "slack.com",
+          kind: "oauth2",
+          credentialEncrypted: encryptedFixture(),
+        }),
+      ),
+    );
+    const selector = {
+      providerDomain: "slack.com",
+      kind: "oauth2" as const,
+      subjectScope: "workspace" as const,
+      accountSelection: "all_eligible" as const,
+    };
+    await enableCapability({
+      db,
+      ...workspace,
+      settings,
+      grant: grant(workspace, "subject-alice"),
+      capabilityId,
+      payload: {
+        config: {},
+        metadata: {},
+        headers: {},
+        connectionRef: selector,
+        onlyIfUninstalled: true,
+      },
+    });
+    expect(
+      (await getCapabilityInstallation(db, workspace.workspaceId, capabilityId))?.config
+        .connectionRef,
+    ).toEqual(selector);
+    const servers = await listEnabledMcpCapabilityServers(db, workspace.workspaceId);
+    const server = servers.find((entry) => entry.capabilityId === capabilityId)!;
+    expect(server.connectionRef).toEqual(selector);
+    const catalog = await buildCapabilityCatalog({
+      db,
+      workspaceId: workspace.workspaceId,
+      settings,
+    });
+    const projected = catalog.items.find((entry) => entry.id === capabilityId)!;
+    expect(projected.enabled).toBe(true);
+    expect(projected.authKind).toBe("oauth2");
+    expect(projected.connectionRef).toMatchObject({
+      accountSelection: "all_eligible",
+      providerDomain: "slack.com",
+    });
+    expect(projected.connectionRef).not.toHaveProperty("connectionId");
+    const frozen = await freezeConnectionAccounts({
+      db,
+      ...workspace,
+      settings: settingsWithMcpCapabilityServers(settings, servers),
+      tools: [{ kind: "mcp", id: server.id }],
+      source: { kind: "subject", subjectId: "subject-alice", accountId: workspace.accountId },
+    });
+    expect(frozen.mcpAccountBindings?.map((binding) => binding.connectionId).sort()).toEqual(
+      [connections[0]!.id, connections[1]!.id].sort(),
+    );
+    expect(
+      frozen.mcpAccountBindings?.every(
+        (binding) => binding.connectionRef.accountSelection === undefined,
+      ),
+    ).toBe(true);
+    // Persisted exact refs, even with an invalid selector field from an older
+    // writer, must never become account selectors in the DB reconstruction.
+    await enableCapabilityInstallation(db, {
+      ...workspace,
+      capabilityId,
+      kind: "mcp",
+      config: { connectionRef: { ...selector, connectionId: connections[0]!.id } },
+      metadata: { mcpConnectivity: { status: "auth_deferred" } },
+    });
+    const pinned = (await listEnabledMcpCapabilityServers(db, workspace.workspaceId)).find(
+      (entry) => entry.capabilityId === capabilityId,
+    )!;
+    expect(pinned.connectionRef?.connectionId).toBe(connections[0]!.id);
+    expect(pinned.connectionRef?.accountSelection).toBeUndefined();
+    const exact = await freezeConnectionAccounts({
+      db,
+      ...workspace,
+      settings: settingsWithMcpCapabilityServers(settings, [pinned]),
+      tools: [{ kind: "mcp", id: pinned.id }],
+      source: { kind: "subject", subjectId: "subject-alice", accountId: workspace.accountId },
+    });
+    expect(exact.mcpAccountBindings?.map((binding) => binding.connectionId)).toEqual([
+      connections[0]!.id,
+    ]);
+    const restricted = await getCapabilityInstallation(db, workspace.workspaceId, capabilityId);
+    const autoEnable = () =>
+      enableCapability({
+        db,
+        ...workspace,
+        settings,
+        grant: grant(workspace, "subject-alice"),
+        capabilityId,
+        payload: {
+          config: {},
+          metadata: {},
+          headers: {},
+          connectionRef: selector,
+          onlyIfUninstalled: true,
+        },
+      });
+    expect(await autoEnable()).toEqual(restricted);
+    const disabled = await disableCapabilityInstallation(db, workspace.workspaceId, capabilityId);
+    expect(await autoEnable()).toEqual(disabled);
+    expect((await getCapabilityInstallation(db, workspace.workspaceId, capabilityId))?.status).toBe(
+      "disabled",
+    );
+    // A deliberate ordinary enable remains available to an authorized caller.
+    expect(
+      (await enableCapabilityInstallation(db, { ...workspace, capabilityId, kind: "mcp" })).status,
+    ).toBe("active");
+  });
+
+  test("concurrent create-only capability completions preserve the exact winning installation", async () => {
+    if (!available) throw new Error("Real PostgreSQL fixture required");
+    const workspace = await freshWorkspace();
+    const capabilityId = `mcp:create-only-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId);
+    const results = await Promise.all(
+      Array.from({ length: 4 }, (_, index) =>
+        enableCapabilityInstallation(db, {
+          ...workspace,
+          capabilityId,
+          kind: "mcp",
+          onlyIfUninstalled: true,
+          config: { winner: index, allowedTools: ["read_only"] },
+          metadata: { setup: index },
+        }),
+      ),
+    );
+    expect(new Set(results.map((result) => result.id)).size).toBe(1);
+    for (const result of results) expect(result).toEqual(results[0]);
+    expect(await getCapabilityInstallation(db, workspace.workspaceId, capabilityId)).toEqual(
+      results[0],
+    );
+  });
+
+  test("deployment-managed personal selectors expose account choice without fixed identifiers", async () => {
+    if (!available) throw new Error("Real PostgreSQL fixture required");
+    const workspace = await freshWorkspace();
+    const selector = {
+      providerDomain: "mail.example.test",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+    };
+    const fixedId = crypto.randomUUID();
+    const catalog = await buildCapabilityCatalog({
+      db,
+      workspaceId: workspace.workspaceId,
+      settings: {
+        ...settings,
+        mcpServers: [
+          { id: "mail", url: "https://mail.example.test/mcp", connectionRef: selector },
+          {
+            id: "fixed-mail",
+            url: "https://mail.example.test/mcp",
+            connectionRef: { ...selector, connectionId: fixedId },
+          },
+        ],
+      },
+    });
+    expect(catalog.items.find((item) => item.id === "mcp:mail")?.connectionRef).toEqual(selector);
+    expect(catalog.items.find((item) => item.id === "mcp:fixed-mail")?.connectionRef).toBeNull();
+    expect(JSON.stringify(catalog)).not.toContain(fixedId);
+  });
+
+  test("Connect completion composes MCP persistence and receipt replay under the policy fence", async () => {
+    if (!available) throw new Error("Real PostgreSQL fixture required");
+    const workspace = await freshWorkspace();
+    const scope = { ...workspace, subjectId: "subject-alice" };
+    const capabilityId = `mcp:connect-policy-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://public.example.test/mcp",
+      authModel: null,
+    });
+    const attemptId = crypto.randomUUID();
+    await beginConnectAttempt(db, scope, {
+      idempotencyKey: attemptId,
+      requestDigest: "a".repeat(64),
+      returnUrl: "https://host.example.test/return",
+      attempt: {
+        id: attemptId,
+        workspaceId: workspace.workspaceId,
+        providerId: "mcp-install",
+        ownership: "workspace",
+        revision: 1,
+        state: "requires_user_action",
+        credentialsCommitted: false,
+        integrationInstalled: false,
+        completionRequirement: "integration",
+        nextAction: { type: "authorize", url: "https://host.example.test/authorize" },
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      },
+    });
+    let probes = 0;
+    const operation = {
+      db,
+      scope,
+      attemptId,
+      expectedRevision: 1,
+      operationId: crypto.randomUUID(),
+      inputDigest: "b".repeat(64),
+      authorize: async () => {},
+      execute: async () => {
+        const prepared = await prepareCapabilityEnable({
+          db,
+          ...workspace,
+          settings,
+          capabilityId,
+          grant: grant(workspace, scope.subjectId),
+          payload: { config: {}, metadata: {}, headers: {} },
+          probeMcpServer: async () => {
+            probes++;
+            return { toolCount: 1 };
+          },
+        });
+        return {
+          commit: async (
+            tx: Database,
+            current: import("@opengeni/contracts/connect").ConnectAttempt,
+          ) => {
+            await prepared.commit(tx);
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete" as const,
+              integrationInstalled: true,
+              nextAction: { type: "none" as const },
+            };
+          },
+        };
+      },
+    };
+    const completed = await executeConnectOperation(operation);
+    expect(completed.state).toBe("complete");
+    expect((await getCapabilityInstallation(db, workspace.workspaceId, capabilityId))?.status).toBe(
+      "active",
+    );
+    await shared!.admin`insert into organization_integration_policies
+      (account_id, mode, allowed_integration_keys, revision)
+      values (${workspace.accountId}, 'restricted', ${shared!.admin.json([])}, 1)`;
+    expect(await executeConnectOperation(operation)).toEqual(completed);
+    expect(probes).toBe(1);
+  });
+  test("organization policy denies MCP probes and late enable commits without hiding installed results", async () => {
+    if (!available) throw new Error("Real PostgreSQL fixture required");
+    const workspace = await freshWorkspace();
+    const capabilityId = `mcp:policy-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://public.example.test/mcp",
+      authModel: null,
+    });
+    const setAllowed = async (allowed: boolean) => {
+      await shared!.admin`insert into organization_integration_policies
+        (account_id, mode, allowed_integration_keys, revision)
+        values (${workspace.accountId}, 'restricted', ${shared!.admin.json(allowed ? ["custom:mcp"] : [])}, 1)
+        on conflict (account_id) do update set allowed_integration_keys = excluded.allowed_integration_keys`;
+    };
+    let probes = 0;
+    const input = {
+      db,
+      ...workspace,
+      settings,
+      capabilityId,
+      grant: grant(workspace, "subject-alice"),
+      payload: { config: {}, metadata: {}, headers: {} },
+      probeMcpServer: async () => {
+        probes++;
+        return { toolCount: 1 };
+      },
+    };
+    await setAllowed(false);
+    await expect(prepareCapabilityEnable(input)).rejects.toMatchObject({
+      name: "OrganizationIntegrationDeniedError",
+    });
+    expect(probes).toBe(0);
+    await setAllowed(true);
+    const prepared = await prepareCapabilityEnable(input);
+    expect(probes).toBe(1);
+    await setAllowed(false);
+    await expect(prepared.commit(db)).rejects.toMatchObject({
+      name: "OrganizationIntegrationDeniedError",
+    });
+    expect(await getCapabilityInstallation(db, workspace.workspaceId, capabilityId)).toBeNull();
+    await setAllowed(true);
+    const installed = await enableCapability(input);
+    await setAllowed(false);
+    const probesBeforeReplay = probes;
+    expect(await enableCapability(input)).toEqual(installed);
+    expect(probes).toBe(probesBeforeReplay);
+    await expect(
+      enableCapability({
+        ...input,
+        payload: { ...input.payload, config: { allowedTools: ["new-tool"] } },
+      }),
+    ).rejects.toMatchObject({ name: "OrganizationIntegrationDeniedError" });
+    expect((await getCapabilityInstallation(db, workspace.workspaceId, capabilityId))?.id).toBe(
+      installed.id,
+    );
+    const unchanged = await prepareCapabilityEnable(input);
+    await disableCapabilityInstallation(db, workspace.workspaceId, capabilityId);
+    await expect(unchanged.commit(db)).rejects.toMatchObject({ status: 409 });
+    expect((await getCapabilityInstallation(db, workspace.workspaceId, capabilityId))?.status).toBe(
+      "disabled",
+    );
+    await expect(enableCapability(input)).rejects.toMatchObject({
+      name: "OrganizationIntegrationDeniedError",
+    });
+  });
+  test("restricted reconciliation compares explicit credentials and remains no-effect across a catalog edit", async () => {
+    if (!available) throw new Error("Real PostgreSQL fixture required");
+    const workspace = await freshWorkspace();
+    const capabilityId = `mcp:reconcile-headers-${crypto.randomUUID()}`;
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://public.example.test/mcp",
+      authModel: null,
+    });
+    let probes = 0;
+    const input = {
+      db,
+      ...workspace,
+      settings,
+      capabilityId,
+      grant: grant(workspace, "subject-alice"),
+      payload: {
+        config: {},
+        metadata: {},
+        headers: { Authorization: "Bearer synthetic-original" },
+      },
+      probeMcpServer: async () => {
+        probes++;
+        return { toolCount: 1 };
+      },
+    };
+    const installed = await enableCapability(input);
+    await shared!.admin`insert into organization_integration_policies
+      (account_id, mode, allowed_integration_keys, revision)
+      values (${workspace.accountId}, 'restricted', ${shared!.admin.json([])}, 1)`;
+    expect(await enableCapability(input)).toEqual(installed);
+    await expect(
+      enableCapability({
+        ...input,
+        payload: { ...input.payload, headers: { Authorization: "Bearer synthetic-changed" } },
+      }),
+    ).rejects.toMatchObject({ name: "OrganizationIntegrationDeniedError" });
+    const prepared = await prepareCapabilityEnable(input);
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://changed.example.test/mcp",
+      authModel: null,
+    });
+    expect(await prepared.commit(db)).toEqual(installed);
+    expect(await getCapabilityInstallation(db, workspace.workspaceId, capabilityId)).toEqual(
+      installed,
+    );
+    expect(probes).toBe(1);
+  });
   test("MCP preparation probes without publishing and commits without creating a credential", async () => {
     if (!available) throw new Error("Real PostgreSQL fixture required");
     const workspace = await freshWorkspace();
@@ -426,13 +806,9 @@ describe("subject-owned capability connection references", () => {
     expect(projected).not.toContain(bob.id);
   });
 
-  test("round-trips opaque and UUID-shaped host capability bindings without native lookup", async () => {
+  test("rejects opaque and UUID-shaped retired host capability bindings", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const activatedSettings = {
-      ...settings,
-      hostMcpAuthoritySourceAdmissionEnabled: true,
-    };
     const cases = [
       {
         suffix: "opaque-workspace",
@@ -475,37 +851,13 @@ describe("subject-owned capability connection references", () => {
             connectionRef: testCase.connectionRef,
           },
         }),
-      ).rejects.toThrow(/OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED=true/);
-      await enableCapability({
-        db,
-        grant: grant(workspace, "subject-alice"),
-        ...workspace,
-        settings: activatedSettings,
-        capabilityId,
-        payload: {
-          config: {},
-          metadata: {},
-          headers: {},
-          connectionRef: testCase.connectionRef,
-        },
-      });
-
-      const installation = await getCapabilityInstallation(db, workspace.workspaceId, capabilityId);
-      expect(installation?.config.connectionRef).toEqual(testCase.connectionRef);
+      ).rejects.toThrow(/host-owned MCP connection refs are no longer supported/);
       const servers = await listEnabledMcpCapabilityServers(db, workspace.workspaceId);
-      expect(servers.find((server) => server.capabilityId === capabilityId)?.connectionRef).toEqual(
-        testCase.connectionRef,
-      );
-      const catalog = await buildCapabilityCatalog({
-        db,
-        workspaceId: workspace.workspaceId,
-        settings: activatedSettings,
-      });
-      expect(catalog.items.find((item) => item.id === capabilityId)?.connectionRef).toBeNull();
+      expect(servers.find((server) => server.capabilityId === capabilityId)).toBeUndefined();
     }
   });
 
-  test("a legacy workspace-scoped Slack MCP installation is not runnable at runtime", async () => {
+  test("an explicitly workspace-scoped Slack MCP installation is runnable", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const capabilityId = `mcp:legacy-workspace-slack-${crypto.randomUUID()}`;
@@ -517,8 +869,6 @@ describe("subject-owned capability connection references", () => {
       kind: "oauth2",
       credentialEncrypted: encryptedFixture(),
     });
-    // enableCapability now rejects this shape, so write the installation the
-    // way an earlier release did: directly, with a workspace-scoped ref.
     await enableCapabilityInstallation(db, {
       ...workspace,
       capabilityId,
@@ -537,19 +887,28 @@ describe("subject-owned capability connection references", () => {
     const installation = await getCapabilityInstallation(db, workspace.workspaceId, capabilityId);
     expect(installation?.status).toBe("active");
 
-    // The row exists and is active, but the runtime fence omits it: no shared
-    // human token executes for the hosted Slack MCP.
     const servers = await listEnabledMcpCapabilityServers(db, workspace.workspaceId);
-    expect(servers.find((server) => server.capabilityId === capabilityId)).toBeUndefined();
+    expect(
+      servers.find((server) => server.capabilityId === capabilityId)?.connectionRef?.subjectScope,
+    ).toBe("workspace");
+    const catalog = await buildCapabilityCatalog({
+      db,
+      workspaceId: workspace.workspaceId,
+      settings,
+    });
+    const entry = catalog.items.find((item) => item.id === capabilityId);
+    expect(entry?.enabled).toBe(true);
+    expect(entry?.runtime.available).toBe(true);
+    expect(entry?.actions).toContain("disconnect");
   });
 
-  test("keeps Gmail personal even when a workspace-owned mailbox row exists", async () => {
+  test("Gmail preserves explicit workspace and personal ownership", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const capabilityId = `mcp:gmail-personal-${crypto.randomUUID()}`;
     await createMcpCapability(workspace, capabilityId, {
       endpointUrl: "https://gmailmcp.googleapis.com/mcp/v1",
-      metadata: { connectionOwnership: "personal_only" },
+      metadata: { defaultConnectionOwnership: "personal" },
     });
     const alice = await createConnection(db, {
       ...workspace,
@@ -566,26 +925,24 @@ describe("subject-owned capability connection references", () => {
       credentialEncrypted: encryptedFixture(),
     });
 
-    await expect(
-      enableCapability({
-        db,
-        grant: grant(workspace, "subject-alice"),
-        ...workspace,
-        settings,
-        capabilityId,
-        payload: {
-          config: {},
-          metadata: {},
-          headers: {},
-          connectionRef: {
-            connectionId: sharedConnection.id,
-            providerDomain: "gmailmcp.googleapis.com",
-            kind: "oauth2",
-            subjectScope: "workspace",
-          },
+    await enableCapability({
+      db,
+      grant: grant(workspace, "subject-alice"),
+      ...workspace,
+      settings,
+      capabilityId,
+      payload: {
+        config: {},
+        metadata: {},
+        headers: {},
+        connectionRef: {
+          connectionId: sharedConnection.id,
+          providerDomain: "gmailmcp.googleapis.com",
+          kind: "oauth2",
+          subjectScope: "workspace",
         },
-      }),
-    ).rejects.toThrow("requires a personal connection");
+      },
+    });
 
     await expect(
       enableCapability({
@@ -632,14 +989,36 @@ describe("subject-owned capability connection references", () => {
     });
     expect(JSON.stringify(installation)).not.toContain(alice.id);
     expect(JSON.stringify(installation)).not.toContain(sharedConnection.id);
+    // Tool discovery must use the same reviewed REST bridge as execution. The
+    // fixture has no usable OAuth token and cannot probe Google's hosted MCP.
+    const permissions = await getConnectorToolPermissions({
+      db,
+      settings,
+      workspaceId: workspace.workspaceId,
+      grant: grant(workspace, "subject-alice"),
+      capabilityId,
+      personalOwnerVerified: true,
+    });
+    expect(permissions.discoveryError).toBeNull();
+    expect(permissions.connectionId).toBe(alice.id);
+    expect(permissions.tools.map((tool) => tool.name)).toContain("search_threads");
+    expect(permissions.tools.map((tool) => tool.name)).toContain("send_message");
+    await expect(
+      getConnectorToolPermissions({
+        db,
+        settings,
+        workspaceId: workspace.workspaceId,
+        grant: grant(workspace, "subject-bob"),
+        capabilityId,
+        personalOwnerVerified: true,
+      }),
+    ).rejects.toThrow("Reconnect this connector");
   });
 
-  test("keeps the hosted Slack MCP personal even when a legacy workspace-owned row exists", async () => {
+  test("hosted Slack MCP respects explicit connection ownership", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const capabilityId = `mcp:slack-personal-${crypto.randomUUID()}`;
-    // The catalog row carries no personal_only marker: the exact official
-    // resource alone must fail closed, exactly like Gmail.
     await createMcpCapability(workspace, capabilityId, {
       endpointUrl: "https://mcp.slack.com/mcp",
     });
@@ -667,18 +1046,15 @@ describe("subject-owned capability connection references", () => {
         kind: "oauth2" as const,
         subjectScope: "workspace" as const,
       },
-      { providerDomain: "slack.com", kind: "oauth2" as const },
     ]) {
-      await expect(
-        enableCapability({
-          db,
-          grant: grant(workspace, "subject-alice"),
-          ...workspace,
-          settings,
-          capabilityId,
-          payload: { config: {}, metadata: {}, headers: {}, connectionRef },
-        }),
-      ).rejects.toThrow("requires a personal connection");
+      await enableCapability({
+        db,
+        grant: grant(workspace, "subject-alice"),
+        ...workspace,
+        settings,
+        capabilityId,
+        payload: { config: {}, metadata: {}, headers: {}, connectionRef },
+      });
     }
 
     await enableCapability({
@@ -705,9 +1081,7 @@ describe("subject-owned capability connection references", () => {
     const workspace = await freshWorkspace();
     const personalCapabilityId = `mcp:subject-explicit-${crypto.randomUUID()}`;
     const sharedCapabilityId = `mcp:workspace-explicit-${crypto.randomUUID()}`;
-    // The hosted Slack MCP resource is personal-only by itself (covered above);
-    // exercise the generic subject/workspace ownership checks on ordinary
-    // endpoints so this test proves the generic rule, not the Slack fence.
+    // Ownership checks apply independently of the provider endpoint.
     await createMcpCapability(workspace, personalCapabilityId, {
       endpointUrl: "https://mcp.example.test/personal",
     });

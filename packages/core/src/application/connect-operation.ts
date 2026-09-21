@@ -1,4 +1,7 @@
 import type { ConnectAttempt } from "@opengeni/contracts/connect";
+import { assertOrganizationIntegrationAllowed } from "@opengeni/contracts";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
+import { integrationKeyForConnectProvider } from "../domain/organization-integration-catalog";
 import {
   claimConnectOperation,
   finishConnectOperation,
@@ -31,11 +34,14 @@ export async function executeConnectOperation(input: {
   operationId: string;
   /** Caller computes a stable keyed digest if input contains low-entropy secrets. */
   inputDigest: string;
+  /** Trusted server adapter classification, never derived from request data.
+   * Cancellation releases pending setup; it acquires no integration authority. */
+  purpose?: "acquisition" | "cancellation";
   authorize: ConnectOperationAuthorization;
   execute: (attempt: ConnectAttempt) => Promise<PreparedConnectOperation>;
 }): Promise<ConnectAttempt> {
   // Snapshot caller-controlled identity before the first asynchronous boundary.
-  const { db, authorize, execute } = input;
+  const { db, authorize, execute, purpose = "acquisition" } = input;
   const scope = { ...input.scope };
   const operation = {
     attemptId: input.attemptId,
@@ -44,8 +50,31 @@ export async function executeConnectOperation(input: {
     inputDigest: input.inputDigest,
     authorize,
   };
-  const claim = await claimConnectOperation(db, scope, operation);
+  const claim = await withOrganizationIntegrationPolicyFence(db, scope, async (tx, policy) =>
+    claimConnectOperation(tx, scope, {
+      ...operation,
+      authorizeAcquisition: async (_tx, attempt) => {
+        if (purpose === "cancellation") return;
+        assertOrganizationIntegrationAllowed(
+          policy,
+          integrationKeyForConnectProvider(attempt.providerId),
+        );
+      },
+    }),
+  );
   if (claim.status === "replayed") return claim.attempt;
   const prepared = await execute(structuredClone(claim.attempt));
-  return finishConnectOperation(db, scope, { ...operation, commit: prepared.commit });
+  return withOrganizationIntegrationPolicyFence(db, scope, async (tx, policy) =>
+    finishConnectOperation(tx, scope, {
+      ...operation,
+      commit: prepared.commit,
+      authorizeAcquisition: async (_tx, attempt) => {
+        if (purpose === "cancellation") return;
+        assertOrganizationIntegrationAllowed(
+          policy,
+          integrationKeyForConnectProvider(attempt.providerId),
+        );
+      },
+    }),
+  );
 }

@@ -73,7 +73,13 @@ async function workspaceGrant() {
     workspaceName: "Scheduled creator policy workspace",
     subjectId: "user:scheduled-creator-owner",
   });
-  return access.workspaceGrants[0]!;
+  const grant = access.workspaceGrants[0]!;
+  const [personal] = await shared!.admin`insert into workspaces (account_id, name)
+    values (${grant.accountId}, 'Personal schedule fixture') returning id`;
+  await shared!.admin`insert into organization_memberships
+    (account_id, subject_id, status, personal_workspace_id)
+    values (${grant.accountId}, ${grant.subjectId}, 'active', ${personal!.id})`;
+  return grant;
 }
 
 async function generatedTask(

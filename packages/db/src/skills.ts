@@ -88,12 +88,13 @@ export async function applySkillLifecycle(
           );
       }
     }
-    if (content === undefined) throw new Error("Skill lifecycle requires a readable SKILL.md");
-    const metadata = readSkillMetadata(content);
+    const removing = request.operation === "remove" || Boolean(request.removalOperationId);
+    if (content === undefined && !removing)
+      throw new Error("Skill lifecycle requires a readable SKILL.md");
+    const metadata = removing ? null : readSkillMetadata(content!);
     const canonicalRequest = {
       ...request,
-      title: metadata.name,
-      description: metadata.description,
+      ...(metadata ? { title: metadata.name, description: metadata.description } : {}),
     };
     const rows = await rawRows<{ receipt: SkillWriteReceipt }>(
       tx,
@@ -116,6 +117,30 @@ export type SkillReadContext = {
   /** Trusted subject enables the existing user-tier visibility; agents share workspace reads. */
   subjectId?: string;
 };
+
+/** Scope only, for authorizing an exact human deletion retry after the head is gone.
+ * The lifecycle still verifies the complete request fingerprint before replay.
+ */
+export async function readSkillRemovalScope(
+  db: Database,
+  context: SkillReadContext & { subjectId: string },
+  skillId: string,
+  operationId: string,
+): Promise<"workspace" | "user" | null> {
+  return withWorkspaceSubjectRls(db, context.workspaceId, context.subjectId, async (tx) => {
+    const [row] = await rawRows<{ scope: string }>(
+      tx,
+      sql`
+      SELECT receipt->>'removedScope' AS scope FROM skill_write_receipts
+      WHERE account_id=${context.accountId}::uuid AND workspace_id=${context.workspaceId}::uuid
+        AND operation_id=${operationId}::uuid AND receipt->>'skillId'=${skillId}
+        AND receipt->>'removed'='true' AND actor->>'kind'='human'
+        AND actor->>'principalKind'='human_session' AND actor->>'subjectId'=${context.subjectId}
+    `,
+    );
+    return row?.scope === "workspace" || row?.scope === "user" ? row.scope : null;
+  });
+}
 
 /** Recheck the host-bound attempt before any agent-facing Skill read/search. */
 export async function assertSkillReadAttempt(
@@ -212,6 +237,7 @@ export async function listSkillRecords(
             AND active.account_id=h.account_id AND active.expires_at <= transaction_timestamp()
         ) THEN 'expired' ELSE h.status END,
         'activeRevisionId',h.active_revision_id,'revisionId',r.id,
+        'removalOperationId',r.skill_removal_operation_id,
         'activationMode',coalesce(r.skill_activation_mode,'workspace_managed'),
         'pendingRevisionIds',coalesce((SELECT jsonb_agg(DISTINCT pending.receipt->>'revisionId')
           FROM skill_write_receipts pending WHERE pending.account_id=h.account_id
@@ -346,7 +372,7 @@ export async function skillReviewResolution(
   db: Database,
   context: SkillReadContext,
   review: SkillReviewReference,
-): Promise<"pending" | "activated" | "declined" | "superseded" | "unavailable"> {
+): Promise<"pending" | "activated" | "removed" | "declined" | "superseded" | "unavailable"> {
   const run = async (tx: Database) => {
     const [record] = await listSkillRecords(tx, context, {
       skillId: review.skillId,
@@ -354,7 +380,19 @@ export async function skillReviewResolution(
       metadataOnly: true,
       limit: 1,
     });
-    if (!record) return "unavailable" as const;
+    if (!record) {
+      if (review.removalOperationId) {
+        const [removed] = await rawRows<{ operation_id: string }>(
+          tx,
+          sql`
+          SELECT operation_id FROM skill_write_receipts
+          WHERE account_id=${context.accountId}::uuid AND workspace_id=${context.workspaceId}::uuid
+            AND receipt->>'skillId'=${review.skillId} AND receipt->>'removed'='true' LIMIT 1`,
+        );
+        if (removed) return "removed" as const;
+      }
+      return "unavailable" as const;
+    }
     const [event] = await rawRows<{ type: string }>(
       tx,
       sql`

@@ -11,8 +11,7 @@
 //   /workspaces/:id/variable-sets            → variable sets + variables
 //   /workspaces/:id/rigs                     → rigs list + create
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
-//   /workspaces/:id/packs                    → redirect to plugins (Packs subsection)
-//   /workspaces/:id/plugins                  → plugin catalog + registry (incl. Packs subsection)
+
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
@@ -39,6 +38,7 @@ import { ProblemPanel } from "@/components/common";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
+import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import {
   parseRootWorkspaceSearch,
@@ -50,6 +50,7 @@ import {
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
 type OrganizationAdminSection =
+  | "integrations"
   | "overview"
   | "knowledge"
   | "models"
@@ -62,7 +63,6 @@ type WorkspaceSettingsSection =
   | "learning"
   | "general"
   | "members"
-  | "tools"
   | "plugins"
   | "models"
   | "api-keys"
@@ -104,6 +104,10 @@ const LazySetupAccountRoute = lazyRouteComponent(
 const LazyAccountAuthRoute = lazyRouteComponent(
   () => import("@/routes/account-auth"),
   "AccountAuthRoute",
+);
+const LazyPersonalSecurityRoute = lazyRouteComponent(
+  () => import("@/routes/personal-security"),
+  "PersonalSecurityRoute",
 );
 const LazyOnboardingPreviewRoute = lazyRouteComponent(
   () => import("@/routes/onboarding-preview"),
@@ -230,6 +234,11 @@ const accountAuthRoute = createRoute({
   }),
   component: AccountAuth,
 });
+const personalSecurityRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "settings/security",
+  component: LazyPersonalSecurityRoute,
+});
 // DEV-only visual harness for the Session composer chrome stack (queue / goal /
 // agents / composer). Public so it needs no live auth or session; omitted from
 // production route trees.
@@ -274,8 +283,10 @@ const workspaceSessionsRoute = createRoute({
 const workspaceSessionRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "sessions/$sessionId",
-  validateSearch: (search: Record<string, unknown>): ComposerLaunchSearch =>
-    parseComposerLaunchSearch(search),
+  validateSearch: (search: Record<string, unknown>): ComposerLaunchSearch & SessionSearchRoute => ({
+    ...parseComposerLaunchSearch(search),
+    ...parseSessionSearchRoute(search),
+  }),
   component: SessionView,
 });
 const workspaceAgentsRoute = createRoute({
@@ -318,37 +329,19 @@ const workspacePriorityRoute = createRoute({
   path: "priority",
   component: Priority,
 });
-// Legacy standalone Packs route: packs are now a subsection of Capabilities,
-// so this redirects there (focusing the Packs subsection) instead of mounting
-// a separate page.
-const workspacePacksRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "packs",
-  component: PacksRedirect,
-});
 const workspaceCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "plugins",
-  // `?section=packs` focuses the Packs subsection (used by the legacy
-  // /packs redirect and the nav). Unknown values fall back to the catalog.
-  validateSearch: (search: Record<string, unknown>): { section?: "packs" | "skills" } => ({
-    ...(search.section === "packs"
-      ? { section: "packs" as const }
-      : search.section === "skills"
-        ? { section: "skills" as const }
-        : {}),
+  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
+    ...(search.section === "skills" ? { section: "skills" as const } : {}),
   }),
   component: Capabilities,
 });
 const workspaceLegacyCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "capabilities",
-  validateSearch: (search: Record<string, unknown>): { section?: "packs" | "skills" } => ({
-    ...(search.section === "packs"
-      ? { section: "packs" as const }
-      : search.section === "skills"
-        ? { section: "skills" as const }
-        : {}),
+  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
+    ...(search.section === "skills" ? { section: "skills" as const } : {}),
   }),
   component: CapabilitiesLegacyRedirect,
 });
@@ -415,14 +408,13 @@ const workspaceSettingsRoute = createRoute({
       search.section === "general" ||
       search.section === "learning" ||
       search.section === "members" ||
-      search.section === "tools" ||
       search.section === "plugins" ||
       search.section === "models" ||
       search.section === "api-keys" ||
       search.section === "danger"
         ? search.section
-        : search.section === "capabilities" || search.section === "permissions"
-          ? "tools"
+        : search.section === "capabilities"
+          ? "plugins"
           : undefined;
     return section ? { section } : {};
   },
@@ -445,6 +437,7 @@ const workspaceStateRoute = createRoute({
 const workspaceArtifactsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "artifacts",
+  validateSearch: artifactReturnSearch,
   component: Artifacts,
 });
 const workspaceArtifactDetailRoute = createRoute({
@@ -481,6 +474,7 @@ const workspaceOrganizationRoute = createRoute({
       search.section === "people" ||
       search.section === "recovery" ||
       search.section === "retention" ||
+      search.section === "integrations" ||
       search.section === "developer" ||
       search.section === "billing"
         ? search.section
@@ -509,6 +503,7 @@ const routeTree = rootRoute.addChildren([
   identityLinkRoute,
   setupAccountRoute,
   accountAuthRoute,
+  personalSecurityRoute,
   ...(import.meta.env.DEV
     ? [composerChromeGalleryRoute, agentTopologyPreviewRoute, onboardingPreviewRoute]
     : []),
@@ -525,7 +520,6 @@ const routeTree = rootRoute.addChildren([
     workspaceMachinesRoute,
     workspaceInsightsRoute,
     workspacePriorityRoute,
-    workspacePacksRoute,
     workspaceCapabilitiesRoute,
     workspaceLegacyCapabilitiesRoute,
     workspaceSchedulesRoute,
@@ -604,6 +598,7 @@ function SessionView() {
       sessionId={sessionId}
       launch={launch}
       realtimeAutostartModel={launch.realtime}
+      searchTarget={launch}
     />
   );
 }
@@ -651,18 +646,6 @@ function Insights() {
 function Priority() {
   const { workspaceId } = workspacePriorityRoute.useParams();
   return <LazyPriorityRoute workspaceId={workspaceId} />;
-}
-
-function PacksRedirect() {
-  const { workspaceId } = workspacePacksRoute.useParams();
-  return (
-    <Navigate
-      to="/workspaces/$workspaceId/plugins"
-      params={{ workspaceId }}
-      search={{ section: "packs" }}
-      replace
-    />
-  );
 }
 
 function CapabilitiesLegacyRedirect() {
@@ -749,7 +732,9 @@ function WorkspaceState() {
 }
 
 function Artifacts() {
-  return <LazyArtifactsRoute {...workspaceArtifactsRoute.useParams()} />;
+  const { workspaceId } = workspaceArtifactsRoute.useParams();
+  const { fromSession } = workspaceArtifactsRoute.useSearch();
+  return <LazyArtifactsRoute workspaceId={workspaceId} fromSession={fromSession} />;
 }
 function IdentityLink() {
   const { linkId } = identityLinkRoute.useParams();

@@ -130,7 +130,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
   {
     id: "workspace",
     name: "Workspace operations",
-    description: "Use sandboxes, rigs, variables, schedules, and artifacts.",
+    description: "Use sandboxes, sandbox environments, variables, schedules, and artifacts.",
     kind: "opengeni",
     matches: (tool) =>
       tool.startsWith("sandbox") ||

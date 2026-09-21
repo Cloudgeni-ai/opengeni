@@ -183,29 +183,7 @@ describe("browser analytics configuration", () => {
     ).toBe(false);
   });
 
-  test("host MCP connection authority defaults off and parses the rollout flag", () => {
-    expect(withEnv({}, () => getSettings()).hostMcpAuthoritySourceAdmissionEnabled).toBe(false);
-    expect(
-      withEnv({ OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "true" }, () => getSettings())
-        .hostMcpAuthoritySourceAdmissionEnabled,
-    ).toBe(true);
-    expect(
-      withEnv({ OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "false" }, () =>
-        getSettings(),
-      ).hostMcpAuthoritySourceAdmissionEnabled,
-    ).toBe(false);
-  });
-
-  test("remote host MCP resolver configuration is optional server configuration", () => {
-    expect(withEnv({}, () => getSettings()).hostMcpCredentialResolversJson).toBeUndefined();
-    const value = JSON.stringify([]);
-    expect(
-      withEnv({ OPENGENI_HOST_MCP_CREDENTIAL_RESOLVERS_JSON: value }, () => getSettings())
-        .hostMcpCredentialResolversJson,
-    ).toBe(value);
-  });
-
-  test("configured host MCP refs require the completed fleet activation", () => {
+  test("configured host MCP refs are rejected even with the retired rollout flag", () => {
     const mcpServers = JSON.stringify([
       {
         id: "host-tools",
@@ -218,17 +196,17 @@ describe("browser analytics configuration", () => {
       },
     ]);
     expect(() => withEnv({ OPENGENI_MCP_SERVERS: mcpServers }, () => getSettings())).toThrow(
-      /OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED=true/,
+      /host-owned connection refs are no longer supported/,
     );
-    expect(
+    expect(() =>
       withEnv(
         {
           OPENGENI_MCP_SERVERS: mcpServers,
           OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "true",
         },
         () => getSettings(),
-      ).mcpServers.find((server) => server.id === "host-tools")?.connectionRef,
-    ).toMatchObject({ authoritySource: "host", connectionId: "opaque-host-binding" });
+      ),
+    ).toThrow(/host-owned connection refs are no longer supported/);
   });
 
   test("Slack workspace routing defaults on and parses the rollout flag", () => {
@@ -2049,6 +2027,19 @@ describe("backend-gated sandbox required-credential validation", () => {
     expect(() =>
       withEnv({ OPENGENI_SANDBOX_BACKEND: "docker" }, () => getSettings()),
     ).not.toThrow();
+  });
+
+  test("native command supervision is explicit opt-in and false stays disabled", () => {
+    for (const [value, expected] of [
+      [undefined, false],
+      ["false", false],
+      ["true", true],
+    ] as const) {
+      expect(
+        withEnv({ OPENGENI_MODAL_COMMAND_SUPERVISION_ENABLED: value }, () => getSettings())
+          .modalCommandSupervisionEnabled,
+      ).toBe(expected);
+    }
   });
 
   test("production modal+desktop defaults to a public pin and accepts an override", () => {

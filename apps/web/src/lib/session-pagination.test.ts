@@ -20,6 +20,108 @@ import {
 const row = (id: string) => ({ id, workspaceId: "workspace-a" }) as Session;
 
 describe("session continuation pagination", () => {
+  test.each([true, false])(
+    "completed archive=%s yields per row, never by response arrival or for sibling rows",
+    (archived) => {
+      const root = { ...row("root"), rootSessionId: "root", archived, archiveVersion: 1 };
+      const children = ["fresh", "old", "unknown"].map((id) => ({
+        ...row(id),
+        parentSessionId: root.id,
+        rootSessionId: root.id,
+        archived: false,
+      }));
+      const options = {
+        flat: true,
+        completedGenerations: new Map([[root.id, 10]]),
+        rowReadGenerations: new Map([
+          ["fresh", 11],
+          ["old", 9],
+        ]),
+      };
+      const receipt = new Map([[root.id, root]]);
+      expect(
+        projectSessionArchiveMembership(children, receipt, !archived, "workspace-a", options).map(
+          (session) => session.id,
+        ),
+      ).toEqual(["fresh"]);
+      expect(receipt.get(root.id)).toBe(root);
+      // Equality is not a post-completion read; failed reads supply no evidence.
+      expect(
+        projectSessionArchiveMembership(children, receipt, !archived, "workspace-a", {
+          ...options,
+          rowReadGenerations: new Map([["fresh", 10]]),
+        }),
+      ).toEqual([]);
+      // A matching root still owns its versioned projection, even on a fresh
+      // child read; this escape is specifically for server-owned child-only membership.
+      expect(
+        projectSessionArchiveMembership(
+          [root, ...children],
+          receipt,
+          !archived,
+          "workspace-a",
+          options,
+        ),
+      ).toEqual([]);
+    },
+  );
+  test("flat archived search retains child-only pages and applies root decisions without injecting rows", () => {
+    const child = {
+      ...row("match"),
+      rootSessionId: "root",
+      parentSessionId: "root",
+      archived: false,
+    } as Session;
+    const continuation = mergeSessionContinuation(
+      emptySessionContinuation(1),
+      1,
+      1,
+      {
+        sessions: [{ ...child, id: "later-match" }],
+        nextCursor: null,
+      },
+      1,
+    );
+    const rows = [child, ...continuation.sessions];
+    const project = (overrides: ReadonlyMap<string, Session>, archived: boolean = true) =>
+      projectSessionArchiveMembership(rows, overrides, archived, "workspace-a", { flat: true });
+    expect(project(new Map()).map((item) => item.id)).toEqual(["match", "later-match"]);
+    const root = {
+      ...row("root"),
+      rootSessionId: "root",
+      archived: true,
+      archiveVersion: 2,
+    } as Session;
+    expect(project(new Map([[root.id, root]])).map((item) => item.id)).toEqual([
+      "match",
+      "later-match",
+    ]);
+    const restored = { ...root, archived: false, archiveVersion: 3 };
+    expect(project(new Map([[root.id, restored]]))).toEqual([]);
+    expect(project(new Map([[root.id, restored]]), false).map((item) => item.id)).toEqual([
+      "match",
+      "later-match",
+    ]);
+    expect(project(new Map([[root.id, root]]), false)).toEqual([]);
+    expect(
+      project(new Map([[root.id, { ...restored, workspaceId: "workspace-b" }]])).map(
+        (item) => item.id,
+      ),
+    ).toEqual(["match", "later-match"]);
+    expect(
+      project(new Map([["unrelated", { ...root, id: "unrelated" }]])).map((item) => item.id),
+    ).toEqual(["match", "later-match"]);
+    expect(
+      projectSessionArchiveMembership(
+        [restored, ...rows],
+        new Map([[root.id, root]]),
+        true,
+        "workspace-a",
+        { flat: true },
+      ),
+    ).toEqual([]);
+  });
+
   test("combines archive pages without losing microseconds, including offset timestamps", () => {
     const latest = { ...row("a-latest"), archivedAt: "2026-09-08T12:00:00.123456Z" };
     const older = { ...row("z-older"), archivedAt: "2026-09-08T12:00:00.123455Z" };

@@ -85,7 +85,8 @@ describe("migration 0374 session event cursors", () => {
       `);
       await sql`
         insert into schema_migrations (name)
-        values (${migrationName}), ('0379_session_event_raw_lane_activation.sql')`;
+        values (${migrationName}), ('0379_session_event_raw_lane_activation.sql'),
+          ('0503_session_meaningful_attention.sql')`;
       await migrate(blank.databaseUrl);
 
       const suffix = crypto.randomUUID();

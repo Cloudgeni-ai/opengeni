@@ -23,6 +23,48 @@ test("streaming soft-closers never execute incomplete HTML", () => {
   );
   expect(output).not.toContain("data-embed");
   expect(output).toContain("Preparing preview");
+  expect(output).toContain('aria-busy="true"');
+  expect(output).toContain("og-preview-loading");
+  expect(output).toContain('<canvas aria-hidden="true"');
+  expect(output).not.toContain("group/disclosure");
+  expect(output).not.toContain('role="button"');
+  expect(output).not.toContain("animate-spin");
+  expect(output).not.toContain("min-h-32");
+  expect(output).not.toContain("Generating the interactive content");
+  expect(output).not.toContain("unfinished");
+});
+
+test("replayed partial previews stay hidden and interrupted previews stop loading", () => {
+  for (const kind of ["html", "site"] as const) {
+    for (const fence of ["```", "~~~~"] as const) {
+      const source = `Intro\n\n${fence}opengeni-${kind}\n<button>private preview source</button>\n`;
+      for (const streaming of [true, false]) {
+        const output = renderToStaticMarkup(
+          <Markdown streaming={streaming} renderInteractiveBlock={render}>
+            {source}
+          </Markdown>,
+        );
+        expect(output).not.toContain("private preview source");
+        expect(output).not.toContain("<pre");
+        expect(output).not.toContain("data-embed");
+        expect(output).toContain(streaming ? "Preparing preview" : "Preview incomplete");
+        expect(output).toContain(`aria-busy="${streaming}"`);
+        expect(output.includes("og-preview-loading")).toBe(streaming);
+        expect(output).not.toContain("og-command-reel-running");
+        if (!streaming) {
+          expect(output).toContain("Generation stopped before the preview was ready.");
+        }
+      }
+      const completed = renderToStaticMarkup(
+        <Markdown streaming renderInteractiveBlock={render}>
+          {source + fence}
+        </Markdown>,
+      );
+      expect(completed).toContain(`data-embed="${kind}"`);
+      expect(completed).not.toContain("Preparing preview");
+      expect(completed).not.toContain("og-preview-loading");
+    }
+  }
 });
 test("ordinary HTML fences and Markdown without host opt-in stay code", () => {
   expect(

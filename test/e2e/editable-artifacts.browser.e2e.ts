@@ -241,6 +241,47 @@ describe("public editable-artifact browser composition", () => {
       await page.keyboard.press("Escape");
       await capture(page, "editable-artifact-presentation-dark.png");
 
+      for (let index = 0; index < 2; index += 1) {
+        await page.getByRole("button", { name: "Add slide" }).click();
+        await waitForEditorIdle(page, "presentation");
+      }
+      const desktopViewport = page.viewportSize()!;
+      const rail = page.locator("[data-og-slide-rail]");
+      await rail.focus();
+      await page.keyboard.press("Home");
+      await page.locator('[data-og-slide-index="0"][aria-selected="true"]').waitFor();
+      await page.keyboard.press("End");
+      await page.locator('[data-og-slide-index="2"][aria-selected="true"]').waitFor();
+
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(await rail.isVisible()).toBe(false);
+      const slideChooser = page.getByRole("button", { name: "Choose slide", exact: true });
+      await slideChooser.click();
+      const mobileSlides = page.locator("[data-og-mobile-slide-list]");
+      const mobileBounds = await mobileSlides.boundingBox();
+      expect(mobileBounds).not.toBeNull();
+      expect(mobileBounds!.width).toBeGreaterThan(160);
+      expect(mobileBounds!.x).toBeGreaterThanOrEqual(0);
+      expect(mobileBounds!.x + mobileBounds!.width).toBeLessThanOrEqual(390);
+      expect(await mobileSlides.evaluate((element) => document.activeElement === element)).toBe(
+        true,
+      );
+      await page.locator('[data-og-mobile-slide-index="0"]').click();
+      await mobileSlides.waitFor({ state: "detached" });
+      expect(await slideChooser.textContent()).toContain("1 / 3");
+      expect(await slideChooser.evaluate((element) => document.activeElement === element)).toBe(
+        true,
+      );
+      await slideChooser.click();
+      await page.keyboard.press("Escape");
+      await mobileSlides.waitFor({ state: "detached" });
+      expect(await slideChooser.evaluate((element) => document.activeElement === element)).toBe(
+        true,
+      );
+      await page.setViewportSize(desktopViewport);
+      expect(await rail.isVisible()).toBe(true);
+      expect(await slideChooser.isVisible()).toBe(false);
+
       expect(observed.workerStarts.length).toBeGreaterThanOrEqual(3);
       expect(observed.wasmUrls.size).toBeGreaterThanOrEqual(3);
       expect([...observed.wasmUrls].some((url) => url.includes("spreadsheet"))).toBe(true);
@@ -364,6 +405,7 @@ function artifactApiEnvironment(
 ): Record<string, string | undefined> {
   return {
     OPENGENI_ENVIRONMENT: "test",
+    OPENGENI_PRODUCT_ACCESS_MODE: "local",
     NODE_ENV: "test",
     OPENGENI_DATABASE_URL: services.runtimeDatabaseUrl,
     OPENGENI_NATS_URL: services.natsUrl,

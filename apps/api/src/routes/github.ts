@@ -7,6 +7,7 @@ import {
   type GitHubInstallationBindingCandidate,
 } from "@opengeni/contracts";
 import { PersonalGitHubConnectionMetadata } from "@opengeni/contracts/personal-github";
+import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import {
   ListGitHubRepositoryBranchesQuery,
   VerifyPublicGitHubRepositoryRefRequest,
@@ -72,6 +73,10 @@ import {
   requireLegacyOAuthActor,
 } from "../connection-ownership";
 import { listPersonalGitHubConnections } from "../integrations/personal-github";
+import {
+  integrationCommitGrant,
+  type IntegrationCommitGrant,
+} from "../integrations/integration-commit-authority";
 import {
   isConsistentGitHubBindingCandidates,
   isConsistentGitHubBindingProof,
@@ -598,6 +603,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
           message: "GitHub OAuth state does not match this workspace",
         });
       }
+      await withOrganizationIntegrationAcquisition(db, grant, ["github-app"], async () => {});
       let candidates: GitHubInstallationBindingCandidate[] | null;
       try {
         candidates = deps.githubAppApi?.discoverInstallationBindingCandidates
@@ -652,6 +658,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "GitHub OAuth state does not match this workspace",
       });
     }
+    await withOrganizationIntegrationAcquisition(db, grant, ["github-app"], async () => {});
     let proof;
     try {
       proof = deps.githubAppApi?.authorizeInstallationBinding
@@ -681,22 +688,30 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const expiresAt = new Date((statePayload.iat + githubBindingStateMaxAgeSeconds) * 1_000);
     let bound;
     try {
-      bound = await bindAuthorizedGitHubInstallationRepositories(db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        installationId,
-        githubAccountId: proof.installation.accountId,
-        accountLogin: proof.installation.accountLogin,
-        accountType: proof.installation.accountType,
-        linkedBySubjectId: grant.subjectId,
-        githubActorId: proof.actorId,
-        githubActorLogin: proof.actorLogin,
-        authorityKind: proof.authorityKind,
-        authorityCheckedAt,
-        authorityExpiresAt: expiresAt,
-        authorityNonce: statePayload.nonce,
-        repositoryIds,
-      });
+      bound = await withOrganizationIntegrationAcquisition(
+        db,
+        grant,
+        ["github-app"],
+        async (tx) => {
+          await grant.authorizeCommit(tx);
+          return bindAuthorizedGitHubInstallationRepositories(tx, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            installationId,
+            githubAccountId: proof.installation.accountId,
+            accountLogin: proof.installation.accountLogin,
+            accountType: proof.installation.accountType,
+            linkedBySubjectId: grant.subjectId,
+            githubActorId: proof.actorId,
+            githubActorLogin: proof.actorLogin,
+            authorityKind: proof.authorityKind,
+            authorityCheckedAt,
+            authorityExpiresAt: expiresAt,
+            authorityNonce: statePayload.nonce,
+            repositoryIds,
+          });
+        },
+      );
     } catch (error) {
       if (error instanceof GitHubInstallationAuthorityCommitError) {
         throw new HTTPException(409, { message: error.message });
@@ -913,18 +928,32 @@ async function requireGitHubManageGrant(
   deps: ApiRouteDeps,
   workspaceId: string,
   expectedState: GitHubSignedStatePayload,
-): Promise<AccessGrant> {
+): Promise<IntegrationCommitGrant> {
   try {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "github:manage");
     requireLegacyOAuthActor(access);
-    return access.grant;
+    return integrationCommitGrant(access, ["github:manage"], {
+      settings: deps.settings,
+      authorizationHeader: c.req.header("authorization"),
+    });
   } catch (error) {
     if (!(error instanceof HTTPException) || error.status !== 401) {
       throw error;
     }
     const grant = githubBrowserGrantFromState(deps.settings, expectedState, workspaceId);
     if (grant) {
-      return grant;
+      return {
+        ...grant,
+        authorizeCommit: async () => {
+          const current = githubBrowserGrantFromState(deps.settings, expectedState, workspaceId);
+          if (
+            !current ||
+            current.accountId !== grant.accountId ||
+            current.subjectId !== grant.subjectId
+          )
+            throw new HTTPException(403, { message: "GitHub browser handoff expired or changed" });
+        },
+      };
     }
     throw error;
   }

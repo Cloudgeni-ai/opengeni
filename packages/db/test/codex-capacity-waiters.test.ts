@@ -5,10 +5,18 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
+import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { eq, sql } from "drizzle-orm";
 import * as schema from "../src/schema";
 import {
+  CODEX_CAPACITY_RECOVERY_KEY,
+  readCodexCapacityRecovery,
+} from "../src/codex-capacity-recovery";
+import {
   armCodexCapacityWait,
+  appendSessionEventsForTurnAttempt,
+  evaluateGoalContinuation,
+  getSessionTurn,
   claimSessionWorkForAttempt,
   codexCapacityRefreshBackoffMs,
   createDb,
@@ -19,10 +27,13 @@ import {
   listPendingCodexCapacityWakeTargets,
   mutateSessionControlInTransaction,
   reconcileCodexCapacityWait,
+  requestSessionTurnRecovery,
+  retryFailedSessionInTransaction,
   recordCodexAccountUsageWithWakeTargets,
   registerPendingSessionToolCall,
   setCodexCredentialExhausted,
   setSessionCodexPinInTransaction,
+  setWorkspaceCodexSubscriptionMode,
   submitHumanPromptInTransaction,
   updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
@@ -245,6 +256,9 @@ const unavailableDecision = (): CodexCapacityAvailabilityDecision => ({
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("codex-capacity-waiters");
   if (!shared) {
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+      throw new Error("Codex capacity waiter regressions require a real PostgreSQL database");
+    }
     available = false;
     console.warn("[codex-capacity-waiters] postgres unavailable, skipping");
     return;
@@ -268,6 +282,330 @@ afterAll(async () => {
 }, 180_000);
 
 describe("durable Codex capacity waits", () => {
+  test("actual breaker failure supports explicit same-turn Retry with a fresh capacity budget", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const credentialId = await connectCredential(ws, true);
+    const scenario = await seedScenario(ws);
+    const armed = await arm(scenario);
+    if (armed.action !== "waiting") throw new Error("expected waiter");
+    await reconcileCodexCapacityWait(
+      dbA,
+      { ...scenario, waiterId: armed.waiter.id, generation: armed.waiter.generation },
+      () => availableDecision(credentialId),
+    );
+    const claimed = await claimTestTurn(
+      dbB,
+      ws.workspaceId,
+      scenario.sessionId,
+      scenario.workflowId,
+    );
+    if (!claimed?.activeAttemptId) throw new Error("expected resumed attempt");
+    await admin`update session_turns set metadata = metadata || ${admin.json({ [CODEX_CAPACITY_RECOVERY_KEY]: { falseResumptions: 9, resumeGeneration: claimed.executionGeneration, retryNotBefore: null } })}::jsonb where id = ${scenario.turnId}`;
+    const stopped = await arm({ ...scenario, attemptId: claimed.activeAttemptId });
+    expect(stopped.action).toBe("stopped");
+    if (stopped.action !== "stopped") throw new Error("expected breaker");
+    expect(stopped.sessionStatus).toBe("failed");
+    const failure = stopped.events.find((event) => event.type === "turn.failed")!;
+    const retried = await withSessionActivityRlsContext(dbA, ws, async (scoped) =>
+      scoped.transaction(async (tx) =>
+        retryFailedSessionInTransaction(tx as unknown as SessionActivityDatabase, {
+          ...ws,
+          sessionId: scenario.sessionId,
+          subjectId: "capacity-test-operator",
+          request: { clientEventId: crypto.randomUUID(), failureEventId: failure.id },
+          executionPolicy: resolveTurnExecutionPolicyV1(settings, {
+            modelId: "codex/gpt-5.6-sol",
+            requestedModelId: null,
+            modelSource: "session",
+            reasoningEffort: "xhigh",
+            reasoningSource: "session",
+            latencyMode: "standard",
+            latencyModeSource: "session",
+          }),
+        }),
+      ),
+    );
+    expect(retried).toMatchObject({ outcome: "accepted", turnId: scenario.turnId });
+    const next = await claimTestTurn(dbB, ws.workspaceId, scenario.sessionId, scenario.workflowId);
+    expect(next?.id).toBe(scenario.turnId);
+    expect(next?.model).toBe("codex/gpt-5.6-sol");
+    expect(readCodexCapacityRecovery(next?.metadata).falseResumptions).toBe(0);
+  });
+
+  test("ten false resumptions persist across clients, back off despite wakes, and require explicit Continue", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const credentialId = await connectCredential(ws, true);
+    const scenario = await seedScenario(ws);
+    let armed = await arm(scenario);
+    if (armed.action !== "waiting") throw new Error("expected waiter");
+    const originalAttemptId = scenario.attemptId;
+    for (let count = 1; count <= 10; count++) {
+      const wake = {
+        ...scenario,
+        waiterId: armed.waiter.id,
+        generation: armed.waiter.generation,
+        now: new Date(armed.waiter.nextCheckAt.getTime() + 1),
+      };
+      const wakes = await Promise.all([
+        reconcileCodexCapacityWait(dbA, wake, () => availableDecision(credentialId)),
+        reconcileCodexCapacityWait(dbB, wake, () => availableDecision(credentialId)),
+      ]);
+      expect(wakes.map((result) => result.action).sort()).toEqual(["resumed", "stale"]);
+      const claimed = await claimTestTurn(
+        dbB,
+        scenario.workspaceId,
+        scenario.sessionId,
+        scenario.workflowId,
+      );
+      if (!claimed?.activeAttemptId) throw new Error("expected resumed attempt");
+      scenario.attemptId = claimed.activeAttemptId;
+      if (count === 3) {
+        expect(
+          await requestSessionTurnRecovery(dbA, ws.workspaceId, {
+            sessionId: scenario.sessionId,
+            turnId: scenario.turnId,
+            triggerEventId: claimed.triggerEventId,
+            attemptId: claimed.activeAttemptId,
+            reason: "worker_shutdown",
+          }),
+        ).toMatchObject({ action: "recovering" });
+        const replacement = await claimTestTurn(
+          dbB,
+          ws.workspaceId,
+          scenario.sessionId,
+          scenario.workflowId,
+        );
+        if (!replacement?.activeAttemptId) throw new Error("expected restart replacement");
+        expect(replacement.executionGeneration).toBe(claimed.executionGeneration + 1);
+        scenario.attemptId = replacement.activeAttemptId;
+      }
+      expect(
+        await armCodexCapacityWait(dbA, {
+          ...scenario,
+          attemptId: originalAttemptId,
+          goalVersion: scenario.goalId ? 1 : null,
+          earliestResetAt: null,
+          resetKind: "bounded_refresh",
+          failurePayload: {},
+        }),
+      ).toMatchObject({ action: "stale" });
+      const result = await arm(scenario);
+      expect(result.action).toBe(count === 10 ? "stopped" : "waiting");
+      const persisted = await getSessionTurn(dbB, scenario.workspaceId, scenario.turnId);
+      const recovery = readCodexCapacityRecovery(persisted?.metadata);
+      expect(recovery.falseResumptions).toBe(count);
+      expect(recovery.resumeGeneration).toBeNull();
+      if (result.action === "stopped") {
+        expect(result.events.find((event) => event.type === "turn.failed")?.payload).toMatchObject({
+          code: "codex_capacity_recovery_exhausted",
+          recoveryExhausted: true,
+          retryable: false,
+        });
+        expect(persisted?.status).toBe("failed");
+        expect(
+          await getCodexCapacityWaitForSession(dbB, scenario.workspaceId, scenario.sessionId),
+        ).toBeNull();
+        expect(
+          await reconcileCodexCapacityWait(dbB, wake, () => availableDecision(credentialId)),
+        ).toMatchObject({ action: "stale" });
+        break;
+      }
+      if (result.action !== "waiting") throw new Error("expected next wait");
+      armed = result;
+      const duplicate = await arm(scenario);
+      expect(duplicate.action).toBe("waiting");
+      await withCodexCapacityMutation(
+        dbA,
+        { workspaceId: scenario.workspaceId, reason: "test_reset" },
+        async () => ({ result: true, changed: true }),
+      );
+      let decisions = 0;
+      const delayed = await reconcileCodexCapacityWait(
+        dbB,
+        { ...scenario, waiterId: armed.waiter.id, generation: armed.waiter.generation },
+        () => {
+          decisions++;
+          return availableDecision(credentialId);
+        },
+      );
+      expect(delayed.action).toBe("waiting");
+      expect(decisions).toBe(0);
+      if (delayed.action !== "waiting") throw new Error("expected backoff");
+      expect(delayed.waiter.observedWakeRevision).toBe(delayed.waiter.wakeRevision);
+      expect(delayed.waiter.nextCheckAt.toISOString()).toBe(recovery.retryNotBefore!);
+    }
+    await evaluateGoalContinuation(dbA, {
+      workspaceId: scenario.workspaceId,
+      sessionId: scenario.sessionId,
+      defaultMaxAutoContinuations: 100,
+    });
+    expect(
+      await claimTestTurn(dbB, scenario.workspaceId, scenario.sessionId, scenario.workflowId),
+    ).toBeNull();
+    const control = (action: "pause" | "resume") =>
+      withSessionActivityRlsContext(dbA, ws, async (scoped) =>
+        scoped.transaction(async (tx) =>
+          mutateSessionControlInTransaction(tx as unknown as SessionActivityDatabase, {
+            ...ws,
+            sessionId: scenario.sessionId,
+            actor: { type: "human", subjectId: "capacity-test-operator" },
+            operationKey: crypto.randomUUID(),
+            action,
+          }),
+        ),
+      );
+    await control("pause");
+    const continued = await withSessionActivityRlsContext(
+      dbA,
+      ws,
+      async (scoped) =>
+        await scoped.transaction(
+          async (tx) =>
+            await submitHumanPromptInTransaction(tx as unknown as SessionActivityDatabase, {
+              ...ws,
+              sessionId: scenario.sessionId,
+              subjectId: "capacity-test-operator",
+              actor: { type: "human", subjectId: "capacity-test-operator" },
+              operationKey: crypto.randomUUID(),
+              delivery: "send",
+              text: "Continue",
+              resources: [],
+              model: "codex/gpt-5.6-sol",
+              reasoningEffort: "xhigh",
+              reasoningEffortFallback: "xhigh",
+              source: "user",
+            }),
+        ),
+    );
+    expect(
+      await claimTestTurn(dbB, scenario.workspaceId, scenario.sessionId, scenario.workflowId),
+    ).toBeNull();
+    await control("resume");
+    const newTurn = await claimTestTurn(
+      dbB,
+      scenario.workspaceId,
+      scenario.sessionId,
+      scenario.workflowId,
+    );
+    expect(newTurn?.id).toBe(continued.turnId);
+    expect(newTurn?.id).not.toBe(scenario.turnId);
+    expect(newTurn?.model).toBe("codex/gpt-5.6-sol");
+    expect(readCodexCapacityRecovery(newTurn?.metadata).falseResumptions).toBe(0);
+  });
+
+  test("unavailable checks can wait for days without spending budget and reset wake resumes the same turn", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const credentialId = await connectCredential(ws, true);
+    const scenario = await seedScenario(ws);
+    const armed = await arm(scenario, new Date(Date.now() + 48 * 60 * 60_000));
+    if (armed.action !== "waiting") throw new Error("expected waiter");
+    for (let hour = 1; hour <= 49; hour++) {
+      expect(
+        await reconcileCodexCapacityWait(
+          dbB,
+          {
+            ...scenario,
+            waiterId: armed.waiter.id,
+            generation: armed.waiter.generation,
+            now: new Date(Date.now() + hour * 60 * 60_000),
+            boundedRefreshAttempted: true,
+          },
+          unavailableDecision,
+        ),
+      ).toMatchObject({ action: "waiting" });
+    }
+    expect(
+      readCodexCapacityRecovery(
+        (await getSessionTurn(dbB, ws.workspaceId, scenario.turnId))?.metadata,
+      ).falseResumptions,
+    ).toBe(0);
+    await withCodexCapacityMutation(
+      dbA,
+      { workspaceId: ws.workspaceId, reason: "test_reset" },
+      async () => ({ result: true, changed: true }),
+    );
+    expect(
+      await reconcileCodexCapacityWait(
+        dbB,
+        { ...scenario, waiterId: armed.waiter.id, generation: armed.waiter.generation },
+        () => availableDecision(credentialId),
+      ),
+    ).toMatchObject({ action: "resumed" });
+  });
+
+  test("only an exact current completed model request clears the durable capacity budget", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const credentialId = await connectCredential(ws, true);
+    const scenario = await seedScenario(ws);
+    const originalAttemptId = scenario.attemptId;
+    const armed = await arm(scenario);
+    if (armed.action !== "waiting") throw new Error("expected waiter");
+    await reconcileCodexCapacityWait(
+      dbA,
+      { ...scenario, waiterId: armed.waiter.id, generation: armed.waiter.generation },
+      () => availableDecision(credentialId),
+    );
+    const claimed = await claimTestTurn(
+      dbB,
+      ws.workspaceId,
+      scenario.sessionId,
+      scenario.workflowId,
+    );
+    if (!claimed?.activeAttemptId) throw new Error("expected attempt");
+    await admin`update session_turns set metadata = metadata || ${admin.json({ [CODEX_CAPACITY_RECOVERY_KEY]: { falseResumptions: 9, resumeGeneration: claimed.executionGeneration, retryNotBefore: null } })}::jsonb where id = ${scenario.turnId}`;
+    const append = (
+      attemptId: string,
+      generation: number,
+      phase: string,
+      meaningfulOutput = false,
+    ) =>
+      appendSessionEventsForTurnAttempt(
+        dbA,
+        ws.workspaceId,
+        scenario.sessionId,
+        scenario.turnId,
+        generation,
+        attemptId,
+        [{ type: "agent.model.request", payload: { phase, meaningfulOutput } }],
+      );
+    expect((await append(originalAttemptId, 1, "completed", true)).accepted).toBe(false);
+    expect(
+      (await append(claimed.activeAttemptId, claimed.executionGeneration, "failed")).accepted,
+    ).toBe(true);
+    expect(
+      readCodexCapacityRecovery(
+        (await getSessionTurn(dbB, ws.workspaceId, scenario.turnId))?.metadata,
+      ).falseResumptions,
+    ).toBe(9);
+    expect(
+      (await append(claimed.activeAttemptId, claimed.executionGeneration, "completed")).accepted,
+    ).toBe(true);
+    expect(
+      readCodexCapacityRecovery(
+        (await getSessionTurn(dbB, ws.workspaceId, scenario.turnId))?.metadata,
+      ).falseResumptions,
+    ).toBe(9);
+    expect(
+      (await append(claimed.activeAttemptId, claimed.executionGeneration, "completed", true))
+        .accepted,
+    ).toBe(true);
+    expect(
+      (await getSessionTurn(dbB, ws.workspaceId, scenario.turnId))?.metadata,
+    ).not.toHaveProperty(CODEX_CAPACITY_RECOVERY_KEY);
+    expect(await arm({ ...scenario, attemptId: claimed.activeAttemptId })).toMatchObject({
+      action: "waiting",
+    });
+    expect(
+      readCodexCapacityRecovery(
+        (await getSessionTurn(dbB, ws.workspaceId, scenario.turnId))?.metadata,
+      ).falseResumptions,
+    ).toBe(0);
+  });
+
   test("bounded unknown-reset backoff is deterministic and capped", () => {
     expect(codexCapacityRefreshBackoffMs(-1)).toBe(60_000);
     expect(codexCapacityRefreshBackoffMs(0)).toBe(60_000);
@@ -495,14 +833,22 @@ describe("durable Codex capacity waits", () => {
     const ws = await freshWorkspace();
     const credentialId = await connectCredential(ws, true);
     const scenario = await seedScenario(ws);
-    await admin`
-      insert into codex_credential_leases (
-        account_id, workspace_id, credential_id, turn_id,
-        holder_id, generation, leased_until
-      ) values (
-        ${scenario.accountId}, ${scenario.workspaceId}, ${credentialId}, ${scenario.turnId},
-        'current-holder', 4, now() + interval '5 minutes'
-      )`;
+    // Lease source authority requires the same tenant context as a real allocation.
+    await withSessionActivityRlsContext(
+      dbA,
+      { accountId: scenario.accountId, workspaceId: scenario.workspaceId },
+      async (tx) => {
+        await tx.execute(sql`
+          insert into codex_credential_leases (
+            account_id, workspace_id, credential_id, turn_id,
+            holder_id, generation, leased_until
+          ) values (
+            ${scenario.accountId}, ${scenario.workspaceId}, ${credentialId}, ${scenario.turnId},
+            'current-holder', 4, now() + interval '5 minutes'
+          )
+        `);
+      },
+    );
     const input = {
       accountId: scenario.accountId,
       workspaceId: scenario.workspaceId,
@@ -628,6 +974,60 @@ describe("durable Codex capacity waits", () => {
       turn_status: "waiting_capacity",
       active_turn_id: scenario.turnId,
     });
+  });
+
+  test("local reconnect across source drift immediately wakes only accepted workspace waiters", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const local = await connectCredential(ws, true);
+    await admin`update codex_subscription_credentials set status = 'error' where id = ${local}`;
+    const workspaceScenario = await seedScenario(ws);
+    const workspaceWait = await arm(workspaceScenario);
+    expect(workspaceWait.action).toBe("waiting");
+    const [organization] = await admin<{ id: string }[]>`insert into codex_subscription_credentials
+      (account_id, organization_id, authority_scope, credential_encrypted, chatgpt_account_id, status)
+      values (${ws.accountId}, ${ws.accountId}, 'organization', 'ciphertext', 'org-reconnect', 'error') returning id`;
+    await admin`insert into organization_codex_rotation_settings (account_id, active_credential_id, rotation_enabled)
+      values (${ws.accountId}, ${organization!.id}, true)`;
+    await setWorkspaceCodexSubscriptionMode(dbA, { ...ws, subjectId: null, mode: "organization" });
+    const organizationScenario = await seedScenario(ws);
+    const organizationWait = await arm(organizationScenario);
+    if (workspaceWait.action !== "waiting" || organizationWait.action !== "waiting")
+      throw new Error("expected waits");
+    const [localRow] =
+      await admin`select chatgpt_account_id from codex_subscription_credentials where id = ${local}`;
+    const mutation = await withCodexCapacityMutation(
+      dbA,
+      { workspaceId: ws.workspaceId, reason: "codex_credential_connected" },
+      async (tx) => {
+        const result = await upsertCodexSubscriptionCredential(tx, {
+          ...ws,
+          credentialEncrypted: "reconnected",
+          chatgptAccountId: localRow!.chatgpt_account_id,
+          scopes: null,
+          planType: "pro",
+          isFedramp: false,
+          expiresAt: null,
+          lastRefreshAt: new Date(),
+        });
+        return { result, changed: true };
+      },
+    );
+    expect(mutation.wakeTargets.map((target) => target.waiterId)).toEqual([
+      workspaceWait.waiter.id,
+    ]);
+    expect(
+      (await getCodexCapacityWaitForSession(dbA, ws.workspaceId, organizationScenario.sessionId))
+        ?.wakeRevision,
+    ).toBe(organizationWait.waiter.wakeRevision);
+    // Changing the preference back must not broaden a local mutation to org waits either.
+    await setWorkspaceCodexSubscriptionMode(dbA, { ...ws, subjectId: null, mode: "workspace" });
+    const again = await withCodexCapacityMutation(
+      dbA,
+      { workspaceId: ws.workspaceId, reason: "local_capacity_changed" },
+      async () => ({ result: true, changed: true }),
+    );
+    expect(again.wakeTargets.map((target) => target.waiterId)).toEqual([workspaceWait.waiter.id]);
   });
 
   test("one capacity mutation wakes and concurrent evaluators resume and claim once", async () => {
@@ -811,7 +1211,11 @@ describe("durable Codex capacity waits", () => {
 
     const mutation = await withCodexCapacityMutation(
       dbA,
-      { workspaceId: workspaces[0]!.workspaceId, reason: "organization_capacity_restored" },
+      {
+        workspaceId: workspaces[0]!.workspaceId,
+        reason: "organization_capacity_restored",
+        mutationSource: "organization",
+      },
       async (tx) => {
         const updated = await tx
           .update(schema.codexSubscriptionCredentials)
@@ -1131,6 +1535,7 @@ describe("durable Codex capacity waits", () => {
     const scenario = await seedScenario(ws);
     const armed = await arm(scenario);
     if (armed.action !== "waiting") throw new Error("expected waiter");
+    await admin`update session_turns set metadata = metadata || ${admin.json({ [CODEX_CAPACITY_RECOVERY_KEY]: { falseResumptions: 9, resumeGeneration: null, retryNotBefore: null } })}::jsonb where id = ${scenario.turnId}`;
 
     const actor = {
       type: "human" as const,
@@ -1165,6 +1570,11 @@ describe("durable Codex capacity waits", () => {
       () => availableDecision(credentialId),
     );
     expect(whilePaused.action).toBe("paused");
+    expect(
+      readCodexCapacityRecovery(
+        (await getSessionTurn(dbB, ws.workspaceId, scenario.turnId))?.metadata,
+      ).falseResumptions,
+    ).toBe(9);
     const [pausedState] = await admin<
       {
         waiter_status: string;
@@ -1226,6 +1636,11 @@ describe("durable Codex capacity waits", () => {
       () => availableDecision(credentialId),
     );
     expect(resumed.action).toBe("resumed");
+    expect(
+      readCodexCapacityRecovery(
+        (await getSessionTurn(dbB, ws.workspaceId, scenario.turnId))?.metadata,
+      ).falseResumptions,
+    ).toBe(9);
     const claimed = await claimTestTurn(
       dbA,
       scenario.workspaceId,

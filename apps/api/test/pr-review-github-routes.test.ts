@@ -1,12 +1,12 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { stableJson, type PrReviewManagedGitHubSetup } from "@opengeni/contracts";
-import { getCapabilityPack, type ApiRouteDeps } from "@opengeni/core";
+import postgres from "postgres";
+import { type PrReviewManagedGitHubSetup } from "@opengeni/contracts";
+import { type ApiRouteDeps } from "@opengeni/core";
 import {
   bootstrapWorkspace,
   createDb,
   deleteWorkspace,
-  enablePackInstallation,
   listPrReviewAppRegistrations,
   listPrReviewRepositoryBindings,
   type DbClient,
@@ -31,8 +31,27 @@ let accountId: string | null = null;
 let subjectId: string | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("pr-review-github-routes");
-  if (!shared) return;
+  const adminUrl = process.env.OPENGENI_INTEGRATION_POLICY_TEST_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_INTEGRATION_POLICY_TEST_APP_URL;
+  if (Boolean(adminUrl) !== Boolean(appUrl)) throw new Error("Set both policy fixture URLs");
+  if (adminUrl && appUrl) {
+    const admin = postgres(adminUrl);
+    shared = {
+      admin,
+      adminUrl,
+      appUrl,
+      release: async () => {
+        await admin.end();
+      },
+    };
+  } else {
+    shared = await acquireSharedTestDatabase("pr-review-github-routes");
+  }
+  if (!shared) {
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1")
+      throw new Error("PR Review GitHub routes require real PostgreSQL");
+    return;
+  }
   client = createDb(shared.appUrl);
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "opengeni:configured",
@@ -50,17 +69,6 @@ beforeAll(async () => {
   workspaceId = grant.workspaceId;
   accountId = grant.accountId;
   subjectId = grant.subjectId;
-  const pack = getCapabilityPack("pr-review");
-  if (!pack) throw new Error("PR Review Pack is unavailable");
-  await enablePackInstallation(client.db, {
-    accountId,
-    workspaceId,
-    packId: pack.id,
-    manifestSnapshot: pack,
-    manifestDigest: createHash("sha256").update(stableJson(pack)).digest("hex"),
-    installedBySubjectId: subjectId,
-    metadata: {},
-  });
 }, 180_000);
 
 afterAll(async () => {

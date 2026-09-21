@@ -72,6 +72,9 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "read_sender_connection(uuid, uuid, uuid, text)",
+  "validate_mcp_account_bindings(jsonb, jsonb)",
+  "fence_mcp_account_bindings()",
   "guard_mcp_operation_immutable()",
   "mcp_operation_command_scoped(jsonb, text, jsonb)",
   "guard_workspace_owned_skill_head_delete()",
@@ -124,6 +127,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_organization_administration_overview(uuid, text)",
   "get_workspace_kind(uuid, uuid)",
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
+  "capture_legacy_codex_turn_sources(uuid, uuid)",
   "list_organization_workspace_ids(uuid)",
   "list_organization_codex_workspace_ids(uuid)",
   "organization_workspace_command(jsonb)",
@@ -252,10 +256,10 @@ const MANAGED_HUMAN_PERSONAL_WORKSPACE_AUTHORITY_TABLES = [
 const PERSONAL_RESOURCE_ATTEMPT_RESOLVER_ROUTINE =
   "resolve_session_attempt_personal_resources(uuid, uuid, uuid)";
 const USER_RESOURCE_LIFECYCLE_ROUTINES = [
+  "list_owned_connection_accounts(uuid, uuid)",
   "accept_turn_personal_resource_attachment(uuid, uuid, uuid, uuid, text, integer, boolean, integer)",
   "list_self_user_resource_authorities(uuid, uuid, text, uuid, integer)",
   "issue_self_user_resource_grant(uuid, uuid, uuid, text, text, text, uuid, integer, boolean)",
-  "issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean)",
   "revoke_self_user_resource_grant(uuid, uuid, uuid)",
   "authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid)",
 ] as const;
@@ -263,9 +267,7 @@ const CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE =
   "connection_authority_convergence_audit_capability_active(uuid)";
 const CONNECTION_AUTHORITY_ROUTINES = [
   CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE,
-  "resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb)",
   "resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text)",
-  "resolve_connection_use_authority(uuid, uuid, uuid, jsonb)",
   "inspect_organization_connection_authority_convergence(uuid, integer, uuid)",
 ] as const;
 const PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES = [
@@ -280,7 +282,6 @@ const PERSONAL_GITHUB_REPOSITORY_AUTHORITY_TABLES = [
 const SCHEDULED_PERSONAL_RESOURCE_ROUTINES = [
   "freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint)",
   "clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint)",
-  "refresh_scheduled_task_personal_resources_clone_connections(uuid, uuid, uuid, bigint, bigint)",
   "create_scheduled_agent_run_with_admission(uuid, uuid, uuid, uuid, bigint, text, text, text, timestamp with time zone, timestamp with time zone, jsonb)",
   "materialize_scheduled_task_reusable_session_from_run(uuid, uuid, uuid, uuid, uuid, bigint, text)",
   "scheduled_task_run_personal_resource_authority(uuid, uuid, uuid)",
@@ -357,6 +358,11 @@ const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
   "detach_scoped_machine_dependent_sessions(uuid, uuid, uuid)",
 ] as const;
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
+  "mutate_managed_sign_in_method(text, text, jsonb)",
+  "assert_managed_sign_in_recovery(text, text, uuid, jsonb)",
+  "replay_managed_sign_in_method(text, text, jsonb)",
+  "claim_managed_sign_in_notification(uuid, text, text, integer)",
+  "settle_managed_sign_in_notification(uuid, uuid, text)",
   "ensure_canonical_human_identity(text, text)",
   "validate_canonical_human_session(text, text, boolean)",
   "get_canonical_human_identity_projection(text)",
@@ -750,6 +756,7 @@ export const FORCE_RLS_TABLES = [
   "codex_reset_redemption_attempts",
   "codex_rotation_settings",
   "codex_subscription_credentials",
+  "codex_turn_source_bindings",
   "company_brain_context_selection_receipts",
   "company_brain_preference_proposal_receipts",
   "company_brain_turn_context_snapshots",
@@ -878,6 +885,7 @@ export const FORCE_RLS_TABLES = [
   "managed_auth_login_transactions",
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
+  "managed_sign_in_method_operations",
   "mcp_operations",
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
@@ -888,6 +896,8 @@ export const FORCE_RLS_TABLES = [
   "organization_codex_rotation_settings",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
+  "organization_integration_policies",
+  "organization_integration_policy_operations",
   "organization_invitation_binding_events",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
@@ -922,8 +932,6 @@ export const FORCE_RLS_TABLES = [
   "organization_user_setup_intents",
   "organization_workspace_lifecycle_events",
   "organization_workspace_operation_receipts",
-  "pack_installation_components",
-  "pack_installations",
   "personal_document_once_consumption_receipts",
   "personal_github_repository_selection_heads",
   "personal_github_repository_selection_operations",
@@ -1073,7 +1081,6 @@ export const FORCE_RLS_TABLES = [
   "workspace_learning_policy_revisions",
   "workspace_learning_policy_snapshots",
   "workspace_model_policies",
-  "workspace_packs",
   "workspace_screenshot_quotas",
   "workspace_session_activity_revisions",
   "workspace_variable_set_variables",
@@ -1201,8 +1208,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_model_provider_connection_operations",
   "organization_model_provider_connections",
   "organization_model_provider_custom_models",
-  "pack_installation_components",
-  "pack_installations",
   "pr_review_app_registrations",
   "pr_review_managed_github_routes",
   "pr_review_repository_bindings",
@@ -1276,7 +1281,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "workspace_instruction_policy_heads",
   "workspace_memberships",
   "workspace_model_policies",
-  "workspace_packs",
   "workspace_screenshot_quotas",
   "workspace_video_generation_policies",
   "workspace_video_generation_quotas",
@@ -1290,6 +1294,7 @@ export const RUNTIME_FULL_DML_TABLES = [
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = [
+  "codex_turn_source_bindings",
   "company_profile_activation_events",
   "company_profile_heads",
   "company_profile_snapshots",
@@ -1300,6 +1305,8 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "knowledge_memory_lifecycle_events",
   "knowledge_memory_relationships",
   "nested_agent_depth_configuration",
+  "organization_integration_policies",
+  "organization_integration_policy_operations",
   "preference_registry_events",
   "preference_registry_snapshots",
   "session_tenancy_activations",
@@ -1467,6 +1474,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "managed_auth_login_transactions",
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
+  "managed_sign_in_method_operations",
   "mcp_operations",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
@@ -1678,6 +1686,27 @@ export class RuntimeDatabasePostureError extends Error {
     this.name = "RuntimeDatabasePostureError";
     this.violations = violations;
   }
+}
+
+/** Posture/configuration mismatches cannot heal through connection backoff. */
+export function isRetryableRuntimeDatabaseStartupError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof RuntimeDatabasePostureError) return false;
+    const code = (current as Error & { code?: unknown }).code;
+    // PostgreSQL authentication, missing database, permission, and schema errors.
+    // Network failures and server-starting states retain the existing retry path.
+    if (
+      typeof code === "string" &&
+      ["28P01", "28000", "3D000", "42501", "42P01", "42703"].includes(code)
+    ) {
+      return false;
+    }
+    current = current.cause;
+  }
+  return true;
 }
 
 type IdentityRow = {
@@ -1942,9 +1971,17 @@ export async function inspectRuntimeDatabasePosture(
             c.relforcerowsecurity as rls_forced,
             row_security_active(c.oid) as rls_active,
             (select count(*)::int from pg_policy policy where policy.polrelid = c.oid) as policy_count,
-            has_table_privilege(current_user, c.oid, 'SELECT') as can_select,
-            has_table_privilege(current_user, c.oid, 'INSERT') as can_insert,
-            has_table_privilege(current_user, c.oid, 'UPDATE') as can_update,
+            -- Column-only grants on the inventory stamp are also unsafe; in
+            -- particular INSERT can mint authority without a table grant.
+            (has_table_privilege(current_user, c.oid, 'SELECT') or
+              (c.relname = 'modal_inventory_read_capabilities' and
+                has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
+            (has_table_privilege(current_user, c.oid, 'INSERT') or
+              (c.relname = 'modal_inventory_read_capabilities' and
+                has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
+            (has_table_privilege(current_user, c.oid, 'UPDATE') or
+              (c.relname = 'modal_inventory_read_capabilities' and
+                has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
@@ -1959,6 +1996,10 @@ export async function inspectRuntimeDatabasePosture(
               ${SCOPED_COMPUTE_CAPABILITY_TABLE},
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
+              'organization_usage_read_capabilities',
+              'session_file_attachments',
+              'session_file_read_capabilities',
+              'modal_inventory_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE}
             )
         `),
@@ -2166,6 +2207,35 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
+  if (tableByName.has("organization_integration_policies")) {
+    for (const name of [
+      "update_organization_integration_policy(uuid, text, jsonb)",
+      "assert_organization_integration_policy_administrator(uuid, text)",
+    ]) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+      const searchPaths = new Set([
+        `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+        `search_path=pg_catalog, ${targetSchema}, pg_temp`,
+      ]);
+      const routine = routines[0];
+      if (
+        routines.length !== 1 ||
+        !routine?.execute ||
+        routine.publicExecute ||
+        !routine.securityDefiner ||
+        !routine.configuration?.some((configuration) => searchPaths.has(configuration)) ||
+        [
+          "organization_integration_policies",
+          "organization_integration_policy_operations",
+          "organization_memberships",
+          "api_keys",
+        ].some((table) => tableByName.get(table)?.owner !== routine.owner)
+      ) {
+        violations.push("organization integration policy mutation capability is missing or unsafe");
+      }
+    }
+  }
   const actualRlsTables = new Set(
     posture.tables.filter((table) => table.rlsEnabled).map((table) => table.name),
   );
@@ -3562,11 +3632,145 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
+  for (const name of ["session_file_attachments", "session_file_read_capabilities"]) {
+    const table = posture.privateTables.find((candidate) => candidate.name === name);
+    if (!table) {
+      if (!options.protectedTables)
+        violations.push(`session attachment relation ${name} is missing`);
+      continue;
+    }
+    if (
+      table.owner === expectedRole ||
+      table.owner !== tableByName.get("files")?.owner ||
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete
+    )
+      violations.push(`session attachment relation ${name} has unsafe authority`);
+    if (
+      name === "session_file_attachments" &&
+      (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1)
+    )
+      violations.push("session attachment grants lack FORCE-RLS isolation");
+    const routines =
+      name === "session_file_attachments"
+        ? [
+            "accept_session_file_attachments(uuid, uuid, uuid, uuid, text, uuid[])",
+            "read_session_file_attachments(uuid, uuid, uuid, integer, uuid[], jsonb)",
+          ]
+        : ["session_file_read_allowed(uuid, uuid, uuid)"];
+    for (const signature of routines) {
+      const routine = posture.privateRoutines.find((candidate) => candidate.name === signature);
+      const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+      const paths =
+        name === "session_file_read_capabilities"
+          ? ["search_path=pg_catalog, pg_temp"]
+          : [
+              `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+              `search_path=pg_catalog, ${targetSchema}, pg_temp`,
+            ];
+      if (
+        !routine ||
+        !routine.execute ||
+        routine.publicExecute ||
+        !routine.securityDefiner ||
+        routine.owner !== table.owner ||
+        !routine.configuration?.some((value) => paths.includes(value))
+      )
+        violations.push(`session attachment capability ${signature} is missing or unsafe`);
+    }
+  }
+
+  const organizationUsageCapability = posture.privateTables.find(
+    (table) => table.name === "organization_usage_read_capabilities",
+  );
+  const modalInventoryCapability = posture.privateTables.find(
+    (table) => table.name === "modal_inventory_read_capabilities",
+  );
+  if (modalInventoryCapability) {
+    const capability = modalInventoryCapability;
+    const inventory = posture.privateRoutines.find(
+      (routine) => routine.name === "list_live_modal_sandbox_leases()",
+    );
+    if (
+      capability.owner === expectedRole ||
+      capability.owner !== tableByName.get("sandbox_leases")?.owner ||
+      capability.select ||
+      capability.insert ||
+      capability.update ||
+      capability.delete ||
+      !inventory?.execute ||
+      !inventory.securityDefiner ||
+      inventory.publicExecute ||
+      inventory.owner !== capability.owner ||
+      !inventory.configuration?.includes("search_path=pg_catalog")
+    ) {
+      violations.push("Modal inventory capability has unsafe owner, ACL or runtime privileges");
+    }
+  }
+  if (organizationUsageCapability) {
+    const capability = organizationUsageCapability;
+    if (
+      capability.owner === expectedRole ||
+      capability.owner !== tableByName.get("usage_events")?.owner ||
+      capability.select ||
+      capability.insert ||
+      capability.update ||
+      capability.delete
+    ) {
+      violations.push(
+        "organization usage capability has unsafe owner or direct runtime privileges",
+      );
+    }
+    const aggregateRoutine = posture.privateRoutines.find(
+      (routine) =>
+        routine.name ===
+        "organization_usage_summary(uuid, timestamp with time zone, timestamp with time zone, text, uuid, boolean)",
+    );
+    if (
+      !aggregateRoutine ||
+      !aggregateRoutine.securityDefiner ||
+      !aggregateRoutine.execute ||
+      aggregateRoutine.publicExecute ||
+      aggregateRoutine.owner !== capability.owner
+    ) {
+      violations.push("organization usage aggregate capability is missing or unsafe");
+    }
+  }
+
   for (const routine of posture.privateRoutines) {
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
     const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
+    if (
+      ["validate_mcp_account_bindings(jsonb, jsonb)", "fence_mcp_account_bindings()"].includes(
+        routine.name,
+      )
+    ) {
+      if (routine.execute || routine.publicExecute) {
+        violations.push(
+          `runtime or PUBLIC has forbidden EXECUTE on MCP account binding internal routine ${routine.name}`,
+        );
+      }
+      if (routine.owner !== tableByName.get("session_turns")?.owner) {
+        violations.push(
+          `MCP account binding internal routine ${routine.name} owner does not match turn owner`,
+        );
+      }
+      if (routine.securityDefiner !== (routine.name === "fence_mcp_account_bindings()")) {
+        violations.push(
+          `MCP account binding internal routine ${routine.name} has unsafe execution mode`,
+        );
+      }
+    }
+    if (
+      routine.name === "read_sender_connection(uuid, uuid, uuid, text)" &&
+      (routine.execute || routine.publicExecute)
+    ) {
+      violations.push("runtime or PUBLIC can call the internal sender connection reader");
+    }
     if (
       [
         "guard_mcp_operation_immutable()",

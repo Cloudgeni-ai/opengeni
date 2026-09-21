@@ -197,7 +197,7 @@ export const AGENT_INSTRUCTIONS_CORE_PLACEHOLDER = "{{core}}";
  */
 export const DEFAULT_AGENT_INSTRUCTIONS = [
   "You are an OpenGeni workspace agent.",
-  "Follow the user's task and any enabled pack or skill instructions for the current role.",
+  "Follow the user's task and the applicable Skill instructions for the current role.",
   "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
   "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
   "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
@@ -285,6 +285,8 @@ const SettingsSchema = z.object({
   observabilityMetricsEnabled: EnvBoolean.default(true),
   observabilityOtlpEndpoint: z.string().url().optional(),
   observabilityOtlpHeaders: z.string().default(""),
+  observabilityDiagnosticsEndpoint: z.string().url().optional(),
+  observabilityDiagnosticsHeaders: z.string().default(""),
   analyticsEnabled: EnvBoolean.default(false),
   analyticsConsentRequired: EnvBoolean.default(true),
   analyticsReoClientId: z
@@ -484,16 +486,6 @@ const SettingsSchema = z.object({
   // into @opengeni/db once at boot.
   // Env: OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED.
   childLifecycleNoticesEnabled: EnvBoolean.default(false),
-  // Explicit host-owned MCP connection authority is a rolling protocol
-  // activation. Keep it off while any API, worker, or browser bundle predates
-  // the authority discriminator; enable it only after the whole fleet runs an
-  // image that understands host refs. Legacy markerless non-UUID refs remain a
-  // separate compatibility lane for already-persisted embedding integrations.
-  // Env: OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED.
-  hostMcpAuthoritySourceAdmissionEnabled: EnvBoolean.default(false),
-  // Server-owned per-organization remote MCP resolver configuration. Optional;
-  // inline credentials and native provider OAuth do not require this service.
-  hostMcpCredentialResolversJson: z.string().optional(),
   // Per-channel and per-DM Slack workspace routing. Default ON. A channel does
   // not count a personal workspace as a candidate, so an organization with one
   // shared workspace resolves it as the sole candidate and never asks; the
@@ -744,6 +736,7 @@ const SettingsSchema = z.object({
   // rotated TO — when EITHER usage window (5h/weekly) is at/over this percent. Default 90 to
   // match the UI danger flip (UsageBar danger at pct >= 90). OPENGENI_CODEX_ROTATION_NEAR_EXHAUSTION_PCT.
   codexRotationNearExhaustionPct: z.coerce.number().int().min(1).max(100).default(90),
+  reasoningConfigurationUpdatesEnabled: EnvBoolean.default(false),
   openaiReasoningEffort: ReasoningEffort.default("low"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh,max"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
@@ -792,7 +785,7 @@ const SettingsSchema = z.object({
   // the verified, self-contained native artifact runtime at its fixed image
   // paths. Disabled by default so arbitrary/custom provider images never make
   // document/spreadsheet/presentation skills appear when their runtime is
-  // absent. Per-pack/per-rig image overrides fail closed in the worker even
+
   // when this base-image contract is enabled.
   sandboxArtifactRuntimeEnabled: EnvBoolean.default(false),
   dockerExposedPorts: z.string().default(""),
@@ -804,6 +797,9 @@ const SettingsSchema = z.object({
   dockerWorkspaceBaseDir: z.string().min(1).optional(),
   modalAppName: z.string().default("opengeni-sandbox"),
   modalImageRef: z.string().optional(),
+  // Activate only after descriptor-aware readers, DB fences and the exact
+  // native image have passed the supervised-command rollout canary.
+  modalCommandSupervisionEnabled: EnvBoolean.default(false),
   // Provider-native immutable Modal image ID for the exact logical
   // `modalImageRef`. When set, the runtime uses ModalImageSelector.fromId and
   // never asks Modal to parse or import the registry ref. The logical ref is
@@ -1332,6 +1328,124 @@ const SettingsSchema = z.object({
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
+
+// Independently supervised artifact services are not API/agent runtimes. Parse
+// only their actual capabilities, using the same field schemas as getSettings.
+const ArtifactServiceSettingsSchema = SettingsSchema.pick({
+  serviceName: true,
+  environment: true,
+  deploymentRevision: true,
+  dbSchema: true,
+  rlsStrategy: true,
+  observabilityStructuredLogs: true,
+  observabilityMetricsEnabled: true,
+  observabilityOtlpEndpoint: true,
+  observabilityOtlpHeaders: true,
+});
+const ArtifactOutboxSettingsSchema = ArtifactServiceSettingsSchema.extend({
+  natsUrl: SettingsSchema.shape.natsUrl,
+  selfhostedNatsControlUser: SettingsSchema.shape.selfhostedNatsControlUser,
+  selfhostedNatsControlPassword: SettingsSchema.shape.selfhostedNatsControlPassword,
+});
+const ObjectStorageSettingsSchema = SettingsSchema.pick({
+  objectStorageBackend: true,
+  objectStorageEndpoint: true,
+  objectStorageInternalEndpoint: true,
+  objectStorageSandboxEndpoint: true,
+  objectStorageBucket: true,
+  objectStorageRegion: true,
+  objectStorageAccessKeyId: true,
+  objectStorageSecretAccessKey: true,
+  objectStorageForcePathStyle: true,
+  objectStorageAzureConnectionString: true,
+  objectStorageAzureAccountName: true,
+  objectStorageAzureAccountKey: true,
+  objectStorageAzureEndpoint: true,
+  objectStorageGcsProjectId: true,
+  objectStorageGcsCredentialsJson: true,
+  objectStorageGcsKeyFilename: true,
+  objectStorageGcsApiEndpoint: true,
+});
+const ArtifactMaterializerSettingsSchema = ArtifactServiceSettingsSchema.extend(
+  ObjectStorageSettingsSchema.shape,
+);
+export type ArtifactOutboxSettings = z.infer<typeof ArtifactOutboxSettingsSchema>;
+export type ObjectStorageSettings = z.infer<typeof ObjectStorageSettingsSchema>;
+export type ArtifactMaterializerSettings = z.infer<typeof ArtifactMaterializerSettingsSchema>;
+
+function artifactServiceEnvironment(source: NodeJS.ProcessEnv) {
+  const optional = (name: string) => optionalEnvironmentValue(name, source);
+  return {
+    serviceName: optional("OPENGENI_SERVICE_NAME"),
+    environment: optional("OPENGENI_ENVIRONMENT"),
+    deploymentRevision:
+      optional("OPENGENI_DEPLOYMENT_REVISION") ??
+      optional("SOURCE_VERSION") ??
+      optional("GITHUB_SHA"),
+    dbSchema: optional("OPENGENI_DB_SCHEMA"),
+    rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
+    observabilityStructuredLogs: optional("OPENGENI_OBSERVABILITY_STRUCTURED_LOGS"),
+    observabilityMetricsEnabled: optional("OPENGENI_OBSERVABILITY_METRICS_ENABLED"),
+    observabilityOtlpEndpoint:
+      optional("OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT") ?? optional("OTEL_EXPORTER_OTLP_ENDPOINT"),
+    observabilityOtlpHeaders:
+      optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
+  };
+}
+
+export function getArtifactOutboxSettings(
+  source: NodeJS.ProcessEnv = process.env,
+): ArtifactOutboxSettings {
+  const settings = ArtifactOutboxSettingsSchema.parse({
+    ...artifactServiceEnvironment(source),
+    natsUrl: optionalEnvironmentValue("OPENGENI_NATS_URL", source),
+    selfhostedNatsControlUser: optionalEnvironmentValue(
+      "OPENGENI_SELFHOSTED_NATS_CONTROL_USER",
+      source,
+    ),
+    selfhostedNatsControlPassword: optionalEnvironmentValue(
+      "OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD",
+      source,
+    ),
+  });
+  dbSearchPath(settings);
+  if (
+    Boolean(settings.selfhostedNatsControlUser) !== Boolean(settings.selfhostedNatsControlPassword)
+  ) {
+    throw new Error("Artifact outbox NATS control user and password must be configured together");
+  }
+  return settings;
+}
+
+export function getArtifactMaterializerSettings(
+  source: NodeJS.ProcessEnv = process.env,
+): ArtifactMaterializerSettings {
+  const optional = (name: string) => optionalEnvironmentValue(name, source);
+  const settings = ArtifactMaterializerSettingsSchema.parse({
+    ...artifactServiceEnvironment(source),
+    objectStorageEndpoint: optional("OPENGENI_OBJECT_STORAGE_ENDPOINT"),
+    objectStorageInternalEndpoint: optional("OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT"),
+    objectStorageSandboxEndpoint: optional("OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT"),
+    objectStorageBackend: optional("OPENGENI_OBJECT_STORAGE_BACKEND"),
+    objectStorageBucket: optional("OPENGENI_OBJECT_STORAGE_BUCKET"),
+    objectStorageRegion: optional("OPENGENI_OBJECT_STORAGE_REGION"),
+    objectStorageAccessKeyId: optional("OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID"),
+    objectStorageSecretAccessKey: optional("OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY"),
+    objectStorageForcePathStyle: optional("OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE"),
+    objectStorageAzureConnectionString: optional("OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING"),
+    objectStorageAzureAccountName: optional("OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME"),
+    objectStorageAzureAccountKey: optional("OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY"),
+    objectStorageAzureEndpoint: optional("OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT"),
+    objectStorageGcsProjectId: optional("OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID"),
+    objectStorageGcsCredentialsJson: optional("OPENGENI_OBJECT_STORAGE_GCS_CREDENTIALS_JSON"),
+    objectStorageGcsKeyFilename: optional("OPENGENI_OBJECT_STORAGE_GCS_KEY_FILENAME"),
+    objectStorageGcsApiEndpoint: optional("OPENGENI_OBJECT_STORAGE_GCS_API_ENDPOINT"),
+  });
+  dbSearchPath(settings);
+  validateObjectStorageSettings(settings);
+  return settings;
+}
+
 export type McpServerConfig = Settings["mcpServers"][number];
 
 export type GoogleDriveProviderRetryOptions = {
@@ -2826,6 +2940,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       optional("OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT") ?? optional("OTEL_EXPORTER_OTLP_ENDPOINT"),
     observabilityOtlpHeaders:
       optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
+    observabilityDiagnosticsEndpoint: optional("OPENGENI_OBSERVABILITY_DIAGNOSTICS_ENDPOINT"),
+    observabilityDiagnosticsHeaders: optional("OPENGENI_OBSERVABILITY_DIAGNOSTICS_HEADERS"),
     analyticsEnabled: optional("OPENGENI_ANALYTICS_ENABLED"),
     analyticsConsentRequired: optional("OPENGENI_ANALYTICS_CONSENT_REQUIRED"),
     analyticsReoClientId: optional("OPENGENI_ANALYTICS_REO_CLIENT_ID"),
@@ -2906,10 +3022,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     goalIdleBackoffMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MS"),
     goalIdleBackoffMaxMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS"),
     childLifecycleNoticesEnabled: optional("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED"),
-    hostMcpAuthoritySourceAdmissionEnabled: optional(
-      "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED",
-    ),
-    hostMcpCredentialResolversJson: optional("OPENGENI_HOST_MCP_CREDENTIAL_RESOLVERS_JSON"),
     slackWorkspaceRoutingEnabled: optional("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
@@ -2994,6 +3106,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     codexProductSku: optional("OPENGENI_CODEX_PRODUCT_SKU"),
+    reasoningConfigurationUpdatesEnabled: optional(
+      "OPENGENI_REASONING_CONFIGURATION_UPDATES_ENABLED",
+    ),
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
     openaiAllowedReasoningEfforts: optional("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"),
     openaiResponsesTransport: optional("OPENGENI_OPENAI_RESPONSES_TRANSPORT"),
@@ -3017,6 +3132,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     dockerWorkspaceBaseDir: optional("OPENGENI_DOCKER_WORKSPACE_BASE_DIR"),
     modalAppName: optional("OPENGENI_MODAL_APP_NAME"),
     modalImageRef: optional("OPENGENI_MODAL_IMAGE_REF") ?? DEFAULT_MODAL_IMAGE_REF,
+    modalCommandSupervisionEnabled: optional("OPENGENI_MODAL_COMMAND_SUPERVISION_ENABLED"),
     modalImageId: optional("OPENGENI_MODAL_IMAGE_ID"),
     modalImageRegistrySecret: optional("OPENGENI_MODAL_IMAGE_REGISTRY_SECRET"),
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),
@@ -5764,6 +5880,7 @@ export function applyGitAuthPointerEnvironment(
 }
 
 export type StartupRetryOptions = {
+  shouldRetry?: (error: unknown) => boolean;
   attempts?: number;
   initialDelayMs?: number;
   maxDelayMs?: number;
@@ -5778,7 +5895,7 @@ export type StartupRetryOptions = {
 
 export function startupRetryOptions(
   settings: Settings,
-): Required<Omit<StartupRetryOptions, "onRetry">> {
+): Required<Omit<StartupRetryOptions, "onRetry" | "shouldRetry">> {
   return {
     attempts: settings.startupDependencyRetryAttempts,
     initialDelayMs: settings.startupDependencyRetryInitialDelayMs,
@@ -5798,7 +5915,7 @@ export async function retryStartupDependency<T>(
     try {
       return await operation();
     } catch (error) {
-      if (attempt >= attempts) {
+      if (attempt >= attempts || options.shouldRetry?.(error) === false) {
         throw error;
       }
       const delayMs = Math.min(maxDelayMs, initialDelayMs * 2 ** (attempt - 1));
@@ -6705,105 +6822,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       );
     }
   }
-  if (
-    settings.objectStorageBackend === "s3-compatible" ||
-    settings.objectStorageBackend === "aws-s3"
-  ) {
-    if (
-      Boolean(settings.objectStorageAccessKeyId) !== Boolean(settings.objectStorageSecretAccessKey)
-    ) {
-      throw new Error(
-        "OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID and OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY must both be set or both omitted",
-      );
-    }
-    if (
-      settings.objectStorageBackend === "s3-compatible" &&
-      (settings.objectStorageEndpoint ||
-        settings.objectStorageInternalEndpoint ||
-        settings.objectStorageSandboxEndpoint) &&
-      (!settings.objectStorageAccessKeyId || !settings.objectStorageSecretAccessKey)
-    ) {
-      throw new Error(
-        "S3-compatible object storage endpoints require OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID and OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY",
-      );
-    }
-    if (
-      settings.objectStorageAzureConnectionString ||
-      settings.objectStorageAzureAccountName ||
-      settings.objectStorageAzureAccountKey ||
-      settings.objectStorageAzureEndpoint
-    ) {
-      throw new Error(
-        "S3 object storage uses OPENGENI_OBJECT_STORAGE_* S3 settings, not OPENGENI_OBJECT_STORAGE_AZURE_* settings",
-      );
-    }
-    if (
-      settings.objectStorageGcsProjectId ||
-      settings.objectStorageGcsCredentialsJson ||
-      settings.objectStorageGcsKeyFilename ||
-      settings.objectStorageGcsApiEndpoint
-    ) {
-      throw new Error(
-        "S3 object storage uses OPENGENI_OBJECT_STORAGE_* S3 settings, not OPENGENI_OBJECT_STORAGE_GCS_* settings",
-      );
-    }
-  } else if (settings.objectStorageBackend === "azure-blob") {
-    if (
-      settings.objectStorageEndpoint ||
-      settings.objectStorageInternalEndpoint ||
-      settings.objectStorageSandboxEndpoint ||
-      settings.objectStorageAccessKeyId ||
-      settings.objectStorageSecretAccessKey
-    ) {
-      throw new Error(
-        "Azure Blob storage uses OPENGENI_OBJECT_STORAGE_AZURE_* settings, not S3-compatible object storage settings",
-      );
-    }
-    if (
-      settings.objectStorageGcsProjectId ||
-      settings.objectStorageGcsCredentialsJson ||
-      settings.objectStorageGcsKeyFilename ||
-      settings.objectStorageGcsApiEndpoint
-    ) {
-      throw new Error(
-        "Azure Blob storage uses OPENGENI_OBJECT_STORAGE_AZURE_* settings, not OPENGENI_OBJECT_STORAGE_GCS_* settings",
-      );
-    }
-    const hasConnectionString = Boolean(settings.objectStorageAzureConnectionString);
-    const hasSharedKey =
-      Boolean(settings.objectStorageAzureAccountName) &&
-      Boolean(settings.objectStorageAzureAccountKey);
-    if (!hasConnectionString && !hasSharedKey) {
-      throw new Error(
-        "Azure Blob storage requires OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING or OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME plus OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY",
-      );
-    }
-  } else {
-    if (
-      settings.objectStorageEndpoint ||
-      settings.objectStorageInternalEndpoint ||
-      settings.objectStorageSandboxEndpoint ||
-      settings.objectStorageAccessKeyId ||
-      settings.objectStorageSecretAccessKey
-    ) {
-      throw new Error(
-        "GCS object storage uses OPENGENI_OBJECT_STORAGE_GCS_* settings, not S3-compatible object storage settings",
-      );
-    }
-    if (
-      settings.objectStorageAzureConnectionString ||
-      settings.objectStorageAzureAccountName ||
-      settings.objectStorageAzureAccountKey ||
-      settings.objectStorageAzureEndpoint
-    ) {
-      throw new Error(
-        "GCS object storage uses OPENGENI_OBJECT_STORAGE_GCS_* settings, not OPENGENI_OBJECT_STORAGE_AZURE_* settings",
-      );
-    }
-    if (settings.objectStorageGcsCredentialsJson) {
-      parseGcsCredentialsJson(settings.objectStorageGcsCredentialsJson);
-    }
-  }
+  validateObjectStorageSettings(settings);
   if (settings.documentChunkOverlap >= settings.documentChunkSize) {
     throw new Error(
       "OPENGENI_DOCUMENT_CHUNK_OVERLAP must be smaller than OPENGENI_DOCUMENT_CHUNK_SIZE",
@@ -6832,12 +6851,9 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       throw new Error(`OPENGENI_MCP_SERVERS contains duplicate id ${server.id}`);
     }
     serverIds.add(server.id);
-    if (
-      server.connectionRef?.authoritySource === "host" &&
-      !settings.hostMcpAuthoritySourceAdmissionEnabled
-    ) {
+    if (server.connectionRef?.authoritySource === "host") {
       throw new Error(
-        "OPENGENI_MCP_SERVERS host-owned connection refs require OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED=true after the whole API/worker fleet is upgraded",
+        "OPENGENI_MCP_SERVERS host-owned connection refs are no longer supported; select ordinary native connections",
       );
     }
   }
@@ -7191,6 +7207,108 @@ export function resolveNatsCalloutConfig(settings: Settings): NatsCalloutConfig 
   return { accountSeed, accountName, user, password };
 }
 
+function validateObjectStorageSettings(settings: ObjectStorageSettings): void {
+  if (
+    settings.objectStorageBackend === "s3-compatible" ||
+    settings.objectStorageBackend === "aws-s3"
+  ) {
+    if (
+      Boolean(settings.objectStorageAccessKeyId) !== Boolean(settings.objectStorageSecretAccessKey)
+    ) {
+      throw new Error(
+        "OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID and OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY must both be set or both omitted",
+      );
+    }
+    if (
+      settings.objectStorageBackend === "s3-compatible" &&
+      (settings.objectStorageEndpoint ||
+        settings.objectStorageInternalEndpoint ||
+        settings.objectStorageSandboxEndpoint) &&
+      (!settings.objectStorageAccessKeyId || !settings.objectStorageSecretAccessKey)
+    ) {
+      throw new Error(
+        "S3-compatible object storage endpoints require OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID and OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY",
+      );
+    }
+    if (
+      settings.objectStorageAzureConnectionString ||
+      settings.objectStorageAzureAccountName ||
+      settings.objectStorageAzureAccountKey ||
+      settings.objectStorageAzureEndpoint
+    ) {
+      throw new Error(
+        "S3 object storage uses OPENGENI_OBJECT_STORAGE_* S3 settings, not OPENGENI_OBJECT_STORAGE_AZURE_* settings",
+      );
+    }
+    if (
+      settings.objectStorageGcsProjectId ||
+      settings.objectStorageGcsCredentialsJson ||
+      settings.objectStorageGcsKeyFilename ||
+      settings.objectStorageGcsApiEndpoint
+    ) {
+      throw new Error(
+        "S3 object storage uses OPENGENI_OBJECT_STORAGE_* S3 settings, not OPENGENI_OBJECT_STORAGE_GCS_* settings",
+      );
+    }
+  } else if (settings.objectStorageBackend === "azure-blob") {
+    if (
+      settings.objectStorageEndpoint ||
+      settings.objectStorageInternalEndpoint ||
+      settings.objectStorageSandboxEndpoint ||
+      settings.objectStorageAccessKeyId ||
+      settings.objectStorageSecretAccessKey
+    ) {
+      throw new Error(
+        "Azure Blob storage uses OPENGENI_OBJECT_STORAGE_AZURE_* settings, not S3-compatible object storage settings",
+      );
+    }
+    if (
+      settings.objectStorageGcsProjectId ||
+      settings.objectStorageGcsCredentialsJson ||
+      settings.objectStorageGcsKeyFilename ||
+      settings.objectStorageGcsApiEndpoint
+    ) {
+      throw new Error(
+        "Azure Blob storage uses OPENGENI_OBJECT_STORAGE_AZURE_* settings, not OPENGENI_OBJECT_STORAGE_GCS_* settings",
+      );
+    }
+    const hasConnectionString = Boolean(settings.objectStorageAzureConnectionString);
+    const hasSharedKey =
+      Boolean(settings.objectStorageAzureAccountName) &&
+      Boolean(settings.objectStorageAzureAccountKey);
+    if (!hasConnectionString && !hasSharedKey) {
+      throw new Error(
+        "Azure Blob storage requires OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING or OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME plus OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY",
+      );
+    }
+  } else {
+    if (
+      settings.objectStorageEndpoint ||
+      settings.objectStorageInternalEndpoint ||
+      settings.objectStorageSandboxEndpoint ||
+      settings.objectStorageAccessKeyId ||
+      settings.objectStorageSecretAccessKey
+    ) {
+      throw new Error(
+        "GCS object storage uses OPENGENI_OBJECT_STORAGE_GCS_* settings, not S3-compatible object storage settings",
+      );
+    }
+    if (
+      settings.objectStorageAzureConnectionString ||
+      settings.objectStorageAzureAccountName ||
+      settings.objectStorageAzureAccountKey ||
+      settings.objectStorageAzureEndpoint
+    ) {
+      throw new Error(
+        "GCS object storage uses OPENGENI_OBJECT_STORAGE_GCS_* settings, not OPENGENI_OBJECT_STORAGE_AZURE_* settings",
+      );
+    }
+    if (settings.objectStorageGcsCredentialsJson) {
+      parseGcsCredentialsJson(settings.objectStorageGcsCredentialsJson);
+    }
+  }
+}
+
 /**
  * The PRIVILEGED control-plane NATS login (api/worker). Present only when BOTH a
  * user and password are set; otherwise null and the bus connects anonymously (local
@@ -7202,7 +7320,9 @@ export interface NatsControlPlaneAuth {
   password: string;
 }
 
-export function resolveNatsControlPlaneAuth(settings: Settings): NatsControlPlaneAuth | null {
+export function resolveNatsControlPlaneAuth(
+  settings: Pick<Settings, "selfhostedNatsControlUser" | "selfhostedNatsControlPassword">,
+): NatsControlPlaneAuth | null {
   const user = settings.selfhostedNatsControlUser?.trim();
   const password = settings.selfhostedNatsControlPassword?.trim();
   if (!user || !password) {

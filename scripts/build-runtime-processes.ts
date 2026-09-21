@@ -3,6 +3,7 @@
 import { cp, mkdir, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeManagedCodemodeClient } from "./build-managed-codemode-client";
 
 type ProcessTarget = "api" | "worker" | "artifact-materializer" | "artifact-outbox";
 
@@ -112,6 +113,7 @@ async function buildWorker(): Promise<void> {
     join(outdir, "workflow-bundle.js"),
   );
   await copyRuntimeSkillAssets(repositoryRoot, outdir);
+  await writeManagedCodemodeClient(repositoryRoot, join(outdir, "assets/codemode-client.json"));
 }
 
 async function buildArtifactSidecar(

@@ -8,7 +8,7 @@ import { useTurnQueue } from "../hooks/use-turn-queue";
 import { useComposer } from "../hooks/use-composer";
 import { useHumanInputRequests } from "../hooks/use-human-input";
 import { ChatComposer, type ChatComposerProps } from "./chat-composer";
-import { QueueSurface } from "./queue-surface";
+import { SessionChrome } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { MessageTimeline } from "./message-timeline";
 import type { UserMessageDisclosureLabels } from "./user-message-body";
@@ -104,12 +104,13 @@ function Conversation({
           autoFocus={false}
         />
         {terminal ? (
-          <QueueSurface queue={queue} readOnly />
+          <SessionChrome queue={queue} sessionStatus={status} readOnly />
         ) : (
-          <QueueSurface
+          <SessionChrome
             queue={queue}
             composer={composer}
-            onRequestComposerFocus={() =>
+            sessionStatus={status}
+            onComposerFocus={() =>
               region.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus()
             }
           />

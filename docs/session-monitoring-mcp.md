@@ -1,5 +1,78 @@
 # Compact session monitoring over MCP
 
+## Child unread and consumption
+
+Unread is based on completed assistant messages, substantive final answers,
+and actionable failures/input/goal facts, not the raw event cursor. The same
+predicate drives child rows and ancestor counts. Raw deltas, status snapshots,
+`sandbox.box.terminated`, `workspace.revision.captured`, rejected late events,
+duplicates and maintenance/continuation completion markers do not create dots.
+The public `lastSequence` and replay/pagination cursors still include all events.
+
+Claimed lifecycle notices carry at most 32 whole event snapshots within an 8 KiB
+evidence budget, captured when the notice is created. Claim validates the retained
+source content before acknowledging it for the receiving turn's frozen human.
+An indexed materialized query takes the newest 32 meaningful candidates before
+payload size/completeness checks; the input budget favors the newest whole result.
+Each source payload is decoded using its own stored codec version before the
+logical 8 KiB evidence budget, parent rendering, or equality checks. The query's
+64 KiB raw inspection cap is only a bounded-read safeguard. Outbox/update payloads
+have their own independent versions; null-version legacy marker text stays literal.
+It never advances to the child's current cursor. A legacy terminal status notice
+without answer content is not proof that the parent consumed an answer.
+
+For a live exact parent attempt, `session_events` and `session_wait` also
+acknowledge complete returned content for that same frozen human and a real
+direct child. Sessionless operators, service turns, siblings and grandchildren
+do not gain this behavior. `session_get` and status-only reads never acknowledge.
+A proven complete final answer acknowledges cumulatively through that exact
+event sequence, including earlier commentary/progress summarized by the final.
+It never acknowledges a newer unseen answer. Other filtered reads advance only a
+contiguous meaningful prefix and cannot skip unseen work. Truncated/omitted results,
+fragment tails and lossy summaries cannot clear unseen content. Fragment reads
+are not accumulated as consumption receipts; use an explicit human mark-read
+when a full item cannot fit in one tool response. Wait/compact acknowledgments
+are restricted to complete answers; use complete result/debug reads for detailed
+failures or human-input content. No read changes append-only history or observes
+background-command completion.
+
+An explicit mark-unread records the current raw event position as an intent
+fence. Old answer replay and later housekeeping do not clear it; proven consumption
+of genuinely newer meaningful activity or an explicit mark-read does. Migration
+0503 conservatively fences meaningfully unread, human-touched personal rows at
+the migration-time frontier because the old revision did not record whether the
+last change was mark-unread, mark-read or follow-up intent, or when that intent
+was set. Old historical receipts cannot erase that ambiguous intent. A read final
+followed only by bookkeeping is not fenced. Legacy mark-unread intent made only
+against housekeeping is indistinguishable from already-read meaningful work and
+cannot be separately reconstructed.
+
+Historical bookkeeping-only dots derive away without advancing personal cursors.
+Additional proven historical reads can be reconciled in bounded operator batches:
+
+```sh
+# Uses the explicitly supplied OPENGENI_DATABASE_URL; never loads dotenv files.
+bun scripts/reconcile-child-read-attention.ts --workspace <uuid> --parent <uuid>
+# After inspecting the content-free dry-run counts, opt in to the same batch:
+bun scripts/reconcile-child-read-attention.ts --workspace <uuid> --parent <uuid> --apply
+```
+
+Pass returned `nextAfter` as `--after` while `hasMore`; `--limit` is 1–100.
+The script pairs current, nonduplicate first-party call/output events on the same
+parent turn, derives its frozen human, verifies whole returned content against
+the exact current direct-child event, and uses the same protected monotone writer.
+Call, output, and child source payloads are decoded independently by their own
+version columns; storage-encoded strings are not treated as delivered answers.
+That writer rechecks the frozen human's current shared membership or exact active
+Personal-owner pointer inside the removal fence. Replay after removal cannot
+recreate deleted personal state; inactive humans remain untouched.
+`provenEvents` counts matching evidence, not changed personal rows. Repeating a
+pass is safe; proven complete finals can clear preceding commentary without a
+separate receipt for every intermediate event.
+Unknown provider/tool aliases, Codemode shell output, missing/truncated receipts,
+multipart fragments, oversized audit bodies, status-only notices and unmatched
+content are unsupported and remain unread. No child is blanket-marked read.
+
 ## Conversation and execution history
 
 `session_events` defaults to a conversation projection: actual user text and

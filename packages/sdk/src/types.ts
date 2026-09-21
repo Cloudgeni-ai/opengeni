@@ -1,6 +1,13 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
+export type {
+  SessionMessageSearchRequest,
+  SessionMessageSearchMatch,
+  SessionMessageSearchResponse,
+} from "./session-message-search";
 
 export type BundledSkillId =
+  | "builtin:opengeni-help"
+  | "builtin:opengeni-client"
   | "builtin:opengeni-visualize"
   | "builtin:document-parsing"
   | "builtin:opengeni-skills"
@@ -585,11 +592,13 @@ export type ToolRef = {
 export type SessionToolPolicy = {
   mode: "workspace_default" | "explicit" | "inherited";
   inheritedFromSessionId: string | null;
+  excludedMcpServerIds?: string[] | undefined;
 };
 
 export type UpdateSessionToolPolicyRequest =
   | {
       mode: "workspace_default";
+      excludedMcpServerIds?: string[] | undefined;
       expectedVersion: number;
     }
   | {
@@ -622,10 +631,18 @@ export type SessionEffectiveToolPolicy = {
   idsTruncated: boolean;
 };
 
+export type SessionGoalReportRequirement = { id: string; title: string };
+export type SessionGoalReportDelivery = {
+  requirementId: string;
+  artifactId: string;
+  inspectionReceiptId: string;
+};
+
 export type GoalSpec = {
   text: string;
   successCriteria?: string | undefined;
   rootConstraints?: string[] | undefined;
+  reportRequirements?: SessionGoalReportRequirement[] | undefined;
   maxAutoContinuations?: number | undefined;
   mutationPolicy?: SessionGoalMutationPolicy | undefined;
 };
@@ -682,9 +699,17 @@ export type UpdateSessionMcpApprovalPolicyRequest = {
 };
 
 export type UpdateSessionMcpApprovalPolicyResponse = {
-  server: SessionMcpServerMetadata;
+  server: SessionMcpApprovalPolicyTarget;
   effectiveFrom: "next_attempt";
 };
+
+export type SessionMcpApprovalPolicyTarget =
+  | SessionMcpServerMetadata
+  | {
+      id: string;
+      source: "workspace";
+      requireApproval: SessionMcpApprovalPolicy;
+    };
 
 export type ConnectionKind = "oauth2" | "api_key" | "app_install" | "delegated";
 export type ConnectionStatus = "active" | "needs_reauth" | "revoked" | "error";
@@ -704,14 +729,14 @@ export type UserResourceDelegation = {
   resourceVersionId?: string | null | undefined;
 };
 
-export type McpConnectionAuthoritySelection = {
+export type McpConnectionAccountSelection = {
   serverId: string;
   connectionId: string;
-  userDelegation: UserResourceDelegation;
 };
 
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
+  accountSelection?: "all_eligible" | undefined;
   authoritySource?: "host" | undefined;
   /** accepted_turn is configuration-only; each accepted owner must select a grant. */
   hostBinding?:
@@ -1371,6 +1396,16 @@ export type CancelSessionBackgroundCommandResult = {
 };
 
 export type Session = {
+  /** Detail-only dispatch evidence; delivery does not prove turn execution. */
+  dispatchWait?:
+    | {
+        state: "pending" | "acknowledged" | "unavailable";
+        attempts: number;
+        nextAttemptAt: string | null;
+        lastError: string | null;
+      }
+    | null
+    | undefined;
   /** Detail-only failure evidence through lastSequence; independent of timeline paging. */
   failureDiagnostics?:
     | {
@@ -1433,6 +1468,7 @@ export type Session = {
   firstPartyMcpPermissions: string[] | null;
   firstPartyMcpTools: FirstPartyMcpToolName[];
   mcpServers: SessionMcpServerMetadata[];
+  mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
   parentSessionId: string | null;
   /** Immutable server-authored nested-agent lineage and policy snapshot. */
   rootSessionId: string;
@@ -1531,6 +1567,10 @@ export type SessionListResponse = {
   pinnedTruncated?: boolean;
   /** Present only when the server recognized and applied additive list filters. */
   filtersApplied?: true;
+  /** Effective server ordering. Name: ASCII-space trim, ASCII case fold,
+   * UTF-8 byte order, id ASC. Date keys and id ties are DESC. */
+  sortBy?: "updatedAt" | "createdAt" | "name" | "archivedAt";
+  archiveStatus?: "active" | "archived" | "all";
   /** Server-resolved Site origin filter, when requested. */
   originSiteId?: string;
   sessions: Session[];
@@ -1794,6 +1834,7 @@ export type HumanInputOption = {
 };
 
 export type SkillReviewReference = {
+  removalOperationId?: string | undefined;
   sourceOperationId: string;
   skillId: string;
   revisionId: string;
@@ -1802,7 +1843,7 @@ export type SkillReviewReference = {
 };
 
 export type HumanInputQuestion = {
-  skillReview?: SkillReviewReference | undefined;
+  skillReview?: SkillReviewReference | null | undefined;
   id: string;
   kind: HumanInputQuestionKind;
   prompt: string;
@@ -2142,6 +2183,10 @@ export type SessionEventPage = {
 
 export type ToolAuthNeededPayload = {
   serverId: string;
+  /** Configured connector for recovery; serverId retains the execution alias. */
+  canonicalServerId?: string | undefined;
+  /** Scope of the exact failed account, not the canonical catalog default. */
+  connectionSubjectScope?: "workspace" | "subject" | undefined;
   toolName?: string | null | undefined;
   providerDomain: string;
   provider?: string | undefined;
@@ -2815,6 +2860,7 @@ export type IncidentTelemetryPreflightInput = Omit<
 };
 
 export type ScheduledTaskAgentConfig = {
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
@@ -2875,6 +2921,8 @@ export type ScheduledTask = {
   accountId: string;
   workspaceId: string;
   name: string;
+  /** Immutable execution owner; null for workspace/service tasks. */
+  ownerSubjectId: string | null;
   status: ScheduledTaskStatus;
   schedule: ScheduledTaskScheduleSpec;
   temporalScheduleId: string;
@@ -2884,7 +2932,6 @@ export type ScheduledTask = {
   agentConfig: ScheduledTaskAgentConfig;
   createdBy?: TurnInitiator | undefined;
   createdByContext?: TurnInitiatorContext | undefined;
-  personalConnections?: McpPersonalConnectionSummary[] | undefined;
   authorityRevision: number;
   executionDigest: string;
   targetSessionId: string | null;
@@ -2900,12 +2947,9 @@ export type ScheduledTask = {
 };
 
 export type CreateSessionRequest = {
-  /** Opt-in host grants for a direct external-user initial turn. */
-  selectedHostMcpDelegations?:
-    | { serverId: string; delegationId: string; generation: number }[]
-    | undefined;
   /** Omitted: defaults/inheritance; []: no bundled guidance. Children cannot widen. */
   bundledSkillIds?: BundledSkillId[] | undefined;
+  excludedMcpServerIds?: string[] | undefined;
   // Optional UUID preallocated by an embedding host so it can durably link its
   // projection before OpenGeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
@@ -2962,6 +3006,8 @@ export type CreateSessionRequest = {
   firstPartyMcpPermissions?: string[] | undefined;
   firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
+  mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   /** Atomically attach the server-derived personal Variable Set/Rig closure to the initial turn. */
   personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
@@ -3054,6 +3100,7 @@ export type Permission = KnownPermission | (string & {});
 
 export type FirstPartyMcpToolName =
   | "knowledge_search"
+  | "knowledge_prepare_save"
   | "knowledge_get"
   | "knowledge_browse"
   | "knowledge_save"
@@ -3671,6 +3718,15 @@ export type CodexAccountsResponse = {
 
 export type OrganizationCodexAccountsResponse = Omit<CodexAccountsResponse, "apps" | "source">;
 
+/** Session-authorized choices: the accepted pool for a capacity wait, otherwise
+ * the current pool for the next turn. Current execution may use another pool. */
+export type SessionCodexAccountsResponse = Omit<CodexAccountsResponse, "apps" | "source"> & {
+  currentSelection: { credentialId: string | null; waiting: boolean } | null;
+  currentAccount: CodexAccount | null;
+  pinnedAccountId: string | null;
+  lastAccountId: string | null;
+};
+
 export type CodexAppsUpdate = {
   credentialId: string | null;
   version: number;
@@ -3819,7 +3875,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-organization-recovery-custody-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-09-plugins-and-skills-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -4069,7 +4125,7 @@ export type UserResourceAuthoritySummary = {
   grants: UserResourceAuthorityGrant[];
 };
 export type ListUserResourceAuthoritiesOptions = {
-  resourceKind: UserResourceKind;
+  resourceKind: Exclude<UserResourceKind, "connection">;
   cursor?: string | undefined;
   limit?: number | undefined;
 };
@@ -4081,7 +4137,7 @@ export type ListUserResourceAuthoritiesResponse = {
 export type IssueUserResourceGrantRequest =
   | {
       scope: "user";
-      resourceKind: UserResourceKind;
+      resourceKind: Exclude<UserResourceKind, "connection">;
       mode: "session";
       context: "user_private" | "workspace_shared";
       sessionId: string;
@@ -4090,7 +4146,7 @@ export type IssueUserResourceGrantRequest =
     }
   | {
       scope: "user";
-      resourceKind: UserResourceKind;
+      resourceKind: Exclude<UserResourceKind, "connection">;
       mode: "always";
       context: "user_private" | "workspace_shared";
       sessionId?: null | undefined;
@@ -4499,6 +4555,7 @@ export type WorkspaceSessionDefaults = {
 };
 
 export type WorkspaceSessionToolDefaults = {
+  inheritConnectedMcpServers?: boolean | undefined;
   mcpServerIds?: string[];
   firstPartyMcpTools?: FirstPartyMcpToolName[];
 };
@@ -4566,7 +4623,11 @@ export type UpdateWorkspaceSettingsRequest = {
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
   sessionToolDefaults?:
-    | { mcpServerIds?: string[] | null; firstPartyMcpTools?: FirstPartyMcpToolName[] | null }
+    | {
+        mcpServerIds?: string[] | null;
+        firstPartyMcpTools?: FirstPartyMcpToolName[] | null;
+        inheritConnectedMcpServers?: boolean | null;
+      }
     | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
@@ -4876,6 +4937,8 @@ export type SessionGoal = {
   text: string;
   successCriteria: string | null;
   rootConstraints: string[];
+  /** Optional for older-server/source compatibility; current servers always supply this projection. */
+  reportRequirements?: SessionGoalReportRequirement[] | undefined;
   evidence: string | null;
   rationale: string | null;
   pausedReason: string | null;
@@ -4997,6 +5060,7 @@ export type ComposerDraft = {
 
 export type NewSessionDraftOptions = {
   agentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
+  excludedMcpServerIds?: string[] | undefined;
   visibility?: SessionVisibility | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   targetSandboxId?: string | undefined;
@@ -5124,6 +5188,52 @@ export type SessionSystemUpdate = {
   createdAt: string;
 };
 
+export type SessionRetryRequest = {
+  clientEventId: string;
+  failureEventId: string;
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
+  latencyMode?: LatencyMode;
+};
+
+export type SandboxRecoverySelection = {
+  version: 1;
+  sessionId: string;
+  sandboxGroupId: string;
+  leaseId: string;
+  routeEpoch: number;
+  authorityEpoch: number;
+  leaseEpoch: number;
+  workspaceGeneration: number;
+  archiveGeneration: number;
+  artifactId: string;
+  revision: string;
+  capturedAt: string;
+};
+export type SandboxRecoveryProjection = {
+  version: 1;
+  status: "unsupported" | "blocked" | "eligible" | "consent_accepted" | "restoring" | "restored";
+  reason: string | null;
+  checkpoint: SandboxRecoverySelection | null;
+  operationId: string | null;
+};
+export type SandboxRecoveryRequest = {
+  operationId: string;
+  acceptHistoricalCheckpoint: true;
+  selection: SandboxRecoverySelection;
+};
+export type SandboxRecoveryResponse = {
+  outcome: "accepted" | "replayed";
+  operationId: string;
+  recovery: SandboxRecoveryProjection;
+};
+
+export type SessionRetryResponse = {
+  outcome: "accepted" | "replayed";
+  turnId: string;
+  failureEventId: string;
+};
+
 export type SessionControlResponse = {
   receipt: SessionCommandReceipt;
   effectiveControl: EffectiveSessionControl;
@@ -5234,7 +5344,7 @@ export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expecte
   controlEtag?: string;
   modelContext?: string;
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
-  connectionAuthorities?: McpConnectionAuthoritySelection[];
+  connectionAccounts?: McpConnectionAccountSelection[];
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
 };
 
@@ -5285,8 +5395,7 @@ export type CreateAgentScheduledTaskRequest = {
   action?: { kind: "agent_turn" } | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
-  connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
-  selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
@@ -5316,8 +5425,7 @@ export type UpdateScheduledTaskRequest = {
   schedule?: ScheduledTaskScheduleSpec | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
-  connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
-  selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
@@ -6331,329 +6439,26 @@ export type WorkspaceMemorySearchResponse = {
   results: WorkspaceMemorySearchResult[];
 };
 
-// --- Capability packs ---------------------------------------------------------
-
-export type CapabilityPackConnectorAuthModel =
-  | "oauth2_authorization_code_pkce"
-  | "oauth2_authorization_code"
-  | "api_key"
-  | "credential_ref";
-
-export type CapabilityPackConnector = {
-  id: string;
-  name: string;
-  category: string;
-  authModel: CapabilityPackConnectorAuthModel;
-  providers: string[];
-  scopes: string[];
-  required: boolean;
-  metadata: Record<string, unknown>;
-};
-
-export type CapabilityPackKnowledge = {
-  type: "document_base";
-  id: string;
-  name: string;
-  description: string | null;
-  required: boolean;
-};
-
-export type CapabilityPackScheduledTaskTemplate = {
-  id: string;
-  name: string;
-  description: string;
-  defaultSchedule: ScheduledTaskScheduleSpec;
-  defaultRunMode: ScheduledTaskRunMode;
-  defaultOverlapPolicy: ScheduledTaskOverlapPolicy;
-  prompt?: string | undefined;
-};
-
-export type CapabilityPackAutomationTemplate = {
-  id: string;
-  name: string;
-  description: string;
-  adapterId: string;
-  eventTypes: string[];
-  sessionTemplate: {
-    bundledSkillIds?: BundledSkillId[] | undefined;
-    prompt: string;
-    instructions: string | null;
-    resources: ResourceRef[];
-    skills: CapabilityPackSkill[];
-    tools: ToolRef[];
-    firstPartyMcpTools: string[];
-    firstPartyMcpPermissions: Permission[];
-    model: string | null;
-    reasoningEffort: ReasoningEffort | null;
-    sandboxBackend: SandboxBackend | null;
-    policyRole: string | null;
-    metadata: Record<string, unknown>;
-  };
-  configuration: Record<string, unknown>;
-  connectionRequirement: string | null;
-};
-
-export type CapabilityPackSkillFile = {
+export type SkillArtifactFile = {
   path: string;
   content: string;
 };
 
-export type CapabilityPackSkill = {
+export type SkillArtifactDefinition = {
   name: string;
   description?: string | undefined;
   /** Omitted means workspace-wide; session_selected requires explicit session attachment. */
   activationMode?: "workspace_managed" | "session_selected" | undefined;
-  files: CapabilityPackSkillFile[];
+  files: SkillArtifactFile[];
 };
 
-export type SessionSkill = Omit<CapabilityPackSkill, "activationMode">;
+export type SessionSkill = Omit<SkillArtifactDefinition, "activationMode">;
 /** SKILL.md owns metadata; supplied legacy fields must exactly match it. */
-export type CapabilityPackSkillInput = Omit<CapabilityPackSkill, "name" | "description"> & {
+export type SkillArtifactDefinitionInput = Omit<SkillArtifactDefinition, "name" | "description"> & {
   name?: string | undefined;
   description?: string | undefined;
 };
-export type SessionSkillInput = Omit<CapabilityPackSkillInput, "activationMode">;
-
-export type CapabilityPackVariableSetSpec = {
-  description: string;
-  requiredVariables: string[];
-  required: boolean;
-};
-
-export type CapabilityPackComponentReference =
-  | {
-      key: string;
-      kind: "plugin";
-      pluginKey: string;
-      version: string;
-      manifestDigest: string;
-      required: boolean;
-    }
-  | {
-      key: string;
-      kind: "skill";
-      capabilityId: string;
-      contentSha256: string;
-      required: boolean;
-    }
-  | {
-      key: string;
-      kind: "integration";
-      capabilityId: string;
-      instanceKey: string;
-      revisionId: string;
-      contentSha256: string;
-      required: boolean;
-    }
-  | {
-      key: string;
-      kind: "facet";
-      capabilityId: string;
-      instanceKey: string;
-      facetKey: string;
-      bindingKey: string;
-      configDigest: string;
-      required: boolean;
-    };
-
-export type CapabilityPackRigRequirement = {
-  description?: string | undefined;
-  required: boolean;
-  rigId?: string | undefined;
-  requireVerified: boolean;
-};
-
-export type CapabilityPack = {
-  id: string;
-  name: string;
-  description: string;
-  role: string;
-  category: string;
-  version: string;
-  sandboxImage?: string | undefined;
-  sandboxProviderImages?:
-    | {
-        modal?: { imageId: string } | undefined;
-      }
-    | undefined;
-  skills: CapabilityPackSkill[];
-  components: CapabilityPackComponentReference[];
-  rig?: CapabilityPackRigRequirement | undefined;
-  tools: ToolRef[];
-  connectors: CapabilityPackConnector[];
-  knowledge: CapabilityPackKnowledge[];
-  scheduledTaskTemplates: CapabilityPackScheduledTaskTemplate[];
-  automationTemplates?: CapabilityPackAutomationTemplate[] | undefined;
-  variableSet?: CapabilityPackVariableSetSpec | undefined;
-  metadata: Record<string, unknown>;
-};
-
-/** Input shape for registering a pack manifest (server applies defaults). */
-export type RegisterCapabilityPackRequest = {
-  id: string;
-  name: string;
-  description: string;
-  role: string;
-  category: string;
-  version: string;
-  sandboxImage?: string | undefined;
-  sandboxProviderImages?:
-    | {
-        modal?: { imageId: string } | undefined;
-      }
-    | undefined;
-  skills?:
-    | {
-        name?: string | undefined;
-        description?: string | undefined;
-        activationMode?: "workspace_managed" | "session_selected" | undefined;
-        files: CapabilityPackSkillFile[];
-      }[]
-    | undefined;
-  components?:
-    | (
-        | {
-            key: string;
-            kind: "plugin";
-            pluginKey: string;
-            version: string;
-            manifestDigest: string;
-            required?: boolean | undefined;
-          }
-        | {
-            key: string;
-            kind: "skill";
-            capabilityId: string;
-            contentSha256: string;
-            required?: boolean | undefined;
-          }
-        | {
-            key: string;
-            kind: "integration";
-            capabilityId: string;
-            instanceKey: string;
-            revisionId: string;
-            contentSha256: string;
-            required?: boolean | undefined;
-          }
-        | {
-            key: string;
-            kind: "facet";
-            capabilityId: string;
-            instanceKey: string;
-            facetKey: string;
-            bindingKey: string;
-            configDigest: string;
-            required?: boolean | undefined;
-          }
-      )[]
-    | undefined;
-  rig?:
-    | {
-        description?: string | undefined;
-        required?: boolean | undefined;
-        rigId?: string | undefined;
-        requireVerified?: boolean | undefined;
-      }
-    | undefined;
-  tools?: ToolRef[] | undefined;
-  connectors?:
-    | {
-        id: string;
-        name: string;
-        category: string;
-        authModel: CapabilityPackConnectorAuthModel;
-        providers?: string[] | undefined;
-        scopes?: string[] | undefined;
-        required?: boolean | undefined;
-        metadata?: Record<string, unknown> | undefined;
-      }[]
-    | undefined;
-  knowledge?:
-    | {
-        type: "document_base";
-        id: string;
-        name: string;
-        description?: string | null | undefined;
-        required?: boolean | undefined;
-      }[]
-    | undefined;
-  scheduledTaskTemplates?:
-    | {
-        id: string;
-        name: string;
-        description: string;
-        defaultSchedule: ScheduledTaskScheduleSpec;
-        defaultRunMode?: ScheduledTaskRunMode | undefined;
-        defaultOverlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
-        prompt?: string | undefined;
-      }[]
-    | undefined;
-  automationTemplates?:
-    | {
-        id: string;
-        name: string;
-        description: string;
-        adapterId: string;
-        eventTypes: string[];
-        sessionTemplate: {
-          bundledSkillIds?: BundledSkillId[] | undefined;
-          prompt: string;
-          instructions?: string | null | undefined;
-          resources?: ResourceRef[] | undefined;
-          skills?: CapabilityPackSkill[] | undefined;
-          tools?: ToolRef[] | undefined;
-          firstPartyMcpTools?: string[] | undefined;
-          firstPartyMcpPermissions?: Permission[] | undefined;
-          model?: string | null | undefined;
-          reasoningEffort?: ReasoningEffort | null | undefined;
-          sandboxBackend?: SandboxBackend | null | undefined;
-          policyRole?: string | null | undefined;
-          metadata?: Record<string, unknown> | undefined;
-        };
-        configuration?: Record<string, unknown> | undefined;
-        connectionRequirement?: string | null | undefined;
-      }[]
-    | undefined;
-  variableSet?:
-    | {
-        description: string;
-        requiredVariables?: string[] | undefined;
-        required?: boolean | undefined;
-      }
-    | undefined;
-  metadata?: Record<string, unknown> | undefined;
-};
-
-export type WorkspaceRegisteredPack = {
-  accountId: string;
-  workspaceId: string;
-  pack: CapabilityPack;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type PackInstallationStatus = "installing" | "active" | "needs_attention" | "disabled";
-
-export type PackInstallation = {
-  skillPublications?: import("./skills").SkillPublicationReceipt[] | undefined;
-  skillWrites?: import("./skills").SkillWriteReceipt[] | undefined;
-  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
-  id: string;
-  accountId: string;
-  workspaceId: string;
-  packId: string;
-  status: PackInstallationStatus;
-  version: number;
-  /** Exact accepted manifest, not a normalized executable Pack. */
-  manifestSnapshot: Record<string, unknown> | null;
-  manifestDigest: string | null;
-  selectedRigId: string | null;
-  installedBySubjectId: string | null;
-  metadata: Record<string, unknown>;
-  enabledAt: string;
-  updatedAt: string;
-};
+export type SessionSkillInput = Omit<SkillArtifactDefinitionInput, "activationMode">;
 
 // --- OpenGeni Review Bot ------------------------------------------------------------
 
@@ -6769,103 +6574,9 @@ export type PrReviewManagedGitHubSetup = {
   missing: string[];
 };
 
-export type EnablePackRequest = {
-  variableSetId?: string | undefined;
-  /** @deprecated use variableSetId */
-  environmentId?: string | undefined;
-  metadata?: Record<string, unknown> | undefined;
-};
-
-export type PackComponentResolutionStatus = "ready" | "missing" | "mismatch";
-
-export type PackComponentResolution = {
-  key: string;
-  kind: "plugin" | "skill" | "integration" | "facet" | "inline_skill";
-  capabilityId: string;
-  required: boolean;
-  status: PackComponentResolutionStatus;
-  expectedDigest: string;
-  actualDigest: string | null;
-  resolvedId: string | null;
-  label: string;
-};
-
-export type PackRigResolution = {
-  required: boolean;
-  status: "not_required" | "ready" | "missing" | "mismatch" | "unverified";
-  requestedRigId: string | null;
-  rigId: string | null;
-  rigVersionId: string | null;
-  name: string | null;
-  image: string | null;
-};
-
-export type PreviewPackInstallationRequest = {
-  rigId?: string | undefined;
-  variableSetId?: string | undefined;
-};
-
-export type PackInstallationPreview = {
-  packId: string;
-  packVersion: string;
-  manifestDigest: string;
-  installationVersion: number | null;
-  action: "install" | "update" | "repair";
-  ready: boolean;
-  blockers: string[];
-  components: PackComponentResolution[];
-  rig: PackRigResolution;
-  variableSetId: string | null;
-  legacyInlineSkillCount: number;
-  legacySandboxImage: string | null;
-};
-
-export type InstallPackRequest = {
-  expectedManifestDigest: string;
-  expectedInstallationVersion?: number | undefined;
-  rigId?: string | undefined;
-  variableSetId?: string | undefined;
-  idempotencyKey: string;
-  metadata?: Record<string, unknown> | undefined;
-};
-
-export type PackUninstallPreview = {
-  packId: string;
-  installed: boolean;
-  installationVersion: number | null;
-  components: Array<{
-    key: string;
-    kind: "plugin" | "skill" | "integration" | "facet" | "inline_skill";
-    capabilityId: string;
-    retainedByOtherOwners: boolean;
-  }>;
-};
-
-export type UninstallPackRequest = {
-  expectedInstallationVersion: number;
-  idempotencyKey: string;
-};
-
-export type UninstallPackResult = {
-  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
-  packId: string;
-  status: "not_installed" | "uninstalled";
-  retainedComponents: string[];
-};
-
-export type ListPacksResponse = {
-  packs: CapabilityPack[];
-  installations: PackInstallation[];
-};
-
-export type GetPackResponse = {
-  pack: CapabilityPack;
-  installation: PackInstallation | null;
-};
-
 // --- Capabilities ---------------------------------------------------------------
 
-export type CapabilityKind = "pack" | "mcp" | "api" | "skill" | "plugin";
+export type CapabilityKind = "mcp" | "api" | "skill" | "plugin";
 
 export type CapabilitySource =
   | "built_in"
@@ -6964,6 +6675,7 @@ export type CapabilityCatalogItem = {
   /** The connection backing this enabled installation, or null when none is involved. */
   connectionRef: {
     connectionId?: string | undefined;
+    accountSelection?: "all_eligible" | undefined;
     authoritySource?: "host" | undefined;
     providerDomain: string;
     kind: string;
@@ -7008,6 +6720,7 @@ export type CreateCapabilityCatalogItemRequest = {
 };
 
 export type EnableCapabilityRequest = {
+  onlyIfUninstalled?: boolean | undefined;
   config?: Record<string, unknown> | undefined;
   metadata?: Record<string, unknown> | undefined;
   connectionRef?: McpServerConnectionRef | undefined;
@@ -7027,7 +6740,7 @@ export type DiscoverMcpCapabilitiesResponse = {
 
 export type SkillImportSource = "github" | "skills_sh";
 
-export type SkillInstallationSource = "library" | "github" | "skills_sh" | "pack";
+export type SkillInstallationSource = "library" | "github" | "skills_sh";
 
 export type PreviewSkillImportRequest = {
   url: string;
@@ -7090,7 +6803,7 @@ export type InstalledSkill = {
 };
 
 export type CapabilityComponentOwner = {
-  kind: "direct" | "plugin" | "pack" | "migration";
+  kind: "direct" | "plugin" | "migration";
   id: string;
   removable: boolean;
 };
@@ -7511,20 +7224,29 @@ export type ListInstalledPluginsResponse = {
   plugins: PluginInstallationSummary[];
 };
 
+export type PluginUninstallComponentImpact = {
+  capabilityId: string;
+  kind: "skill" | "integration" | "mcp";
+  retainedByOtherOwners: boolean;
+  name: string;
+  disposition: "removed" | "retained" | "inactive";
+  retentionReasons: Array<"other_owners" | "customized" | "re_scoped" | "registry_unavailable">;
+  remainingOwners: Array<{ kind: "direct" | "plugin" | "migration"; name: string }>;
+  skillId?: string | undefined;
+};
+
 export type PluginUninstallPreview = {
   pluginKey: string;
   installed: boolean;
   version: string | null;
   installationVersion: number | null;
-  components: Array<{
-    capabilityId: string;
-    kind: "skill" | "integration" | "mcp";
-    retainedByOtherOwners: boolean;
-  }>;
+  previewToken?: string | undefined;
+  components: PluginUninstallComponentImpact[];
 };
 
 export type UninstallPluginRequest = {
   expectedInstallationVersion: number;
+  expectedPreviewToken?: string | undefined;
   idempotencyKey: string;
 };
 
@@ -8002,8 +7724,7 @@ export type UserMessageEventInput = {
     controlEtag?: string | undefined;
     expectedDraftRevision?: number | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
-    connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
-    selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
+    connectionAccounts?: McpConnectionAccountSelection[] | undefined;
     personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   };
 };
@@ -8366,3 +8087,26 @@ export type ModelConnectionAccessResponse = {
   workspaces: Array<{ id: string; name: string }>;
   personalWorkspacesSupported: boolean;
 };
+
+export type ConnectorToolPermission = "allow" | "ask" | "block";
+export type ConnectorToolPermissionEntry = {
+  name: string;
+  title?: string | undefined;
+  description?: string | undefined;
+  group: "read" | "write" | "other";
+  permission: ConnectorToolPermission;
+  inherited: boolean;
+  approvalRequired: boolean;
+};
+export type ConnectorToolPermissionsResponse = {
+  connectionId: string;
+  serverId: string;
+  defaultPermission: ConnectorToolPermission | null;
+  tools: ConnectorToolPermissionEntry[];
+  discoveryError: string | null;
+  canManage: boolean;
+};
+export type UpdateConnectorToolPermissionsRequest = {
+  connectionId: string;
+  permission: ConnectorToolPermission;
+} & ({ target: "default" } | { target: "tools"; toolNames: string[] });

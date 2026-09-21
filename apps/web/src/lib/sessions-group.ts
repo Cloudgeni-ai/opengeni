@@ -42,7 +42,7 @@ function hasActiveEffectiveControl(session: Session): boolean {
 }
 
 function isEffectivelyRunning(session: Session): boolean {
-  if (session.backgroundCommandActivity) return true;
+  // Background commands have their own chat indicator, not agent working status.
   return (
     hasActiveEffectiveControl(session) &&
     (isRunningStatus(session.status) || Boolean(sessionInputWait(session)))
@@ -179,6 +179,7 @@ export type RailAggregateStatusKind =
   | "needs_attention"
   | "failed"
   | "active"
+  | "queued"
   | "unread"
   | "active_work"
   | "neutral";
@@ -206,6 +207,7 @@ type RailStatusCounts = {
   attentionSince: string | null;
   failed: number;
   active: number;
+  queued: number;
   unread: number;
   activeWork: number;
 };
@@ -231,13 +233,15 @@ function ownRailStatusCounts(
     // result) acknowledges the failure together with the unread frontier.
     failed: session.status === "failed" && session.unread ? 1 : 0,
     active:
-      session.backgroundCommandActivity ||
-      (hasActiveEffectiveControl(session) &&
-        (session.status === "running" ||
-          session.status === "queued" ||
-          session.status === "recovering" ||
-          session.status === "waiting_capacity" ||
-          Boolean(sessionInputWait(session))))
+      hasActiveEffectiveControl(session) &&
+      (session.status === "running" ||
+        session.status === "recovering" ||
+        Boolean(sessionInputWait(session)))
+        ? 1
+        : 0,
+    queued:
+      hasActiveEffectiveControl(session) &&
+      (session.status === "queued" || session.status === "waiting_capacity")
         ? 1
         : 0,
     unread: session.unread ? 1 : 0,
@@ -252,6 +256,7 @@ function addRailStatusCounts(target: RailStatusCounts, source: RailStatusCounts)
   target.attentionSince = earliestIso(target.attentionSince, source.attentionSince);
   target.failed += source.failed;
   target.active += source.active;
+  target.queued += source.queued;
   target.unread += source.unread;
   target.activeWork += source.activeWork;
 }
@@ -268,6 +273,7 @@ function railStatusCounts(
       "attention",
       "failed",
       "active",
+      "queued",
       "unread",
       "activeWork",
     ] as const)
@@ -284,8 +290,8 @@ function railStatusCounts(
     counts.attention += stats.attentionDescendants;
     counts.attentionSince = earliestIso(counts.attentionSince, stats.attentionSince);
     counts.failed += stats.unreadFailedDescendants ?? stats.failedDescendants;
-    counts.active +=
-      stats.runningDescendants + stats.queuedDescendants + (stats.waitingDescendants ?? 0);
+    counts.active += stats.runningDescendants + (stats.waitingDescendants ?? 0);
+    counts.queued += stats.queuedDescendants;
     counts.unread += stats.unreadDescendants ?? 0;
     counts.activeWork += stats.activelyWorkingDescendants ?? 0;
 
@@ -338,6 +344,7 @@ export function summarizeRailNodes(
     attentionSince: null,
     failed: 0,
     active: 0,
+    queued: 0,
     unread: 0,
     activeWork: 0,
   };
@@ -382,6 +389,14 @@ export function summarizeRailNodes(
       count: counts.active,
       total: counts.total,
       label: `${counts.active} working`,
+    };
+  }
+  if (counts.queued > 0) {
+    return {
+      kind: "queued",
+      count: counts.queued,
+      total: counts.total,
+      label: `${counts.queued} waiting to run`,
     };
   }
   if (counts.unread > 0) {
@@ -430,7 +445,58 @@ export type SessionForest = {
   }[];
 };
 
-export type SessionBrowseGroupBy = "activity" | "created" | "creator";
+export type SessionBrowseGroupBy = "activity" | "project" | "none" | "created" | "creator";
+export type SessionBrowseSortBy = "updatedAt" | "createdAt" | "name";
+
+const sessionNameEncoder = new TextEncoder();
+function sessionNameSortKey(title: string | null | undefined): Uint8Array {
+  return sessionNameEncoder.encode(
+    (title ?? "").replace(/^ +| +$/g, "").replace(/[A-Z]/g, (letter) => letter.toLowerCase()),
+  );
+}
+
+function sessionSortMicroseconds(value: string): number {
+  const fraction = value.match(/\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/)?.[1] ?? "";
+  return Number(fraction.padEnd(6, "0").slice(3, 6));
+}
+
+/** The same ordering as the server page, reapplied after live projection merges. */
+export function compareSessionBrowse(
+  left: Session,
+  right: Session,
+  sortBy: SessionBrowseSortBy,
+): number {
+  if (sortBy === "name") {
+    const a = sessionNameSortKey(left.title);
+    const b = sessionNameSortKey(right.title);
+    for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+      if (a[index] !== b[index]) return a[index]! - b[index]!;
+    }
+    return a.length - b.length || left.id.localeCompare(right.id);
+  }
+  return (
+    Date.parse(right[sortBy]) - Date.parse(left[sortBy]) ||
+    sessionSortMicroseconds(right[sortBy]) - sessionSortMicroseconds(left[sortBy]) ||
+    right.id.localeCompare(left.id)
+  );
+}
+
+export function sortSessionForest(
+  forest: SessionForest,
+  sortBy: SessionBrowseSortBy,
+): SessionForest {
+  const sortNodes = (nodes: SessionTreeNode[]): SessionTreeNode[] =>
+    nodes
+      .map((node) => ({ ...node, children: sortNodes(node.children) }))
+      .sort((a, b) => compareSessionBrowse(a.session, b.session, sortBy));
+  return {
+    running: sortNodes(forest.running),
+    grouped: forest.grouped.map((bucket) => ({
+      ...bucket,
+      sessions: sortNodes(bucket.sessions),
+    })),
+  };
+}
 export type SessionBrowseDateField = "activity" | "created";
 export type SessionBrowseDateRange = "any" | "today" | "week" | "month";
 
@@ -590,6 +656,9 @@ export function groupSessionForestForBrowse(
 ): SessionForest {
   const now = options.now ?? new Date();
   const roots = forestRoots(forest);
+  if (groupBy === "none" || groupBy === "project") {
+    return { running: [], grouped: [{ group: "none", label: "Sessions", sessions: roots }] };
+  }
   const running = roots
     .filter(nodeIsActive)
     .sort((left, right) => compareSessionActivity(left.session, right.session));

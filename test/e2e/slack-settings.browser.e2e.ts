@@ -238,7 +238,8 @@ async function installApi(
       state.disconnects++;
       return json({});
     }
-    if (path.endsWith("/packs")) return json({ packs: [], installations: [] });
+
+    if (path.endsWith("/skills/search")) return json({ items: [], nextCursor: null });
     if (path.endsWith("/skills")) return json({ skills: [] });
     if (path.endsWith("/skills/content")) return json({ skills: [], nextCursor: null });
     if (path.endsWith("/capabilities/discovery/plugins"))

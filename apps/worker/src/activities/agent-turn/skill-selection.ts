@@ -14,6 +14,8 @@ export function configuredBundledSkillNames(context: BundledSkillConfiguration):
   const tools = new Set(context.firstPartyTools);
   const artifacts = () => tools.has("editable_artifact_list") && tools.has("editable_artifact_get");
   const definitions = [
+    { name: "opengeni-help", include: () => true },
+    { name: "opengeni-client", include: () => true },
     { name: "opengeni-visualize", include: () => true },
     { name: "document-parsing", include: () => true },
     { name: "opengeni-skills", include: () => true },

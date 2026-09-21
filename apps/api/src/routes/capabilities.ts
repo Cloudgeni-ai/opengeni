@@ -3,9 +3,16 @@ import {
   CreateCapabilityCatalogItemRequest,
   DiscoverMcpCapabilitiesResponse,
   EnableCapabilityRequest,
+  ConnectorToolPermissionsResponse,
+  UpdateConnectorToolPermissionsRequest,
 } from "@opengeni/contracts";
 import type { Hono } from "hono";
-import { requireAccessGrant } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireAccessGrantAuthorization,
+  getConnectorToolPermissions,
+  updateConnectorToolPermissions,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   buildCapabilityCatalog,
@@ -15,6 +22,7 @@ import {
   enableCapability,
   officialMcpRegistryUrl,
 } from "@opengeni/core";
+import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import { boundedLimit } from "../http/common";
 import { z } from "zod";
 import pluginSnapshot from "../../../../data/catalog/plugins-snapshot.json";
@@ -109,6 +117,48 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
     );
   });
+
+  app.get("/v1/workspaces/:workspaceId/capabilities/:capabilityId/tool-permissions", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "workspace:read");
+    return c.json(
+      ConnectorToolPermissionsResponse.parse(
+        await getConnectorToolPermissions({
+          db,
+          settings,
+          workspaceId,
+          grant: access.grant,
+          capabilityId: decodeURIComponent(c.req.param("capabilityId")),
+          personalOwnerVerified: isPersonalConnectionOwnerPrincipal(access),
+        }),
+      ),
+    );
+  });
+
+  app.patch(
+    "/v1/workspaces/:workspaceId/capabilities/:capabilityId/tool-permissions",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const access = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "capabilities:manage",
+      );
+      const payload = UpdateConnectorToolPermissionsRequest.safeParse(await c.req.json());
+      if (!payload.success) return c.json({ error: "Invalid connector permission target" }, 400);
+      await updateConnectorToolPermissions({
+        db,
+        settings,
+        workspaceId,
+        grant: access.grant,
+        capabilityId: decodeURIComponent(c.req.param("capabilityId")),
+        personalOwnerVerified: isPersonalConnectionOwnerPrincipal(access),
+        payload: payload.data,
+      });
+      return c.json({ saved: true });
+    },
+  );
 
   app.post("/v1/workspaces/:workspaceId/capabilities/:capabilityId/enable", async (c) => {
     const workspaceId = c.req.param("workspaceId");

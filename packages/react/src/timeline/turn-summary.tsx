@@ -14,6 +14,7 @@ import { CopyButton } from "../components/copy-button";
 import { cn } from "../lib/cn";
 import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { useForcedDefaultOpen } from "./disclosure-context";
+import { useTimelineSearchReveal } from "../components/timeline-search";
 import { useEntranceAnimation } from "./entrance";
 import { useFoldMemory, type FoldRestingState } from "./fold-memory";
 import {
@@ -125,8 +126,8 @@ export type TurnSummaryProps = {
   items: ActivityItem[];
   /**
    * The settled verdict — or absent for a completed CLUSTER of a still-running
-   * turn, which folds neutrally: no verdict glyph (the turn has none yet), a
-   * quiet pulse dot in its place so alignment and the running feel both hold.
+   * turn, which folds neutrally. Only unfinished activity inside this summary
+   * animates; the parent turn may still be composing a response elsewhere.
    */
   outcome?: TurnOutcome | undefined;
   /** A short failure reason shown inline on a failed chip (never hidden). */
@@ -202,6 +203,7 @@ export function TurnSummary({
   // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
   // (screenshot instrumentation); otherwise the turn starts folded.
   const forcedDefaultOpen = useForcedDefaultOpen();
+  const searchReveal = useTimelineSearchReveal();
   const foldMemory = useFoldMemory();
   // A remembered resting state outranks author defaults: a fold that already
   // finished its settle collapse (or that the reader closed) mounts closed
@@ -315,6 +317,18 @@ export function TurnSummary({
     }
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [settleFold]);
+  useEffect(() => {
+    if (!searchReveal) return;
+    clearSettleTimers();
+    settleArmedRef.current = false;
+    setSettling(false);
+    setSettlePhase(false);
+    setNestSuppressLatch(false);
+    setOpen(true);
+    rememberResting("open");
+    // Search is an explicit, persistent reader action, not a new fold default.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchReveal]);
   const onOpenChange = (next: boolean) => {
     // The reader took over — cancel the pending auto-collapse for good.
     // Clear settle CSS phase immediately (fast collapse) but keep nest latch
@@ -447,7 +461,7 @@ export function TurnSummary({
             />
             {/* Completion is the quiet default and needs no repeated glyph. Failed,
             cancelled, and still-running folds retain a visible state marker. */}
-            {outcome === "complete" || (liveHeader && !outcome) ? null : (
+            {outcome === "complete" || (!outcome && (liveHeader || context.settled)) ? null : (
               <span
                 className={cn(
                   "inline-flex shrink-0 items-center justify-center",

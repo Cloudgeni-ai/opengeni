@@ -37,6 +37,85 @@ function catalogModel(
 }
 
 describe("model-policy", () => {
+  test.each([
+    {
+      name: "free-only with blocked paid",
+      paid: false,
+      codex: true,
+      free: true,
+      codexOnly: false,
+      first: "Codex",
+    },
+    {
+      name: "selectable paid",
+      paid: true,
+      codex: true,
+      free: true,
+      codexOnly: false,
+      first: "OpenGeni",
+    },
+    {
+      name: "no usable Codex",
+      paid: false,
+      codex: false,
+      free: true,
+      codexOnly: false,
+      first: "OpenGeni",
+    },
+    {
+      name: "no selectable OpenGeni",
+      paid: false,
+      codex: true,
+      free: false,
+      codexOnly: false,
+      first: "OpenGeni",
+    },
+    {
+      name: "Codex-only session",
+      paid: false,
+      codex: true,
+      free: false,
+      codexOnly: true,
+      first: "Codex",
+    },
+    {
+      name: "Codex-only without usable Codex",
+      paid: false,
+      codex: false,
+      free: false,
+      codexOnly: true,
+      first: "OpenGeni",
+    },
+  ])("conditionally promotes the UI group: $name", ({ paid, codex, free, codexOnly, first }) => {
+    const rows = projectPickerRows([
+      catalogModel({ id: "free", label: "Free", source: "opengeni", cost: "free" }),
+      catalogModel({ id: "paid", label: "Paid", source: "opengeni", cost: "credits" }),
+      catalogModel({ id: "codex/test", label: "Codex", source: "codex", cost: "subscription" }),
+    ]).map((row, index) => ({
+      ...row,
+      selectable: [free, paid, codex][index]!,
+      unavailableReason: [free, paid, codex][index] ? null : "Blocked by workspace policy",
+    }));
+    const snapshot = structuredClone(rows);
+    const groups = groupPickerRowsByBillingClass(rows, { codexOnly });
+    expect(groups[0]?.label).toBe(first);
+    expect(groups.flatMap((group) => group.rows)).toHaveLength(3);
+    expect(groups.flatMap((group) => group.rows).find((row) => row.id === "paid")).toEqual(rows[1]);
+    expect(rows).toEqual(snapshot);
+    expect(groupPickerRowsByBillingClass(rows.slice(0, 2))[0]?.label).toBe("OpenGeni");
+  });
+
+  test("unknown legacy cost is not treated as free", () => {
+    const rows = projectPickerRows([
+      catalogModel({ id: "legacy", label: "Legacy", source: "opengeni" }),
+      catalogModel({ id: "codex/test", label: "Codex", source: "codex" }),
+    ]);
+    expect(groupPickerRowsByBillingClass(rows).map((group) => group.label)).toEqual([
+      "OpenGeni",
+      "Codex",
+    ]);
+  });
+
   test("credit notices follow cost policy rather than the OpenGeni group", () => {
     for (const cost of ["free", "credits", "workspace", "organization", "subscription"] as const) {
       const model = catalogModel({

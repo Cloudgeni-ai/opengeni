@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   prepareKnowledgeFile,
   updateScheduledTaskForApi,
@@ -23,6 +24,7 @@ import {
   listFilesForSubject,
   nestedPostgresSqlState,
   withSessionRlsActorContext,
+  withRlsContext,
 } from "../src";
 import { applySkillLifecycle } from "../src/skills";
 import { createTaskNote, archiveTaskNote } from "../src/task-notes";
@@ -200,7 +202,7 @@ describe("unified Knowledge storage", () => {
     await expect(
       updateScheduledTaskForApi(
         client.db,
-        f.workspaceId,
+        authorization.grant,
         task.id,
         { name: "Must roll back" },
         {
@@ -220,7 +222,7 @@ describe("unified Knowledge storage", () => {
     );
     const changed = await updateScheduledTaskForApi(
       client.db,
-      f.workspaceId,
+      authorization.grant,
       task.id,
       { name: "Reviewed ingestion" },
       {
@@ -836,6 +838,55 @@ describe("unified Knowledge storage", () => {
     expect(third.nextCursor).toBeNull();
     expect((await listFilesForSubject(client.db, { ...input, scope: "personal" })).files).toEqual(
       [],
+    );
+  });
+
+  test("null-human service reads retain shared attachments without borrowing private authority", async () => {
+    const f = await fixture();
+    const sharedId = crypto.randomUUID();
+    const privateId = crypto.randomUUID();
+    for (const [id, owners] of [
+      [sharedId, null],
+      [privateId, [f.subjectId]],
+    ] as const) {
+      await shared!
+        .admin`INSERT INTO files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,bucket,object_key,private_owner_subject_ids)
+        VALUES(${id},${f.accountId},${f.workspaceId},'ready','Image.png','Image.png','image/png',1,'test',${id},${owners ? [...owners] : null})`;
+    }
+    await withSessionRlsActorContext(
+      { subjectId: "service:agent-turn", privateFileOwnerSubjectId: f.subjectId },
+      () =>
+        withRlsContext(client.db, f, async (tx) => {
+          const files = await getFilesForSubject(tx, {
+            accountId: f.accountId,
+            workspaceId: f.workspaceId,
+            subjectId: null,
+            fileIds: [sharedId, privateId],
+          });
+          expect(files.map((file) => file.id)).toEqual([sharedId]);
+          const [scope] = await tx.execute<{ subject: string; owner: string }>(sql`
+          select current_setting('opengeni.subject_id', true) as subject,
+                 current_setting('opengeni.private_file_owner', true) as owner`);
+          expect(scope?.subject).toBe("service:agent-turn");
+          expect(scope?.owner).toBe(f.subjectId);
+          let failure: unknown;
+          try {
+            await getFilesForSubject(tx, {
+              accountId: f.accountId,
+              workspaceId: f.workspaceId,
+              subjectId: null,
+              fileIds: ["not-a-uuid"],
+            });
+          } catch (error) {
+            failure = error;
+          }
+          expect(nestedPostgresSqlState(failure)).toBe("22P02");
+          const [afterFailure] = await tx.execute<{ subject: string; owner: string }>(sql`
+          select current_setting('opengeni.subject_id', true) as subject,
+                 current_setting('opengeni.private_file_owner', true) as owner`);
+          expect(afterFailure?.subject).toBe("service:agent-turn");
+          expect(afterFailure?.owner).toBe(f.subjectId);
+        }),
     );
   });
 
@@ -1813,7 +1864,7 @@ describe("unified Knowledge storage", () => {
     ).toBe("rejected");
   });
 
-  test("an ordinary PDF attachment is parsed into one searchable source under its task policy", async () => {
+  test("explicit PDF evidence preparation retains one source outside default discovery", async () => {
     const f = await fixture();
     const { agent } = await attempt(f);
     const fileId = crypto.randomUUID();
@@ -1843,7 +1894,8 @@ describe("unified Knowledge storage", () => {
     const retained = await prepareKnowledgeFile(deps, agent, fileId);
     expect(retained.status).toBe("retained");
     expect(reads).toBe(1);
-    const records = await listKnowledgeEntries(client.db, f.human, { limit: 20 });
+    expect((await listKnowledgeEntries(client.db, f.human)).entries).toEqual([]);
+    const records = await listKnowledgeEntries(client.db, f.human, { includeEvidence: true });
     expect(records.entries.map((entry) => entry.revision.kind)).toEqual(["source"]);
   }, 120_000);
 
@@ -1946,7 +1998,7 @@ describe("unified Knowledge storage", () => {
     ).toBe("published");
   });
 
-  test("automatically prepared source text is searchable and keeps findings separate", async () => {
+  test("prepared evidence is searchable explicitly and keeps findings discoverable", async () => {
     const f = await fixture();
     const { agent } = await attempt(f);
     const fileId = crypto.randomUUID();
@@ -1960,13 +2012,16 @@ describe("unified Knowledge storage", () => {
     });
     if (saved.status !== "retained") throw new Error("Expected retained source");
     expect(
-      (await listKnowledgeEntries(client.db, agent, { query: "December" })).entries.map(
-        (entry) => entry.id,
-      ),
+      (
+        await listKnowledgeEntries(client.db, agent, { query: "December", includeEvidence: true })
+      ).entries.map((entry) => entry.id),
     ).toEqual([saved.receipt.entryId]);
     expect(
       (await getKnowledgeEntry(client.db, agent, saved.receipt.entryId))?.revision.entry.kind,
     ).toBe("source");
+    expect((await listKnowledgeEntries(client.db, agent, { query: "December" })).entries).toEqual(
+      [],
+    );
     const finding = await saveKnowledgeEntry(client.db, agent, {
       operationId: crypto.randomUUID(),
       entryId: crypto.randomUUID(),
@@ -1985,12 +2040,286 @@ describe("unified Knowledge storage", () => {
     ).toEqual([finding.entryId]);
     await save(agent, "An unrelated retained finding");
     expect(
-      (await listKnowledgeEntries(client.db, agent, { fileId })).entries
+      (await listKnowledgeEntries(client.db, agent, { fileId, includeEvidence: true })).entries
         .map((entry) => entry.id)
         .sort(),
     ).toEqual([saved.receipt.entryId, finding.entryId].sort());
     await shared!.admin`UPDATE files SET status='failed' WHERE id=${fileId}`;
     expect(await getKnowledgeEntry(client.db, agent, finding.entryId)).toBeNull();
+  });
+
+  test("0469 rejects missing or live old runtime identities before changing definitions", async () => {
+    const migration = await Bun.file(
+      new URL("../drizzle/0469_knowledge_source_discovery.sql", import.meta.url),
+    ).text();
+    const drain = migration.slice(
+      migration.indexOf("DO $drain$"),
+      migration.indexOf("END $drain$;") + "END $drain$;".length,
+    );
+    const appRole = decodeURIComponent(new URL(shared!.appUrl).username);
+    // Open the lazy runtime pool even when this test is run in isolation.
+    await listKnowledgeEntries(client.db, (await fixture()).human);
+    for (const roles of ["", "[]", '[" invalid "]', JSON.stringify([appRole])]) {
+      await expect(
+        shared!.admin.begin(async (tx) => {
+          await tx`SELECT set_config('opengeni.migration_application_roles',${roles},true)`;
+          await tx.unsafe(drain);
+        }),
+      ).rejects.toMatchObject({ code: "55000" });
+    }
+  });
+
+  test("source purpose is validated at the database lifecycle boundary", async () => {
+    const f = await fixture();
+    for (const purpose of ["unknown", null, 1]) {
+      await expect(
+        shared!.admin.begin(async (tx) => {
+          await tx`SELECT set_config('opengeni.account_id',${f.accountId},true),
+          set_config('opengeni.workspace_id',${f.workspaceId},true),
+          set_config('opengeni.subject_id',${f.subjectId},true),
+          set_config('opengeni.principal_kind','human_session',true)`;
+          const request = {
+            operation: "save",
+            operationId: crypto.randomUUID(),
+            entryId: crypto.randomUUID(),
+            expectedVersion: 0,
+            codecVersion: 1,
+            preview: "Exact",
+            searchText: "Exact",
+            entry: {
+              kind: "source",
+              title: "Exact",
+              content: "Exact",
+              source: { kind: "manual", purpose },
+              evidence: [],
+              groupIds: [],
+              relationships: [],
+            },
+          };
+          await tx`SELECT knowledge_entry_apply(${f.accountId},${f.workspaceId},${tx.json(f.human.actor)},${tx.json(request)})`;
+        }),
+      ).rejects.toMatchObject({ code: "22023" });
+    }
+    expect(
+      (await listKnowledgeEntries(client.db, f.human, { includeEvidence: true })).entries,
+    ).toEqual([]);
+  });
+
+  test("source purpose filters before search and paging while preserving evidence and migrated references", async () => {
+    const f = await fixture();
+    const { agent } = await attempt(f);
+    const createSource = (kind: "manual" | "conversation", purpose?: "evidence" | "reference") =>
+      saveKnowledgeEntry(client.db, f.human, {
+        operationId: crypto.randomUUID(),
+        entryId: crypto.randomUUID(),
+        expectedVersion: 0,
+        entry: {
+          kind: "source",
+          title: "Discovery specimen",
+          content: "Discovery specimen exact text",
+          source: { kind, ...(purpose ? { purpose } : {}) },
+        },
+      });
+    const evidence = await createSource("manual", "evidence");
+    const conversation = await createSource("conversation");
+    const historicalPrepared = await createSource("manual");
+    const migratedReference = await createSource("conversation");
+    const explicitReference = await createSource("conversation", "reference");
+    const ordinaryReference = await createSource("manual");
+    // Reproduce typed pre-0469 metadata without changing a stored revision body.
+    await shared!.admin`UPDATE knowledge_entries SET prepared_file_id=${crypto.randomUUID()}
+      WHERE id=${historicalPrepared.entryId}`;
+    await shared!.admin`UPDATE knowledge_entries SET legacy_memory_id=${crypto.randomUUID()}
+      WHERE id=${migratedReference.entryId}`;
+    const finding = await saveKnowledgeEntry(client.db, agent, {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      entry: {
+        kind: "fact",
+        title: "Discovery specimen finding",
+        content: "Discovery specimen",
+        evidence: [{ entryId: evidence.entryId, revisionId: evidence.revisionId }],
+      },
+    });
+    const visible = [
+      migratedReference.entryId,
+      explicitReference.entryId,
+      ordinaryReference.entryId,
+      finding.entryId,
+    ].sort();
+    const all = [
+      ...visible,
+      evidence.entryId,
+      conversation.entryId,
+      historicalPrepared.entryId,
+    ].sort();
+    for (const context of [f.human, agent]) {
+      for (const query of [undefined, "Discovery"]) {
+        for (const mode of ["keyword", "hybrid"] as const) {
+          const ids: string[] = [];
+          let cursor: string | undefined;
+          do {
+            const page = await listKnowledgeEntries(client.db, context, {
+              limit: 1,
+              query,
+              mode,
+              cursor,
+            });
+            ids.push(...page.entries.map((entry) => entry.id));
+            cursor = page.nextCursor ?? undefined;
+          } while (cursor);
+          expect(ids.sort()).toEqual(visible);
+          expect(
+            (
+              await listKnowledgeEntries(client.db, context, { query, mode, includeEvidence: true })
+            ).entries
+              .map((entry) => entry.id)
+              .sort(),
+          ).toEqual(all);
+        }
+      }
+      for (const source of [evidence, conversation, historicalPrepared]) {
+        const exact = await getKnowledgeEntry(client.db, context, source.entryId, {
+          revisionId: source.revisionId,
+        });
+        expect(exact?.revision.entry.content).toBe("Discovery specimen exact text");
+      }
+      expect(
+        (await getKnowledgeEntry(client.db, context, finding.entryId))?.revision.entry.evidence,
+      ).toMatchObject([{ entryId: evidence.entryId, revisionId: evidence.revisionId }]);
+    }
+    const prior = await getKnowledgeEntry(client.db, f.human, historicalPrepared.entryId);
+    const promoted = await saveKnowledgeEntry(client.db, f.human, {
+      operationId: crypto.randomUUID(),
+      entryId: historicalPrepared.entryId,
+      expectedVersion: prior!.version,
+      entry: {
+        ...prior!.revision.entry,
+        source: { ...prior!.revision.entry.source!, purpose: "reference" },
+      },
+    });
+    expect(
+      (await listKnowledgeEntries(client.db, f.human)).entries.map((entry) => entry.id),
+    ).toContain(promoted.entryId);
+    expect(
+      (
+        await getKnowledgeEntry(client.db, f.human, historicalPrepared.entryId, {
+          revisionId: historicalPrepared.revisionId,
+        })
+      )?.revision.entry,
+    ).toEqual(prior!.revision.entry);
+    const page = await listKnowledgeEntries(client.db, agent, { limit: 1 });
+    await expect(
+      listKnowledgeEntries(client.db, agent, {
+        limit: 1,
+        cursor: page.nextCursor!,
+        includeEvidence: true,
+      }),
+    ).rejects.toThrow("This search changed");
+    const foreign = await fixture();
+    expect(
+      (await listKnowledgeEntries(client.db, foreign.human, { includeEvidence: true })).entries,
+    ).toEqual([]);
+    expect(await getKnowledgeEntry(client.db, foreign.human, evidence.entryId)).toBeNull();
+    await shared!.admin`UPDATE knowledge_entries SET scope='personal',scope_workspace_id=NULL,
+      scope_subject_id='user:someone-else' WHERE id=${evidence.entryId}`;
+    expect(
+      (await listKnowledgeEntries(client.db, f.human, { includeEvidence: true })).entries.map(
+        (entry) => entry.id,
+      ),
+    ).not.toContain(evidence.entryId);
+    expect(await getKnowledgeEntry(client.db, f.human, finding.entryId)).toBeNull();
+  });
+
+  test("image evidence retains its original without inventing extracted text", async () => {
+    const f = await fixture();
+    const { agent } = await attempt(f);
+    const fileId = crypto.randomUUID();
+    await shared!
+      .admin`INSERT INTO files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,bucket,object_key)
+      VALUES(${fileId},${f.accountId},${f.workspaceId},'ready','diagram.png','diagram.png','image/png',10,'test',${fileId})`;
+    const prepared = await completeKnowledgeFilePreparation(client.db, agent, {
+      fileId,
+      title: "Diagram evidence",
+      content: "",
+      purpose: "evidence",
+    });
+    if (prepared.status !== "retained") throw new Error("Expected retained image evidence");
+    expect(
+      (await getKnowledgeEntry(client.db, agent, prepared.receipt.entryId))?.revision.entry,
+    ).toMatchObject({
+      content: "",
+      source: { fileId, purpose: "evidence", retention: "reference" },
+    });
+    expect((await getKnowledgeOriginalFile(client.db, agent, prepared.receipt.entryId))?.id).toBe(
+      fileId,
+    );
+    expect((await listKnowledgeEntries(client.db, agent)).entries).toEqual([]);
+    expect(
+      (await listKnowledgeEntries(client.db, agent, { includeEvidence: true })).entries.map(
+        (entry) => entry.id,
+      ),
+    ).toEqual([prepared.receipt.entryId]);
+  });
+
+  test("pending evidence remains reviewable, and explicit agent references remain discoverable", async () => {
+    const f = await fixture();
+    const pending = await attempt(f, "review_first");
+    const evidence = await saveKnowledgeEntry(client.db, pending.agent, {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      entry: {
+        kind: "source",
+        title: "Pending evidence",
+        content: "Exact pending source",
+        source: { kind: "manual", purpose: "evidence" },
+      },
+    });
+    expect(
+      (await listKnowledgeEntries(client.db, pending.agent, { view: "needs_review" })).entries.map(
+        (entry) => entry.id,
+      ),
+    ).toEqual([evidence.entryId]);
+    expect((await listKnowledgeReviewBatches(client.db, f.human)).batches[0]?.pendingCount).toBe(1);
+    await reviewKnowledgeEntry(client.db, f.human, {
+      operationId: crypto.randomUUID(),
+      entryId: evidence.entryId,
+      revisionId: evidence.revisionId,
+      expectedVersion: evidence.version,
+      decision: "approve",
+    });
+    expect((await listKnowledgeEntries(client.db, f.human)).entries).toEqual([]);
+    expect(
+      (await getKnowledgeEntry(client.db, f.human, evidence.entryId))?.revision.entry.content,
+    ).toBe("Exact pending source");
+    const automatic = await attempt(f);
+    const fileId = crypto.randomUUID();
+    await shared!
+      .admin`INSERT INTO files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,bucket,object_key)
+      VALUES(${fileId},${f.accountId},${f.workspaceId},'ready','reference.txt','reference.txt','text/plain',10,'test',${fileId})`;
+    const reference = await completeKnowledgeFilePreparation(client.db, automatic.agent, {
+      fileId,
+      title: "Reference",
+      content: "Intentionally retained",
+      purpose: "reference",
+    });
+    if (reference.status !== "retained") throw new Error("Expected retained reference");
+    expect(
+      (await listKnowledgeEntries(client.db, automatic.agent)).entries.map((entry) => entry.id),
+    ).toEqual([reference.receipt.entryId]);
+    const replay = await completeKnowledgeFilePreparation(client.db, automatic.agent, {
+      fileId,
+      title: "Reference",
+      content: "Intentionally retained",
+      purpose: "evidence",
+    });
+    expect(replay.status === "retained" && replay.receipt.entryId).toBe(reference.receipt.entryId);
+    expect(
+      (await getKnowledgeEntry(client.db, automatic.agent, reference.receipt.entryId))?.revision
+        .entry.source?.purpose,
+    ).toBe("reference");
   });
 
   test("task-note promotion retains exact text once and cannot read another task tree", async () => {

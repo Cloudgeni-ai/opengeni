@@ -1,3 +1,8 @@
+import {
+  withPreparedCompactionRequest,
+  deferCompactionToModelBoundary,
+} from "./prepared-compaction-request";
+export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {
@@ -233,6 +238,7 @@ import {
   CODEX_APPS_MCP_SERVER_ID,
   CODEX_APPS_MCP_URL,
   CODEX_ORIGINATOR,
+  classifyCodexEncryptedArtifactRejection,
   codexAppsSanitizingFetch,
 } from "@opengeni/codex";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -275,6 +281,11 @@ import {
   sandboxCommandStdout,
 } from "./sandbox/command-result";
 import { shellCodemodePath } from "./sandbox/codemode-token";
+import {
+  installManagedCodemodeClient,
+  loadManagedCodemodeClient,
+  managedCodemodeClientDirectory,
+} from "./sandbox/codemode-client";
 import { InputWaitYield, type InputWaitYieldStream } from "./input-wait-yield";
 export { InputWaitYield } from "./input-wait-yield";
 import {
@@ -319,7 +330,6 @@ export {
   type EffectiveSkillSelection,
   type InstalledSkillActivation,
   type NativeToolSkillSet,
-  type PackSkillActivation,
   type RuntimeSkillActivation,
   type RuntimeSkillArtifact,
   type RuntimeSkillArtifactFile,
@@ -338,6 +348,7 @@ import {
 import {
   ModelRequestCaptureModel,
   ModelRequestCaptureProvider,
+  notifyModelRequestCapture,
   withModelRequestCapture,
   type ModelRequestCapture,
   nextModelContextCaptureIndex,
@@ -598,6 +609,10 @@ export {
   CompactionNeededError,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
+  compactionProviderRejection,
+  compactionProviderRejectionFromDiagnostics,
+  describeCompactionProviderRejection,
+  type CompactionProviderRejection,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
   compactionReplacementFingerprint,
@@ -1258,10 +1273,9 @@ function serializeToolForRemoteCompaction(tool: Tool): SerializedTool | null {
  * exactly one `{ type: "compaction", encrypted_content }` output item.
  * Must run inside Codex ALS with `remote_compaction_v2` beta + turn metadata.
  *
- * Prompt-cache critical: `systemInstructions` and `tools` must match the
- * ordinary agent turn prefix (Codex CLI sends `base_instructions` +
- * `model_visible_specs` on the compact call). An empty instructions string
- * busts the shared tools→instructions prefix and is rejected here.
+ * Reuse the complete prepared ordinary request, after sandbox and lazy-tool
+ * preparation. Never reconstruct its prefix from Agent configuration. Empty
+ * instructions are rejected.
  *
  * Tools are schema context only. This is a single `_fetchResponse` (no tool
  * loop), and extract still requires exactly one compaction item, so a
@@ -1274,54 +1288,44 @@ export async function requestRemoteCompactionV2(
     client: OpenAI;
     provider?: ResolvedModelProvider;
     model: string;
-    /**
-     * Exact agent system instructions for this session/turn. Required and
-     * non-blank — must match the prior ordinary model call for cache prefix.
-     */
-    systemInstructions: string;
-    promptCacheKey?: string;
-    /** Model-visible tool schemas for the compact request (CLI parity). */
-    tools?: readonly SerializedTool[];
+    preparedRequest: Omit<ModelRequest, "input">;
+    captureAgent?: object;
+    signal?: AbortSignal | undefined;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
   },
 ): Promise<Record<string, unknown>> {
-  // Match Agents SDK `normalizeInstructions`: reject blank after trim, but send
-  // the original bytes. Trimming here would diverge from ordinary turns that
-  // keep leading/trailing whitespace and bust the tools→instructions prefix.
-  if (options.systemInstructions.trim() === "") {
+  const { signal: _priorSignal, ...prefix } = options.preparedRequest;
+  if (!prefix.systemInstructions?.trim()) {
     throw new EmptyCompactionSummaryError({
       stage: "remote_v2_instructions",
       reason: "empty_system_instructions",
     });
   }
-  const systemInstructions = options.systemInstructions;
-  const promptInput = buildRemoteCompactionV2PromptInput(input);
-  const tools = options.tools ? [...options.tools] : [];
+  // Reuse the complete prepared request. New SDK/model settings flow through
+  // automatically; only history and the transient compaction marker differ.
   const request: ModelRequest = {
-    systemInstructions,
-    input: promptInput as AgentInputItem[],
-    modelSettings: {
-      // Azure rejects store:false; Codex transport enforces store:false itself.
-      ...(settings.openaiProvider === "azure" ? {} : { store: false }),
-      ...(options.promptCacheKey
-        ? { providerData: { prompt_cache_key: options.promptCacheKey } }
-        : {}),
-    },
-    tools,
-    toolsExplicitlyProvided: true,
-    outputType: "text",
-    handoffs: [],
+    ...prefix,
+    input: buildRemoteCompactionV2PromptInput(input) as AgentInputItem[],
+    // This call outlives the SDK Runner trace. Tracing is client-side metadata,
+    // not part of the provider request or cache prefix.
     tracing: false,
+    // The stopped inference stream may have aborted its per-call signal.
+    // Compaction uses the still-active turn cancellation signal instead.
+    ...(options.signal ? { signal: options.signal } : {}),
   };
   let response: unknown;
   try {
     const provider = options.provider ?? configuredProviders(settings)[0];
     if (!provider) throw new Error("Built-in model provider is unavailable");
-    response = await new CompactionResponsesModel(
-      options.client,
-      options.model,
-      provider,
-    ).fetchResponse(request);
+    response = await withModelRequestCapture(
+      options.captureAgent ? agentModelContextCaptures.get(options.captureAgent) : undefined,
+      async () => {
+        void notifyModelRequestCapture(request);
+        return new CompactionResponsesModel(options.client, options.model, provider).fetchResponse(
+          request,
+        );
+      },
+    );
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
@@ -1366,8 +1370,13 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
   let code: string | null = null;
   let type: string | null = null;
   let requestId: string | null = null;
+  let param: string | null = null;
   let eventType: string | null = null;
-  let rejectionReason: "missing_required_reasoning_item" | null = null;
+  let rejectionReason: CompactionRejectionReason | null = classifyCodexEncryptedArtifactRejection(
+    error,
+  )
+    ? "encrypted_content_rejected"
+    : null;
   const seen = new Set<object>();
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
     if (seen.has(current)) break;
@@ -1376,6 +1385,11 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
     rejectionReason ??= compactionRejectionReason(record);
     if (!errorName && current instanceof Error) {
       errorName = boundCompactionDiagnosticField(current.name);
+    }
+    // `error.param` names the rejected request field (an identifier path such
+    // as `input[3].encrypted_content`), never conversation content.
+    if (param === null && typeof record.param === "string" && record.param.length > 0) {
+      param = boundCompactionDiagnosticField(record.param);
     }
     if (
       httpStatus === null &&
@@ -1406,7 +1420,10 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
       eventType = boundCompactionDiagnosticField(directEventType);
     }
     if (requestId === null) {
-      const directRequestId = record.request_id ?? record.requestId ?? record._request_id;
+      // `requestID` is the OpenAI SDK's APIError property; the others are
+      // provider-body and legacy spellings.
+      const directRequestId =
+        record.request_id ?? record.requestId ?? record.requestID ?? record._request_id;
       if (typeof directRequestId === "string") {
         requestId = boundCompactionDiagnosticField(directRequestId);
       }
@@ -1431,6 +1448,9 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
       if (type === null && typeof nested.type === "string") {
         type = boundCompactionDiagnosticField(nested.type);
       }
+      if (param === null && typeof nested.param === "string" && nested.param.length > 0) {
+        param = boundCompactionDiagnosticField(nested.param);
+      }
       const nestedResponseStatus = nested.response_status ?? nested.responseStatus;
       if (responseStatus === null && typeof nestedResponseStatus === "string") {
         responseStatus = boundCompactionDiagnosticField(nestedResponseStatus);
@@ -1453,11 +1473,20 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
     responseId,
     code,
     type,
+    param,
     requestId,
     ...(eventType ? { eventType } : {}),
     ...(rejectionReason ? { rejectionReason } : {}),
   };
 }
+
+/**
+ * Closed provider rejection families the worker reacts to. Anything else is a
+ * bounded status/code/param record with no classification.
+ */
+export type CompactionRejectionReason =
+  | "missing_required_reasoning_item"
+  | "encrypted_content_rejected";
 
 function compactionRejectionReason(
   record: Record<string, unknown>,
@@ -1978,15 +2007,12 @@ export type BuildAgentOptions = {
   // timeline message. Omitted ⇒ the composed instructions are byte-identical to
   // a workspace-only persona.
   sessionInstructions?: string;
-  /**
-   * Exact Skill activations admitted for this turn. Optional/domain Skills
-   * enter only through an explicit installation, Pack owner, or session
-   * selection; native tool-bound Skills are derived separately from the exact
-   * executable tool catalog.
-   */
+
   skillActivations?: readonly RuntimeSkillActivation[];
   /** Host-owned descriptors and reader; mutually exclusive with skillActivations. */
   skillCatalog?: readonly SkillCatalogDescriptor[];
+  /** Worker has persisted the catalog in conversation history before inference. */
+  skillCatalogInHistory?: boolean;
   /**
    * Internal per-attempt cancellation boundary. The worker supplies Temporal's
    * signal so an in-flight shell process is interrupted immediately instead of
@@ -2034,10 +2060,10 @@ export type RigInstructionsContext = {
 
 export function rigInstructions(rig: RigInstructionsContext): string[] {
   return [
-    `This session runs on rig "${rig.name}" (active version v${rig.version}) — a shared, versioned sandbox machine definition for your workspace.`,
-    "Your sandbox is an EPHEMERAL FORK of that rig: you have root and may install anything freely, but everything you change here is junk that dies with the box and never reaches the rig or other sessions.",
-    "For a DURABLE, team-wide change (tooling every future session on this rig should have), propose it with rig_propose_change, passing the EXACT command that already worked in this box — never assume an unverified change propagates.",
-    "If tooling you expect is missing, consult rig_get to see the rig's current setup and checks before reinstalling.",
+    `This session uses sandbox environment "${rig.name}" (active version v${rig.version}) — a versioned definition of custom sandbox setup and health checks.`,
+    "Your sandbox is an EPHEMERAL FORK of this environment. You may install tools here, but local changes do not update the environment definition or other sessions.",
+    "To make a verified setup change available to future sessions using this environment, call rig_propose_change with the exact command that already worked here. Never assume an unverified change propagates.",
+    "If tooling you expect is missing, consult rig_get to see the sandbox environment's current setup and checks before reinstalling.",
   ];
 }
 
@@ -2075,7 +2101,9 @@ export function coreInstructions(
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; resume a paused goal with opengeni__goal_resume regardless of who paused it or why; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
-    "Use knowledge_search and knowledge_get when retained information is relevant. For questions about what the workspace knows, ground the answer in authorized Knowledge and attached sources. Missing internal facts remain unknown; do not infer a person's role or cite unrelated public search results as evidence. Keep any relevant external research clearly separate from workspace records. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save when useful for future work, whether requested explicitly or learned during ordinary work. When a user supplies or confirms a durable fact, use knowledge_retain_message to retain the actual message and cite its returned entryId/revisionId in the finding evidence. Preserve existing source evidence and relationships when correcting an entry; do not replace them with empty arrays merely because the user confirmed a new value. Explicit confirmation can supersede a conflicting pending proposal, but explain that outcome to the user. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files and automatically prepare source text when authoring is enabled. Use knowledge_retain_file for a newly fetched file or failed preparation. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
+    'Choose durable storage by purpose, including requests to "remember this" or keep something "for future sessions". Knowledge is retrieval-only information, not standing behavior. Use instruction_policy_get then instruction_policy_save for short always-on workspace rules, such as "Keep replies concise; expand when asked." Use Skills for reusable procedures and context-specific or personal behavioral preferences; make the Skill description state when it applies so the prompt index can guide skill_read. Do not save behavioral preferences as Knowledge by rephrasing them as facts like "the user prefers concise replies". Preserve the intended scope: do not turn a personal preference into a workspace-wide rule; use an authorized personal Skill when appropriate, or explain the unavailable scope. Split mixed requests into a short rule and detailed Skill steps without duplicating them in Knowledge.',
+    "Before changing workspace instructions, read the current instruction and exact baseline, preserve unrelated rules, append new rules, and use only a localized exact anchored edit for updates or removals. Agents cannot replace the complete instruction; whole-policy rewrites belong in the manual workspace editor. Do not bypass a destination's Agent learning setting, review, scope, limits, or unavailable tools by saving to another destination. Report the actual destination and receipt: active, pending review, or not saved. Do not promise future behavior from a Knowledge save.",
+    "Use knowledge_search and knowledge_get when retained information is relevant. For questions about what the workspace knows, ground the answer in authorized Knowledge and attached sources. Missing internal facts remain unknown; do not infer a person's role or cite unrelated public search results as evidence. Keep any relevant external research clearly separate from workspace records. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save only when they help a plausible future task. Do not retain routine approvals, acknowledgments, temporary task instructions, status chatter or raw screenshots merely because they occurred. Before saving, use knowledge_prepare_save when available to fetch the authorized collection map with descriptions and parent IDs plus related published and pending entries; otherwise search both views and browse collections. Skip unchanged duplicates, improve the existing entry when appropriate, and create a new entry only for distinct useful information. Read the current entry before correcting it and preserve uncertainty, conflicting evidence and existing relationships. When a user supplies or confirms a durable fact, use knowledge_retain_message to retain the actual message and cite its returned entryId/revisionId in the finding evidence. Preserve existing source evidence and relationships when correcting an entry; do not replace them with empty arrays merely because the user confirmed a new value. Explicit confirmation can supersede a conflicting pending proposal, but explain that outcome to the user. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files for the conversation without automatically publishing OCR or source text into Knowledge. Inspect an image visually in the current task; save only a useful supported observation, requirement or incident when warranted. Use knowledge_retain_file purpose=evidence only when a selected finding needs the original as supporting evidence, or purpose=reference when deliberately retaining a reusable source document. Supporting sources remain accessible through evidence links and explicit includeEvidence searches, but do not fill ordinary Knowledge discovery. An upload alone is not a reason to save Knowledge. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
     ...(workspaceEnvironment ? workspaceEnvironmentInstructions(workspaceEnvironment) : []),
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
     // white-label persona template can never drop it. Absent for rig-less sessions.
@@ -2195,12 +2223,12 @@ export function inspectPersistentAgentInstructions(
       });
     }
     push("workspace_memory", "Workspace memory", options.workspaceMemory);
-    if (options.skillCatalog)
+    if (options.skillCatalog && !options.skillCatalogInHistory)
       push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
     push("session_instructions", "Session instructions", options.sessionInstructions);
   } else {
     push("workspace_governance", "Workspace governance", options.workspaceGovernance);
-    if (options.skillCatalog)
+    if (options.skillCatalog && !options.skillCatalogInHistory)
       push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
     push("session_instructions", "Session instructions", options.sessionInstructions);
     if (codemodeIsAvailable(options)) {
@@ -2847,8 +2875,8 @@ function maybeInstallLazyToolTransport(
   if (!enabled) return;
 
   const mcpServers = options.mcpServers ?? [];
-  // Prepared servers use a shared SDK lifecycle name; tool prefixes come from
-  // their registry identity. Preserve the fallback for embedded/test servers.
+  // Prepared servers use exact model-name mappings, not SDK lifecycle names
+  // or parseable prefixes. Preserve legacy embedded/test-server classification.
   const mcpServerIds = new Set(mcpServers.map((server) => mcpServerRegistryId(server)));
   const deferredMcpServerIds = new Set(
     mcpServers
@@ -2862,6 +2890,18 @@ function maybeInstallLazyToolTransport(
     options.toolPreparationReady,
     deferredMcpServerIds,
     new Set(options.preparationIndependentToolNames ?? []),
+    () => {
+      const identities = new Map<string, string>();
+      for (const server of mcpServers) {
+        if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
+          continue;
+        for (const name of server.modelToolNames()) {
+          if (identities.has(name)) throw new Error("MCP model tool identity collision");
+          identities.set(name, server.registryId);
+        }
+      }
+      return identities;
+    },
   );
 }
 
@@ -2894,7 +2934,7 @@ function sessionMcpApprovalConnectionId(serverId: string, url: string): string {
   return `session-mcp:${serverId}:${targetHash}`;
 }
 
-/** A per-server approval policy keyed by the server's `<id>__` tool prefix. */
+/** Exact server policy. Prefix matching is only for legacy unwrapped servers. */
 type McpApprovalPolicy = {
   prefix: string;
   serverId: string;
@@ -2906,6 +2946,7 @@ type McpApprovalPolicy = {
 /** The subset of the agent surface the approval wrap needs — including `clone`. */
 type ApprovalCapableAgent = {
   getMcpTools: (runContext: unknown) => Promise<Tool<any>[]>;
+  mcpServers?: MCPServer[];
   clone?: (config: unknown) => ApprovalCapableAgent;
 };
 
@@ -2948,9 +2989,9 @@ function modelMcpSourceCallId(modelName: string): string | undefined {
 /**
  * Install the approval wrap on a single agent instance: replace `getMcpTools`
  * with one that stamps `needsApproval: () => true` on every MCP tool whose
- * server policy demands it. Tools are matched by the server's `<id>__` prefix
- * (LONGEST prefix first — see {@link applyMcpApprovalPolicy}), then the
- * unprefixed tool name.
+ * server policy demands it. Prepared tools resolve through their frozen model
+ * name -> original server/tool map; legacy unwrapped servers retain longest-
+ * prefix matching. Never infer account authority from a sanitized SDK name.
  *
  * CLONE SURVIVAL (also used by `installLazyToolRuntime`): the sandbox runtime
  * resolves tools not on the agent we build here but on a FRESH clone —
@@ -2973,20 +3014,35 @@ function installMcpApprovalPolicy(
   const listMcpTools = agent.getMcpTools.bind(agent);
   agent.getMcpTools = async (resolutionContext: unknown) => {
     const tools = await listMcpTools(resolutionContext);
+    const identities = new Map<string, { serverId: string; toolName: string }>();
+    for (const server of agent.mcpServers ?? []) {
+      if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
+        continue;
+      for (const descriptor of await server.listTools()) {
+        if (identities.has(descriptor.name)) throw new Error("MCP model tool identity collision");
+        identities.set(descriptor.name, {
+          serverId: server.registryId,
+          toolName: await server.unprefixedToolName(descriptor.name),
+        });
+      }
+    }
     return tools.map((tool) => {
       if (tool.type !== "function") {
         return tool;
       }
-      const policy = policies.find((entry) => tool.name.startsWith(entry.prefix));
+      const identity = identities.get(tool.name);
+      const policy = identity
+        ? policies.find((entry) => entry.serverId === identity.serverId)
+        : policies.find((entry) => tool.name.startsWith(entry.prefix));
       if (!policy) {
         return tool;
       }
-      const unprefixed = tool.name.slice(policy.prefix.length);
+      const unprefixed = identity?.toolName ?? tool.name.slice(policy.prefix.length);
       const originalNeedsApproval = tool.needsApproval.bind(tool);
       const originalInvoke = tool.invoke.bind(tool);
       const legacyApproval =
         !policy.connectorBacked && mcpToolRequiresApproval(policy.requireApproval, unprefixed);
-      if (!policy.connectorBacked && !legacyApproval) {
+      if (!policy.connectorBacked && !legacyApproval && !connectorActionPolicy) {
         return tool;
       }
       const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => {
@@ -3295,7 +3351,8 @@ function installInteractionInterventionPolicy(
  * tools to function tools with `needsApproval` unset (defaults false) and exposes
  * no per-server/agent approval knob, so we wrap the agent's `getMcpTools` to
  * attach a `needsApproval: () => true` predicate to the matching tools — matched
- * by the server's `<id>__` prefix, then the unprefixed tool name. A tool that
+ * by exact prepared server/tool identity (legacy unwrapped servers use their
+ * `<id>__` prefix). A tool that
  * needs approval raises a run INTERRUPTION, which the worker turns into
  * `session.requiresAction` and resolves via `user.approvalDecision`
  * (resumeApproval) — the same generic path other tool approvals use, so
@@ -3324,6 +3381,7 @@ function applyMcpApprovalPolicy(
     .filter(
       (server) =>
         Boolean(server.connectionRef) ||
+        Boolean(connectorActionPolicy && attemptToolSource(server.id) === "mcp") ||
         server.requireApproval === true ||
         (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
     )
@@ -3338,7 +3396,9 @@ function applyMcpApprovalPolicy(
         prefix: prefixedMcpToolName(server.id, ""),
         serverId: server.id,
         requireApproval:
-          server.requireApproval === true ? true : new Set(server.requireApproval as string[]),
+          server.requireApproval === true
+            ? true
+            : new Set(Array.isArray(server.requireApproval) ? server.requireApproval : []),
         connectorBacked: Boolean(server.connectionRef),
         connectionId,
       };
@@ -3676,11 +3736,15 @@ export type ToolPreparationPhase =
 
 export type ToolPreparationPhaseMeasurement = {
   phase: ToolPreparationPhase;
+  /** Background preparation starts immediately but is not a first-request dependency. */
+  execution: "blocking" | "background";
   outcome: "completed" | "failed";
   durationSeconds: number;
 };
 
 export type PrepareToolsOptions = {
+  /** Frozen, explicitly selected account labels keyed by execution route, not provider. */
+  mcpAccountLabels?: ReadonlyMap<string, string>;
   /** Opt-in exact-attempt persistence; absence preserves ordinary MCP execution. */
   mcpOperationPersistence?: McpOperationPersistence;
   /** Live exact-owner control refresh; API remains read/observation authority. */
@@ -3792,6 +3856,7 @@ async function measureToolPreparationPhase<T>(
   options: PrepareToolsOptions,
   phase: ToolPreparationPhase,
   operation: () => Promise<T>,
+  execution: ToolPreparationPhaseMeasurement["execution"] = "blocking",
 ): Promise<T> {
   const startedAt = performance.now();
   let outcome: ToolPreparationPhaseMeasurement["outcome"] = "completed";
@@ -3804,6 +3869,7 @@ async function measureToolPreparationPhase<T>(
     try {
       options.onPreparationPhase?.({
         phase,
+        execution,
         outcome,
         durationSeconds: (performance.now() - startedAt) / 1_000,
       });
@@ -3929,6 +3995,7 @@ class DeferredPreparedMcpServer implements MCPServer {
   readonly cacheToolsList = false;
   readonly deferredPreparation = true;
   readonly name: string;
+  private readonly listedModelNames = new Set<string>();
 
   constructor(
     readonly registryId: string,
@@ -3959,7 +4026,20 @@ class DeferredPreparedMcpServer implements MCPServer {
   async listTools(): Promise<RuntimeMcpTool[]> {
     if (!this.isPrepared()) return [];
     const target = await this.resolveTarget();
-    return target ? ((await target.listTools()) as RuntimeMcpTool[]) : [];
+    const tools = target ? ((await target.listTools()) as RuntimeMcpTool[]) : [];
+    this.listedModelNames.clear();
+    for (const tool of tools) this.listedModelNames.add(tool.name);
+    return tools;
+  }
+
+  modelToolNames(): Iterable<string> {
+    return this.listedModelNames.values();
+  }
+
+  async unprefixedToolName(name: string): Promise<string> {
+    const target = await this.requiredTarget();
+    if (!(target instanceof PrefixedMcpServer)) throw new Error("Unknown prepared MCP identity");
+    return target.unprefixedToolName(name);
   }
 
   async callTool(
@@ -4076,6 +4156,9 @@ export async function prepareAgentTools(
                 tool.eager !== true,
                 local.preflightCall,
                 local.approvalAuthority,
+                undefined,
+                undefined,
+                options.mcpAccountLabels?.get(config.id),
               ),
               config,
               options,
@@ -4129,7 +4212,7 @@ export async function prepareAgentTools(
         //    reject the bearer at the initialize/tools-list handshake, so a 401/403
         //    (or a missing/failed token) drops the server.
         //  - an optional ToolRef: either an auto-attached workspace-default
-        //    capability MCP or a client/pack-selected portable ref. A
+
         //    broken/expired credential or unavailable endpoint skips the server
         //    with a warning, never killing the turn before the model runs. Bare
         //    refs stay strict (below), preserving the fail-loud default.
@@ -4217,6 +4300,7 @@ export async function prepareAgentTools(
             firstParty && config.id === "opengeni" && !config.connectionRef && !bridge
               ? options.refreshOwnedCommand
               : undefined,
+            options.mcpAccountLabels?.get(config.id),
           ),
           config,
           options,
@@ -4263,6 +4347,7 @@ export async function prepareAgentTools(
     entries: typeof servers,
     strict: boolean,
     phase: "required_connect" | "optional_connect",
+    execution: ToolPreparationPhaseMeasurement["execution"],
   ): Promise<ConnectedMcpServerBatches | null> =>
     entries.length === 0
       ? null
@@ -4277,6 +4362,7 @@ export async function prepareAgentTools(
                 connectTimeoutMs: mcpOuterConnectTimeoutMs(entries.map((entry) => entry.timeoutMs)),
               },
             ),
+          execution,
         );
   const warnBestEffortFailures = (connected: ConnectedMcpServerBatches | null): void => {
     if (!connected) return;
@@ -4303,13 +4389,14 @@ export async function prepareAgentTools(
   const connectEntryGroups = async (
     required: typeof servers,
     bestEffort: typeof servers,
+    execution: ToolPreparationPhaseMeasurement["execution"],
   ): Promise<{
     required: ConnectedMcpServerBatches | null;
     bestEffort: ConnectedMcpServerBatches | null;
   }> => {
     const [requiredResult, bestEffortResult] = await Promise.allSettled([
-      connectEntries(required, true, "required_connect"),
-      connectEntries(bestEffort, false, "optional_connect"),
+      connectEntries(required, true, "required_connect", execution),
+      connectEntries(bestEffort, false, "optional_connect", execution),
     ]);
     const connectedBestEffort =
       bestEffortResult.status === "fulfilled" ? bestEffortResult.value : null;
@@ -4324,7 +4411,11 @@ export async function prepareAgentTools(
     }
     return { required: requiredResult.value, bestEffort: connectedBestEffort };
   };
-  const connectedEager = await connectEntryGroups(eagerRequiredEntries, eagerBestEffortEntries);
+  const connectedEager = await connectEntryGroups(
+    eagerRequiredEntries,
+    eagerBestEffortEntries,
+    "blocking",
+  );
   const connectedEagerRequired = connectedEager.required;
   const connectedEagerBestEffort = connectedEager.bestEffort;
   warnBestEffortFailures(connectedEagerBestEffort);
@@ -4344,6 +4435,7 @@ export async function prepareAgentTools(
     await connectedEagerRequired?.close().catch(() => undefined);
   };
   const completePreparation = async (): Promise<PreparedAgentTools> => {
+    const execution = exposesDeferredPreparation ? "background" : "blocking";
     let attemptToolEnvironment: AttemptToolEnvironment | null = null;
     let toolGatewayCatalog: ToolGatewayCatalog | null = null;
     let toolGateway: ToolGateway | null = null;
@@ -4351,6 +4443,7 @@ export async function prepareAgentTools(
       const connectedDeferred = await connectEntryGroups(
         deferredRequiredEntries,
         deferredBestEffortEntries,
+        execution,
       );
       connectedDeferredRequired = connectedDeferred.required;
       connectedDeferredBestEffort = connectedDeferred.bestEffort;
@@ -4371,14 +4464,20 @@ export async function prepareAgentTools(
             resolvedMcpConnectionIds,
             options,
           ),
+        execution,
       );
       if (attemptToolEnvironment && localToolServer) {
         localToolServer.bindAttemptToolEnvironment(attemptToolEnvironment);
       }
       if (attemptToolEnvironment) {
-        await measureToolPreparationPhase(options, "attempt_catalog_persist", async () => {
-          await options.onAttemptToolCatalog?.(attemptToolEnvironment!.catalog);
-        });
+        await measureToolPreparationPhase(
+          options,
+          "attempt_catalog_persist",
+          async () => {
+            await options.onAttemptToolCatalog?.(attemptToolEnvironment!.catalog);
+          },
+          execution,
+        );
       }
       if (options.workspaceToolGateway) {
         const prepared = await measureToolPreparationPhase(
@@ -4386,6 +4485,7 @@ export async function prepareAgentTools(
           "workspace_gateway_catalog_build",
           async () =>
             await prepareWorkspaceToolGatewayEnvironment(activeMcpServers, registry, options),
+          execution,
         );
         toolGatewayCatalog = prepared.catalog;
         toolGateway = prepared.gateway;
@@ -4655,7 +4755,11 @@ function installAttemptConnectorActionGatewayLifecycle(
     const config = registry.get(definition.identity.serverId);
     const legacyMcpApproval =
       Boolean(config) && !config!.connectionRef && definition.approval === "human";
-    if (!binding && !config?.connectionRef && !legacyMcpApproval) return definition;
+    const workspaceConnectorPolicy = Boolean(
+      connectorActionPolicy && config && attemptToolSource(config.id) === "mcp",
+    );
+    if (!binding && !config?.connectionRef && !legacyMcpApproval && !workspaceConnectorPolicy)
+      return definition;
     if (definition.lifecycle) {
       throw new Error(`Connector action tool already owns a lifecycle: ${definition.modelName}`);
     }
@@ -4684,7 +4788,7 @@ function installAttemptConnectorActionGatewayLifecycle(
             serverId: definition.identity.serverId,
             toolName: definition.identity.toolName,
             arguments: arguments_,
-            approvalMode: "session_mcp",
+            ...(legacyMcpApproval ? { approvalMode: "session_mcp" as const } : {}),
           });
     return {
       ...definition,
@@ -6408,7 +6512,15 @@ function normalizeUrl(raw: string): string | null {
 }
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
-  return sharedPrefixedMcpToolName(registryId, toolName);
+  const name = sharedPrefixedMcpToolName(registryId, toolName);
+  // The SDK normalizes punctuation (including hyphens) and providers cap names
+  // at 64 characters. Use the complete digest, not lossy truncation. Hex names
+  // cannot collide with ordinary names, which always contain the __ separator.
+  return name.length <= 64 && /^[A-Za-z0-9_]+$/.test(name)
+    ? name
+    : createHash("sha256")
+        .update(JSON.stringify([registryId, toolName]))
+        .digest("hex");
 }
 
 const MCP_SDK_LIFECYCLE_NAME = "opengeni-mcp-lifecycle";
@@ -6605,6 +6717,11 @@ export class PrefixedMcpServer implements MCPServer {
   private loggedListToolsFailure = false;
   private listedToolSchemaTokens = 0;
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
+  private readonly originalToolNames = new Map<string, string>();
+  /** Exact attempt-local classification, including names too long for a prefix. */
+  modelToolNames(): Iterable<string> {
+    return this.originalToolNames.keys();
+  }
   private attemptToolEnvironment: AttemptToolEnvironment | null = null;
   private attemptToolSubjectId = "worker:mcp-model";
   private readonly resultCustomDataBridge: McpResultCustomDataBridge;
@@ -6626,6 +6743,7 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly approvalAuthority?: unknown,
     private readonly inputWaitYield?: InputWaitYield,
     private readonly refreshOwnedCommand?: (commandId: string) => Promise<boolean>,
+    private readonly accountLabel?: string,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -6802,10 +6920,23 @@ export class PrefixedMcpServer implements MCPServer {
       const tools = assertMcpToolListWithinBounds(await this.inner.listTools()) as RuntimeMcpTool[];
       const exposed = tools
         .filter((tool) => this.isAllowed(tool.name))
-        .map((tool) => ({
-          ...tool,
-          name: prefixedMcpToolName(this.registryId, tool.name),
-        }));
+        .map((tool) => {
+          const name = prefixedMcpToolName(this.registryId, tool.name);
+          const prior = this.originalToolNames.get(name);
+          if (prior !== undefined && prior !== tool.name)
+            throw new Error("MCP model tool identity collision");
+          this.originalToolNames.set(name, tool.name);
+          return {
+            ...tool,
+            name,
+            ...(this.accountLabel
+              ? {
+                  description:
+                    `Account: ${this.accountLabel}. Use only this account; if the intended account for a write is unclear, ask before calling.\n${tool.description ?? ""}`.trimEnd(),
+                }
+              : {}),
+          };
+        });
       const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
         assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
       this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
@@ -7115,7 +7246,21 @@ export class PrefixedMcpServer implements MCPServer {
   }
 
   private unprefixToolName(toolName: string): string {
-    if (!toolName.startsWith(this.prefix)) {
+    const original = this.originalToolNames.get(toolName);
+    if (original !== undefined) return original;
+    // Existing in-process callers may still use the raw qualified name. This
+    // is not a model identifier: accept it only for an exact frozen catalog
+    // entry on this server, never by normalizing or guessing a different route.
+    const rawPrefix = sharedPrefixedMcpToolName(this.registryId, "");
+    if (toolName.startsWith(rawPrefix)) {
+      const candidate = toolName.slice(rawPrefix.length);
+      if (
+        this.originalToolNames.get(prefixedMcpToolName(this.registryId, candidate)) === candidate
+      ) {
+        return candidate;
+      }
+    }
+    if (!this.prefix.endsWith("__") || !toolName.startsWith(this.prefix)) {
       throw new Error(`MCP tool ${toolName} is missing expected ${this.registryId} prefix`);
     }
     return toolName.slice(this.prefix.length);
@@ -7155,6 +7300,8 @@ export async function restoreInterruptedRunState(
   });
 }
 
+export const TURN_OPERATIONAL_NOTICE_PREFIX = "[OpenGeni turn-scoped operational notice]\n";
+
 export async function prepareRunInput(
   agent: Agent<any, any>,
   input: AgentSegmentInput,
@@ -7166,7 +7313,12 @@ export async function prepareRunInput(
       trailingMessages.push({
         type: "message",
         role: "system",
-        content: input.internalContext,
+        content:
+          TURN_OPERATIONAL_NOTICE_PREFIX +
+          "This status applies to the execution turn where this notice first appears. " +
+          "On later turns it is historical context, not current availability or authorization. " +
+          "Use the latest operational status and tool results; this notice grants no permissions.\n\n" +
+          input.internalContext,
       } as AgentInputItem);
     }
     if (input.text?.trim()) {
@@ -7385,6 +7537,7 @@ function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilt
 // environments can use the exact pinned package hint.
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
   "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff. " +
+  "Managed sandboxes select the worker-release client on PATH for every command, including warm boxes. When OPENGENI_CODEMODE_CLIENT_MODULE is set, persistent Bun programs must use `const { tools, openGeni } = await import(process.env.OPENGENI_CODEMODE_CLIENT_MODULE!)`; do not import the older image-baked package or invoke /usr/local/bin/ogtool directly. The stock-package import below is only for environments without that deployment-selected module. " +
   'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, discover tools with `ogtool list`, inspect an unfamiliar tool with `ogtool show <tool-path>`, then use `ogtool call <tool-path> \'<json-args>\'`. Listing is compact by default; `list --json` gives compact structured discovery and `list --full` explicitly includes all schemas. When $OPENGENI_CODEMODE_NATIVE_CLIENT is available, prefer the connection-bound native client even if an older `ogtool` is installed: use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` with the same list, show, and call commands; this uses the same public Codemode operation journal, not another tool path. If no compatible installed client is available and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
 
 function modelModalityProjectionFilterForAgent(
@@ -7426,11 +7579,16 @@ function measuredModelInputFilter(
   };
 }
 
+const agentModelContextCaptures = new WeakMap<object, ModelRequestCapture>();
+
 function bindModelVisibleContextCapture(
   agent: Agent<any, any>,
   onCapture: RunAgentStreamOptions["onModelVisibleContext"],
 ): ModelRequestCapture | undefined {
-  if (!onCapture) return undefined;
+  if (!onCapture) {
+    agentModelContextCaptures.delete(agent);
+    return undefined;
+  }
   const capture: ModelRequestCapture = async (request) => {
     const requestIndex = nextModelContextCaptureIndex(agent);
     await onCapture(
@@ -7455,6 +7613,7 @@ function bindModelVisibleContextCapture(
       }),
     );
   };
+  agentModelContextCaptures.set(agent, capture);
   return capture;
 }
 
@@ -7483,7 +7642,9 @@ export async function runAgentStream(
   const scope = gate?.beginStream(overrides.signal);
   try {
     if (scope) agent.toolUseBehavior = scope.toolUseBehavior;
-    const stream = await runAgentStreamInternal(agent, input, settings, overrides, scope);
+    const stream = await withPreparedCompactionRequest(agent, () =>
+      runAgentStreamInternal(agent, input, settings, overrides, scope),
+    );
     // Observe the SDK's own settlement promise before exposing the stream. Do
     // not wrap/replace SDK history, errors, cancellation, or stream iteration.
     // In particular a fatal sibling tool error must not leave admission open
@@ -7515,12 +7676,16 @@ async function runAgentStreamInternal(
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
   const codemodeTokenFile = codemodeTokenFileForAgent(agent, environment);
   const codemodeUrl = environment.OPENGENI_CODEMODE_URL;
+  const codemodeClientDirectory =
+    codemodeTokenFile && agentActiveSandboxBackend.get(agent) !== "selfhosted"
+      ? managedCodemodeClientDirectory(await loadManagedCodemodeClient())
+      : undefined;
   const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
   const modelRequestCapture = bindModelVisibleContextCapture(
     agent,
     overrides.onModelVisibleContext,
   );
-  if (modelRequestCapture) installNonLazyModelRequestCapture(agent);
+  installNonLazyModelRequestCapture(agent);
   if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
     throw new Error("runCredentialSessionId is required when run credential setup is enabled");
   }
@@ -7546,13 +7711,23 @@ async function runAgentStreamInternal(
       ? withRunCredentialsSession(session as SandboxSessionLike, overrides.runCredentialSessionId)
       : (session as SandboxSessionLike);
     const agentSession = codemodeTokenFile
-      ? withCodemodeTokenSession(credentialAgentSession, codemodeTokenFile, codemodeUrl)
+      ? withCodemodeTokenSession(
+          credentialAgentSession,
+          codemodeTokenFile,
+          codemodeUrl,
+          codemodeClientDirectory,
+        )
       : credentialAgentSession;
     const credentialSetupSession = overrides.runCredentialSessionId
       ? withRunCredentialsSession(setupSession, overrides.runCredentialSessionId)
       : setupSession;
     const decoratedSetupSession = codemodeTokenFile
-      ? withCodemodeTokenSession(credentialSetupSession, codemodeTokenFile, codemodeUrl)
+      ? withCodemodeTokenSession(
+          credentialSetupSession,
+          codemodeTokenFile,
+          codemodeUrl,
+          codemodeClientDirectory,
+        )
       : credentialSetupSession;
     // Platform setup (manifest-env pin + beforeAgentStart hooks + file downloads)
     // against the UN-proxied established box — the ONE-TRUTH helper shared with the
@@ -7640,7 +7815,12 @@ async function runAgentStreamInternal(
         )
       : resourceClient;
     const codemodeResourceClient = codemodeTokenFile
-      ? withCodemodeTokenClient(credentialResourceClient, codemodeTokenFile, codemodeUrl)
+      ? withCodemodeTokenClient(
+          credentialResourceClient,
+          codemodeTokenFile,
+          codemodeUrl,
+          codemodeClientDirectory,
+        )
       : credentialResourceClient;
     const decoratedClient = withSandboxLifecycleHooks(
       codemodeResourceClient,
@@ -7669,19 +7849,21 @@ async function runAgentStreamInternal(
         ),
         measuredModelInputFilter(
           "input_filter_context",
-          contextRobustnessFilterForSettings(settings, {
-            throwOnCompactionNeeded: Boolean(
-              overrides.contextCompactionSignal || overrides.contextCompactionRequested,
-            ),
-            ...(overrides.contextCompactionSignal
-              ? { contextCompactionSignal: overrides.contextCompactionSignal }
-              : {}),
-            ...(overrides.contextCompactionRequested
-              ? {
-                  contextCompactionRequested: overrides.contextCompactionRequested,
-                }
-              : {}),
-          }),
+          deferCompactionToModelBoundary(
+            contextRobustnessFilterForSettings(settings, {
+              throwOnCompactionNeeded: Boolean(
+                overrides.contextCompactionSignal || overrides.contextCompactionRequested,
+              ),
+              ...(overrides.contextCompactionSignal
+                ? { contextCompactionSignal: overrides.contextCompactionSignal }
+                : {}),
+              ...(overrides.contextCompactionRequested
+                ? {
+                    contextCompactionRequested: overrides.contextCompactionRequested,
+                  }
+                : {}),
+            }),
+          ),
         ),
         // Seal admission before any provider preparation/transport awaits.
         inputWaitYield?.modelDispatchFilter,
@@ -7753,7 +7935,12 @@ async function runAgentStreamInternal(
       : resourceClient;
   const codemodeClient =
     credentialClient && codemodeTokenFile
-      ? withCodemodeTokenClient(credentialClient, codemodeTokenFile, codemodeUrl)
+      ? withCodemodeTokenClient(
+          credentialClient,
+          codemodeTokenFile,
+          codemodeUrl,
+          codemodeClientDirectory,
+        )
       : credentialClient;
   // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
   // repository-clone hook seeds it to the box's token file before the clone.
@@ -7820,19 +8007,21 @@ async function runAgentStreamInternal(
       ),
       measuredModelInputFilter(
         "input_filter_context",
-        contextRobustnessFilterForSettings(settings, {
-          throwOnCompactionNeeded: Boolean(
-            overrides.contextCompactionSignal || overrides.contextCompactionRequested,
-          ),
-          ...(overrides.contextCompactionSignal
-            ? { contextCompactionSignal: overrides.contextCompactionSignal }
-            : {}),
-          ...(overrides.contextCompactionRequested
-            ? {
-                contextCompactionRequested: overrides.contextCompactionRequested,
-              }
-            : {}),
-        }),
+        deferCompactionToModelBoundary(
+          contextRobustnessFilterForSettings(settings, {
+            throwOnCompactionNeeded: Boolean(
+              overrides.contextCompactionSignal || overrides.contextCompactionRequested,
+            ),
+            ...(overrides.contextCompactionSignal
+              ? { contextCompactionSignal: overrides.contextCompactionSignal }
+              : {}),
+            ...(overrides.contextCompactionRequested
+              ? {
+                  contextCompactionRequested: overrides.contextCompactionRequested,
+                }
+              : {}),
+          }),
+        ),
       ),
       inputWaitYield?.modelDispatchFilter,
     ].filter((f): f is CallModelInputFilter => Boolean(f)),
@@ -8283,6 +8472,8 @@ export async function runOwnedSandboxSetup(
     environment: Record<string, string>;
     preparedInput?: PreparedAgentInput;
     fileDownloadsMaterialized?: boolean;
+    /** Lazy setup runs after SDK preparation has already observed the logical manifest. */
+    recordLazyManifest?: boolean;
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
     gitTokenSeedsOverride?: GitTokenSeeds;
     gitTokenSeedOverride?: string;
@@ -8395,6 +8586,13 @@ export async function runOwnedSandboxSetup(
     });
     if (opts.preparedInput) {
       appendSandboxFileDownloadFailureNote(opts.preparedInput, materialized.failures);
+    }
+  }
+  if (opts.recordLazyManifest) {
+    const manifest = (agent as { defaultManifest?: Manifest }).defaultManifest;
+    if (manifest) {
+      const { recordLazyMaterializedDirectories } = await import("./lazy-manifest");
+      await recordLazyMaterializedDirectories(session, manifest);
     }
   }
 }
@@ -8715,7 +8913,7 @@ export function buildManifest(
   }
   // No extraPathGrants here: remote sandbox clients (Modal) reject manifests
   // that carry them at create/apply time, which broke every Modal session.
-  // Pack, selected-library, session, and artifact skills are represented by
+
   // sandbox-safe in-memory or staged local-dir sources, so no host path grant
   // is required here.
   return new Manifest({
@@ -9277,6 +9475,15 @@ function codemodeTokenFileForAgent(
 function sandboxCodemodeTokenHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
   return codemodeTokenSeedForAgent(agent)
     ? [
+        ...(agentActiveSandboxBackend.get(agent) !== "selfhosted"
+          ? [
+              {
+                id: "codemode-client",
+                phase: "beforeAgentStart" as const,
+                run: runManagedCodemodeClientHook,
+              },
+            ]
+          : []),
         {
           id: "codemode-token",
           phase: "beforeAgentStart",
@@ -10518,6 +10725,29 @@ export async function runCodemodeTokenSeedHook(
   assertSandboxCommandSucceeded(result, "Codemode token seed hook");
 }
 
+export async function runManagedCodemodeClientHook(
+  session: SandboxSessionLike,
+  context: SandboxLifecycleHookContext,
+): Promise<void> {
+  await installManagedCodemodeClient(
+    session,
+    await loadManagedCodemodeClient(),
+    async (cmd) =>
+      await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd,
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 1_000,
+        },
+        context.commandRunner,
+      ),
+    context.runAs,
+  );
+}
+
 export async function refreshCodemodeTokenFile(
   session: CodemodeTokenWriterSession,
   token: string,
@@ -10589,7 +10819,7 @@ function rigSetupHeredocDelimiter(script: string): string {
 
 function rigSetupExistingMarkerProbe(versionId: string, contentHash?: string): string {
   if (contentHash !== undefined && !/^sha256:[0-9a-f]{64}$/u.test(contentHash)) {
-    throw new Error("Rig setup content hash must be a canonical SHA-256 value");
+    throw new Error("Sandbox Environment setup content hash must be a canonical SHA-256 value");
   }
   const markers = [`${RIG_SETUP_RUNTIME_MARKER_ROOT}/rig-setup-${versionId}.done`];
   if (contentHash) {
@@ -10632,14 +10862,14 @@ export function rigSetupScriptCommand(
     ["trusted content marker", trustedContentMarkerRoot],
   ] as const) {
     if (!isAbsolute(root) || root === "/") {
-      throw new Error(`Rig setup ${label} root must be a non-root absolute path`);
+      throw new Error(`Sandbox Environment setup ${label} root must be a non-root absolute path`);
     }
   }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new Error("Rig setup timeout must be a positive finite duration");
+    throw new Error("Sandbox Environment setup timeout must be a positive finite duration");
   }
   if (contentHash !== undefined && !/^sha256:[0-9a-f]{64}$/u.test(contentHash)) {
-    throw new Error("Rig setup content hash must be a canonical SHA-256 value");
+    throw new Error("Sandbox Environment setup content hash must be a canonical SHA-256 value");
   }
   const timeoutSecs = Math.max(1, Math.ceil(timeoutMs / 1000));
   const lockWaitSecs = timeoutSecs + 6;
@@ -10658,7 +10888,7 @@ export function rigSetupScriptCommand(
   const heredocDelimiter = rigSetupHeredocDelimiter(script);
   return [
     "set -u",
-    `if ! mkdir -p ${shellQuote(markerRoot)}; then printf '%s\\n' 'unable to create rig setup marker root' >&2; exit 73; fi`,
+    `if ! mkdir -p ${shellQuote(markerRoot)}; then printf '%s\\n' 'unable to create sandbox environment setup marker root' >&2; exit 73; fi`,
     `__OG_RIG_VERSION_MARKER=${shellQuote(versionMarker)}`,
     `__OG_RIG_CONTENT_MARKER=${shellQuote(contentMarker ?? "")}`,
     `__OG_RIG_TRUSTED_CONTENT_MARKER=${shellQuote(trustedContentMarker ?? "")}`,
@@ -10671,7 +10901,7 @@ export function rigSetupScriptCommand(
     '  if mkdir "$__OG_RIG_LOCK" 2>/dev/null; then',
     "    trap 'rm -rf \"$__OG_RIG_LOCK\"' EXIT",
     `    if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
-    "    if ! __OG_RIG_SCRIPT=\"$(mktemp)\"; then printf '%s\\n' 'unable to create rig setup script file' >&2; exit 73; fi",
+    "    if ! __OG_RIG_SCRIPT=\"$(mktemp)\"; then printf '%s\\n' 'unable to create sandbox environment setup script file' >&2; exit 73; fi",
     `cat > "$__OG_RIG_SCRIPT" <<'${heredocDelimiter}'`,
     script,
     heredocDelimiter,
@@ -10679,12 +10909,12 @@ export function rigSetupScriptCommand(
     "__OG_RIG_RC=$?",
     '    rm -f "$__OG_RIG_SCRIPT"',
     '    if [ "$__OG_RIG_RC" -eq 0 ]; then',
-    "      if ! touch \"$__OG_RIG_VERSION_MARKER\"; then printf '%s\\n' 'unable to write rig setup version marker' >&2; exit 73; fi",
-    "      if [ -n \"$__OG_RIG_CONTENT_MARKER\" ] && ! touch \"$__OG_RIG_CONTENT_MARKER\"; then printf '%s\\n' 'unable to write rig setup content marker' >&2; exit 73; fi",
+    "      if ! touch \"$__OG_RIG_VERSION_MARKER\"; then printf '%s\\n' 'unable to write sandbox environment setup version marker' >&2; exit 73; fi",
+    "      if [ -n \"$__OG_RIG_CONTENT_MARKER\" ] && ! touch \"$__OG_RIG_CONTENT_MARKER\"; then printf '%s\\n' 'unable to write sandbox environment setup content marker' >&2; exit 73; fi",
     "    fi",
     '    exit "$__OG_RIG_RC"',
     "  fi",
-    "  if [ ! -d \"$__OG_RIG_LOCK\" ]; then printf '%s\\n' 'unable to create rig setup lock' >&2; exit 73; fi",
+    "  if [ ! -d \"$__OG_RIG_LOCK\" ]; then printf '%s\\n' 'unable to create sandbox environment setup lock' >&2; exit 73; fi",
     "  __OG_RIG_WAITED=0",
     '  while [ "$__OG_RIG_WAITED" -lt "$__OG_RIG_LOCK_WAIT_SECS" ]; do',
     `    if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
@@ -10694,7 +10924,7 @@ export function rigSetupScriptCommand(
     "  done",
     `  if ${markerReady}; then printf '%s\\n' ${shellQuote(RIG_SETUP_SKIPPED_SENTINEL)}; exit 0; fi`,
     '  if [ ! -d "$__OG_RIG_LOCK" ]; then continue; fi',
-    "  if ! rmdir \"$__OG_RIG_LOCK\" 2>/dev/null && [ -d \"$__OG_RIG_LOCK\" ]; then printf '%s\\n' 'unable to reclaim stale rig setup lock' >&2; exit 73; fi",
+    "  if ! rmdir \"$__OG_RIG_LOCK\" 2>/dev/null && [ -d \"$__OG_RIG_LOCK\" ]; then printf '%s\\n' 'unable to reclaim stale sandbox environment setup lock' >&2; exit 73; fi",
     "done",
   ].join("\n");
 }
@@ -10731,7 +10961,7 @@ async function stageRigSetupScript(
         },
         context.commandRunner,
       );
-      assertSandboxCommandSucceeded(result, "Rig setup payload staging");
+      assertSandboxCommandSucceeded(result, "Sandbox Environment setup payload staging");
     }
     return payloadPath;
   } catch (error) {
@@ -10833,8 +11063,10 @@ export async function runRigSetupHook(
       ) {
         result = markerProbe;
       } else if (markerProbeExitCode !== 42) {
-        assertSandboxCommandSucceeded(markerProbe, "Rig setup marker probe");
-        throw new Error("Rig setup marker probe returned success without its sentinel");
+        assertSandboxCommandSucceeded(markerProbe, "Sandbox Environment setup marker probe");
+        throw new Error(
+          "Sandbox Environment setup marker probe returned success without its sentinel",
+        );
       }
       if (result === undefined) {
         stagedScriptPath = await stageRigSetupScript(session, rigSetup.script, context);
@@ -10859,7 +11091,7 @@ export async function runRigSetupHook(
       },
     });
     throw new Error(
-      `Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): ${message}`,
+      `Sandbox Environment setup failed for sandbox environment "${rigSetup.rigName}" (version ${rigSetup.versionId}): ${message}`,
       { cause: error },
     );
   } finally {
@@ -10894,12 +11126,12 @@ export async function runRigSetupHook(
         : output;
     const timedOut = stillRunning || exitCode === 124 || exitCode === 137;
     const reason = timedOut
-      ? `did not finish within the rig setup timeout (${rigSetup.timeoutMs}ms)`
+      ? `did not finish within the sandbox environment setup timeout (${rigSetup.timeoutMs}ms)`
       : exitCode === null
         ? "did not report an exit code"
         : `exited with code ${exitCode}`;
     const failure = new Error(
-      `Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): the setup script ${reason}${tail ? `:\n${tail}` : ""}`,
+      `Sandbox Environment setup failed for sandbox environment "${rigSetup.rigName}" (version ${rigSetup.versionId}): the setup script ${reason}${tail ? `:\n${tail}` : ""}`,
     );
     await context.onRuntimeEvent?.({
       type: "rig.setup.failed",

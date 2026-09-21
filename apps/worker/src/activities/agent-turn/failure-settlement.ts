@@ -225,6 +225,16 @@ function acceptedCodexPolicySnapshot(
 }
 
 export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgentTurnResult> {
+  if (deps.settings.environment === "local" && deps.error instanceof Error) {
+    // Keep local startup failures diagnosable without logging error messages,
+    // absolute host paths, prompts, credentials, or provider response bodies.
+    const locations = (deps.error.stack ?? "")
+      .split("\n")
+      .slice(1)
+      .flatMap((line) => line.match(/(?:apps|packages)\/[A-Za-z0-9_./-]+:\d+:\d+/g) ?? [])
+      .slice(0, 8);
+    console.error(JSON.stringify({ message: "Local turn failure source locations", locations }));
+  }
   const {
     error,
     input,
@@ -249,6 +259,36 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     acknowledgeLostAttemptOwnership,
     acknowledgeRecoveryQuiescence,
   } = deps;
+  // Capture before any recovery/checkpoint DB operation can fail again.
+  if (isSessionEventPersistenceError(error)) {
+    try {
+      const diagnosticId = observability.recordFailureDiagnostic({
+        code: error.details.code,
+        stage:
+          error.details.stage === "session_events.append_generic"
+            ? "session_events.append_generic"
+            : error.details.stage === "session_events.append_for_turn_attempt"
+              ? "session_events.append_for_turn_attempt"
+              : error.details.stage === "session_attempts.claim"
+                ? "session_attempts.claim"
+                : "failure_settlement",
+        retryDecision: error.details.retryOutcome,
+        error,
+        sessionId: input.sessionId,
+        ...(attempt.turnId ? { turnId: attempt.turnId } : {}),
+        attemptId: input.attemptId,
+        attempts: error.details.attempts,
+        eventTypes: error.details.eventTypes,
+        sqlState: error.details.sqlState,
+        ...(error.details.database.constraint
+          ? { constraint: error.details.database.constraint }
+          : {}),
+      });
+      observability.error("session event persistence failed", { correlationId: diagnosticId });
+    } catch {
+      // Failure settlement must not depend on telemetry availability.
+    }
+  }
   // Graceful worker shutdown (deploy / rollout restart): checkpoint the
   // same current inference for a new fenced attempt instead of failing the
   // session. Conversation truth is already persisted per model response;
@@ -724,7 +764,9 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         labels: { workspace_key: codexWorkspaceKey, outcome: "completed" },
       });
       const now = new Date();
-      const before = await listCodexAccountStatuses(db, input.workspaceId).catch(() => []);
+      const before = await listCodexAccountStatuses(db, input.workspaceId, attempt.turnId).catch(
+        () => [],
+      );
       const servingCached = before.find(
         (account) => account.id === providerTurn.effectiveCodexCredentialId,
       );
@@ -892,7 +934,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       }
       let accounts: Awaited<ReturnType<typeof listCodexAccountStatuses>>;
       try {
-        accounts = await listCodexAccountStatuses(db, input.workspaceId);
+        accounts = await listCodexAccountStatuses(db, input.workspaceId, attempt.turnId);
       } catch (metadataError) {
         // Current account health/cooldown metadata is still required after
         // quarantine. Operational database failures re-enter the existing
@@ -1126,6 +1168,11 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           { onArmed: () => (leases.codex.held = false) },
         );
         control.activityError = error;
+        if (evaluated.action === "stopped") {
+          control.activityStatus = evaluated.sessionStatus === "queued" ? "idle" : "failed";
+          control.turnMetricOutcome = "failed";
+          return claimedResult({ status: control.activityStatus });
+        }
         if (evaluated.action === "resumed") {
           control.activityStatus = "recovering";
           control.turnMetricOutcome = "recovering";
@@ -1455,32 +1502,6 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   let failure = agentRunFailurePayload(error, {
     isCodexTurn: billingState.isCodexTurn,
   }) as ReturnType<typeof agentRunFailurePayload>;
-  if (isSessionEventPersistenceError(error)) {
-    // Preserve the exact source message in the internal runtime diagnostic;
-    // SQLSTATE/catalog facts remain separate classification attributes.
-    observability.error("session event persistence failed", {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId: attempt.turnId,
-      attemptId: input.attemptId,
-      code: error.details.code,
-      sqlState: error.details.sqlState ?? "unknown",
-      stage: error.details.stage,
-      eventTypes: error.details.eventTypes.join(","),
-      correlationId: error.details.correlationId,
-      attempts: error.details.attempts,
-      retryOutcome: error.details.retryOutcome,
-      dbSeverity: error.details.database.severity,
-      dbSchema: error.details.database.schema,
-      dbTable: error.details.database.table,
-      dbColumn: error.details.database.column,
-      dbDataType: error.details.database.dataType,
-      dbConstraint: error.details.database.constraint,
-      dbRoutine: error.details.database.routine,
-      error: error.message,
-    });
-  }
   if (failure.retryable && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
     const nextProviderRecoveryCount = attempt.providerRecoveryCount + 1;
     const recoveryResult = providerRecoveryResult({

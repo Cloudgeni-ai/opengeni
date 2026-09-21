@@ -61,8 +61,13 @@ test.skipIf(process.env.OPENGENI_LIVE_MODAL_SETUP !== "1")(
           load: async () => saved,
           acknowledge: async (next: SandboxProviderCommand) => (saved = next),
           reserveInput: async () => 1,
+          captureRouterPage: async (page) => {
+            expect(saved).toEqual(page.expected);
+            saved = page.command;
+            return { command: page.command, captured: true };
+          },
         });
-        await current.acknowledgeCommandOutput!(pages[0]!);
+        expect(await current.captureCommandOutput!(pages[0]!)).toBe(true);
       } else expect(handle).toBeGreaterThan(2147483647);
       const deadline = Date.now() + 30_000;
       while (parseExecBannerSessionId(pages.at(-1)!) !== null && Date.now() < deadline) {
@@ -72,7 +77,7 @@ test.skipIf(process.env.OPENGENI_LIVE_MODAL_SETUP !== "1")(
           yieldTimeMs: 1000,
         });
         pages.push(page);
-        if (admitted) await current.acknowledgeCommandOutput!(page);
+        if (admitted) expect(await current.captureCommandOutput!(page)).toBe(true);
       }
       expect(parseExecBannerExitCode(pages.at(-1)!)).toBe(0);
       return pages.join("\n");

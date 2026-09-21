@@ -293,6 +293,8 @@ describe("rig CRUD lifecycle", () => {
       code: "23514",
       constraint_name: "rig_versions_platform_base_only",
     });
+    // Raw admin SQL exercises the immutable migration 0357 diagnostic. Public
+    // writes reject earlier with RigImageOverrideUnsupportedError's current copy.
     expect((rejection as Error).message).toContain("Rig image overrides are unsupported");
   });
 

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
+import { OpenGeniDocumentAuthorityClient } from "../src/document-authority-client";
 import {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
@@ -66,6 +67,130 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
 }
 
 describe("OpenGeniClient", () => {
+  test("checkpoint recovery preview is read-only and explicit consent sends one exact request, never a Retry", async () => {
+    const projection = {
+      version: 1 as const,
+      status: "eligible" as const,
+      reason: null,
+      checkpoint: null,
+      operationId: null,
+    };
+    const request = {
+      operationId: crypto.randomUUID(),
+      acceptHistoricalCheckpoint: true as const,
+      selection: {
+        version: 1 as const,
+        sessionId: SESSION_ID,
+        sandboxGroupId: crypto.randomUUID(),
+        leaseId: crypto.randomUUID(),
+        routeEpoch: 1,
+        authorityEpoch: 2,
+        leaseEpoch: 3,
+        workspaceGeneration: 44,
+        archiveGeneration: 10,
+        artifactId: crypto.randomUUID(),
+        revision: "wa2:exact",
+        capturedAt: "2026-09-16T06:24:07.000Z",
+      },
+    };
+    const { client, requests } = makeClient((r) =>
+      jsonResponse(
+        r.method === "GET"
+          ? projection
+          : {
+              outcome: "accepted",
+              operationId: request.operationId,
+              recovery: { ...projection, status: "consent_accepted" },
+            },
+      ),
+    );
+    expect(await client.getSandboxRecovery(WORKSPACE_ID, SESSION_ID)).toEqual(projection);
+    expect((await client.recoverSandbox(WORKSPACE_ID, SESSION_ID, request)).recovery.status).toBe(
+      "consent_accepted",
+    );
+    expect(requests.map((r) => r.method)).toEqual(["GET", "POST"]);
+    expect(requests.every((r) => r.url.endsWith(`/sessions/${SESSION_ID}/sandbox-recovery`))).toBe(
+      true,
+    );
+    expect(JSON.parse(requests[1]!.body!)).toEqual(request);
+  });
+
+  test("listSessionCodexAccounts uses the session-authorized projection without a caller-selected source", async () => {
+    const response = {
+      accounts: [],
+      currentAccount: null,
+      currentSelection: null,
+      pinnedAccountId: null,
+      lastAccountId: null,
+      activeAccountId: null,
+      settings: {
+        rotationEnabled: false,
+        rotationStrategy: "sharded" as const,
+        activeCredentialId: null,
+      },
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    expect(await client.listSessionCodexAccounts(WORKSPACE_ID, SESSION_ID)).toEqual(response);
+    expect(requests[0]!.method).toBe("GET");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/codex-accounts`,
+    );
+  });
+  test("retrySession preserves the exact failure and selected policy without a message", async () => {
+    const request = {
+      clientEventId: crypto.randomUUID(),
+      failureEventId: crypto.randomUUID(),
+      model: "selected-model",
+      reasoningEffort: "high" as const,
+      latencyMode: "fast" as const,
+    };
+    const response = {
+      outcome: "accepted" as const,
+      turnId: crypto.randomUUID(),
+      failureEventId: request.failureEventId,
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    expect(await client.retrySession(WORKSPACE_ID, SESSION_ID, request)).toEqual(response);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("POST");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/retry`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual(request);
+    expect(requests[0]!.body).not.toContain('"text"');
+  });
+  test("session pages require affirmative sort and archive acknowledgments", async () => {
+    for (const response of [
+      [],
+      { pinned: [], sessions: [], nextCursor: null },
+      { pinned: [], sessions: [], nextCursor: null, sortBy: "updatedAt", archiveStatus: "active" },
+    ]) {
+      const { client } = makeClient(() => jsonResponse(response));
+      await expect(client.listSessionPage(WORKSPACE_ID, { sortBy: "name" })).rejects.toThrow(
+        "does not support",
+      );
+      await expect(client.listSessionPage(WORKSPACE_ID, { archiveStatus: "all" })).rejects.toThrow(
+        "does not support",
+      );
+    }
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        sortBy: "name",
+        archiveStatus: "all",
+      }),
+    );
+    expect(
+      await client.listSessionPage(WORKSPACE_ID, { sortBy: "name", archiveStatus: "all" }),
+    ).toMatchObject({
+      sortBy: "name",
+      archiveStatus: "all",
+    });
+    expect(requests[0]!.url).toContain("sortBy=name&archiveStatus=all");
+  });
+
   test("uses organization-scoped shared-workspace control-plane routes", async () => {
     const organizationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const membershipId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -125,15 +250,20 @@ describe("OpenGeniClient", () => {
   test("manages bounded session/always personal grants without exposing once", async () => {
     const authorityId = "66666666-6666-4666-8666-666666666666";
     const grantId = "77777777-7777-4777-8777-777777777777";
-    const { client, requests } = makeClient(() => jsonResponse({}));
+    const { fetch, requests } = recordingFetch(() => jsonResponse({}));
+    const client = new OpenGeniDocumentAuthorityClient({
+      baseUrl: "https://api.example.test/",
+      apiKey: "og_test_key",
+      fetch,
+    });
     await client.listUserResourceAuthorities(WORKSPACE_ID, {
-      resourceKind: "connection",
+      resourceKind: "document",
       cursor: authorityId,
       limit: 25,
     });
     await client.issueUserResourceGrant(WORKSPACE_ID, authorityId, {
       scope: "user",
-      resourceKind: "connection",
+      resourceKind: "document",
       mode: "session",
       context: "workspace_shared",
       sessionId: SESSION_ID,
@@ -151,13 +281,13 @@ describe("OpenGeniClient", () => {
     const listUrl = new URL(requests[0]!.url);
     expect(Object.fromEntries(listUrl.searchParams)).toEqual({
       scope: "user",
-      resourceKind: "connection",
+      resourceKind: "document",
       cursor: authorityId,
       limit: "25",
     });
     expect(JSON.parse(requests[1]!.body!)).toEqual({
       scope: "user",
-      resourceKind: "connection",
+      resourceKind: "document",
       mode: "session",
       context: "workspace_shared",
       sessionId: SESSION_ID,
@@ -559,7 +689,7 @@ describe("OpenGeniClient", () => {
         model: "gpt-5.6-sol",
         reasoningEffort: "high",
         latencyMode: "priority",
-        connectionAuthorities: [],
+        connectionAccounts: [],
       }),
     ).toEqual(response as never);
 
@@ -578,7 +708,7 @@ describe("OpenGeniClient", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
       latencyMode: "priority",
-      connectionAuthorities: [],
+      connectionAccounts: [],
     });
   });
 
@@ -1390,7 +1520,7 @@ describe("OpenGeniClient", () => {
       clientEventId: "ce-1",
       controlEtag: "control-1",
       expectedDraftRevision: 3,
-      connectionAuthorities: [],
+      connectionAccounts: [],
     });
     expect(result.sequence).toBe(4);
     const request = requests[0]!;
@@ -1405,7 +1535,7 @@ describe("OpenGeniClient", () => {
         modelContext: "Host context for this turn.",
         controlEtag: "control-1",
         expectedDraftRevision: 3,
-        connectionAuthorities: [],
+        connectionAccounts: [],
       },
     });
   });

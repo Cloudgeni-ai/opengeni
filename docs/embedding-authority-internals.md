@@ -2,6 +2,15 @@
 
 Companion to [the architecture map](architecture.md), [product integration](product-integration.md) and [remote MCP credentials](remote-mcp-credentials.md). Code and current tests own exact behavior.
 
+Connector discovery resolves account-qualified execution tool IDs through the
+current turn's accepted bindings. An enabled connector is not proof of a usable
+account. Missing tools with an accepted account, or historical work lacking an
+account snapshot, report execution unavailability rather than inventing a need
+to reconnect. Actual credential failures retain their native recovery notices.
+Custom native OAuth installations supply omitted catalog authentication metadata
+from their stored connection kind; host-managed references never become native
+OAuth recovery targets.
+
 `packages/connect` owns the framework-neutral setup controller and its
 transport contract. It keeps durable attempt state distinct from browser
 navigation and from credential submission; backend adapters own admission
@@ -56,11 +65,10 @@ selected operations through the existing installation validator. No-auth API
 sources do not invent credentials. Custom-header MCP setup uses the runtime's
 header validator and encrypted storage, distinct from installing server tools.
 Fiken OAuth also uses durable claims and atomic completion, retaining its
-company checks and workspace-only ownership. Core `application/host-mcp-owner.ts`
-admits explicit native or external human selections using the effective owner's
-own membership revision; service keys cannot manufacture human ownership.
-Callers must still authenticate and reauthorize the actor before this storage
-seam: an RLS scope is not proof of authentication.
+company checks and workspace-only ownership. Personal connection setup uses the
+verified canonical actor, including organization-key `asUser` requests. An
+unscoped service request is not human ownership. Callers must authenticate and
+reauthorize the actor before storage: an RLS scope is not authentication.
 The internal `packages/core/src/application/connect-operation.ts` coordinator
 claims before provider effects and reauthorizes inside completion transactions,
 including receipt replays. Provider adapters must supply live authority fences;
@@ -84,93 +92,49 @@ organization-service-key provenance from native-human and attempt claims.
 These new request-time lanes recheck live authority before provider invocation
 and approval issuance; existing catalog filtering and approval rules remain
 authoritative. This does not supply durable scheduled/binding delegation.
-Migration 0443 adds the credential-free `host_mcp_bindings` registry with
-FORCE-RLS external-owner scope, immutable destination/identity, idempotent
-registration, and terminal generation-advancing revocation. Its DB seam is
-`packages/db/src/host-mcp-bindings.ts`; the API adapter is
-`apps/api/src/routes/host-mcp-bindings.ts`. Registration/read/revoke use verified
-external authority, but registration is not an execution delegation. Do not infer authority
-from a registry row, historical creator, or a host credential response.
-Migration 0444 adds owner-scoped `host_mcp_delegations` alongside that registry.
-Its internal DB API reuses session/always grant scopes, shared-output
-acknowledgement, binding generation and live owner/workspace checks. Neither
-these metadata rows nor `HostMcpAcceptedAuthority` schemas admit execution:
-verified owner HTTP issuance now uses `/host-mcp-delegations`, with the same
-commit-time external authority recheck as binding registration. Direct initial-turn
-admission captures selected grants; the worker consumes captured direct-turn
-snapshots through `authorizeDirectHostMcpUse` and fails closed without one.
-`withDirectHostMcpAdmission` in the DB module constructs a direct-turn snapshot
-under live owner/grant/session/turn locks and passes it to a capture callback.
-It is not authentication or storage; production acceptance must invoke it within
-its canonical session-activity transaction and persist an immutable snapshot.
-Scheduled/inherited work is deliberately excluded from this direct-only seam.
-Migration 0445 adds `host_mcp_turn_authorities`, an owner-scoped FORCE-RLS
-direct-turn ledger. `captureDirectHostMcpAuthority` persists the builder's
-snapshot; its insert trigger independently reconstructs and checks canonical
-authority. The runtime role has only SELECT/INSERT, and foreign keys retain
-referenced bindings/delegations until accepted work is removed. Exact replay
-cannot replace a turn/server selection. Verified create admission writes this
-storage atomically with initial events. Worker live consumption validates
-direct or exact same-session causal snapshots, membership/session epochs,
-grants and destinations. Scheduled and child work use separate guarded capture
-paths rather than relaxing the direct-turn guard.
+MCP credentials use the ordinary native connection store, OAuth refresh engine
+and accepted native connection authority. The old host registry/delegation HTTP
+APIs, SDK methods, callback broker and public selection fields are removed.
+Migrations 0443–0448 and 0453 remain historical schema, with legacy persistence
+cleanup tracked separately; their tables do not make the deleted APIs available
+or authorize native credential use. See [the cutover note](remote-mcp-credentials.md).
+
 `initializeSessionStartAtomically` now offers a backend-only
 `captureInitialTurnAuthority` callback for newly inserted initial turns, under
 the same activity transaction as initial events. Capture failure rolls back
 both; replay never attaches authority to an existing turn, and deferred starts
-reject this callback. Explicit public host selection uses this callback.
+reject this callback. External identity-link authority still uses this seam;
+host credential selection does not.
 Core `createAndStartSessionWithOutcome` carries this backend callback through
 the shared finish/repair stage with the exact persisted session and turn IDs.
-The callback is backend-only. `createSessionForRequestWithOutcome` validates
-public `selectedHostMcpDelegations` for a verified direct external owner with
-connection-read authority, then matches selected tools and exact configured
-host URL/ref under the fleet admission switch. The capture callback rechecks
-external authority inside the canonical transaction. Service, realtime and
-child explicit selections are rejected. Direct follow-up send/steer uses the
-same selected-config admission helper, capturing atomically after fresh turn
-insertion in `submitHumanPromptInTransaction`. Prompt replay identity includes
-nonempty canonical selections; replay never invokes capture.
-`host-mcp-task-authority.ts` freezes explicit selections against native task
-revisions (0447), carries them through reusable-session promotion and rollback,
-and captures scheduled turns before attempt registration. All three native
-execution modes retain their existing scheduling rules. Agent-created tasks
-inherit only selected live grants from the exact signed calling attempt.
+Native session creation, send/steer and composer submission select for the
+current named participant. Session-local MCP definitions participate in that
+selection. Native task revisions freeze connection selection for all three
+scheduled run modes; an existing-session task uses its target's persisted tools
+and MCP definitions. Retries retain accepted selection rather than choosing a
+different account. Empty realtime creation captures no connection authority;
+the first text turn selects under its authenticated participant.
 `live-session-attempt.ts` owns the shared active-attempt/interruption/link fence
-used by native execution and host credential reads; host reads do not mutate
-goal snapshots. `scheduled-task-revision-authority.ts` reads the native frozen
+used by native execution. `scheduled-task-revision-authority.ts` reads the native frozen
 revision without importing the DB root barrel. Owner-migrated PostgreSQL tests
 exercise both schedules and private SuperGrok connections under FORCE RLS;
 the scoped lifecycle routines retain membership locks and restore their markers.
 Turn authority ledgers also use the native restrictive session-reference policy;
-owning a host credential does not bypass private-session visibility. Private
+owning a connection does not bypass private-session visibility. Private
 Connect origin triggers have no PUBLIC execution grant, including to artifact
 materializer roles.
-Child initialization (0448) copies only selected `always` grants from the exact
-stored spawning turn; session-bound grants cannot cross that boundary.
-Scheduled origin survives descendants and is revalidated at physical use.
 Optional native links (0449–0452) retain distinct external/native identities.
 `asLinkedUser` explicitly selects the live native delegation; immutable linked
 task/turn snapshots propagate through all scheduled modes, child sessions and
 causal continuations. Runtime execution and credential-use checks deny revoked
-links without tying durable work to the original API key. Native host binding
-ownership (0453) resolves the effective member's own revision, not the external
-authenticating member revision. Native-owned bindings do not expose or migrate
-external-owned bindings. Native consent and account inventory reuse the shared
+links without tying durable work to the original API key. Linking does not
+transfer personal connection ownership. Native consent and account inventory reuse the shared
 React link surfaces; inventory is participant-scoped and cursor-bounded.
-Same-session goal/child-result resumptions separately copy the exact causal
-turn's snapshot after canonical delivery and before attempt registration.
-`inheritCausalHostMcpTurnAuthorities` and the 0446 insert guard prove the
-consumed source, unchanged visibility/epoch and live delegation. Revoked
-selections are omitted; no creator/latest-turn fallback is permitted.
-The DB create/replay boundary now compares `selectedHostMcpDelegations` through
-reserved immutable metadata, normalized by `host-selection-identity.ts` using
-contracts validation. Caller metadata cannot override it; missing selection is
-empty, and changed/removal replays conflict. This is replay identity only;
-it never substitutes for live admission or worker authority validation.
-Core `createAndStartSessionWithOutcome` now forwards internal host selections
-into both keyed and unkeyed DB creation. Its keyed replay rejects omission,
-changed generation or changed delegation ID without invoking capture again.
-Early initialized replay compares the same selection without recapturing it.
+The DB create boundary strips retired selection metadata from new input and no
+longer accepts host-selection arguments. `retired-session-create-metadata.ts`
+keeps only a historical replay rejection: nonempty or malformed stored host
+selection cannot be mistaken for a native create using the same idempotency key.
+Historical records are not rewritten. This compatibility check grants no access.
 Curated API Integration OAuth carries encrypted external continuation data in
 signed state. `packages/core/src/application/external-continuation.ts` checks
 the live identity, explicit membership and organization-key ceiling; the
@@ -258,3 +222,12 @@ The web Capabilities route owns tabs, global search, and curated ordering.
 `apps/web/src/components/capabilities/connection-services.ts` groups explicit
 provider identities without merging their independent authorization options.
 Northstar demonstrates the same SDK catalogue with its existing API proxy.
+
+In catalog mode, `ConnectPanel` presents available provider adapters and MCP
+services through one searchable `ConnectionDiscovery` list. The optional custom
+connection chooser remains separate. Service presentation is shared by discovery
+and account rows; personal credentials do not need a workspace installation
+reference to display their service name and logo. Display matching never selects
+a credential or changes ownership. Curated API integrations retain the explicit
+tool-selection step after OAuth; authorizing an account alone does not install
+its operations.

@@ -1,13 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createHash, randomBytes } from "node:crypto";
+import { Hono } from "hono";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { AccessGrant, McpPersonalConnectionDelegation } from "@opengeni/contracts";
+import type { AccessGrant } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
   createDb,
+  createOrganizationApiKey,
   createScheduledTask,
   getScheduledTask,
-  getScheduledTaskPersonalConnectionDelegations,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -17,6 +19,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
+import { registerScheduledTaskRoutes } from "../src/routes/scheduled-tasks";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 let available = true;
@@ -124,8 +127,8 @@ function resultText(result: unknown): string {
   return content.map((item) => item.text ?? "").join("\n");
 }
 
-describe("first-party MCP scheduled task connectionAuthorities", () => {
-  test("declares connectionAuthorities on create/update and rejects a malformed selection before storage", async () => {
+describe("first-party MCP scheduled task connectionAccounts", () => {
+  test("declares connectionAccounts on create/update and rejects a malformed selection before storage", async () => {
     if (!available) return;
     let databaseTouches = 0;
     const throwingDb = new Proxy(
@@ -149,73 +152,64 @@ describe("first-party MCP scheduled task connectionAuthorities", () => {
       for (const name of ["scheduled_tasks_create", "scheduled_tasks_update"]) {
         const tool = tools.find((candidate) => candidate.name === name);
         expect(tool, name).toBeTruthy();
-        expect(tool?.inputSchema.properties, name).toHaveProperty("connectionAuthorities");
+        expect(tool?.inputSchema.properties, name).toHaveProperty("connectionAccounts");
       }
 
-      // A selection missing connectionId/userDelegation must reach the contract
+      // A selection missing connectionId must reach the contract
       // parse and fail there. If the MCP input schema stripped the field, the
-      // request would parse as connectionAuthorities=[] and proceed to storage.
+      // request would parse as connectionAccounts=[] and proceed to storage.
       const malformed = await connected.client.callTool({
         name: "scheduled_tasks_create",
         arguments: {
           name: "malformed selection",
           schedule: { type: "interval", everySeconds: 3_600 },
           agentConfig: { prompt: "run with a bogus selection" },
-          connectionAuthorities: [{ serverId: "linear" }],
+          connectionAccounts: [{ serverId: "linear" }],
         },
       });
       expect(malformed).toMatchObject({ isError: true });
-      expect(resultText(malformed)).toContain("connectionAuthorities");
+      expect(resultText(malformed)).toContain("connectionAccounts");
       expect(databaseTouches).toBe(0);
     } finally {
       await connected.close();
     }
   });
 
-  test("scheduled_tasks_update accepts connectionAuthorities: [] and clears frozen delegations", async () => {
+  test("scheduled_tasks_update accepts connectionAccounts: [] and resets explicit account choices", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
-    const delegations: McpPersonalConnectionDelegation[] = [
+    const connectionAccounts = [
       {
         serverId: "linear",
         connectionId: crypto.randomUUID(),
-        ownerSubjectId: workspace.subjectId,
-        providerDomain: "linear.app",
-        kind: "oauth2",
       },
     ];
     const task = await createScheduledTask(client.db, {
       ...workspace,
-      name: "clear connection authority",
+      name: "reset account choice",
       status: "active",
       schedule: { type: "interval", everySeconds: 3_600 },
       temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
       runMode: "new_session_per_run",
       overlapPolicy: "allow_concurrent",
       agentConfig: {
-        prompt: "connection authorized prompt",
+        connectionAccounts,
+        prompt: "scheduled prompt",
         resources: [],
         tools: [],
         metadata: {},
       },
       createdBy: { kind: "subject", subjectId: workspace.subjectId },
-      personalConnectionDelegations: delegations,
       metadata: {},
     });
-    expect(
-      await getScheduledTaskPersonalConnectionDelegations(
-        client.db,
-        workspace.workspaceId,
-        task.id,
-      ),
-    ).toEqual(delegations);
+    expect(task.agentConfig.connectionAccounts).toEqual(connectionAccounts);
 
     const server = buildOpenGeniMcpServer(deps(client.db), grantFor(workspace));
     const connected = await connectedClient(server);
     try {
       const updated = await connected.client.callTool({
         name: "scheduled_tasks_update",
-        arguments: { id: task.id, connectionAuthorities: [] },
+        arguments: { id: task.id, connectionAccounts: [] },
       });
       expect(updated).not.toMatchObject({ isError: true });
       const receipt = JSON.parse(resultText(updated)) as {
@@ -231,14 +225,130 @@ describe("first-party MCP scheduled task connectionAuthorities", () => {
     } finally {
       await connected.close();
     }
-    expect(
-      await getScheduledTaskPersonalConnectionDelegations(
-        client.db,
-        workspace.workspaceId,
-        task.id,
-      ),
-    ).toEqual([]);
     const after = await getScheduledTask(client.db, workspace.workspaceId, task.id);
+    expect(after?.agentConfig.connectionAccounts).toEqual([]);
+    expect(after?.ownerSubjectId).toBe(workspace.subjectId);
     expect(after?.authorityRevision).toBeGreaterThan(task.authorityRevision);
   });
 });
+
+test.each([
+  "scheduled_tasks_update",
+  "scheduled_tasks_pause",
+  "scheduled_tasks_resume",
+  "scheduled_tasks_trigger",
+  "scheduled_tasks_delete",
+] as const)(
+  "%s refuses another participant even with empty connection selections",
+  async (name) => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const task = await createScheduledTask(client.db, {
+      ...workspace,
+      name: "Owned schedule",
+      status: name === "scheduled_tasks_resume" ? "paused" : "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "Use my connections",
+        resources: [],
+        tools: [],
+        metadata: {},
+        connectionAccounts: [],
+      },
+      createdBy: { kind: "subject", subjectId: workspace.subjectId },
+      metadata: {},
+    });
+    const other: AccessGrant = {
+      ...grantFor(workspace),
+      subjectId: "user:other-participant",
+      permissions: ["scheduled_tasks:manage", "scheduled_tasks:run"],
+    };
+    for (const caller of [
+      other,
+      { ...other, subjectId: workspace.subjectId, principalKind: "service" as const },
+    ]) {
+      const server = buildOpenGeniMcpServer(deps(client.db), caller);
+      const connected = await connectedClient(server);
+      try {
+        const result = await connected.client.callTool({
+          name,
+          arguments: {
+            id: task.id,
+            ...(name === "scheduled_tasks_update"
+              ? { connectionAccounts: [], name: "Taken over" }
+              : {}),
+          },
+        });
+        expect(result).toMatchObject({ isError: true });
+        expect(resultText(result)).toContain("Only the schedule owner");
+        expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toEqual(task);
+      } finally {
+        await connected.close();
+      }
+    }
+  },
+);
+
+test.each(["update", "pause", "resume", "trigger", "delete"] as const)(
+  "HTTP %s refuses service credentials acting on a personal schedule",
+  async (operation) => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const [sharedWorkspace] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${workspace.accountId}, 'Shared schedule workspace') returning id`;
+    workspace.workspaceId = sharedWorkspace!.id;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id)
+      values (${workspace.workspaceId}, ${workspace.accountId})`;
+    await admin`insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId})`;
+    const task = await createScheduledTask(client.db, {
+      ...workspace,
+      name: "Personal schedule",
+      status: operation === "resume" ? "paused" : "active",
+      schedule: { type: "manual" },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "Use my connections",
+        resources: [],
+        tools: [],
+        metadata: {},
+        connectionAccounts: [],
+      },
+      createdBy: { kind: "subject", subjectId: workspace.subjectId },
+      metadata: {},
+    });
+    const token = randomBytes(24).toString("hex");
+    await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "Schedule fixture",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "scheduled_tasks:manage", "scheduled_tasks:run"],
+    });
+    const app = new Hono();
+    registerScheduledTaskRoutes(app, {
+      ...deps(client.db),
+      settings: testSettings({ productAccessMode: "managed", sandboxBackend: "none" }),
+    });
+    const suffix = operation === "update" || operation === "delete" ? "" : "/" + operation;
+    const response = await app.request(
+      `/v1/workspaces/${workspace.workspaceId}/scheduled-tasks/${task.id}${suffix}`,
+      {
+        method: operation === "update" ? "PATCH" : operation === "delete" ? "DELETE" : "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        ...(operation === "update"
+          ? { body: JSON.stringify({ connectionAccounts: [], name: "Taken over" }) }
+          : {}),
+      },
+    );
+    expect(response.status).toBe(403);
+    expect(await response.text()).toContain("Only the schedule owner");
+    expect(await getScheduledTask(client.db, workspace.workspaceId, task.id)).toEqual(task);
+  },
+);

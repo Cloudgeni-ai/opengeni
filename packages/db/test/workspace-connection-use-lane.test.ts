@@ -218,9 +218,9 @@ describe("workspace connection use lane (migration 0279)", () => {
       denials.push([label, resolution.reason]);
     }
     expect(denials).toEqual([
-      ["foreign", "connection_identity_changed"],
+      ["foreign", "connection_missing"],
       ["inactive", "connection_status_inactive"],
-      ["personal", "connection_identity_changed"],
+      ["personal", "connection_missing"],
     ]);
     // A denied use leaves the same audit evidence as an authorized one.
     const [deniedCount] = await admin<{ count: number }[]>`

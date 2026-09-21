@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { getConnectBeginReplay } from "@opengeni/db/connect-attempts";
 import {
   AdvanceConnectRequest,
   BeginConnectRequest,
@@ -12,15 +13,15 @@ import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
   InstallApiIntegrationRequest,
   stableJson,
+  assertOrganizationIntegrationAllowed,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
-  OPENGENI_PR_REVIEW_PACK_ID,
 } from "@opengeni/contracts";
 import {
   CORE_INTEGRATION_DEFINITIONS,
   createPinnedIntegrationTransport,
 } from "@opengeni/capabilities";
 import {
-  beginConnectAttempt,
+  beginConnectAttempt as persistConnectAttempt,
   getConnectAttempt,
   listPendingConnectAttempts,
   withWorkspaceSubjectRls,
@@ -30,9 +31,8 @@ import {
   createConnection,
   updateConnection,
   encryptEnvironmentValue,
-  normalizedHostCredentialHeaders,
+  normalizedCredentialHeaders,
   listGitHubInstallationAccessForWorkspace,
-  getPackInstallation,
   listPrReviewAppRegistrations,
   listSocialConnections,
   getSocialConnection,
@@ -46,6 +46,7 @@ import {
   isOpenGeniSlackBotConnection,
   prepareCapabilityEnable,
   buildCapabilityCatalog,
+  integrationKeyForConnectProvider,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
@@ -74,6 +75,7 @@ import {
 } from "../integrations/provider-oauth";
 import { resolveForRoute, validatedIntegrationInstallInput } from "./api-integrations";
 import { executeConnectOperation } from "@opengeni/core";
+import { withOrganizationIntegrationPolicyFence } from "@opengeni/db/organization-integration-policy";
 import { startMcpOAuth, requireIntegrationsStateSecret } from "../integrations/oauth-client";
 import { OFFICIAL_GMAIL_MCP_URL } from "../integrations/oauth-profiles";
 import { z } from "zod";
@@ -101,13 +103,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       "workspace:read",
     );
     const external = authorization.contextIntegrity;
+    const policy = await withOrganizationIntegrationPolicyFence(
+      deps.db,
+      authorization.grant,
+      async (_tx, current) => current,
+    );
     const canWrite = hasPermission(authorization.grant.permissions, "connections:write");
     const personal = isPersonalConnectionOwnerPrincipal(authorization);
-    const lensPack = await getPackInstallation(
-      deps.db,
-      authorization.grant.workspaceId,
-      OPENGENI_PR_REVIEW_PACK_ID,
-    );
     let mcpConfigured = false;
     let credentialConfigured = false;
     try {
@@ -118,7 +120,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch {
       /* Missing operator configuration is catalog readiness, not actor authority. */
     }
-    return c.json([
+    const providers = [
       ...(["x", "reddit"] as const).map((providerId) => {
         let configured = mcpConfigured;
         try {
@@ -233,27 +235,27 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: "Gmail",
         family: "google",
         readiness:
-          !external || !canWrite || !personal
+          !external || !canWrite
             ? "unsupported"
             : mcpConfigured
               ? "available"
               : "needs_configuration",
-        ownership: personal ? ["personal"] : [],
+        ownership: personal ? ["workspace", "personal"] : ["workspace"],
         setup: ["oauth"],
       }),
       ConnectProvider.parse({
         id: "slack-personal",
-        label: "My Slack account",
+        label: "Slack account",
         family: "slack",
         readiness:
-          !external || !canWrite || !personal
+          !external || !canWrite
             ? "unsupported"
             : mcpConfigured &&
                 deps.settings.slackClientId?.trim() &&
                 deps.settings.slackClientSecret?.trim()
               ? "available"
               : "needs_configuration",
-        ownership: personal ? ["personal"] : [],
+        ownership: personal ? ["workspace", "personal"] : ["workspace"],
         setup: ["oauth"],
       }),
       ConnectProvider.parse({
@@ -296,7 +298,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           !hasPermission(authorization.grant.permissions, "secrets:write")
             ? "unsupported"
             : credentialConfigured &&
-                lensPack?.status === "active" &&
                 deps.settings.sandboxBackend !== "selfhosted" &&
                 prReviewGitHubAppMissingSettings(deps.settings).length === 0
               ? "available"
@@ -391,7 +392,16 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         ownership: personal ? ["workspace", "personal"] : ["workspace"],
         setup: ["credentials"],
       }),
-    ]);
+    ];
+    return c.json(
+      providers.filter(
+        (provider) =>
+          policy.mode === "unrestricted" ||
+          policy.allowedIntegrationKeys.includes(
+            integrationKeyForConnectProvider(provider.id) ?? "",
+          ),
+      ),
+    );
   });
   app.get("/v1/workspaces/:workspaceId/connect/accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -717,7 +727,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             await requireConnectOwnerAuthority(tx, scope, installationPermission, origin);
             if (before.providerId === "github-lens") {
               await requireConnectOwnerAuthority(tx, scope, "secrets:write", origin);
-              await requireGitHubLensConnect({ ...deps, db: tx }, workspaceId);
+              await requireGitHubLensConnect({ ...deps, db: tx });
             }
           },
           execute: async (attempt) =>
@@ -754,6 +764,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             const resolved = await resolveForRoute({
               deps,
               transport,
+              accountId: scope.accountId,
               workspaceId,
               subjectId: scope.subjectId,
               payload: {
@@ -904,7 +915,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       try {
         credentialHeaders =
           "headers" in values
-            ? normalizedHostCredentialHeaders(
+            ? normalizedCredentialHeaders(
                 z.record(z.string(), z.string()).parse(JSON.parse(values.headers)),
               )
             : { authorization: `Bearer ${values.token}` };
@@ -1052,6 +1063,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               throw new HTTPException(409, { message: "Reload the current connection setup" });
             const started = await startMcpOAuth(deps, {
               ...scope,
+              ...(before.providerId === "gmail" || before.providerId === "slack-personal"
+                ? { integrationKey: before.providerId }
+                : {}),
               ...(continuation ? { externalContinuation: continuation } : {}),
               connectAttemptId: attempt.id,
               personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(authorization),
@@ -1144,6 +1158,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           const resolved = await resolveForRoute({
             deps,
             transport,
+            accountId: scope.accountId,
             workspaceId,
             subjectId: scope.subjectId,
             payload: previewRequest,
@@ -1237,6 +1252,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         inputDigest: createHash("sha256")
           .update(stableJson({ ...input, action: "cancel" }))
           .digest("hex"),
+        purpose: "cancellation",
         authorize: async (tx, attempt, origin) => {
           const permission =
             attempt.providerId === "mcp-install"
@@ -1320,8 +1336,59 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(continuation ? { externalContinuation: continuation } : {}),
     };
     return c.json(
-      await withWorkspaceSubjectRls(deps.db, workspaceId, scope.subjectId, async (tx) => {
-        await requireConnectOwnerAuthority(tx, scope, setupPermission);
+      await (async () => {
+        // Remote setup preparation stays outside the policy and actor transactions.
+        // Repeat both admissions when persisting the resulting attempt.
+        const tx = deps.db;
+        const admit = () =>
+          withOrganizationIntegrationPolicyFence(deps.db, scope, async (policyTx, policy) => {
+            return withWorkspaceSubjectRls(
+              policyTx,
+              workspaceId,
+              scope.subjectId,
+              async (actorTx) => {
+                await requireConnectOwnerAuthority(actorTx, scope, setupPermission);
+                const replay = await getConnectBeginReplay(actorTx, scope, {
+                  idempotencyKey: input.idempotencyKey,
+                  requestDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
+                  returnUrl: input.returnUrl,
+                  ...(continuation ? { externalContinuation: continuation } : {}),
+                });
+                if (replay) return replay;
+                assertOrganizationIntegrationAllowed(
+                  policy,
+                  integrationKeyForConnectProvider(input.providerId),
+                );
+                return null;
+              },
+            );
+          });
+        const replay = await admit();
+        if (replay) return replay;
+        const beginConnectAttempt = async (
+          _db: Parameters<typeof persistConnectAttempt>[0],
+          _scope: Parameters<typeof persistConnectAttempt>[1],
+          attemptInput: Parameters<typeof persistConnectAttempt>[2],
+        ) =>
+          withOrganizationIntegrationPolicyFence(deps.db, scope, async (policyTx, policy) => {
+            return withWorkspaceSubjectRls(
+              policyTx,
+              workspaceId,
+              scope.subjectId,
+              async (actorTx) => {
+                await requireConnectOwnerAuthority(actorTx, scope, setupPermission);
+                return persistConnectAttempt(actorTx, scope, {
+                  ...attemptInput,
+                  authorizeAcquisition: async () => {
+                    assertOrganizationIntegrationAllowed(
+                      policy,
+                      integrationKeyForConnectProvider(input.providerId),
+                    );
+                  },
+                });
+              },
+            );
+          });
         const id = randomUUID();
         if (input.providerId === "mcp-install") {
           if (
@@ -1467,7 +1534,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             if (!hasPermission(authorization.grant.permissions, "secrets:write"))
               throw new HTTPException(403, { message: "secrets:write required" });
             await requireConnectOwnerAuthority(tx, scope, "secrets:write");
-            await requireGitHubLensConnect({ ...deps, db: tx }, workspaceId);
+            await requireGitHubLensConnect({ ...deps, db: tx });
           }
           const navigation = githubAppConnectNavigation(
             deps,
@@ -1595,14 +1662,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             "fiken-token",
           ].includes(input.providerId)
         ) {
-          if (input.providerId === "slack-personal" && input.ownership !== "personal")
-            throw new HTTPException(422, {
-              message: "Hosted Slack MCP requires personal ownership",
-            });
-          if (input.providerId === "gmail" && input.ownership !== "personal")
-            throw new HTTPException(422, {
-              message: "Gmail requires personal ownership; each user connects their own account",
-            });
           if (input.providerId === "fiken-token" && input.ownership !== "workspace")
             throw new HTTPException(422, { message: "Fiken is workspace-owned" });
           requireEnvironmentEncryption(deps.settings);
@@ -1867,7 +1926,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             expiresAt: started.expiresAt,
           },
         });
-      }),
+      })(),
     );
   });
   app.get("/v1/workspaces/:workspaceId/connect/attempts", async (c) => {

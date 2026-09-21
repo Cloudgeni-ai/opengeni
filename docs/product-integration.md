@@ -23,17 +23,10 @@ value. Personal workspaces are excluded from this service-provisioning model.
 The separate verified `asUser` lane can access its own provisioned Personal
 workspace; an unscoped service key cannot. See the external-user section below.
 
-The built-in `opengeni-product-integration` Pack is guidance for the coding
-session that builds this integration, not for the resulting product chatbot.
-Its Skill is session-selected: installation alone does not add it to any agent.
-Use **Start with Pack** in the web console, or create the implementation session
-with the reviewed Skill component ID in `installedSkillIds`. Never include that
-ID in customer-facing session creation.
-The Pack content is generated from `.agents/skills/opengeni-client`, with only
-an explicit install-name/description/activation wrapper. After editing the
-developer guide, run `bun scripts/sync-product-integration-skill.ts`; use
-`bun run check:product-integration-skill` to detect drift. Published runtime
-packages contain the generated content and do not read repository Markdown.
+The repository Skill `.agents/skills/opengeni-client` guides the coding agent
+that builds this integration, not the resulting product chatbot. Use it in the
+implementation session; never attach implementation guidance to customer-facing
+runtime sessions. The product continues to own its own session Skill catalog.
 When a create uses an idempotency key, its ordered `installedSkillIds`
 selection is immutable: a retry may repeat it exactly, but changing or removing
 the selection conflicts instead of replaying a differently configured session.
@@ -206,6 +199,14 @@ existing platform/organization readiness policy. An unscoped service key cannot
 claim that provenance. External identity admission does not create an OpenGeni
 login. Broader personal-resource and durable external execution guarantees must
 be verified separately from core private-session access.
+
+An organization-admin backend may read and update
+`/v1/organizations/:organizationId/private-session-settings` with its organization
+key (`workspace:admin`), without a browser login or synthetic membership. Enabling
+the setting still requires platform readiness. Updates require `expectedVersion`
+and `operationId`; retries preserve their result and recheck live key authority.
+This product setting grants no private-session access: create and use sessions
+through the intended user's `asUser` context.
 
 `firstPartyMcpTools` and `firstPartyMcpPermissions` still narrow what a session
 can do, and narrowing is monotone: a child session, an agent updating its own
@@ -389,6 +390,21 @@ operation.
 
 ## Skills are external product data
 
+Ordinary OpenGeni sessions include `builtin:opengeni-client` for product
+integration and `builtin:opengeni-help` for general product questions. Both are
+readable with `skill_read` without a sandbox, installation, Pack, or repository
+attachment. The client guide helps discover/connect required resources and adapt
+implementation, verification and handoff to the product. Only descriptors enter
+the initial prompt; the agent reads relevant guidance on demand.
+
+`.agents/skills/opengeni-client` is the single authored source, also usable by
+coding agents in a cloned repository. `bun run sync:client-skill` copies it exactly
+to the runtime's bundled assets; `bun run check:client-skill` and the unit suite
+check for drift. These assets ship with runtime packages and production process
+bundles, so managed, self-hosted and local deployments use the same guide without
+fetching GitHub at runtime. Edit the canonical source, not the generated copy.
+The old `opengeni-product-integration` Pack is not needed or restored.
+
 Control OpenGeni's bundled guidance separately from your product Skills with
 `CreateSessionRequest.bundledSkillIds`. Omit it for the default bundles; pass
 `[]` for none, or explicit IDs such as `"builtin:opengeni-documents"`. Selection
@@ -401,6 +417,13 @@ This does not disable workspace-authored/installed Skills or your inline
 `skills`. Those keep their own ownership and sharing rules. The eager
 `skill_read` tool remains available even with no bundled guidance. Bundle
 selection does not wait for lazy tool discovery or sandbox startup.
+
+For an embedded support bot, put `bundledSkillIds: []` in the raw create request
+or `create: { bundledSkillIds: [] }` in the chat facade's resolved options. Select
+only the product's own inline Skills and intended tools, and use a workspace
+whose shared Skills match that product. For example, a documents-capable bot
+can select only `builtin:opengeni-documents`. Removing bundled guides does not
+remove mandatory runtime rules or independently authorized Skill/tool surfaces.
 
 The external backend owns its reusable Skills. Store and version them with the
 product's integration code or in the product's own Skill store, then pass the
@@ -440,7 +463,7 @@ sessions. The external backend remains the source of truth and passes the exact
 selected Skills inline per product-created session.
 
 Do not confuse inline session Skills with workspace `agentInstructions`,
-session `instructions`, instruction policies, preference descriptors, Packs,
+session `instructions`, instruction policies, preference descriptors,
 or MCP tools. Those have separate authority and lifecycle contracts.
 
 ## Product context and tools
@@ -545,6 +568,11 @@ runtime agent.
 
 ## Browser and React integration
 
+For organization-wide server-enforced Connect acquisition choices, use the
+[organization integration policy](organization-integration-policy.md). Its
+catalog exposes named stable keys, and its revisioned update API is administered
+with the backend's organization key rather than a browser-only filter.
+
 Use `SessionConversation` for a packaged existing-session experience, or
 compose the timeline and composer. These use the normal SDK, not the
 simplified backend chat-handler protocol. Custom clients of that protocol
@@ -599,6 +627,22 @@ An ambiguous network result is not itself a provisioning failure. Retry
 `ensureWorkspace` with the exact same external source/id pair; a successful
 replay returns the original workspace with `created: false` and preserves its
 settings.
+
+Connection creation accepts an `operationId`. After an ambiguous response,
+`getConnectionCreationResult(workspaceId, operationId)` recovers that initiating
+actor's committed, secret-free connection metadata. Use the same `asUser` identity;
+an organization administrator does not inherit another actor's creation receipt.
+The lookup does not refresh, reconnect, or restore a revoked connection. A `404`
+is not proof that an earlier request is no longer in flight. Exact creation
+retries still require the original payload; changed credentials with the same
+operation ID are rejected instead of overwriting accepted credentials.
+
+Personal connections use the authenticated initiating user's authority, whether
+created interactively or provisioned through `asUser`. No conversation-use grant
+or shared-output acknowledgment is required. `initialUseContexts` is rejected as
+obsolete. Account choices narrow the owner's accounts without granting access;
+sharing a conversation does not share its participants' credentials. Creation
+replay never restores a revoked connection.
 
 ## Delivery checklist
 

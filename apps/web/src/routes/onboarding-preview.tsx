@@ -10,6 +10,7 @@ import { OrganizationOnboardingPanel } from "@/components/organization-onboardin
 import { CreateOrganizationDialog } from "@/components/rail/create-organization-dialog";
 import { OrganizationSwitcherLine } from "@/components/rail/switcher-block";
 import { SetupAccountRoute } from "@/routes/setup-account";
+import { SignInMethodsPreview } from "@/dev/sign-in-methods-preview";
 
 // Local-only fixtures. No provider credentials or real payments are used.
 const previewMethods = {
@@ -238,6 +239,8 @@ function AdditionalOrganizationPreview() {
 
 /** Public development-only harness rendering the production onboarding components. */
 export function OnboardingPreviewRoute() {
+  if (new URLSearchParams(window.location.search).get("view") === "security")
+    return <SignInMethodsPreview />;
   const view = new URLSearchParams(window.location.search).get("view");
   if (view === "additional-organization") {
     return <AdditionalOrganizationPreview />;

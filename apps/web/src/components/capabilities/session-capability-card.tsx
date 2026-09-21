@@ -1,7 +1,6 @@
-import { authorizeSessionPersonalConnection } from "./session-connection-authority";
 import { attachSessionCapability } from "./attach-session-capability";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import type { AuthNeededItem } from "@opengeni/react";
+import { SessionMcpCapabilityCard, type AuthNeededItem } from "@opengeni/react";
 import { CheckIcon, Loader2Icon } from "lucide-react";
 import { useAppContext } from "@/context";
 import { Button } from "@/components/ui/button";
@@ -21,23 +20,51 @@ const CodexSubscriptionsCard = lazy(async () => ({
 
 /** Recommendations carry identity and rationale, never connection configuration.
  * Expand against the current authenticated catalog before rendering any form. */
-export function SessionCapabilityCard({
-  item,
-  workspaceId,
-  sessionId,
-  visibility = "workspace",
-  onConfigured,
-}: {
+type SessionCapabilityCardProps = {
   visibility?: "private" | "workspace";
   onConfigured?: (() => Promise<void>) | undefined;
   item: AuthNeededItem;
   workspaceId: string;
   sessionId: string;
-}) {
+};
+
+export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
+  const context = useAppContext();
+  const capability = props.item.capability;
+  const resolved = context.workspaceCapabilityCatalog.find((entry) => entry.id === capability?.id);
+  if (capability && resolved?.kind === "mcp" && resolved.authKind === "oauth2") {
+    return (
+      <SessionMcpCapabilityCard
+        client={context.client}
+        workspaceId={props.workspaceId}
+        sessionId={props.sessionId}
+        capabilityId={capability.id}
+        name={capability.name}
+        rationale={capability.rationale}
+        returnUrl={window.location.href}
+        onConfigured={props.onConfigured}
+      />
+    );
+  }
+  return (
+    <ScopedSessionCapabilityCard
+      key={`${props.workspaceId}:${props.sessionId}:${props.item.capability!.id}`}
+      {...props}
+    />
+  );
+}
+
+function ScopedSessionCapabilityCard({
+  item,
+  workspaceId,
+  sessionId,
+  onConfigured,
+}: SessionCapabilityCardProps) {
   const context = useAppContext();
   const recommendation = item.capability!;
   const [expanded, setExpanded] = useState(false);
   const [complete, setComplete] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [resolvedItem, setResolvedItem] = useState<CapabilityCatalogItem | null>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLElement>(null);
@@ -49,7 +76,6 @@ export function SessionCapabilityCard({
     : null;
   const close = () => {
     setExpanded(false);
-    requestAnimationFrame(() => (opener.current ?? cardRef.current)?.focus());
   };
   const skill = recommendation.kind === "skill";
   const apiKey = catalogItem ? capabilityConnectPlan(catalogItem).mode === "api_key" : false;
@@ -80,11 +106,15 @@ export function SessionCapabilityCard({
             : "Review access before signing in. You'll return to this conversation after authorization."
       }
       onOpen={() => setExpanded(true)}
+      onClose={close}
+      busy={busy}
       opener={opener}
       cardRef={cardRef}
     >
       {recommendation.id === "api:github-app" ? (
         <SessionGitHubSetup
+          busy={busy}
+          setBusy={setBusy}
           workspaceId={workspaceId}
           sessionId={sessionId}
           onClose={close}
@@ -95,6 +125,8 @@ export function SessionCapabilityCard({
         />
       ) : recommendation.id === "mcp:codex_apps" ? (
         <SessionCodexAppsSetup
+          busy={busy}
+          setBusy={setBusy}
           workspaceId={workspaceId}
           sessionId={sessionId}
           onClose={close}
@@ -105,10 +137,11 @@ export function SessionCapabilityCard({
         />
       ) : (
         <SessionCapabilitySetup
+          busy={busy}
+          setBusy={setBusy}
           key={`${workspaceId}:${sessionId}:${recommendation.id}`}
           capabilityId={recommendation.id}
           onResolvedItem={setResolvedItem}
-          visibility={visibility}
           onConfigured={onConfigured}
           workspaceId={workspaceId}
           sessionId={sessionId}
@@ -124,18 +157,20 @@ export function SessionCapabilityCard({
 }
 
 function SessionCapabilitySetup({
+  busy,
+  setBusy,
   capabilityId,
   onResolvedItem,
-  visibility,
   onConfigured,
   workspaceId,
   sessionId,
   onClose,
   onComplete,
 }: {
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
   capabilityId: string;
   onResolvedItem: (item: CapabilityCatalogItem) => void;
-  visibility: "private" | "workspace";
   onConfigured?: (() => Promise<void>) | undefined;
   workspaceId: string;
   sessionId: string;
@@ -144,9 +179,6 @@ function SessionCapabilitySetup({
 }) {
   const context = useAppContext();
   const catalog = useCapabilitiesCatalog(workspaceId);
-  const [sharedAcknowledged, setSharedAcknowledged] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
   const scope = useRef({ client: context.client, workspaceId, sessionId, alive: true });
@@ -201,12 +233,6 @@ function SessionCapabilitySetup({
             if (!current()) return;
             if (!updated?.enabled)
               throw new Error("Setup could not be verified. Refresh and try again.");
-            if (updated.connectionRef?.subjectScope === "subject") {
-              setNotice(
-                "Your account is connected. Choose how to use it in this conversation below.",
-              );
-              return;
-            }
             await attachSessionCapability(context.client, workspaceId, sessionId, updated, current);
             await onConfigured?.();
             if (current()) onComplete();
@@ -246,17 +272,6 @@ function SessionCapabilitySetup({
       scope.current.workspaceId === invocation.workspaceId &&
       scope.current.sessionId === invocation.sessionId;
     try {
-      if (item.connectionRef?.subjectScope === "subject") {
-        await authorizeSessionPersonalConnection(
-          context.client,
-          workspaceId,
-          sessionId,
-          item,
-          visibility,
-          sharedAcknowledged,
-          current,
-        );
-      }
       await attachSessionCapability(context.client, workspaceId, sessionId, item, current);
       if (current()) await onConfigured?.();
       if (current()) onComplete();
@@ -276,7 +291,7 @@ function SessionCapabilitySetup({
     ? connectionHealth(item, catalog.connections ?? [], catalog.connections !== null)
     : null;
   return (
-    <div>
+    <div className="p-6 sm:p-8">
       {catalog.loading && !item ? (
         <p role="status" className="flex items-center gap-2 text-sm text-fg-muted">
           <Loader2Icon className="size-4 animate-spin" />
@@ -297,7 +312,7 @@ function SessionCapabilitySetup({
         </Notice>
       ) : (
         <DetailBody
-          inline
+          setupOnly
           showIdentity={false}
           onCancel={ownsActionRow ? onClose : undefined}
           item={item}
@@ -319,34 +334,6 @@ function SessionCapabilitySetup({
           onAction={(action) => void act(action)}
         />
       )}
-      {notice ? (
-        <p role="status" className="mt-2 text-xs text-fg-muted">
-          {notice}
-        </p>
-      ) : null}
-      {item?.enabled && item.connectionRef?.subjectScope === "subject" ? (
-        <div className="mt-3 text-xs text-fg-muted">
-          {visibility === "workspace" ? (
-            <label className="flex items-start gap-2">
-              <input
-                type="checkbox"
-                checked={sharedAcknowledged}
-                onChange={(event) => setSharedAcknowledged(event.target.checked)}
-                disabled={busy}
-                className="mt-0.5 size-4"
-              />
-              <span>
-                Allow this conversation to use my personal account. Results shared here will be
-                visible to other workspace members.
-              </span>
-            </label>
-          ) : (
-            <p>
-              Allow your personal account only in this private conversation and its continuations.
-            </p>
-          )}
-        </div>
-      ) : null}
       <div className="mt-2 flex justify-end gap-2">
         {!ownsActionRow ? (
           <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>
@@ -354,18 +341,8 @@ function SessionCapabilitySetup({
           </Button>
         ) : null}
         {item?.enabled && health?.state !== "attention" && health?.state !== "unverified" ? (
-          <Button
-            size="sm"
-            disabled={
-              busy ||
-              (item.connectionRef?.subjectScope === "subject" &&
-                visibility === "workspace" &&
-                !sharedAcknowledged)
-            }
-            onClick={() => void useConnected()}
-          >
-            {busy ? <Loader2Icon className="animate-spin" /> : <CheckIcon />}Use in this
-            conversation
+          <Button size="sm" disabled={busy} onClick={() => void useConnected()}>
+            {busy ? <Loader2Icon className="animate-spin" /> : <CheckIcon />}Add tools
           </Button>
         ) : null}
       </div>
@@ -374,18 +351,21 @@ function SessionCapabilitySetup({
 }
 
 function SessionGitHubSetup({
+  busy,
+  setBusy,
   workspaceId,
   sessionId,
   onClose,
   onComplete,
 }: {
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
   workspaceId: string;
   sessionId: string;
   onClose: () => void;
   onComplete: () => void;
 }) {
   const { client } = useAppContext();
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const active = useRef(true);
   const inFlight = useRef(false);
@@ -427,7 +407,7 @@ function SessionGitHubSetup({
     }
   }
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 p-6 sm:p-8">
       <p className="text-xs leading-[1.7] text-fg-muted">
         Choose the account and repositories to share with this workspace on GitHub, then return to
         this conversation.
@@ -446,11 +426,15 @@ function SessionGitHubSetup({
 }
 
 function SessionCodexAppsSetup({
+  busy,
+  setBusy,
   workspaceId,
   sessionId,
   onClose,
   onComplete,
 }: {
+  busy: boolean;
+  setBusy: (busy: boolean) => void;
   workspaceId: string;
   sessionId: string;
   onClose: () => void;
@@ -458,7 +442,6 @@ function SessionCodexAppsSetup({
 }) {
   const context = useAppContext();
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const inFlight = useRef(false);
   const active = useRef(true);
   useEffect(
@@ -498,7 +481,7 @@ function SessionCodexAppsSetup({
     }
   }
   return (
-    <div>
+    <div className="p-6 sm:p-8">
       <Suspense fallback={<p role="status">Loading connection controls…</p>}>
         <CodexSubscriptionsCard
           workspaceId={workspaceId}

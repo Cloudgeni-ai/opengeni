@@ -8,6 +8,7 @@ import {
 } from "@opengeni/db";
 import {
   RoutingMutationOutcomeUnknownError,
+  runManagedCodemodeClientHook,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime";
 import {
@@ -18,7 +19,10 @@ import {
 import { createRuntimeBatcher, currentActivityContext } from "../streaming";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import { maybePersistWarmWorkspaceSnapshot, type ResumedTurnSandbox } from "../../sandbox-resume";
-import { recordCreditMicros } from "../../observability-metrics";
+import {
+  recordCreditMicros,
+  runtimeMetricsHooksForObservability,
+} from "../../observability-metrics";
 import { ChannelAPartialMutationError } from "@opengeni/runtime/sandbox";
 
 import { safeErrorDiagnostic } from "./errors";
@@ -124,16 +128,37 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
   // alive. Keep setup/snapshot persistence on the rebound raw session while
   // preserving the SDK-owned routing proxy for eager turns. Lazy turns hold the
   // proxy separately, so their worker-side handle may replace its raw session.
-  const onHomeSandboxRebound = (rebound: {
+  const onHomeSandboxRebound = async (rebound: {
     established: EstablishedSandboxSession;
     leaseEpoch: number;
-  }): void => {
+  }): Promise<void> => {
     const current = sandboxState.resolvedSandbox;
+    if (!current) throw new Error("Home sandbox rebound before turn sandbox admission");
+    if (
+      rebound.established.backendId !== "selfhosted" &&
+      rebound.established.instanceId !== current.established.instanceId
+    ) {
+      // An older archive may lack this worker release's selected client. Only
+      // prepare that client, never replay turn-start hooks/credentials/resources.
+      // Fence the replacement itself, not the stale turn-start handle. Both
+      // mutation admission and settlement precede raw-state/route publication.
+      const commandFence = eventing.toolCancellationFenceRef.current;
+      await runWorkspaceMutationForSandbox(
+        { ...current, established: rebound.established, leaseEpoch: rebound.leaseEpoch },
+        "homeSandboxClientPreparation",
+        () =>
+          runManagedCodemodeClientHook(rebound.established.session as never, {
+            environment: {},
+            ...(commandFence
+              ? { commandRunner: commandFence.runSandboxCommand.bind(commandFence) }
+              : {}),
+          }),
+      );
+    }
     const previousSession = current?.established.session;
     const preserveRoutingProxy =
       current !== null && previousSession !== sandboxState.setupBoxSession;
     sandboxState.setupBoxSession = rebound.established.session;
-    if (!current) return;
     current.leaseEpoch = rebound.leaseEpoch;
     current.established = preserveRoutingProxy
       ? {
@@ -539,8 +564,10 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
       // MID-SESSION snapshot (sandbox-file-persistence): while the turn holds
       // the box, fold a fresh /workspace snapshot onto the lease every
       // sandboxSnapshotIntervalMs, so a box death the reaper never sees
-      // (Modal hard timeout mid-busy, OOM, infra) costs at most one interval
-      // of work — a legit multi-day turn is otherwise completely unprotected
+      // (Modal hard timeout mid-busy, OOM, infra) has a recent recovery point
+      // when capture succeeds. This interval is not a maximum recovery-point
+      // age: live writers and failed captures can defer publication. A legit
+      // multi-day turn is otherwise completely unprotected
       // (the reaper only drain-persists IDLE leases). Uses the UN-proxied box
       // session (setupBoxSession): the routing veneer could swap mid-op and a
       // selfhosted target has no persistWorkspace anyway. Best-effort +
@@ -558,7 +585,13 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
         })
       ) {
         const snapshot = maybePersistWarmWorkspaceSnapshot(
-          { db, settings, objectStorage },
+          {
+            db,
+            settings,
+            objectStorage,
+            sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+            observability,
+          },
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,

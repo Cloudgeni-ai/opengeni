@@ -1,4 +1,8 @@
-import { dbSearchPath, getSettings, type Settings } from "@opengeni/config";
+import {
+  dbSearchPath,
+  getArtifactMaterializerSettings,
+  type ArtifactMaterializerSettings,
+} from "@opengeni/config";
 import {
   createDb,
   dbSql,
@@ -77,7 +81,7 @@ export type CreateEditableArtifactMaterializerServiceInput = Readonly<{
 }>;
 
 export type ProductionEditableArtifactMaterializerServiceOptions = Readonly<{
-  settings: Settings;
+  settings: ArtifactMaterializerSettings;
   /** Dedicated DSN; never defaults to settings.databaseUrl. */
   databaseUrl: string;
   declaredDatabaseRole: string;
@@ -671,7 +675,7 @@ export async function createMaterializerSidecarFromEnvironment(
 }> | null> {
   const sidecar = readEditableArtifactMaterializerSidecarEnvironment(environment);
   if (!sidecar) return null;
-  const settings = getSettings();
+  const settings = getArtifactMaterializerSettings(environment);
   const service = await createProductionEditableArtifactMaterializerService({
     settings,
     databaseUrl: sidecar.databaseUrl,

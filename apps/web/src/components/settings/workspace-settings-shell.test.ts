@@ -95,6 +95,16 @@ async function renderShell(
 }
 
 describe("workspace management navigation", () => {
+  test("keeps Agent Knowledge out of the settings sidebar", async () => {
+    const view = await renderShell({ kind: "settings", section: "learning" });
+    try {
+      expect(view.container.textContent).toContain("Agent learning");
+      expect(view.container.textContent).not.toContain("Agent Knowledge");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("keeps settings and management destinations in one shell", () => {
     expect(workspaceManagementLocation(`${base}/settings`, workspaceId, "api-keys")).toEqual({
       kind: "settings",

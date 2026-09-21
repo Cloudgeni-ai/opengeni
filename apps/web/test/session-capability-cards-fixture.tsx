@@ -68,7 +68,6 @@ function Scenario({ scenario }: { scenario: (typeof scenarios)[number] }) {
   function close() {
     setExpanded(false);
     setError(null);
-    requestAnimationFrame(() => (opener.current ?? cardRef.current)?.focus());
   }
 
   function onAction(action: ConnectAction) {
@@ -104,22 +103,26 @@ function Scenario({ scenario }: { scenario: (typeof scenarios)[number] }) {
               : "Review access before signing in. You'll return to this conversation after authorization."
         }
         onOpen={() => setExpanded(true)}
+        onClose={close}
+        busy={busy}
         opener={opener}
         cardRef={cardRef}
       >
-        <DetailBody
-          item={item}
-          inline
-          showIdentity={false}
-          onCancel={close}
-          health={{ state: "none" }}
-          logoSrc={null}
-          busy={busy}
-          errorMessage={error}
-          canManageSocial
-          canManageSkills
-          onAction={onAction}
-        />
+        <div className="p-6 sm:p-8">
+          <DetailBody
+            item={item}
+            setupOnly
+            showIdentity={false}
+            onCancel={close}
+            health={{ state: "none" }}
+            logoSrc={null}
+            busy={busy}
+            errorMessage={error}
+            canManageSocial
+            canManageSkills
+            onAction={onAction}
+          />
+        </div>
       </SessionCapabilityFrame>
       <fieldset
         className="mt-3 flex flex-wrap gap-2"

@@ -198,7 +198,11 @@ export type BuildCreateSessionRequestInput = {
   omitWorkspaceResources?: boolean;
   selectedTools: ToolRef[];
   /** Exact policy acknowledged by the revision-fenced new-session draft. */
-  newSessionDraftToolPolicy?: { tools: ToolRef[]; toolsProvided: boolean };
+  newSessionDraftToolPolicy?: {
+    tools: ToolRef[];
+    toolsProvided: boolean;
+    excludedMcpServerIds?: string[];
+  };
   defaultModel: string;
   defaultReasoningEffort: ReasoningEffort;
   defaultLatencyMode: LatencyMode;
@@ -275,9 +279,14 @@ export function buildCreateSessionRequest(
   const defaultToolIds = input.workspaceDefaultMcpServerIds
     ? [...new Set(input.workspaceDefaultMcpServerIds)].sort()
     : null;
-  const tools = input.newSessionDraftToolPolicy
-    ? input.newSessionDraftToolPolicy.toolsProvided
-      ? [...input.newSessionDraftToolPolicy.tools]
+  const draftPolicy = input.newSessionDraftToolPolicy;
+  const exclusionOnlyCustomize =
+    draftPolicy?.toolsProvided === true &&
+    draftPolicy.tools.length === 0 &&
+    draftPolicy.excludedMcpServerIds !== undefined;
+  const tools = draftPolicy
+    ? draftPolicy.toolsProvided && !exclusionOnlyCustomize
+      ? [...draftPolicy.tools]
       : undefined
     : input.workspaceMcpCatalogReady === true &&
         defaultToolIds &&
@@ -294,6 +303,9 @@ export function buildCreateSessionRequest(
     ...(input.installedSkillIds?.length ? { installedSkillIds: input.installedSkillIds } : {}),
     resources,
     ...(tools === undefined ? {} : { tools }),
+    ...(input.newSessionDraftToolPolicy?.excludedMcpServerIds !== undefined
+      ? { excludedMcpServerIds: input.newSessionDraftToolPolicy.excludedMcpServerIds }
+      : {}),
     model: input.submission.model ?? input.defaultModel,
     reasoningEffort: input.submission.reasoningEffort ?? input.defaultReasoningEffort,
     latencyMode: input.submission.latencyMode ?? input.defaultLatencyMode,
@@ -321,8 +333,8 @@ export function buildCreateSessionRequest(
           personalResourceAttachment: input.submission.personalResourceAttachment,
         }
       : {}),
-    ...(input.submission.connectionAuthorities
-      ? { connectionAuthorities: input.submission.connectionAuthorities }
+    ...(input.submission.connectionAccounts
+      ? { connectionAccounts: input.submission.connectionAccounts }
       : {}),
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),

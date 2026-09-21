@@ -894,69 +894,99 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     expect(persistCalls).toEqual([]);
   });
 
-  test("a persistWorkspace failure does NOT terminate the box (re-throws → lease stays draining)", async () => {
-    resumeCalls.length = 0;
-    deleteCalls.length = 0;
+  test.each([false, true])(
+    "capture failure releases its claim without terminating even if logging throws (%s)",
+    async (throwingLogger) => {
+      resumeCalls.length = 0;
+      deleteCalls.length = 0;
 
-    // A client whose resumed session FAILS to snapshot (provider snapshot error).
-    const failClient = {
-      backendId: "modal",
-      async deserializeSessionState(state: Record<string, unknown>) {
-        return { ...state, ownsSandbox: true };
-      },
-      async resume() {
-        resumeCalls.push("sb-nosnap");
-        return {
-          state: { sandboxId: "sb-nosnap" },
-          kill: async () => {},
-          closed: false,
-          exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
-          persistWorkspace: async () => {
-            throw new Error("Modal snapshot_filesystem persistence timed out.");
+      // A client whose resumed session FAILS to snapshot (provider snapshot error).
+      const failClient = {
+        backendId: "modal",
+        async deserializeSessionState(state: Record<string, unknown>) {
+          return { ...state, ownsSandbox: true };
+        },
+        async resume() {
+          resumeCalls.push("sb-nosnap");
+          return {
+            state: { sandboxId: "sb-nosnap" },
+            kill: async () => {},
+            closed: false,
+            exec: async () => ({ stdout: TEST_WORKSPACE_FINGERPRINT }),
+            persistWorkspace: async () => {
+              throw new Error("Modal snapshot_filesystem persistence timed out.");
+            },
+          };
+        },
+        async resumeExact() {
+          return await this.resume();
+        },
+        async serializeSessionState(state: Record<string, unknown>) {
+          return { ...state };
+        },
+        async delete(state: { sandboxId?: unknown }) {
+          deleteCalls.push(state?.sandboxId as string | undefined);
+        },
+      };
+
+      const established = {
+        client: failClient,
+        session: {},
+        sessionState: { sandboxId: "sb-nosnap", appName: "app", imageTag: "tag" },
+        instanceId: "sb-nosnap",
+        backendId: "modal",
+      };
+      const resumeState = await runtime.serializeEstablishedSandboxEnvelope(established as never);
+      const lease = {
+        sandboxGroupId: "group-nosnap",
+        leaseEpoch: 1,
+        backend: "modal",
+        instanceId: "sb-nosnap",
+        resumeBackendId: "modal",
+        resumeState,
+      };
+      const settings = testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true });
+
+      const persistArchive = async () => ({ wrote: true as const });
+      let released = false;
+      const warnings: any[] = [];
+      const captureLogger = {
+        info() {},
+        warn(_message: string, fields: unknown) {
+          warnings.push(fields);
+          if (throwingLogger) throw Error("log sink failed");
+        },
+      };
+
+      // The snapshot failure must propagate (so the caller skips + leaves the lease
+      // draining); the box is NEVER terminated with un-captured files. The failing
+      // client is injected explicitly (no global @opengeni/runtime mock).
+      await expect(
+        terminateProviderBox(
+          settings,
+          lease as never,
+          captureLogger as never,
+          persistArchive,
+          ((backend: string) => (backend === "modal" ? failClient : undefined)) as never,
+          undefined,
+          undefined,
+          "capture_required",
+          undefined,
+          false,
+          async () => {
+            released = true;
           },
-        };
-      },
-      async resumeExact() {
-        return await this.resume();
-      },
-      async serializeSessionState(state: Record<string, unknown>) {
-        return { ...state };
-      },
-      async delete(state: { sandboxId?: unknown }) {
-        deleteCalls.push(state?.sandboxId as string | undefined);
-      },
-    };
-
-    const established = {
-      client: failClient,
-      session: {},
-      sessionState: { sandboxId: "sb-nosnap", appName: "app", imageTag: "tag" },
-      instanceId: "sb-nosnap",
-      backendId: "modal",
-    };
-    const resumeState = await runtime.serializeEstablishedSandboxEnvelope(established as never);
-    const lease = {
-      sandboxGroupId: "group-nosnap",
-      leaseEpoch: 1,
-      backend: "modal",
-      instanceId: "sb-nosnap",
-      resumeBackendId: "modal",
-      resumeState,
-    };
-    const settings = testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true });
-
-    const persistArchive = async () => ({ wrote: true as const });
-
-    // The snapshot failure must propagate (so the caller skips + leaves the lease
-    // draining); the box is NEVER terminated with un-captured files. The failing
-    // client is injected explicitly (no global @opengeni/runtime mock).
-    await expect(
-      terminateProviderBox(settings, lease as never, observability, persistArchive, ((
-        backend: string,
-      ) => (backend === "modal" ? failClient : undefined)) as never),
-    ).rejects.toThrow(/snapshot_filesystem persistence timed out/);
-    expect(deleteCalls).toHaveLength(0); // box deliberately NOT terminated
-  });
+          "workspace-nosnap",
+        ),
+      ).rejects.toThrow(/snapshot_filesystem persistence timed out/);
+      expect(deleteCalls).toHaveLength(0); // box deliberately NOT terminated
+      expect(released).toBe(true);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0].errorClass).toBe("SnapshotOperationError");
+      expect(warnings[0].sandboxLeaseKey).toMatch(/^slk_[0-9a-f]{32}$/);
+      expect(warnings[0].leaseEpoch).toBe(1);
+    },
+  );
 
   test("provider NotFound before capture is returned as typed missing-workspace evidence", async () => {
     const notFoundClient = {

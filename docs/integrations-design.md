@@ -51,28 +51,16 @@ Decisions baked in:
 - `credential_encrypted` is the only column that may hold secret material; `metadata` is UI-renderable verbatim. API list/get helpers never select `credential_encrypted`.
 - Revoking sets `status='revoked'` (row kept for audit) and best-effort calls the provider's revocation endpoint when known.
 
-**Ownership doctrine.** Default new providers to workspace-shared (`subject_id` null) bot-style identity — survives user churn, matches agent workloads. Personal connections are for act-as-a-person tools; the token's native provider-side permissions are the authorization boundary. OpenGeni's standalone table resolver remains workspace-shared. Embedded hosts can resolve subject-scoped connections through `ConnectionCredentialsPort.mcpCredentials`, which receives the immutable current turn initiator rather than relying on the worker's synthetic technical subject.
+**Ownership defaults.** New providers default to workspace ownership. Mail, calendar, contacts and drive setup suggest personal ownership. Users can explicitly choose either. OAuth profiles describe protocol requirements and optional `defaultOwnership`; they cannot prohibit a supported ownership choice. Reconnecting preserves the saved ownership.
 
-**An omitted ownership is never guessed.** The MCP OAuth start keeps its
-documented behaviour: it resolves through the resolved provider profile's
-declared default (`defaultOwnershipFor`, §5.2.2) — workspace, unless the
-profile's `allowedOwnership` is personal-only. The Integration Definition OAuth
-start (`provider-oauth.ts`) instead **refuses** an ambiguous omission with a
-422, because both possible fallbacks are defects there: `personal` (what it used
-to do) inverts the doctrine for every caller that did not spell ownership out,
-and `workspace` silently flips a newly connected Outlook mailbox, Drive, or
-OneDrive from subject-scoped to workspace-shared. A profile that allows exactly
-one ownership is unambiguous and still resolves, so Gmail and hosted Slack MCP
-are unaffected, as is a reconnect (which takes the existing row's ownership).
-No flow may fall back to `personal` on its own.
+Generic MCP OAuth applies its profile default when ownership is omitted. The Integration Definition OAuth API requires an explicit ownership for a new account, while native setup supplies the user's choice. Workspace sharing uses the authorized provider account; it does not create a separate provider identity.
 
 **Only a managed human may own a personal connection**
 (`apps/api/src/connection-ownership.ts`). An API key, the shared `configured:`
 key, a service principal, an agent attempt, a grant that fails
 `contextIntegrity`, and any principal whose grant subject is not its
 authenticated subject are refused with an explicit **422** before a connection
-is created — never silently downgraded to workspace ownership, which a
-personal-only profile (Gmail, hosted Slack MCP) forbids outright. Two
+is created — never silently downgraded to workspace ownership. Two
 independent facts require it: personal execution resolves only through the
 immutable delegation snapshot frozen on a *human's* causal turn or scheduled
 task, and `bind_connection_authority` (migration 0256) can mint the `user`
@@ -248,14 +236,14 @@ Some authorization servers advertise both CIMD and DCR but reject a metadata-doc
 
 ### 5.2.2 Provider OAuth quirks as data (profiles)
 
-Providers that need a pre-registered client with pinned metadata, personal-only
-ownership, an exact resource URL, a fixed scope set, or non-standard authorize
+Providers that need a pre-registered client with pinned metadata, an exact
+resource URL, a fixed scope set, or non-standard authorize
 parameters are expressed as an `OAuthProviderProfile`
 (`apps/api/src/integrations/oauth-profiles.ts`), never as a provider branch in
 the flow. `oauth-client.ts` resolves exactly one profile per start and reads
 every quirk from it: start-time payload fences (caller-client rejection,
-provider identity, exact MCP URL, required deployment client), allowed
-ownership plus its default, exact-URL reconnect binding and connection
+provider identity, exact MCP URL, required deployment client), ownership
+defaults, exact-URL reconnect binding and connection
 selection, post-discovery authorization-server origin pins, `resource`
 parameter suppression, extra authorize parameters, and an exact scope override.
 
@@ -323,7 +311,7 @@ Served publicly at `GET /v1/integrations/oauth/client-metadata.json`:
 MCP server settings entries carry the optional `connectionRef` (§4). Behavior when the broker returns `auth_needed`:
 
 - **Tool call time:** the call short-circuits before any network I/O; a `tool.auth_needed` session event is published, and the model receives an MCP error result (`isError: true`, "Authentication required — a connection link was posted to the session") so it can adapt. The turn continues; **this is not a `session.requiresAction` pause** (approval gates persist run state and block; a missing connection is a tool-level condition). If product later wants blocking OAuth, that's an explicit extension.
-- **Connect/tools-list time:** credential-backed servers are best-effort: publish the authorization-needed event and skip the unavailable server while the turn continues. The Gmail REST bridge preserves the broker's reason at startup as well as tool-call time. Ambient startup notices remain in diagnostics to avoid repeated consent prompts during unrelated work. When discovery finds that a needed personal integration lacks tools in this attempt, the agent can post an explicit authorization request. The web opens the existing **Use in this conversation** review, including shared-results acknowledgement. Concrete tool-call authority failures also resolve by exact server identity. Events never issue grants.
+- **Connect/tools-list time:** credential-backed servers are best-effort: publish the authorization-needed event and skip the unavailable server while the turn continues. The Gmail REST bridge preserves the broker's reason at startup as well as tool-call time. Ambient startup notices remain in diagnostics to avoid repeated consent prompts during unrelated work. When a needed personal integration lacks tools, the agent can post an authorization request. Connect uses the initiating user's own account; sharing a conversation never grants another participant access to it. Concrete tool-call authority failures resolve by exact server identity.
 
 Event: `"tool.auth_needed"` added to `SessionEventType` in `packages/contracts/src/index.ts` AND the hand-written mirror in `packages/sdk/src/types.ts` (parity test pins them), plus the structural flush set in `apps/worker/src/activities/streaming.ts` so the chip appears promptly. Payload: `{ serverId, toolName?, providerDomain, connectionId?, reason, scopes?, resource?, authorizationUrl?, subjectId? }` — no verifiers, secrets, or raw provider responses; `authorizationUrl` only when free of secret material. Timeline projection (`packages/react/src/timeline/projection.ts`) renders a waiting-tone notice with a Connect action; copy is plain language (provider name + "needs a connection"/"needs additional access") — no kind enums, no "CIMD"/"DCR", no status slugs.
 
@@ -333,7 +321,7 @@ New permissions `connections:read` (metadata/status only — never secrets) and 
 
 Subject-ownership is enforced in helper predicates + domain logic (DB RLS is account/workspace-scoped and cannot see the caller subject): readers see shared rows plus their own subject rows; admins may revoke subject-owned rows but not use them or read beyond provider + status; the broker re-checks at resolve time.
 
-**Resolved embedding boundary:** the worker still calls `prepareTools` with the synthetic technical subject `worker:first-party-mcp`, so OpenGeni's standalone connection-table resolver intentionally accepts **workspace-shared connections only**. The host MCP credential port separately receives the durable turn's immutable initiator and must use that field—not the technical caller—for subject authorization. Codemode follows the same rule.
+**Execution boundary:** native credential resolution uses the durable turn's immutable initiating user and captured account selection, not the technical worker identity. Children retain that authority; scheduled runs use their named owner. Codemode follows the same rule. No host credential-resolution lane is required.
 
 `subjectScope: "subject"` remains representable for forward compatibility, but
 the standalone table resolver currently fails it closed because it does not load

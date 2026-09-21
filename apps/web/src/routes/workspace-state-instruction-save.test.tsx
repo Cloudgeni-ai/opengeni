@@ -73,11 +73,21 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
+async function waitForEditorState(predicate: () => boolean) {
+  const deadline = performance.now() + 2_000;
+  while (!predicate() && performance.now() < deadline) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    });
+  }
+  expect(predicate()).toBe(true);
+}
+
 async function mount() {
   requests.length = 0;
   const container = document.createElement("div");
   const root = createRoot(container);
-  const render = async (head = initialHead) =>
+  const render = async (head = initialHead) => {
     await act(async () =>
       root.render(
         <FocusedInstructions
@@ -96,14 +106,24 @@ async function mount() {
         />,
       ),
     );
+    // A refreshed head starts another asynchronous content read. Submission
+    // must wait for that read, just as the enabled editor requires in the UI.
+    await waitForEditorState(() => container.querySelector("textarea")?.disabled === false);
+  };
   await render();
   const submit = async () => {
     await act(async () => {
       container
         .querySelector("form")!
         .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      await new Promise((resolve) => setTimeout(resolve, 30));
     });
+    // The request timeout starts after the draft request, not at submission.
+    // Observe the settled UI instead of racing its deadline under CI load.
+    await waitForEditorState(
+      () =>
+        container.querySelector("textarea")?.disabled === false &&
+        container.querySelector('[role="status"], [role="alert"]') !== null,
+    );
   };
   return { container, root, submit, render };
 }

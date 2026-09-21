@@ -14,14 +14,14 @@ const scenarios = [
     id: "oauth",
     name: "PostHog",
     open: "Connect PostHog",
-    submit: "Continue authorization",
+    submit: "Connect for workspace",
     action: "oauth",
   },
   {
     id: "api-key",
     name: "Example API",
     open: "Add API key",
-    submit: "Verify & connect",
+    submit: "Connect for workspace",
     action: "api_key",
   },
   {
@@ -103,7 +103,10 @@ describe("session capability preview parity in Chromium", () => {
             .waitFor();
           const headers = new Map<string, string>();
           for (const scenario of scenarios) {
-            const card = page.getByRole("region", { name: `${scenario.name} setup` });
+            const card = page.getByRole("region", {
+              name: `${scenario.name} setup`,
+              includeHidden: true,
+            });
             headers.set(scenario.id, await card.locator(":scope > div").first().innerText());
             await assertBounds(page, card, width);
             const note = (await card
@@ -117,11 +120,11 @@ describe("session capability preview parity in Chromium", () => {
             const action = (await card
               .getByRole("button", { name: scenario.open, exact: true })
               .boundingBox())!;
-            expect(
-              width > 600
-                ? Math.abs(note.y + note.height / 2 - action.y - action.height / 2)
-                : Math.abs(action.y - note.y - note.height - 6),
-            ).toBeLessThanOrEqual(1);
+            // The shared shell wraps only when content requires it, rather than
+            // imposing the old console-only viewport breakpoint.
+            const sameRow = Math.abs(note.y + note.height / 2 - action.y - action.height / 2) <= 1;
+            if (sameRow) expect(action.x).toBeGreaterThanOrEqual(note.x + note.width);
+            else expect(action.y).toBeGreaterThanOrEqual(note.y + note.height + 6);
             if (scenario.id === "skill") {
               expect(
                 await card
@@ -130,7 +133,7 @@ describe("session capability preview parity in Chromium", () => {
                   .locator('[aria-hidden="true"]')
                   .first()
                   .innerText(),
-              ).toBe("W");
+              ).toBe("WR");
               expect(await card.locator("img").count()).toBe(0);
             }
           }
@@ -144,11 +147,16 @@ describe("session capability preview parity in Chromium", () => {
           ).toEqual([]);
           for (const scenario of scenarios) {
             const fixture = page.getByTestId(`${scenario.id}-fixture`);
-            const card = page.getByRole("region", { name: `${scenario.name} setup` });
+            const card = page.getByRole("region", {
+              name: `${scenario.name} setup`,
+              includeHidden: true,
+            });
             const opener = card.getByRole("button", { name: scenario.open, exact: true });
             const assertHeader = async () => {
               expect(
-                await card.getByRole("heading", { name: scenario.name, exact: true }).count(),
+                await card
+                  .getByRole("heading", { name: scenario.name, exact: true, includeHidden: true })
+                  .count(),
               ).toBe(1);
               expect(await card.locator(":scope > div").first().innerText()).toBe(
                 headers.get(scenario.id)!,
@@ -156,43 +164,87 @@ describe("session capability preview parity in Chromium", () => {
             };
             await opener.focus();
             await page.keyboard.press("Enter");
-            await card.getByRole("button", { name: scenario.submit, exact: true }).waitFor();
+            const dialog = page.getByRole("dialog", { name: scenario.name, exact: true });
+            await dialog.getByRole("button", { name: scenario.submit, exact: true }).waitFor();
+            expect(await card.locator("form").count()).toBe(0);
+            const dialogBox = (await dialog.boundingBox())!;
+            expect(dialogBox.x).toBeGreaterThanOrEqual(0);
+            expect(dialogBox.x + dialogBox.width).toBeLessThanOrEqual(width);
+            if (width === 1280) {
+              expect(dialogBox.width).toBe(672);
+              expect(Math.abs(dialogBox.x + dialogBox.width / 2 - width / 2)).toBeLessThanOrEqual(
+                1,
+              );
+              expect(Math.abs(dialogBox.y + dialogBox.height / 2 - 450)).toBeLessThanOrEqual(1);
+            }
+            expect(
+              (await new AxeBuilder({ page }).include('[role="dialog"]').analyze()).violations,
+            ).toEqual([]);
+            const controls = await dialog
+              .locator("button:not([disabled]), input:not([disabled])")
+              .count();
+            for (let index = 0; index <= controls; index++) {
+              await page.keyboard.press("Tab");
+              expect(
+                await dialog.evaluate((element) => element.contains(document.activeElement)),
+              ).toBe(true);
+            }
+            await page.keyboard.press("Shift+Tab");
+            expect(
+              await dialog.evaluate((element) => element.contains(document.activeElement)),
+            ).toBe(true);
             await assertHeader();
             await assertBounds(page, card, width);
             await page.screenshot({
               path: `${evidenceDir}${theme}-${width}-${scenario.id}-expanded.png`,
               fullPage: true,
             });
-            await card.getByRole("button", { name: "Cancel", exact: true }).click();
+            await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+            await page.waitForFunction(
+              (label) => document.activeElement?.textContent?.trim() === label,
+              scenario.open,
+            );
+            await opener.press("Enter");
+            await dialog.waitFor();
+            await page.keyboard.press("Escape");
+            await page.waitForFunction(
+              (label) => document.activeElement?.textContent?.trim() === label,
+              scenario.open,
+            );
+            await opener.press("Enter");
+            await dialog.waitFor();
+            await page
+              .locator(".og-session-capability-overlay")
+              .click({ position: { x: width / 2, y: 10 } });
             await page.waitForFunction(
               (label) => document.activeElement?.textContent?.trim() === label,
               scenario.open,
             );
             await opener.press("Enter");
             if (scenario.id === "api-key") {
-              const workspaceChoice = card.getByRole("radio", { name: "Workspace", exact: true });
+              const workspaceChoice = dialog.locator('input[value="workspace"]');
               await workspaceChoice.focus();
               await page.keyboard.press("ArrowRight");
-              expect(
-                await card.getByRole("radio", { name: "Only me", exact: true }).isChecked(),
-              ).toBe(true);
+              expect(await dialog.locator('input[value="personal"]').isChecked()).toBe(true);
               await page.keyboard.press("ArrowLeft");
               expect(await workspaceChoice.isChecked()).toBe(true);
               expect(
-                await card.getByRole("button", { name: scenario.submit, exact: true }).isDisabled(),
+                await dialog
+                  .getByRole("button", { name: scenario.submit, exact: true })
+                  .isDisabled(),
               ).toBe(true);
-              await card.locator('input[type="password"]').fill("fixture-only-not-a-real-secret");
+              await dialog.locator('input[type="password"]').fill("fixture-only-not-a-real-secret");
             }
             if (scenario.id === "skill") {
-              await card
+              await dialog
                 .getByText(
                   "This library skill can currently be installed for the workspace only.",
                   { exact: true },
                 )
                 .waitFor();
-              expect(await card.getByRole("radio").count()).toBe(0);
+              expect(await dialog.getByRole("radio").count()).toBe(0);
             }
-            await card.getByRole("button", { name: scenario.submit, exact: true }).press("Enter");
+            await dialog.getByRole("button", { name: scenario.submit, exact: true }).press("Enter");
             await expectReceipt(page, scenario.id, {
               action: scenario.action,
               attempts: 1,
@@ -201,10 +253,19 @@ describe("session capability preview parity in Chromium", () => {
               complete: false,
             });
             expect(
-              await card.getByRole("button", { name: "Cancel", exact: true }).isDisabled(),
+              await dialog.getByRole("button", { name: "Cancel", exact: true }).isDisabled(),
             ).toBe(true);
-            await fixture.getByRole("button", { name: "Fixture fail", exact: true }).click();
-            await card
+            await page.keyboard.press("Escape");
+            expect(await dialog.isVisible()).toBe(true);
+            await page
+              .locator(".og-session-capability-overlay")
+              .click({ position: { x: width / 2, y: 10 } });
+            expect(await dialog.isVisible()).toBe(true);
+            // Explicitly settle the fixture request while the real modal makes the page inert.
+            await fixture
+              .getByRole("button", { name: "Fixture fail", exact: true, includeHidden: true })
+              .evaluate((button: HTMLButtonElement) => button.click());
+            await dialog
               .getByText("Fixture provider rejected this attempt. Review your input and retry.", {
                 exact: true,
               })
@@ -215,9 +276,11 @@ describe("session capability preview parity in Chromium", () => {
               path: `${evidenceDir}${theme}-${width}-${scenario.id}-error.png`,
               fullPage: true,
             });
-            await card.getByRole("button", { name: scenario.submit, exact: true }).press("Enter");
+            await dialog.getByRole("button", { name: scenario.submit, exact: true }).press("Enter");
             await expectReceipt(page, scenario.id, { attempts: 2, busy: true, complete: false });
-            await fixture.getByRole("button", { name: "Fixture succeed", exact: true }).click();
+            await fixture
+              .getByRole("button", { name: "Fixture succeed", exact: true, includeHidden: true })
+              .evaluate((button: HTMLButtonElement) => button.click());
             await card.getByRole("status").waitFor();
             await page.waitForFunction(
               (name) => document.activeElement?.getAttribute("aria-label") === `${name} setup`,

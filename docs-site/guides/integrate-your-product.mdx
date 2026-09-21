@@ -9,18 +9,17 @@ Put OpenGeni behind your product's existing chat endpoint with `@opengeni/sdk/ch
 The browser talks to your backend. The organization API key stays on that backend.
 
 <Note>
-  Use the repository's workspace packages for this integration. Stable `3.3.2` packages do not
-  export `/chat`, and `@opengeni/react@3.8.0-canary.0` has a broken published `/chat` export. The
-  source workspace includes the component. Use a deployment containing the [chat
-  integration](https://github.com/Cloudgeni-ai/opengeni/pull/2310), and set its API URL explicitly.
-  Merging the feature into `main` does not update the hosted API by itself.
+  Verify that your installed `@opengeni/sdk` exports `/chat` and that the target deployment supports
+  the corresponding contract. Check the package exports/types and `/v1/config/client`; older
+  releases may not include the facade. Set the API URL explicitly. A feature in source or
+  documentation is not proof that your deployment includes it.
 </Note>
 
 ## Connect your backend
 
 Create a **full-access organization API key** in organization settings or through the organization API-key routes. Store its one-time token in your secret manager. A read-only key can inspect sessions but cannot create chats or send messages. See [Authentication](/reference/authentication#organization-key-access).
 
-Clone the [repository](https://github.com/Cloudgeni-ai/opengeni), run `bun install` at its root, and start with the [chat quickstart](https://github.com/Cloudgeni-ai/opengeni/tree/main/examples/chat-quickstart). It resolves the SDK and React workspace packages from source. Adapt its server and component using the examples below; replace its demo authentication with your product's real verifier.
+Use a compatible published SDK release and start with the examples below. The [chat quickstart](https://github.com/Cloudgeni-ai/opengeni/tree/main/examples/chat-quickstart) is a backend-only source example when you need to inspect or test workspace packages. An ordinary integration does not require access to OpenGeni's repository. Replace demo authentication with your product's real verifier, and provision the user's authorized membership through the [external-user onboarding flow](/reference/authentication#external-user-onboarding) before using `user`; chat requests do not grant membership.
 
 ```ts
 import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
@@ -50,7 +49,7 @@ export const handleChat = createChatHandler(og, {
 
 `authenticate` is your existing cookie or bearer verifier, not an OpenGeni function. It must return the user's authorized tenant and user ID; never take either directly from the request body or an unverified identity header. Keep `source` stable: it identifies your product when mapping tenants and users.
 
-Set `OPENGENI_API_BASE_URL` to the compatible deployment from the note above. If omitted, `OpenGeni` defaults to `https://app.opengeni.ai`, so do not rely on that default before the hosted API supports this feature. Each tenant's workspace is resolved idempotently on first use; the conversation's session is created on its first message. These are organization workspaces, not Personal workspaces.
+Set `OPENGENI_API_BASE_URL` to the compatible deployment from the note above. If omitted, `OpenGeni` defaults to `https://app.opengeni.ai`; verify compatibility before relying on that default. Each tenant's workspace is resolved idempotently on first use; the conversation's session is created on its first message. These are organization workspaces, not Personal workspaces.
 
 ## Mount the handler
 
@@ -64,7 +63,7 @@ Register the same `handleChat(request)` function for all three routes in your se
 
 Protect all three routes through the handler's `resolve` hook. A framework's `POST` export for `/api/chat` does not automatically register `/api/chat/respond`.
 
-Keep one stable conversation ID per chat thread. Custom clients send it in `x-opengeni-conversation`; the handler scopes it to the authenticated user. Two users supplying the same conversation ID reach different sessions. If your host omits `user`, it must return an authorized `conversation` from `resolve` itself. Host-supplied conversation IDs take precedence over client IDs.
+Keep one stable conversation ID per chat thread. Custom clients send it in `x-opengeni-conversation`. Conversation identity is independent of the acting user; authorization decides who may access the same conversation. Do not rely on different user IDs to isolate a shared conversation ID. If your host omits `user`, it must return an authorized `conversation` from `resolve` itself. Host-supplied conversation IDs take precedence over client IDs.
 
 ## Render the chat
 
@@ -79,6 +78,27 @@ For the full OpenGeni React experience, use `SessionConversation` or compose
 `MessageTimeline` and `ChatComposer` through the normal session SDK and an
 authenticated backend proxy. These components do not consume the simplified
 chat-handler protocol. See the [SDK reference](/reference/sdk).
+
+## Choose allowed integration setup
+
+Organization owners and administrators can select allowed integrations in
+**Organization settings → Integrations**. Your backend can administer the same
+policy with a full-access organization key through
+`@opengeni/sdk/organization-integration-policy`. Use
+`getOrganizationIntegrationCatalog` to discover supported keys, rather than
+guessing provider IDs. The policy is organization-wide, not per customer workspace.
+
+Unrestricted mode permits supported setup flows. Restricted mode permits only
+the selected keys; an empty selection denies new setup. Custom MCP, OpenAPI and
+GraphQL are separate broad permissions. Existing connections remain usable under
+their normal authorization, and cleanup and exact completed-request retries remain
+available. This setting does not grant access or replace tool-execution policy.
+Embedding-host session-local MCP configuration retains its existing admission rules.
+
+Use the matching API/runtime, SDK and database migration before enabling this
+policy. Older runtimes do not enforce it. On an uncertain policy save, retry the
+same operation ID and request; on a revision conflict, read current state before
+making a new change. See the [integration policy contract](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/organization-integration-policy.md).
 
 ## Choose agent access and memory
 
@@ -120,6 +140,38 @@ Set the handler's `format` when your product already has a text-chat client:
 | `"openai-responses"` | OpenAI Responses-shaped requests and responses        |
 
 The Vercel and OpenAI adapters send the latest user message and import earlier text messages from that request as context only when creating the conversation. After that, OpenGeni owns the history. These are text-chat adapters, not replacements for every feature of those APIs; execution and approval handling remain OpenGeni's. The history and `/respond` routes keep their native JSON and SSE contracts regardless of `format`.
+
+These formats are served by **your backend handler**. Do not point an arbitrary OpenAI provider constructor at the OpenGeni service URL and assume `/responses`, `/chat/completions`, or `/embeddings` exist there. The Vercel format is a UI message stream, not a server-side AI SDK model provider. Inspect features used by `streamText`, tools, and provider-specific options before migrating them. Embeddings require their own verified contract; retain the existing embedding provider when only chat generation is being replaced.
+
+## Product guidance in embedded agents
+
+Ordinary sessions include a bundled `opengeni-help` guide with product documentation and setup advice. It is available without a manual download. An embedded support bot can exclude OpenGeni's bundled guides while keeping its own Skills:
+
+```ts
+return {
+  tenant: me.tenantId,
+  user: me.userId,
+  agentAccess: "session",
+  create: {
+    bundledSkillIds: [],
+    skills: supportSkills, // Your versioned support procedures.
+    firstPartyMcpTools: [], // Choose the capabilities the product needs.
+    tools: supportIntegrations,
+  },
+};
+```
+
+This is the return value of your authenticated `resolve` hook. With the raw session client, pass these fields directly to `createSession`. Omit `bundledSkillIds` for defaults, pass `[]` for no bundled guides, or select specific IDs such as `"builtin:opengeni-documents"`. Selection grants no tool permissions. Children inherit the selection and can narrow it.
+
+Workspace-authored/installed Skills, inline Skills, tool authority, and ordinary runtime instructions are separate. Use a workspace whose shared Skills are appropriate for the product. Empty bundled selection does not make a workspace's shared guidance disappear. The repository's `opengeni-client` Skill guides developers implementing an integration; it should not be attached to the support bot.
+
+## Request cost and verification
+
+The current chat reply and Vercel/OpenAI formatters do not define a first-class monetary cost field. Recheck your installed version's reply types and formatter before depending on one. Model-picker billing categories do not establish per-request price.
+
+The separate `getBillingUsage` accounting read requires billing authority and returns a bounded usage list. It does not add cost to AI SDK responses or guarantee complete per-turn accounting. Distinguish charged OpenGeni credits from estimated provider expense and externally billed usage; zero OpenGeni charge is not proof of zero upstream cost. A turn can include multiple model responses.
+
+Before implementing a migration, check the actual development runtime, package manager, lockfile, and test commands. Repair missing dependencies within the authorized sandbox. Rerun tests after installation. Report a local commit, passing tests, a verified integration, and publication as separate outcomes; a whitespace check does not verify the integration.
 
 See the [SDK reference](/reference/sdk#chat-api) and the [runnable chat quickstart](https://github.com/Cloudgeni-ai/opengeni/tree/main/examples/chat-quickstart) for the complete setup. Replace the example's demo authentication before using it with real users.
 

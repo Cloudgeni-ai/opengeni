@@ -1,3 +1,4 @@
+import { rememberPreparedModelRequest } from "./prepared-compaction-request";
 import {
   tool as agentTool,
   toolSearchTool,
@@ -185,6 +186,7 @@ export class LazyToolRuntime {
     private readonly toolPreparationReady?: Promise<void>,
     private readonly deferredMcpServerIds: ReadonlySet<string> = mcpServerIds,
     private readonly preparationIndependentToolNames: ReadonlySet<string> = new Set(),
+    private readonly modelMcpServerIds: () => ReadonlyMap<string, string> = () => new Map(),
   ) {
     this.controlTools =
       transport !== "generic_dispatch"
@@ -289,6 +291,7 @@ export class LazyToolRuntime {
     this.currentTools = tools;
     this.functionTools.clear();
     this.searchableToolNames.clear();
+    const modelServerIds = this.modelMcpServerIds();
     for (const tool of tools) {
       if (!isFunctionTool(tool)) continue;
       this.functionTools.set(tool.name, tool);
@@ -297,8 +300,8 @@ export class LazyToolRuntime {
       // Origin, not transport: deferred MCP plus every non-MCP function tool
       // outside the base set. ToolRef.eager still decides the MCP arm.
       const lazy =
-        isSearchableMcpFunctionTool(tool, this.deferredMcpServerIds) ||
-        !isSearchableMcpFunctionTool(tool, this.mcpServerIds);
+        isSearchableMcpFunctionTool(tool, this.deferredMcpServerIds, modelServerIds) ||
+        !isSearchableMcpFunctionTool(tool, this.mcpServerIds, modelServerIds);
       if (lazy) {
         // After the preparation fence, deferred tools stay off the Agent
         // list. Search teaches names; a remembered raw name binds later
@@ -489,6 +492,12 @@ export class LazyToolRuntime {
           tools: descriptors,
           total: tools.length,
           nextCursor: index < tools.length ? descriptors.at(-1)!.name : null,
+          ...(prefix && tools.length === 0
+            ? {
+                message:
+                  "No tool names match this literal prefix. Retry tool_list without namePrefix to browse the authorized catalog; tool names can include a server namespace.",
+              }
+            : {}),
         });
       },
     }) as unknown as Tool;
@@ -581,6 +590,7 @@ export function installLazyToolRuntime(
   toolPreparationReady?: Promise<void>,
   deferredMcpServerIds: ReadonlySet<string> = mcpServerIds,
   preparationIndependentToolNames: ReadonlySet<string> = new Set(),
+  modelMcpServerIds?: () => ReadonlyMap<string, string>,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -588,6 +598,7 @@ export function installLazyToolRuntime(
     toolPreparationReady,
     deferredMcpServerIds,
     preparationIndependentToolNames,
+    modelMcpServerIds,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;
@@ -815,6 +826,7 @@ class LazyToolModel implements Model {
 
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
     const prepared = prepareLazyToolRequest(request, this.runtime);
+    rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     const response = await this.inner.getResponse(prepared);
     if (responseRequiresToolPreparation(response, this.runtime)) {
@@ -827,6 +839,7 @@ class LazyToolModel implements Model {
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
     const prepared = prepareLazyToolRequest(request, this.runtime);
+    rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     for await (const event of this.inner.getStreamedResponse(prepared)) {
       if (event.type === "response_done") {

@@ -62,6 +62,25 @@ const withheldMigrationNames = [
   // behind the same historical replay boundary.
   "0462_agent_instruction_non_destructive_edits.sql",
   "0466_agent_instruction_activation_preservation.sql",
+  // Compiles against the Knowledge tables and visibility helper from 0461.
+  "0468_knowledge_relationship_projection.sql",
+  "0469_knowledge_source_discovery.sql",
+  "0478_sender_owned_connections.sql",
+  // The destructive removal must follow the historical 0402/0433 readers.
+  "0482_remove_packs.sql",
+  // Patches the exact Skill lifecycle rewritten by 0461; replay after it.
+  "0488_permanent_skill_removal.sql",
+  // 0491 reads the publication column introduced by withheld 0184; 0494 patches
+  // withheld 0478, and 0496 installs a capture guard using the same 0184 column.
+  // Replay the real migrations after their prerequisites, never fake columns.
+  "0491_warm_capture_holder_reclamation.sql",
+  "0494_mcp_account_bindings.sql",
+  "0496_supervised_command_settlement.sql",
+  // Rewrites the original-file policy introduced by withheld 0461.
+  "0499_session_attachment_access.sql",
+  "0501_session_sharing_execution.sql",
+  // Reads the cursor table from withheld 0374; replay after its prerequisite.
+  "0503_session_meaningful_attention.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

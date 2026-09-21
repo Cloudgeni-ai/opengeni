@@ -6,6 +6,59 @@
 `packages/db/src/skills.ts` is the driver-neutral persistence adapter;
 `skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)` is the atomic database boundary.
 
+## Permanent removal
+
+The lazy agent tool `skill_remove` and core `removeSkill` permanently delete the
+saved Skill identity and **all registry revisions and files**, including pending
+revisions. This is distinct from source uninstall/deactivation and is not
+recoverable through Skill restore. No soft-deleted content head is retained.
+Conversation history, accepted context snapshots and minimal operation audit
+identifiers are unchanged. Shared upstream source packages and their immutable
+distribution files are not erased by deleting one workspace's installed Skill.
+
+Removal uses the same accepted actor, personal/workspace scope, Learning policy,
+live-attempt checks, publication lock and operation-key replay as `skill_save`.
+Supply `operationId`, `skillId`, `expectedRevisionId` (current active head, or
+null), `expectedScopeVersion` and `reason`. Built-in, repository and inline
+session identities are not registry UUIDs and cannot be removed through this
+tool. Organization Skills are outside its scope. Off refuses new changes;
+Automatic applies deletion; Review first retains a removal proposal in
+Knowledge > Needs review without interrupting the task.
+
+A removal proposal is a marked, immutable revision, never executable guidance.
+The review surfaces explicitly label irreversible deletion. Human approval must
+include the exact `removalOperationId`, proposal revision, original head and
+scope version. A normal approval request without that deletion binding fails.
+The existing verified-human chat response path also validates the exact deletion
+text and choices; ordinary Save cards cannot authorize deletion. A newer proposed
+or active revision, a scope change, or a prior rejection invalidates approval.
+Rejection keeps the Skill. Legacy activation and restore cannot activate a
+removal proposal as content.
+
+Successful removal returns `removed: true, outcome: applied`; pending and rejected
+receipts return `removed: false`. Reuse identical arguments and operation ID after
+uncertainty. Committed removal replays without reading deleted content, but still
+requires valid live actor authority. Changed arguments with the same key fail.
+Direct database deletion remains unavailable to runtime roles. Only the scoped
+SECURITY DEFINER lifecycle can open the exact-head deletion guard; head deletion
+cascades to its revisions, events and source binding. Content-free operation
+receipts remain replayable, with their deleted activation-event link cleared by
+the foreign key. This prevents delayed save retries from recreating a deleted Skill.
+Scoped proposal audit rows with live references are removed. Cross-Skill
+references still fail atomically rather than deleting another Skill's history.
+
+A direct installation releases only its scoped Skill facet. A non-direct
+distribution owner must first be released through its existing authorized
+lifecycle; removal refuses rather than modifying unrelated components. Removed
+source content can be explicitly installed again as a new Skill; old operation
+receipts remain historical results, not proof of a current installation.
+
+Migration `0488_permanent_skill_removal.sql` is a maintenance cutover. Drain all
+API/control/turn workers, provide the complete runtime role list, migrate and
+provision roles, then start matching binaries. Never restart pre-0487 binaries:
+old review UIs do not label removal intent. The migration changes no historical
+conversation or Skill content; it adds the removal marker and guarded lifecycle.
+
 A Skill has exactly one scoped identity and current head in
 `preference_registry_preferences`, and one immutable revision history in
 `preference_registry_revisions`. A revision's `skill_files` is its complete
@@ -141,7 +194,7 @@ not accept a caller-provided hash. Without an explicit identity, install binds
 the full resolved input; callers cannot safely replay a moving URL before
 resolution. Receipts predating the envelope fail closed, not reconstruct a
 possibly changed installation. A missing operation ID means a new operation.
-Last-owner direct, Pack, and plugin removal resolves the canonical head atomically
+Last-owner direct and plugin removal resolves the canonical head atomically
 with distribution cleanup through `skill-source-release.ts`. Source-managed
 workspace heads deactivate through the existing human registry lifecycle;
 customized or re-scoped heads remain active and return an explicit preservation
@@ -152,27 +205,27 @@ personal, and other-workspace Skills are unaffected. Direct history deletion
 remains forbidden; corrupt cross-scope references cause atomic failure rather
 than removal of surviving history. Existing workspace-deletion eligibility and
 authorization checks still apply. Physical owners,
-including pending Pack owners, prevent cleanup even when not runtime-effective.
+including pending Plugin owners, prevent cleanup even when not runtime-effective.
 The removal and upgrade-finalization APIs accept `skillActor`; removing a bound
 Skill requires a trusted `human_session` actor. Missing, service/API-key, and agent
 authority fails closed and rolls back. A subject ID is never treated as proof of
 human authority. No new agent deactivation authority is introduced here.
 Removal results expose `skillReleases` with the Skill/revision IDs, disposition,
-event ID, and warning. Pack and plugin finalizers return these receipts too;
-plugin operation replay retains them. Pack adapters must retain returned receipts
+event ID, and warning. Plugin finalizers return these receipts too;
+plugin operation replay retains them. Plugin adapters must retain returned receipts
 when finalizing their operation result.
 
 ## Release
 
 ### Composite source publication
 
-An unfinished Pack/Plugin owner cannot publish newly installed guidance. An
+An unfinished Plugin owner cannot publish newly installed guidance. An
 otherwise-Automatic child install saves an inactive revision and returns
 `outcome: pending, pendingReason: source_finalization`. Its immutable write receipt
 retains the deferred intent and the expected head, scope version, and source facet.
 Suggest proposals are not marked for automatic publication.
 
-Successful Pack/Plugin finalization changes the owner status and publishes
+Successful Plugin finalization changes the owner status and publishes
 eligible deferred revisions in the same database transaction. A private status
 trigger, `skill_publish_finalized_owner`, has no runtime EXECUTE grant. Install,
 replay, parent preparation and finalization serialize on the workspace publication
@@ -190,7 +243,7 @@ a deterministic operation ID, `sourceOperationId` and `activationEventId`.
 Original install receipts are never rewritten: replay can truthfully return the
 original pending result after publication. Parent finalizers return supplemental
 `skillPublications` and persist them in the parent operation's replay result.
-Pack and Plugin API adapters must forward these completion receipts; they must
+Plugin API adapters must forward these completion receipts; they must
 not relabel the earlier `skillWrites` as if those installs were already applied.
 The publication event is attributed to `service:skill-publication`; any retained
 human-confirmed authority is derived from the original immutable human receipt,
@@ -288,11 +341,9 @@ ordinary runtime session-configuration writer.
 The migration ledger makes committed retries no-ops. A failure rolls back all
 configuration changes, receipts, registry conversion and schema changes.
 
-Pack installation `manifestSnapshot` is returned as exact saved JSON alongside
-its unchanged digest, not parsed through current admission rules. This keeps
-disabled historical snapshots readable and does not turn them into executable
-configuration. Execution explicitly uses `StoredCapabilityPack`, deriving labels
-from valid frontmatter and rejecting headerless or malformed Skills.
+The following notes document historical migration 0433, which runs before the
+destructive Pack-removal migration. Archived Pack JSON is migration evidence,
+not a current API contract or runtime compatibility layer.
 
 The owner-only RLS window also covers current configurations and the exact
 Session/automation/Pack tables read by preflight; FORCE is restored before commit.

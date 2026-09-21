@@ -48,16 +48,17 @@ const FIRST_PARTY = [
 ];
 
 describe("unified session tool picker", () => {
-  test("dialog tools toggle without a dropdown content or roving-focus context", async () => {
+  test("dialog connectors toggle without a roving-focus context and preserve hidden builtins", async () => {
     let latest: SessionToolSelection = {
-      mcpServerIds: new Set<string>(),
-      firstPartyToolIds: new Set<FirstPartyMcpToolName>(),
+      mcpServerIds: new Set(["files"]),
+      firstPartyToolIds: new Set<FirstPartyMcpToolName>(["session_get"]),
     };
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
     function Harness() {
       const [selection, setSelection] = useState(latest);
+      const [customizing, setCustomizing] = useState(false);
       return (
         <DropdownMenu>
           <SessionToolsMenuBody
@@ -65,6 +66,8 @@ describe("unified session tool picker", () => {
             servers={[{ id: "linear", name: "Linear" }]}
             firstPartyTools={FIRST_PARTY}
             selection={selection}
+            customizing={customizing}
+            onCustomizingChange={setCustomizing}
             onChange={(next) => {
               latest = next;
               setSelection(next);
@@ -75,18 +78,30 @@ describe("unified session tool picker", () => {
     }
     try {
       await act(async () => root.render(<Harness />));
-      const linear = container.querySelector<HTMLButtonElement>('button[title="linear"]')!;
-      expect(linear.getAttribute("aria-pressed")).toBe("false");
+      // Connector controls are deliberately outside the eager composer graph.
+      await act(async () => {
+        await import("@/components/session-connectors-menu-body");
+      });
+      const customize = container.querySelector<HTMLButtonElement>(
+        'button[role="switch"][aria-label="Customize connectors"]',
+      )!;
+      expect(container.querySelector('button[role="switch"][aria-label="Linear"]')).toBeNull();
+      expect(container.querySelector('[aria-label="Linear, off for this session"]')).not.toBeNull();
+      await act(async () => customize.click());
+      const linear = container.querySelector<HTMLButtonElement>(
+        'button[role="switch"][aria-label="Linear"]',
+      )!;
+      expect(linear.getAttribute("aria-checked")).toBe("false");
       await act(async () => linear.click());
       expect(latest.mcpServerIds.has("linear")).toBe(true);
-      expect(linear.getAttribute("aria-pressed")).toBe("true");
+      expect(linear.getAttribute("aria-checked")).toBe("true");
       await act(async () => linear.click());
       expect(latest.mcpServerIds.has("linear")).toBe(false);
-      const capability = container.querySelector<HTMLButtonElement>(
-        "button[aria-pressed]:not([title])",
-      )!;
-      await act(async () => capability.click());
-      expect(latest.firstPartyToolIds.size).toBeGreaterThan(0);
+      expect(latest.mcpServerIds.has("files")).toBe(true);
+      expect([...latest.firstPartyToolIds]).toEqual(["session_get"]);
+      expect(
+        container.querySelectorAll('button[role="switch"][aria-label="Customize connectors"]'),
+      ).toHaveLength(1);
     } finally {
       await act(async () => root.unmount());
       container.remove();

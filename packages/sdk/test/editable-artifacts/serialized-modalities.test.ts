@@ -427,6 +427,115 @@ describe("serialized document/presentation SDK integration", () => {
   });
 
   for (const scenario of SCENARIOS) {
+    test(`recovers a committed ${scenario.modality} edit retained across a reload before WAL deletion`, async () => {
+      const adapter = await loadRealAdapter(scenario.modality);
+      const snapshot = await createInitialSnapshot(scenario.modality, adapter);
+      const storage = new MemoryEditableArtifactStorage();
+      const scope = {
+        namespace: editableArtifactCacheNamespace(STORAGE_AUTHORITY),
+        artifactId: ARTIFACT_ID,
+        modality: scenario.modality,
+      } as const;
+      const first = createSession(
+        scenario.modality,
+        adapter,
+        storage,
+        new SerializedTransport(
+          bootstrap(scenario.modality, adapter, snapshot, 0, snapshot.stateHash, 0),
+          [],
+        ),
+      );
+      await first.whenReady();
+      if (scenario.modality === "document") {
+        await first.applyDocumentCommands(scenario.localBatch as DocumentArtifactCommandBatch);
+      } else {
+        await first.applyPresentationCommands(
+          scenario.localBatch as PresentationArtifactCommandBatch,
+        );
+      }
+      await first.close();
+      const [pending] = await storage.listPending(scope);
+      expect(pending).toBeDefined();
+      const authority = adapter.open(snapshot.bytes);
+      let committed: EditableArtifactSerializedCommittedTransaction;
+      try {
+        const nativeReceiptBytes = authority.applyCommands(pending!.commandBytes);
+        const stateHash = await authority.stateHash();
+        committed = {
+          artifactId: ARTIFACT_ID,
+          modality: scenario.modality,
+          transactionId: REMOTE_TRANSACTION_ID,
+          requestHash: pending!.requestHash,
+          startSequence: 1,
+          endSequence: 1,
+          priorStateHash: snapshot.stateHash,
+          stateHash,
+          priorNativeRevision: snapshot.nativeRevision,
+          nativeRevision: authority.nativeRevision(),
+          commitProtocolVersion: 1,
+          committedTransactionBytes: encodeEditableArtifactSerializedCommit({
+            modality: scenario.modality,
+            transactionId: REMOTE_TRANSACTION_ID,
+            parentHeadSequence: 0,
+            resultHeadSequence: 1,
+            priorNativeRevision: snapshot.nativeRevision,
+            priorStateHash: snapshot.stateHash,
+            stateHash,
+            intentBytes: pending!.intentBytes,
+            nativeReceiptBytes,
+          }),
+        };
+      } finally {
+        authority.dispose();
+      }
+      // A reload can interrupt between appendCommitted and deletePending: both
+      // records are individually durable, but they are not one storage transaction.
+      await storage.appendCommitted(scope, {
+        artifactId: ARTIFACT_ID,
+        expectedCursor: 0,
+        expectedStateHash: snapshot.stateHash,
+        transaction: committed,
+        updatedAt: Date.now(),
+      });
+      const reopened = createSession(
+        scenario.modality,
+        adapter,
+        storage,
+        new SerializedTransport(
+          bootstrap(
+            scenario.modality,
+            adapter,
+            null,
+            1,
+            committed.stateHash,
+            committed.nativeRevision,
+          ),
+          [committed],
+        ),
+      );
+      try {
+        await reopened.whenReady();
+        expect(reopened.getView()).toMatchObject({
+          cursor: 1,
+          pendingTransactions: 0,
+          blockedPending: [],
+        });
+        expect(await storage.listPending(scope)).toEqual([]);
+        if (scenario.modality === "document") {
+          await reopened.applyDocumentCommands(
+            scenario.remoteBatch as DocumentArtifactCommandBatch,
+          );
+        } else {
+          await reopened.applyPresentationCommands(
+            scenario.remoteBatch as PresentationArtifactCommandBatch,
+          );
+        }
+        expect(reopened.getView().blockedPending).toEqual([]);
+      } finally {
+        await reopened.close();
+      }
+    });
+
     test(`uses real ${scenario.modality} WASM and fails closed when a remote winner makes local WAL stale`, async () => {
       const adapter = await loadRealAdapter(scenario.modality);
       const snapshot = await createInitialSnapshot(scenario.modality, adapter);

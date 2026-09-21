@@ -38,7 +38,7 @@ export default defineConfig({
               // surface is active. Keep their implementations behind those
               // lazy imports instead of recursively merging them into chat.
               name: "session-conditional-panels",
-              test: /(?:packages[\\/]react[\\/]src[\\/](?:components[\\/](?:human-input-(?:form|surface)|session-commands-panel)\.tsx|hooks[\\/]use-session-background-commands\.ts)$|apps[\\/]web[\\/]src[\\/]components[\\/]session[\\/]commands\.tsx$)/,
+              test: /(?:packages[\\/]react[\\/]src[\\/](?:components[\\/](?:human-input-(?:form|surface)|session-commands(?:-panel)?)\.tsx|hooks[\\/]use-session-background-commands\.ts)$|apps[\\/]web[\\/]src[\\/]components[\\/]session[\\/]commands\.tsx$)/,
               includeDependenciesRecursively: false,
               priority: 21,
             },
@@ -46,7 +46,7 @@ export default defineConfig({
               // Account setup is interaction-driven. Do not let shared icons
               // co-locate these forms/controllers with the eager session graph.
               name: "connect-setup",
-              test: /(?:packages[\\/]react[\\/]styles[\\/]connect\.css$|packages[\\/]react[\\/]src[\\/](?:connect(?:-accounts|-chooser|-panel|-setup)?|device-authorization|identity-link-accounts|identity-link-consent)\.tsx?$|packages[\\/]connect[\\/]src[\\/](?:index|device|authorization|poll|browser-navigation)\.ts$|apps[\\/]web[\\/]src[\\/](?:components[\\/]capabilities[\\/]native-connect-setup|routes[\\/]identity-link)\.tsx$)/,
+              test: /(?:packages[\\/]react[\\/]styles[\\/]connect\.css$|packages[\\/]react[\\/]src[\\/](?:connect(?:-accounts|-chooser|-panel|-setup)|hooks[\\/]use-connect|device-authorization|identity-link-accounts|identity-link-consent)\.tsx?$|packages[\\/]connect[\\/]src[\\/](?:index|device|authorization|poll|browser-navigation)\.ts$|apps[\\/]web[\\/]src[\\/](?:components[\\/]capabilities[\\/]native-connect-setup|routes[\\/]identity-link)\.tsx$)/,
               includeDependenciesRecursively: false,
               priority: 21,
             },
@@ -103,8 +103,11 @@ export default defineConfig({
               // falls into a circular workspace-management route chunk.
               // The Personal badge and scope trigger are shared rail UI, not
               // settings-only code; keep them out of the management chunk.
+              // Search intent is shared by App's eager search validator and
+              // lazy rail/conversation surfaces. Keep it here so recursive
+              // session grouping cannot pull the workbench into startup.
               name: "app-shell",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/](?:routes|identity-link-continuation)\.ts|components[\\/]personal-workspace-badge\.tsx|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot|scope-switcher-trigger)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/](?:routes|identity-link-continuation|session-search-route)\.ts|components[\\/]personal-workspace-badge\.tsx|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot|scope-switcher-trigger)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
               includeDependenciesRecursively: true,
               priority: 4,
             },
@@ -240,6 +243,15 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: 3000,
+    // OAuth providers return to the public web origin. Match production's /v1
+    // ingress routing so these callbacks reach the API instead of the SPA.
+    proxy: {
+      "/v1": {
+        target:
+          process.env.VITE_API_BASE_URL ||
+          `http://127.0.0.1:${process.env.OPENGENI_API_PORT || 8000}`,
+      },
+    },
     ...(allowedHosts?.length ? { allowedHosts } : {}),
   },
   preview: {

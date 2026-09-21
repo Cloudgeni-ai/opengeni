@@ -4,7 +4,6 @@ import { HTTPException } from "hono/http-exception";
 import type { ConnectAdvance, ConnectAttempt } from "@opengeni/contracts/connect";
 import {
   bindAuthorizedGitHubInstallationRepositories,
-  claimConnectOperation,
   finishConnectOperation,
   getConnectAttempt,
   type ConnectActorScope,
@@ -23,7 +22,7 @@ import {
 import { commitGitHubLensConnect, requireGitHubLensConnect } from "./github-lens-connect";
 import type { ApiRouteDeps, PreparedConnectOperation } from "@opengeni/core";
 import { requireConnectOwnerAuthority } from "./connect-authority";
-import { integrationBaseUrl } from "./oauth-client";
+import { claimOAuthAcquisition, finishOAuthAcquisition, integrationBaseUrl } from "./oauth-client";
 import {
   isConsistentGitHubBindingCandidates,
   isConsistentGitHubBindingProof,
@@ -177,27 +176,52 @@ export async function completeGitHubAppConnect(
     const stored = await getConnectAttempt(deps.db, state, state.connectAttemptId);
     if (stored.attempt.providerId !== state.providerId || stored.attempt.ownership !== "workspace")
       throw new Error("GitHub attempt mismatch");
-    destination = stored.returnUrl;
     // Reject obsolete browser stages before committing an operation claim.
     // Otherwise a valid older callback could strand the current stage in-flight.
     // Completed callbacks still navigate home without repeating provider work.
-    if (
-      stored.attempt.nextAction.type !== "authorize" ||
-      new URL(stored.attempt.nextAction.url).searchParams.get("state") !== input.state
-    )
-      throw new Error("Stale GitHub setup stage");
-    if (state.providerId === "github-lens") await requireGitHubLensConnect(deps, state.workspaceId);
-    const authorize = callbackAuthority(state);
+    const authorize: ConnectOperationAuthorization = async (tx, attempt, origin) => {
+      await callbackAuthority(state)(tx, attempt, origin);
+      destination = stored.returnUrl;
+    };
+    const acquiring =
+      !input.error && (state.phase === "install" ? input.setupAction !== "request" : !!input.code);
     const operation = {
       attemptId: state.connectAttemptId,
       operationId: `github:${state.nonce}`,
       inputDigest: createHash("sha256").update(input.state!).digest("hex"),
       authorize,
     };
-    const claim = await claimConnectOperation(deps.db, state, {
-      ...operation,
-      expectedRevision: stored.attempt.revision,
-    });
+    const claim = await claimOAuthAcquisition(
+      deps.db,
+      state,
+      {
+        ...operation,
+        expectedRevision: stored.attempt.revision,
+        authorizeAcquisition: async (tx, current) => {
+          if (
+            current.nextAction.type !== "authorize" ||
+            new URL(current.nextAction.url).searchParams.get("state") !== input.state
+          )
+            throw new Error("Stale GitHub setup stage");
+          if (acquiring && state.providerId === "github-lens")
+            await requireGitHubLensConnect({ ...deps, db: tx });
+        },
+      },
+      state.providerId,
+      acquiring,
+    );
+    // Recover a repeated install callback only while its next stage is still
+    // current. A completed/superseded attempt returns home without reopening OAuth.
+    if (
+      claim.status === "replayed" &&
+      state.phase === "install" &&
+      claim.attempt.revision === stored.attempt.revision &&
+      claim.attempt.nextAction.type === "authorize"
+    )
+      return new Response(null, {
+        status: 302,
+        headers: { Location: claim.attempt.nextAction.url },
+      });
     if (claim.status !== "replayed") {
       const provider =
         state.providerId === "github-lens" ? deps.prReviewGithubAppApi : deps.githubAppApi;
@@ -378,7 +402,19 @@ export async function completeGitHubAppConnect(
           },
         };
       }
-      await finishConnectOperation(deps.db, state, { ...operation, commit: prepared.commit });
+      const completed = acquiring
+        ? await finishOAuthAcquisition(
+            deps.db,
+            state,
+            { ...operation, commit: prepared.commit },
+            state.providerId,
+          )
+        : await finishConnectOperation(deps.db, state, { ...operation, commit: prepared.commit });
+      // Installation is only the first half of consent. Keep this browser on
+      // the exact authorization stage committed above; polling still waits for
+      // the final owner proof before reporting connection completion.
+      if (state.phase === "install" && completed.nextAction.type === "authorize")
+        return new Response(null, { status: 302, headers: { Location: completed.nextAction.url } });
     }
   } catch {
     // Preserve unknown outcomes; never replay provider authorization to recover.

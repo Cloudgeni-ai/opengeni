@@ -9,17 +9,10 @@
  */
 
 import type { ReactNode } from "react";
+import type { CapabilityCatalogStatus } from "@opengeni/react/connect";
 
 export type IntegrationChipTone = "ok" | "warn" | "idle" | "plain";
 
-/**
- * The closed chip vocabulary. The first five labels describe a live connection
- * to another product (Integrations, Connectors); the last four describe a
- * Bundle - a Skill, Plugin, or Pack, which is a named collection of tools and
- * instructions rather than a connection, so "Connected" would read as a lie
- * there. Keep this closed: a free-form string turns the chip into per-caller
- * copy and the row/sheet stop being one shape.
- */
 export type IntegrationChipLabel =
   | "Connected"
   | "Needs attention"
@@ -35,6 +28,15 @@ export type IntegrationChip = {
   label: IntegrationChipLabel;
   tone: IntegrationChipTone;
 };
+
+/** Keep catalog exceptions explicit without showing routine connected/not-connected text. */
+export function catalogStatusForChip(chip: IntegrationChip): CapabilityCatalogStatus {
+  if (chip.label === "Loading" || chip.label === "Installing") return "loading";
+  if (chip.tone === "warn") return "attention";
+  if (chip.tone === "ok") return "added";
+  if (chip.tone === "plain") return "unavailable";
+  return "available";
+}
 
 export type IntegrationMark = { logoSrc: string; monogram: string } | { monogram: string };
 
@@ -211,13 +213,7 @@ export type IntegrationViewModel = {
   id: string;
   name: string;
   description: string;
-  /**
-   * One extra segment for the row's accessible name, spoken between the name
-   * and the state ("Slack. Pack, curated by OpenGeni. Not installed"). The row
-   * button's `aria-label` overrides its own contents, so anything the visible
-   * description line carries that a caller needs announced has to arrive here.
-   * The row renders whatever string it is given and branches on nothing.
-   */
+
   accessibleDetail?: string;
   mark: IntegrationMark;
   chip: IntegrationChip;

@@ -6,10 +6,15 @@ import { testSettings } from "@opengeni/testing";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { apiRequestBindingsForTransportPeer } from "../src/http/request-source";
 import {
+  completeAuthorizationRedirect,
   isMcpOAuthPublicProtocolPath,
   isMcpOAuthResourcePath,
   mcpOAuthBearerToken,
+  mcpOAuthRedirectUriCandidates,
   registerMcpOAuthRoutes,
+  renderMcpOAuthConsentPage,
+  renderMcpOAuthContinuePage,
+  renderMcpOAuthExpiredPage,
 } from "../src/mcp-oauth";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -101,6 +106,191 @@ describe("MCP OAuth protocol", () => {
     });
     expect(rejected.status).toBe(400);
     expect(await rejected.json()).toEqual({ error: "invalid_redirect_uri" });
+  });
+
+  test("registers any native custom-scheme client, not a vendor-specific redirect", async () => {
+    const app = new Hono();
+    registerMcpOAuthRoutes(
+      app,
+      depsWithRows([
+        {
+          client_id: "ogmcp_client_generic_native",
+          redirect_uris: ["myapp://oauth/callback", "http://127.0.0.1:8787/callback"],
+          client_name: "Generic MCP client",
+          grant_types: ["authorization_code", "refresh_token"],
+          response_types: ["code"],
+          created_at: "2026-09-02T00:00:00.000Z",
+        },
+      ]),
+    );
+    const registered = await app.request("/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: ["myapp://oauth/callback", "http://127.0.0.1:8787/callback"],
+        client_name: "Generic MCP client",
+        application_type: "native",
+        scope: "mcp:access",
+      }),
+    });
+    expect(registered.status).toBe(201);
+    expect(await registered.json()).toMatchObject({
+      client_id: "ogmcp_client_generic_native",
+      client_name: "Generic MCP client",
+      redirect_uris: ["myapp://oauth/callback", "http://127.0.0.1:8787/callback"],
+    });
+  });
+
+  test("consent UI lets any client pick organization and workspace", () => {
+    const html = renderMcpOAuthConsentPage({
+      clientName: "Claude Code",
+      requestToken: "ogmcp_req_fixture",
+      accounts: [
+        { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Northwind" },
+        { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", name: "Contoso" },
+      ],
+      workspaces: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          name: "Site A",
+          kind: "shared",
+        },
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          accountId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          name: "Home",
+          kind: "personal",
+        },
+      ],
+      selectedWorkspaceId: "11111111-1111-4111-8111-111111111111",
+    });
+    expect(html).toContain("Claude Code");
+    expect(html).toContain('name="organization"');
+    expect(html).toContain('name="workspace_id"');
+    expect(html).toContain("Northwind");
+    expect(html).toContain("Site A");
+    expect(html).toContain("Home (Personal)");
+    expect(html).not.toContain("cursor://");
+    expect(html).not.toContain("Resource:");
+    expect(html).not.toContain("letter-spacing");
+    expect(html).toContain("event.submitter");
+    expect(html).toContain("submitter.name");
+    expect(html).toContain("button.disabled=true");
+  });
+
+  test("authorization handoff is 200 HTML for loopback and custom-scheme redirects", async () => {
+    const app = new Hono();
+    app.get("/loopback", (c) =>
+      completeAuthorizationRedirect(c, "http://127.0.0.1:4567/callback?code=demo"),
+    );
+    app.get("/https", (c) =>
+      completeAuthorizationRedirect(c, "https://client.example/callback?code=demo"),
+    );
+    app.get("/native", (c) => completeAuthorizationRedirect(c, "myapp://oauth/callback?code=demo"));
+
+    for (const [path, redirectTo] of [
+      ["/loopback", "http://127.0.0.1:4567/callback?code=demo"],
+      ["/https", "https://client.example/callback?code=demo"],
+      ["/native", "myapp://oauth/callback?code=demo"],
+    ] as const) {
+      const response = await app.request(path);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("location")).toBeNull();
+      expect(response.headers.get("content-type")).toMatch(/text\/html/);
+      expect(response.headers.get("refresh")).toBe(`0;url=${redirectTo}`);
+      const html = await response.text();
+      expect(html).toContain("location.replace");
+      expect(html).toContain(redirectTo);
+      expect(html).not.toContain("Continue</a>");
+    }
+  });
+
+  test("token exchange can use any registered redirect URI for the same client", () => {
+    expect(
+      mcpOAuthRedirectUriCandidates(
+        ["myapp://oauth/callback", "http://127.0.0.1:8787/callback"],
+        "http://127.0.0.1:8787/callback",
+      ),
+    ).toEqual(["http://127.0.0.1:8787/callback", "myapp://oauth/callback"]);
+    expect(
+      mcpOAuthRedirectUriCandidates(["https://client.example/callback"], "https://evil.example"),
+    ).toEqual([]);
+  });
+
+  test("continue and expired pages stay client-agnostic", () => {
+    const continueHtml = renderMcpOAuthContinuePage("myapp://oauth/callback?code=demo");
+    expect(continueHtml).toContain("Returning to the app");
+    expect(continueHtml).toContain("myapp://oauth/callback?code=demo");
+    expect(continueHtml).toContain('http-equiv="refresh"');
+    expect(continueHtml).not.toContain("Continue</a>");
+    expect(continueHtml).not.toContain("cursor://");
+    expect(continueHtml).not.toContain("letter-spacing");
+    expect(renderMcpOAuthExpiredPage("This authorization request expired.")).toContain(
+      "Authorization expired",
+    );
+  });
+
+  test("registers native clients and ignores extra RFC 7591 metadata", async () => {
+    const app = new Hono();
+    registerMcpOAuthRoutes(
+      app,
+      depsWithRows([
+        {
+          client_id: "ogmcp_client_native",
+          redirect_uris: [
+            "cursor://anysphere.cursor-mcp/oauth/callback",
+            "https://www.cursor.com/agents/mcp/oauth/callback",
+            "http://localhost:8787/callback",
+          ],
+          client_name: "Desktop MCP client",
+          grant_types: ["authorization_code", "refresh_token"],
+          response_types: ["code"],
+          created_at: "2026-09-02T00:00:00.000Z",
+        },
+      ]),
+    );
+    const registered = await app.request("/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: [
+          "cursor://anysphere.cursor-mcp/oauth/callback",
+          "https://www.cursor.com/agents/mcp/oauth/callback",
+          "http://localhost:8787/callback",
+        ],
+        token_endpoint_auth_method: "none",
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+        client_name: "Desktop MCP client",
+        logo_uri: "https://client.example/logo.svg",
+        scope: "mcp:access",
+      }),
+    });
+    expect(registered.status).toBe(201);
+    expect(await registered.json()).toMatchObject({
+      client_id: "ogmcp_client_native",
+      client_name: "Desktop MCP client",
+      scope: "mcp:access",
+      redirect_uris: [
+        "cursor://anysphere.cursor-mcp/oauth/callback",
+        "https://www.cursor.com/agents/mcp/oauth/callback",
+        "http://localhost:8787/callback",
+      ],
+    });
+  });
+
+  test("explains reused browser consent instead of a raw OAuth JSON error", async () => {
+    const app = new Hono();
+    registerMcpOAuthRoutes(app, depsWithRows());
+    const response = await app.request("/oauth/authorize", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "decision=approve",
+    });
+    expect(response.status).toBe(400);
+    expect(response.headers.get("content-type")).toMatch(/text\/html/);
+    expect(await response.text()).toContain("Authorization expired");
   });
 
   test("maps durable dynamic-registration admission failures to a retryable OAuth error", async () => {

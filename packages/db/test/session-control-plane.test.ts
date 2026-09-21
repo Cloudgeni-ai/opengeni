@@ -64,6 +64,7 @@ import {
   getLatestRunState,
   peekSessionWork,
   prepareConnectorActionApproval,
+  previewConnectorActionApproval,
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
   requestSessionCompaction,
@@ -3781,6 +3782,59 @@ describe("clean session control plane", () => {
     });
   });
 
+  test("cleanup worker loss preserves a completed turn and admits its queued follow-up", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "finish this work once");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("turn was not claimed");
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { output: "done" } }],
+    });
+    const next = await send(grant, session.id, "continue with new work");
+    // A finalization containment exit becomes a heartbeat timeout for the old
+    // physical activity. It must not replay its already-committed logical turn.
+    expect(
+      await recoverSessionDispatch(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      }),
+    ).toMatchObject({ action: "stale", turnStatus: "completed" });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn.id)).toMatchObject({
+      status: "completed",
+      executionGeneration: turn.executionGeneration,
+      activeAttemptId: null,
+    });
+    const claimed = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId: crypto.randomUUID() },
+    );
+    expect(claimed?.id).toBe(next.turn.id);
+    expect(
+      (await listSessionEvents(client.db, grant.workspaceId!, session.id)).filter(
+        (event) => event.type === "turn.completed" && event.turnId === turn.id,
+      ),
+    ).toHaveLength(1);
+  });
+
   test("heartbeat recovery reparks only the exact owning attempt", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "survive a worker loss");
@@ -5067,6 +5121,98 @@ describe("clean session control plane", () => {
       status: "running",
       executionGeneration: predecessor!.executionGeneration + 1,
     });
+  });
+
+  test("paused provider recovery projects its quiesced receipt without an interruption row", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "provider recovery before pause");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
+    const predecessor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId, workflowRunId, dispatchId },
+    );
+    expect(predecessor).not.toBeNull();
+    expect(
+      await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: predecessor!.id,
+        triggerEventId: predecessor!.triggerEventId,
+        attemptId,
+        reason: "provider_unavailable",
+        detail: { code: "provider_unavailable", retryable: true, continueDelayMs: 2_000 },
+      }),
+    ).toMatchObject({ action: "recovering" });
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+    });
+    await controlSession(grant, session.id, "pause");
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const interruptions = await db
+        .select()
+        .from(schema.sessionAttemptInterruptions)
+        .where(eq(schema.sessionAttemptInterruptions.attemptId, attemptId));
+      expect(interruptions).toHaveLength(0);
+      await db
+        .update(schema.sessions)
+        .set({ status: "recovering" })
+        .where(eq(schema.sessions.id, session.id));
+    });
+    const beforeControl = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      evaluateSessionControl(db, grant.workspaceId!, session.id),
+    );
+    expect(beforeControl.state).toBe("paused");
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "cancellation-wait",
+      attemptId,
+    });
+    const input = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+      activitySettled: true,
+    };
+    const result = await reconcileSessionAttemptQuiescence(client.db, input);
+    expect(result.action).toBe("quiesced");
+    expect(result.events.filter((e) => e.type === "session.status.changed")).toHaveLength(1);
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "idle",
+      activeTurnId: predecessor!.id,
+    });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, predecessor!.id)).toMatchObject({
+      status: "recovering",
+      activeAttemptId: null,
+    });
+    const afterControl = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      evaluateSessionControl(db, grant.workspaceId!, session.id),
+    );
+    expect(afterControl.controlEtag).toBe(beforeControl.controlEtag);
+    expect(afterControl.state).toBe("paused");
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "idle",
+    });
+    expect(await reconcileSessionAttemptQuiescence(client.db, input)).toEqual({
+      action: "quiesced",
+      events: [],
+    });
+    expect(
+      await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId),
+    ).toBeNull();
   });
 
   test("an already-quiesced paused recovery repairs its stale public projection", async () => {
@@ -6914,6 +7060,27 @@ describe("clean session control plane", () => {
       policy: "block",
     });
     expect(wildcardPolicy.changed).toBe(true);
+    const headerConnectionId = `session-mcp:${serverId}:fixture-target`;
+    await upsertConnectorActionPolicy(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      subjectId: grant.subjectId,
+      connectionId: headerConnectionId,
+      serverId,
+      toolName: "header_blocked",
+      actionName: "*",
+      policy: "block",
+    });
+    await upsertConnectorActionPolicy(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      subjectId: grant.subjectId,
+      connectionId: headerConnectionId,
+      serverId,
+      toolName: "header_allowed",
+      actionName: "*",
+      policy: "allow",
+    });
     await send(grant, session.id, "exercise connector action policies");
 
     const firstAttemptId = crypto.randomUUID();
@@ -6935,6 +7102,37 @@ describe("clean session control plane", () => {
       executionGeneration: firstClaim.turn.executionGeneration,
       initiator: firstClaim.turn.initiator,
     };
+    const headerBlockedCall = {
+      approvalId: "header-blocked",
+      connectionId: headerConnectionId,
+      serverId,
+      toolName: "header_blocked",
+      arguments: {},
+      approvalMode: "session_mcp" as const,
+    };
+    expect(
+      await previewConnectorActionApproval(client.db, firstIdentity, headerBlockedCall),
+    ).toMatchObject({ managed: true, decision: "block" });
+    expect(
+      await previewConnectorActionApproval(client.db, firstIdentity, {
+        ...headerBlockedCall,
+        approvalId: "header-allowed-preview",
+        toolName: "header_allowed",
+      }),
+    ).toMatchObject({ managed: true, decision: "ask" });
+    expect(
+      await prepareConnectorActionApproval(client.db, firstIdentity, headerBlockedCall),
+    ).toMatchObject({ managed: true, decision: "block" });
+    expect(
+      await beginConnectorActionExecution(client.db, firstIdentity, headerBlockedCall),
+    ).toMatchObject({ allowed: false, managed: true, reason: "blocked" });
+    expect(
+      await prepareConnectorActionApproval(client.db, firstIdentity, {
+        ...headerBlockedCall,
+        approvalId: "header-allowed",
+        toolName: "header_allowed",
+      }),
+    ).toMatchObject({ managed: true, decision: "ask" });
     const sensitiveFixture = `sensitive-fixture-${crypto.randomUUID()}`;
     const call = (approvalId: string, action: string, value = sensitiveFixture) => ({
       approvalId,

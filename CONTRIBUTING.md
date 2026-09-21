@@ -4,7 +4,7 @@ Thanks for considering a contribution.
 
 ## Development Setup
 
-1. Install Bun and Docker.
+1. Install the exact Bun version in [`.bun-version`](.bun-version), Git, curl, rustup, a C build toolchain, and Docker. See the [local prerequisites](README.md#quick-start).
 2. Copy `.env.example` to `.env`.
 3. Fill in the required `OPENGENI_*` values for the workflow you want to test.
 4. Start the full local stack:
@@ -12,6 +12,9 @@ Thanks for considering a contribution.
 ```bash
 bun run dev
 ```
+
+[`docs/local-development.md`](docs/local-development.md) covers manual startup,
+configuration, the native (no Docker) path, and the web-app walkthrough.
 
 ## Toolchain
 
@@ -85,6 +88,13 @@ Release and publishing guidance starts here; executable truth lives in [`package
 **Staging:** dispatch `staging-canary-dispatch.yml` with any `main` SHA whose `canary-sha-*` tags already exist. Pending changesets are allowed. Missing tags fail closed; do not rebuild unsigned `:ci` images.
 
 **Canary npm:** dispatch `publish-canary.yml` to publish `{version}-canary.N` with dist-tag `canary`. This does not consume changeset files or move `latest`.
+
+In GitHub Actions, `N` has a floor derived from the workflow run ID and attempt
+(`run ID * 1000 + attempt`), so retries do not reuse versions hidden by stale
+registry tags or staged publication. A visible version at or above that floor
+rejects a superseded attempt: dispatch a new workflow instead of retrying the
+older one. Fixed package groups remain aligned. An admitted retry publishes a fresh set rather than
+overwriting or removing any partially published versions.
 
 Two publish-coherence rules learned the hard way (all versions are 0.x):
 

@@ -3,7 +3,11 @@ export { pollDeviceAuthorization } from "./device";
 export { findConnectRecoveryAccount } from "./recovery";
 export { pollConnectAttempt } from "./poll";
 export { authorizeConnectAttempt, type ConnectNavigation } from "./authorization";
-export { createBrowserConnectNavigation, type ConnectBrowserWindow } from "./browser-navigation";
+export {
+  createBrowserConnectNavigation,
+  reserveBrowserConnectNavigation,
+  type ConnectBrowserWindow,
+} from "./browser-navigation";
 import type { ConnectAdvance, ConnectAttempt, ConnectOwnership, ConnectTransport } from "./types";
 import { pollConnectAttempt } from "./poll";
 

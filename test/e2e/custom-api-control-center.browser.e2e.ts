@@ -52,6 +52,14 @@ describe("custom API control center diagnostics", () => {
   const sessionsUrl = `http://127.0.0.1:9/v1/workspaces/${workspaceId}/sessions`;
 
   test("allows only the route-owned paged session requests cancelled during replacement", () => {
+    for (const query of [
+      "view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active",
+      "archiveStatus=active&sortBy=updatedAt&parentSessionId=null&limit=50&view=page",
+    ]) {
+      expect(
+        isExpectedSessionPageCancellation("GET", `${sessionsUrl}?${query}`, "net::ERR_ABORTED"),
+      ).toBe(true);
+    }
     expect(
       isExpectedSessionPageCancellation(
         "GET",
@@ -76,6 +84,25 @@ describe("custom API control center diagnostics", () => {
   });
 
   test("retains other request failures as diagnostics", () => {
+    const query = "view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active";
+    for (const [method, url, error] of [
+      ["POST", `${sessionsUrl}?${query}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query}`, "net::ERR_CONNECTION_RESET"],
+      ["GET", `${sessionsUrl}?${query}&unexpected=true`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query}&sortBy=updatedAt`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query}&archivedOnly=true`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("updatedAt", "name")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("active", "all")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("50", "51")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("null", "other-session")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${query.replace("&archiveStatus=active", "")}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl.replace(workspaceId, accountId)}?${query}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl.replace(":9/", ":10/")}?${query}`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}/other?${query}`, "net::ERR_ABORTED"],
+      ["GET", "not a URL", "net::ERR_ABORTED"],
+    ]) {
+      expect(isExpectedSessionPageCancellation(method!, url!, error!)).toBe(false);
+    }
     expect(
       isExpectedSessionPageCancellation(
         "GET",
@@ -353,6 +380,8 @@ describe("custom API control center browser acceptance", () => {
       const addAccount = sheet.getByRole("button", { name: "+ Add account" });
       await expectVisible(addAccount);
       await addAccount.click();
+      await page.getByRole("radio", { name: "This workspace", exact: false }).check();
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
       const [consent] = await Promise.all([
         context.waitForEvent("page"),
         page.getByRole("button", { name: "Authorize connection" }).click(),
@@ -433,7 +462,7 @@ describe("custom API control center browser acceptance", () => {
         .getByRole("button", { name: /^Outlook Mail\s/ })
         .filter({ hasText: "Connected" });
       await expectVisible(row);
-      expect(await row.locator(".og-connection-catalog-status").textContent()).toBe("Connected");
+      expect(await row.locator(".og-capability-catalog-sr-only").textContent()).toBe("Connected");
       // Keyboard journey: opening from the focused row must return focus to it.
       await row.focus();
       await row.press("Enter");
@@ -516,6 +545,8 @@ function isExpectedSessionPageCancellation(
     .sort()
     .join("&");
   return new Set([
+    // Default root page on this fixture's capabilities route; keep exact keys and values.
+    "archiveStatus=active&limit=50&parentSessionId=null&sortBy=updatedAt&view=page",
     "limit=50&parentSessionId=null&view=page",
     "archivedOnly=true&limit=50&parentSessionId=null&view=page",
     "limit=1&pinsOnly=true&view=page",
@@ -526,13 +557,14 @@ async function openCapabilities(page: Page): Promise<void> {
   await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
     waitUntil: "networkidle",
   });
+  await page.getByRole("tab", { name: "Connections", exact: true }).click();
   await expectVisible(page.getByRole("heading", { name: "Custom APIs" }));
 }
 
 /** Opens the one Outlook Mail provider row's detail sheet (its accounts live there). */
 async function openOutlookMailSheet(page: Page) {
   const row = page
-    .locator(".og-connection-catalog-row")
+    .locator(".og-capability-catalog-row")
     .and(page.getByRole("button", { name: /^Outlook Mail\s/ }));
   await expectVisible(row);
   await row.click();
@@ -631,9 +663,9 @@ async function installApi(page: Page, state: UiState): Promise<void> {
         return json({ message: "Connection data unavailable" }, 503);
       return json({ connections: connections(state.dense) });
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({ packs: [], installations: [] });
-    }
+
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`)
+      return json({ items: [], nextCursor: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) return json({ skills: [] });
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`)
       return json({ skills: [], nextCursor: null });

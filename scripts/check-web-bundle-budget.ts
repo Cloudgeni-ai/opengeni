@@ -133,7 +133,7 @@ const budgets = {
   // Advance only those two aggregate envelopes to their next whole KiB; every
   // initial, per-file, file-count, lazy-chunk, and CSS cap stays fixed.
   // Generic event automations add the shared SDK contracts that let ordinary
-  // session surfaces carry Pack-owned trigger metadata. The pre-migration Bun 1.3.14
+  // session surfaces carry automation trigger metadata. The pre-migration Bun 1.3.14
   // production graph measures 2,121,826 raw / 588,620 gzip bytes. Advance only
   // the raw aggregate to its next whole-KiB envelope; gzip, file-count, initial,
   // per-file, lazy-chunk, and CSS caps remain unchanged.
@@ -471,6 +471,10 @@ const effectiveBudgets = {
     // 2,439,754 raw / 684,860 gzip, 39 files (Bun 1.4, macOS/arm64).
     // Preserve the established platform/configuration variance allowance.
     wholeKibEnvelope(2_439_754, 1.5 * kib),
+    // Unified connection discovery plus native OAuth recovery metadata measures
+    // 2,442,346 raw / 689,953 gzip across 34 files in Linux/x64 browser CI.
+    // Keep the existing headroom policy; compressed and unrelated caps stay fixed.
+    wholeKibEnvelope(2_442_346, 1.5 * kib),
     wholeKibEnvelope(2_354_899),
     wholeKibEnvelope(2_326_478),
     wholeKibEnvelope(2_333_912),
@@ -487,6 +491,10 @@ const effectiveBudgets = {
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    // Sender-owned account selection replaces the consent UI: Bun 1.4 macOS/arm64
+    // measures 2,434,041 raw / 689,945 gzip across 37 files. Raw and file count
+    // remain below their existing caps; retain the standard gzip variance allowance.
+    wholeKibEnvelope(689_945, 1.5 * kib),
     wholeKibEnvelope(684_860, 1.5 * kib),
     // Same unified Knowledge measurement documented in the raw bound above.
     wholeKibEnvelope(663_198, 1.5 * kib),

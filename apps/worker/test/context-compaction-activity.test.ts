@@ -983,6 +983,172 @@ describe("standalone context compaction execution", () => {
     );
   });
 
+  test("a definitive provider rejection persists its closed record on the skip landmark and the failed turn", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Rejected standalone compaction test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Rejected standalone compaction test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const originalItems = [
+      { type: "message", role: "user", content: "preserve this request" },
+      {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "work in progress ".repeat(1_000) }],
+      },
+    ];
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values(
+        originalItems.map((item, position) => ({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position,
+          item,
+        })),
+      );
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+
+    const providerMessage = "Invalid value for 'input[1].content': private conversation text";
+    const runtime = {
+      configure: () => undefined,
+      resolveTurnModel: () => ({
+        client: {
+          chat: {
+            completions: {
+              create: async () => {
+                throw Object.assign(new Error(`400 ${providerMessage}`), {
+                  status: 400,
+                  type: "invalid_request_error",
+                  code: "invalid_value",
+                  param: "input[1].content",
+                  requestID: "req_rejected_fixture",
+                  error: {
+                    type: "invalid_request_error",
+                    code: "invalid_value",
+                    param: "input[1].content",
+                    message: providerMessage,
+                  },
+                });
+              },
+            },
+          },
+        },
+        provider: {
+          id: "test-chat",
+          kind: "api-key",
+          api: "chat",
+          builtin: false,
+        },
+        configured: {
+          id: "scripted-compactor",
+          contextWindowTokens: 250_000,
+          effectiveContextWindowTokens: 250_000,
+          autoCompactLimitTokens: 225_000,
+          hostedWebSearch: false,
+        },
+      }),
+      buildAgent: () => {
+        throw new Error("rejected standalone compaction entered the agent runtime");
+      },
+      prepareTools: () => {
+        throw new Error("rejected standalone compaction prepared tools");
+      },
+      prepareInput: () => {
+        throw new Error("rejected standalone compaction prepared input");
+      },
+      runStream: () => {
+        throw new Error("rejected standalone compaction started inference");
+      },
+      serializeApprovals: () => {
+        throw new Error("rejected standalone compaction serialized approvals");
+      },
+    } as unknown as OpenGeniRuntime;
+    const bus = new MemoryEventBus();
+    const activities = createActivityTestHarness({
+      settings: testSettings({
+        databaseUrl: shared.appUrl,
+        openaiModel: "scripted-compactor",
+        sandboxBackend: "none",
+      }),
+      db: client.db,
+      bus,
+      runtime,
+    });
+
+    const attemptId = crypto.randomUUID();
+    const result = await activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+
+    expect(result).toMatchObject({ status: "idle", attemptId });
+    if (result.status === "unclaimed") throw new Error("Compaction was not claimed");
+    expect(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
+        (row) => row.item,
+      ),
+    ).toEqual(originalItems);
+    const turn = await getSessionTurn(client.db, grant.workspaceId!, result.turnId);
+    expect(turn).toMatchObject({ source: "compaction", status: "failed" });
+    const events = await listSessionEvents(client.db, grant.workspaceId!, session.id, {
+      after: 0,
+      limit: 100,
+    });
+    const providerRejection = {
+      httpStatus: 400,
+      type: "invalid_request_error",
+      code: "invalid_value",
+      param: "input[1].content",
+      requestId: "req_rejected_fixture",
+    };
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "session.context.compaction.skipped",
+        payload: { reason: "summarization_failed", providerRejection },
+      }),
+    );
+    const failed = events.find((event) => event.type === "turn.failed");
+    expect(failed?.payload).toMatchObject({
+      code: "context_compaction_failed",
+      retryable: false,
+      recovery: "user_message",
+      compacted: false,
+      providerRejection,
+    });
+    const failureText = String(failed?.payload.error);
+    expect(failureText).toContain(
+      "the model provider rejected the compaction request (HTTP 400 invalid_request_error invalid_value; param input[1].content; request req_rejected_fixture)",
+    );
+    expect(failureText).toContain("start a new session");
+    expect(failureText).not.toContain("private conversation text");
+    expect(JSON.stringify(events)).not.toContain("private conversation text");
+  });
+
   test("a transient standalone summary failure keeps the request on the same recovering turn", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -1752,22 +1918,6 @@ describe("standalone context compaction execution", () => {
       ),
     );
 
-    const ordinary = await addSessionSystemUpdate(client.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      sessionId: session.id,
-      kind: "agent_message",
-      classification: "info",
-      sourceId: crypto.randomUUID(),
-      dedupeKey: `ordinary-${crypto.randomUUID()}`,
-      summary: "Ordinary durable notice",
-      payload: {
-        type: "agent_message",
-        text: "Ordinary durable notice",
-        operationId: crypto.randomUUID(),
-      },
-    });
-    if (!ordinary.added) throw new Error("ordinary update was not inserted");
     const goal = await createSessionGoal(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -1885,7 +2035,7 @@ describe("standalone context compaction execution", () => {
     expect(summaryCalls).toBe(1);
     expect(await getSessionTurn(client.db, grant.workspaceId!, result.turnId)).toMatchObject({
       source: "goal",
-      metadata: { internalUpdateCount: 2 },
+      metadata: { internalUpdateCount: 1 },
       status: "failed",
     });
     expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("idle");
@@ -1902,7 +2052,6 @@ describe("standalone context compaction execution", () => {
       role: "user",
     });
     const continuationInput = JSON.stringify(historyAfter.at(-1)?.item);
-    expect(continuationInput).toContain(ordinary.update.id);
     expect(continuationInput).toContain("Continue the goal");
     expect(continuationInput).not.toContain(goalContinuation.update.id);
     expect(

@@ -69,6 +69,29 @@ kubectl create configmap opengeni-streaming-health \
 ## Metric sources
 
 Most panels read **app-emitted** series scraped from OpenGeni's `/metrics` endpoints.
+
+Runtime Failures includes **Sandbox visibility-check failures**, separating an
+invisible destination, unsuccessful shell exit, still-running check, invalid
+confirmation, and a thrown provider error. These are bounded reason categories,
+not raw error-message labels. Exact checked path, workspace root, command,
+returned output, exit code, and yielded provider handle are preserved in the
+authenticated `turn.failed` or `turn.recovery.requested` event's
+`materializationDiagnostic` field. Provider errors keep their existing recovery
+classification. Use the
+session events API with `payloadMode=full` to retrieve them. The detail-only
+`failureDiagnostics` summary is intentionally smaller than that event.
+An unfinished check is not evidence that a directory is absent. This telemetry
+does not retry materialization or an agent turn, and a later successful Continue
+does not prove the earlier cause. Existing historical generic failures cannot
+be enriched retrospectively with output that was never retained.
+
+Modal's fixed visibility probe observes its own provider output cursor rather
+than a retained agent command. Its bounded observation deadline remains a
+`command_pending` failure, not proof of a missing path or process termination.
+When known, `materializationDiagnostic.providerExecution` preserves the exact
+sandbox/task/exec identity for investigation; it is not a durable command alias.
+Neither those identities nor raw output enter public metric labels.
+
 Enable scraping via the chart:
 
 ```yaml
@@ -90,6 +113,7 @@ App series used here (non-exhaustive): `opengeni_stream_ttft_seconds`,
 `opengeni_context_compaction_monitor_fresh`,
 `opengeni_machine_op_*`, `opengeni_turns_*`, `opengeni_sandbox_leases`,
 `opengeni_sandbox_operations_total`, `opengeni_sandbox_operation_duration_seconds`,
+`opengeni_sandbox_materialization_verification_failures_total`,
 `opengeni_turn_startup_phase_duration_seconds`,
 `opengeni_turn_worker_preparation_duration_seconds`,
 `opengeni_turn_startup_milestone_duration_seconds`,
@@ -135,3 +159,14 @@ alerts on that condition.
 > Prometheus series — a machine's link history lives in the session timeline (which
 > carries the workspace/session context Prometheus omits). The Connected Machines
 > board is the aggregate op-outcome view.
+
+Runtime Failures also shows **Turn cleanup in progress** by bounded stage and
+**Slow turn cleanup stages**. These describe physical cleanup after agent
+execution ends, including already-completed logical turns. Inspect the exact
+Temporal activity heartbeat (`phase=finalizing`, `finalizationStage`, and
+`finalizationStageStartedAt`) to correlate a session. A single cleanup stage
+stalled for five minutes triggers worker containment without claiming remote
+writer quiescence or retrying the completed logical turn. The slow-stage counter
+records a thirty-second observation while the worker remains scrapeable; a slow
+stage may still finish. Exact containment exits are recorded in the bounded log
+and should be correlated with worker restarts, not inferred from that counter.

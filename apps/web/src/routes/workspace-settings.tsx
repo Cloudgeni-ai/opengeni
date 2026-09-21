@@ -491,26 +491,18 @@ function OperationalWorkspaceSettingsRoute({
           )
         ) : null}
 
-        {section === "tools" ? (
-          <WorkspaceCapabilityDefaults
-            workspaceId={workspaceId}
-            canManage={canManageSettings}
-            kind="permissions"
-          />
-        ) : null}
-
         {section === "plugins" ? (
           <>
             <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-4">
               <div>
-                <h2 className="text-sm font-medium">Install and manage plugins</h2>
+                <h2 className="text-sm font-medium">Manage capabilities</h2>
                 <p className="mt-1 text-xs text-fg-muted">
-                  Connect apps, MCP servers, skills, and packs on the Plugins page.
+                  Manage Plugins, Skills, and integrations on the Capabilities page.
                 </p>
               </div>
               <Button asChild type="button" variant="secondary" size="sm">
                 <Link to="/workspaces/$workspaceId/plugins" params={{ workspaceId }}>
-                  Open Plugins
+                  Open Capabilities
                   <ArrowUpRightIcon className="size-3.5" />
                 </Link>
               </Button>

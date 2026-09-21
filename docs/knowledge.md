@@ -4,6 +4,14 @@ Knowledge is the durable retrieval system from maintenance migration **0461**.
 It replaces agent Memory and the separate reviewed Knowledge authoring lane.
 Conversation history and temporary task notes keep their existing jobs.
 
+Knowledge is retrieval-only information, not the destination for persistent
+behavior. Requests such as "keep replies concise in future sessions" belong in
+workspace instructions or an applicable Skill, within the intended scope, rather
+than a Knowledge fact about a preference. The always-present CORE teaches this
+choice independently of existing governance. See
+[durable context write routing](company-brain-write-routing.md#behavior-is-not-a-knowledge-fact)
+for scope, mixed requests, and truthful save confirmations.
+
 ## Sources, records and storage
 
 Agents encounter information through chat attachments, user messages, connected
@@ -32,8 +40,10 @@ already retained source revision and a page, passage, message, or code location.
   matching, ranking, counts, excerpts and pagination.
 
 Uploading retains the original. Source preparation extracts searchable content;
-it does not invent company facts. In ordinary chats the accepted agent turn
-prepares its uploaded sources, then retains useful findings as part of its work.
+it does not invent company facts. Ordinary chat attachments remain conversation resources; accepting a turn does
+not parse or publish them into Knowledge. The agent first identifies useful
+lasting information, then explicitly retains supporting evidence or a reusable
+reference when warranted.
 Off leaves the file available to the chat while refusing new agent Knowledge.
 Document parsing and indexing are mechanical infrastructure. Configured Drive
 and Atlassian sources are ordinary scheduled agent tasks: their exact source and
@@ -51,6 +61,68 @@ updates its checkpoint and summary, while the ordinary agent lifecycle owns task
 completion. Each provider request, including retries, rechecks the live attempt,
 current source selection and connection version. A source schedule requires its
 connection owner's accepted human revision authority.
+
+
+## Selective retention and discovery
+
+A saved entry should help answer a plausible future question. Routine approvals,
+acknowledgments, temporary task instructions and status chatter stay in the
+conversation. Agents inspect screenshots visually and retain a supported
+observation, requirement or incident when useful; an upload or successful OCR
+extraction alone is not a reason to create Knowledge.
+
+Source metadata distinguishes `purpose: "evidence"` from `purpose: "reference"`.
+Supporting evidence preserves original messages, files and exact revisions but
+is omitted from ordinary published listing/search before ranking and pagination.
+Findings and deliberately retained reference documents remain discoverable.
+Exact get, evidence traversal, Files-related inspection, history and review keep
+their existing authority checks. Explicit `includeEvidence: true` searches or
+the browser's **Include supporting evidence** control expose supporting sources.
+Collection membership does not change source purpose or access.
+
+Historical agent-prepared file sources and non-migrated conversation sources are
+classified by typed preparation/provenance identity; migrated reference records
+are preserved. No source body, original file, decision or evidence link is
+rewritten or deleted. An explicit purpose on a new revision wins. Promoting an
+existing source to a reference uses the ordinary versioned edit/review lifecycle;
+retrying file preparation reuses the existing receipt and does not promote it.
+
+`knowledge_retain_message` creates supporting evidence. `knowledge_retain_file`
+defaults to supporting evidence and accepts `purpose: "reference"` for a
+selected reusable source. Images retained as evidence preserve the original
+without requiring OCR; their empty source text carries `retention: "reference"`.
+Reference files still require nonempty extracted text. Opening a file source
+shows its original preview first with extracted text collapsed below it.
+
+### Preparing a save
+
+`knowledge_prepare_save` and
+`POST /v1/workspaces/:workspaceId/knowledge/entries/prepare-save` take a concise
+`query` about the proposed information. The SDK exposes `prepareKnowledgeSave`
+from `@opengeni/sdk/knowledge`. The operation requires a live agent with the selected tool, or a human Knowledge
+reviewer, because it reads unapproved proposals. It writes nothing. It returns:
+
+- a collection catalog with stable entry/revision IDs, current versions, scopes,
+  names, descriptions, parent IDs and separate published/pending status;
+- hybrid search matches across all authorized collections, separated into
+  `published` and `needs_review`, with previews/excerpts and versioned IDs.
+
+The normal catalog includes all authorized collections in one call, paging
+internally rather than stopping at the first 20 results. Large catalogs explicitly
+report `complete: false` and per-view continuation cursors; descriptions longer
+than 2,000 characters report truncation and can be fetched through `knowledge_get`.
+The bounded catalog is fetched when needed, never composed into every prompt.
+Collection descriptions are reauthorized against their current published/pending
+revision after listing. Every
+continuation uses the existing context-bound database cursor.
+
+The agent skips unchanged duplicates, reads and improves an existing entry when
+appropriate, or creates a distinct useful entry and chooses existing collections.
+Conflicting information stays qualified and evidence-linked; search similarity
+alone is not permission to overwrite it. Pending matches are unapproved and
+cannot become accepted answers. An unavailable prepare tool falls back to
+ordinary search in both views and collection browsing, without widening the
+task's selected tools or permissions.
 
 ## Personal and shared Knowledge
 

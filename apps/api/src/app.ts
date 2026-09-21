@@ -1,7 +1,7 @@
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
 import { codemodeSessionRequest } from "./codemode";
-import { SiteSessionPathError } from "@opengeni/contracts";
+import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
   canonicalizeConfiguredModelId,
@@ -55,7 +55,7 @@ import {
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
-import { createObservability } from "@opengeni/observability";
+import { createObservability, withTraceContext } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
@@ -106,6 +106,7 @@ import {
   runManagedAuthProvider,
 } from "./auth/managed-auth-attempt-context";
 import { createManagedEmailTransport } from "./auth/managed-email";
+import { startManagedSignInNotificationDelivery } from "./auth/managed-sign-in-notifications";
 import {
   assertManagedEmailTransportMetadata,
   assertOrganizationUserSetupQueryTransportConfigured,
@@ -149,11 +150,11 @@ import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
 import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
+import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organization-integration-policy";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerConnectRoutes } from "./routes/connect";
-import { registerHostMcpBindingRoutes } from "./routes/host-mcp-bindings";
-import { registerHostMcpResolverRoutes } from "./routes/host-mcp-resolvers";
+
 import { registerExternalIdentityLinkRoutes } from "./routes/external-identity-links";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerKnowledgeRoutes } from "./routes/knowledge";
@@ -178,7 +179,6 @@ import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerIntegrationFacetRoutes } from "./routes/integration-facets";
 import { registerInteractionResourceRoutes } from "./routes/interaction-resources";
 import { registerPrReviewRoutes } from "./routes/pr-review";
-import { registerPackRoutes } from "./routes/packs";
 import { registerAutomationRoutes } from "./routes/automations";
 import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
@@ -207,12 +207,15 @@ import { registerOrganizationSessionRoutes } from "./routes/organization-session
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
 import {
+  registerManagedSignInMethodRoutes,
+  handleManagedSignInConnectCallback,
+} from "./routes/managed-sign-in-methods";
+import {
   registerManagedAuthSessionSetRoutes,
   requireManagedAuthProviderRouteAllowed,
   scrubManagedAuthProviderResponse,
 } from "./routes/managed-auth-session-sets";
 import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
-import { registerConnectionAuthorityRoutes } from "./routes/connection-authorities";
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
 import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
@@ -299,6 +302,7 @@ export function createAppComposition(deps: AppDependencies): {
   const managedAuthSessionAdapter =
     deps.managedAuthSessionAdapter ??
     (managedAuth ? createBetterAuthSessionAdapter(managedAuth, deps.db) : null);
+  if (managedAuth) startManagedSignInNotificationDelivery(deps.db, managedEmailTransport);
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;
   let documentServices: DocumentServices | null = deps.documentServices ?? null;
@@ -538,70 +542,76 @@ export function createAppComposition(deps: AppDependencies): {
     const route = routeLabel(url.pathname);
     const correlationId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
     const start = performance.now();
-    const span = observability.startSpan(`HTTP ${c.req.method} ${route}`, {
-      "http.request.method": c.req.method,
-      "opengeni.route": route,
+    const span = observability.startSpan(
+      `HTTP ${c.req.method} ${route}`,
+      {
+        "http.request.method": c.req.method,
+        "opengeni.route": route,
+      },
+      { parent: null },
+    );
+    return await withTraceContext(span, async () => {
+      try {
+        await next();
+        const status = c.res.status || 200;
+        const durationSeconds = (performance.now() - start) / 1000;
+        observability.recordHttpRequest({
+          method: c.req.method,
+          route,
+          status,
+          durationSeconds,
+        });
+        span.end({
+          attributes: {
+            "http.response.status_code": status,
+            "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+          },
+        });
+        observability.info("HTTP request completed", {
+          method: c.req.method,
+          route,
+          status,
+          durationMs: Math.round(durationSeconds * 1000),
+          traceId: span.traceId,
+          spanId: span.spanId,
+          correlationId,
+        });
+      } catch (error) {
+        const status = httpStatusForError(error);
+        const errorCode = errorCodeForStatus(status);
+        const durationSeconds = (performance.now() - start) / 1000;
+        observability.recordHttpRequest({
+          method: c.req.method,
+          route,
+          status,
+          durationSeconds,
+        });
+        observability.incrementCounter({
+          name: "opengeni_http_errors_total",
+          help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
+          labels: { route, status: String(status), code: errorCode },
+        });
+        span.end({
+          attributes: {
+            "http.response.status_code": status,
+            "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+          },
+          error,
+        });
+        observability.error("HTTP request failed", {
+          method: c.req.method,
+          route,
+          status,
+          durationMs: Math.round(durationSeconds * 1000),
+          traceId: span.traceId,
+          spanId: span.spanId,
+          correlationId,
+          errorCode,
+          errorClass: "HttpOperationError",
+        });
+        throw error;
+      }
     });
-    try {
-      await next();
-      const status = c.res.status || 200;
-      const durationSeconds = (performance.now() - start) / 1000;
-      observability.recordHttpRequest({
-        method: c.req.method,
-        route,
-        status,
-        durationSeconds,
-      });
-      span.end({
-        attributes: {
-          "http.response.status_code": status,
-          "opengeni.duration_ms": Math.round(durationSeconds * 1000),
-        },
-      });
-      observability.info("HTTP request completed", {
-        method: c.req.method,
-        route,
-        status,
-        durationMs: Math.round(durationSeconds * 1000),
-        traceId: span.traceId,
-        spanId: span.spanId,
-        correlationId,
-      });
-    } catch (error) {
-      const status = httpStatusForError(error);
-      const errorCode = errorCodeForStatus(status);
-      const durationSeconds = (performance.now() - start) / 1000;
-      observability.recordHttpRequest({
-        method: c.req.method,
-        route,
-        status,
-        durationSeconds,
-      });
-      observability.incrementCounter({
-        name: "opengeni_http_errors_total",
-        help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
-        labels: { route, status: String(status), code: errorCode },
-      });
-      span.end({
-        attributes: {
-          "http.response.status_code": status,
-          "opengeni.duration_ms": Math.round(durationSeconds * 1000),
-        },
-        error,
-      });
-      observability.error("HTTP request failed", {
-        method: c.req.method,
-        route,
-        status,
-        durationMs: Math.round(durationSeconds * 1000),
-        traceId: span.traceId,
-        spanId: span.spanId,
-        correlationId,
-        errorCode,
-        errorClass: "HttpOperationError",
-      });
-      throw error;
-    }
   });
 
   const accessKeyBoundary = requireAccessKey(deps.settings);
@@ -669,10 +679,61 @@ export function createAppComposition(deps: AppDependencies): {
   // wildcard handler or the provider returns its own 404 first.
   registerManagedOnboardingRoutes(app, routeDeps);
   registerManagedAuthSessionSetRoutes(app, routeDeps);
+  registerManagedSignInMethodRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
+      if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
+        const body = await c.req.raw
+          .clone()
+          .json()
+          .catch(() => null);
+        if (
+          !body ||
+          !["google", "github"].includes(body.provider) ||
+          Object.prototype.hasOwnProperty.call(body, "idToken")
+        ) {
+          return c.json(
+            {
+              code: "SIGN_IN_METHOD_OAUTH_REDIRECT_REQUIRED",
+              message: "Use the browser OAuth sign-in redirect",
+            },
+            403,
+          );
+        }
+      }
+      if (oauthCallbackProvider) {
+        const connectResponse = await handleManagedSignInConnectCallback(
+          c,
+          routeDeps,
+          oauthCallbackProvider,
+        );
+        if (connectResponse) return connectResponse;
+      }
+      if (
+        new Set([
+          "link-social",
+          "unlink-account",
+          "list-accounts",
+          "set-password",
+          "change-password",
+          "change-email",
+          "update-user",
+          "delete-user",
+          "get-access-token",
+          "refresh-token",
+          "account-info",
+        ]).has(pathname.slice("/v1/auth/".length))
+      ) {
+        return c.json(
+          {
+            code: "SIGN_IN_METHOD_PRODUCT_ROUTE_REQUIRED",
+            message: "Use personal sign-in method settings",
+          },
+          403,
+        );
+      }
       if (deps.settings.managedAuthSessionSetMode === "legacy") {
         return oauthCallbackProvider
           ? await runManagedAuthProvider(
@@ -1256,8 +1317,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
   registerConnectRoutes(app, routeDeps);
-  registerHostMcpBindingRoutes(app, routeDeps);
-  registerHostMcpResolverRoutes(app, routeDeps);
+
   registerExternalIdentityLinkRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
   registerApiIntegrationRoutes(app, routeDeps);
@@ -1268,7 +1328,6 @@ export function createAppComposition(deps: AppDependencies): {
   registerEnvironmentRoutes(app, routeDeps);
   registerChannelRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
-  registerPackRoutes(app, routeDeps);
   registerAutomationRoutes(app, routeDeps);
   registerPrReviewRoutes(app, routeDeps);
   registerPluginRoutes(app, routeDeps);
@@ -1278,6 +1337,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
+  registerOrganizationIntegrationPolicyRoutes(app, routeDeps);
   registerModelConnectionAccessRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
@@ -1288,7 +1348,6 @@ export function createAppComposition(deps: AppDependencies): {
   registerOrganizationSessionRoutes(app, routeDeps);
   registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);
-  registerConnectionAuthorityRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
 
   app.notFound((c) => {
@@ -1311,7 +1370,10 @@ export function createAppComposition(deps: AppDependencies): {
   app.onError((rawError, c) => {
     // One central mapping for every Send/Steer/control route: a bounded
     // control-prefix wait that expired is a known, retryable, not-applied 503.
-    const error = workspaceControlBusyHttpError(rawError) ?? rawError;
+    const error =
+      rawError instanceof OrganizationIntegrationDeniedError
+        ? new HTTPException(403, { message: rawError.message })
+        : (workspaceControlBusyHttpError(rawError) ?? rawError);
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
     const status = compactionLock ? 422 : httpStatusForError(error);
@@ -1862,6 +1924,10 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/sessions",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/session-message-search$/,
+    label: "/v1/workspaces/:workspaceId/session-message-search",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/control-events\/stream$/,
     label: "/v1/workspaces/:workspaceId/control-events/stream",
   },
@@ -2373,26 +2439,7 @@ const routeLabelPatterns: Array<{
     pattern: /^\/v1\/workspaces\/[^/]+\/environments\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/environments/:id",
   },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs$/,
-    label: "/v1/workspaces/:workspaceId/packs",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs\/installations$/,
-    label: "/v1/workspaces/:workspaceId/packs/installations",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs\/marketing-social-daily-analysis\/scheduled-tasks$/,
-    label: "/v1/workspaces/:workspaceId/packs/marketing-social-daily-analysis/scheduled-tasks",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs\/[^/]+\/enable$/,
-    label: "/v1/workspaces/:workspaceId/packs/:id/enable",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs\/[^/]+$/,
-    label: "/v1/workspaces/:workspaceId/packs/:id",
-  },
+
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/preview$/,
     label: "/v1/workspaces/:workspaceId/plugins/preview",

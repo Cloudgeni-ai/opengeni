@@ -51,7 +51,7 @@
         "unlabel_message",
         "unlabel_thread"
       ],
-      "connectionOwnership": "personal_only",
+      "defaultConnectionOwnership": "personal",
       "presentation": {
         "providerName": "Google",
         "icon": "mail",
@@ -93,7 +93,6 @@
       "notes": [
         "scopesHint keeps the consent surface to the union required by the reviewed tools instead of requesting every scope advertised by PRM.",
         "allowedTools freezes the reviewed tool surface. Every tool call executes through OpenGeni's first-party Gmail REST bridge (packages/runtime/src/gmail-rest-mcp.ts), never Google's Developer Preview MCP endpoint directly; this connection's mcpUrl identity is unchanged so existing consents and reconnect flows keep working. send_message and send_draft are OpenGeni additions the Developer Preview server does not offer; both require durable human approval, non-optional and not workspace-configurable.",
-        "connectionOwnership is personal_only: a consumer Gmail account is never a workspace credential. Each member authorizes their own mailbox.",
         "logoSourceUrl is null because Google has not published a reusable Gmail MCP logo asset. Keep the self-hosted monogram rather than hotlinking a brand asset."
       ]
     },
@@ -136,10 +135,9 @@
       ],
       "notes": [
         "Slack's tools/list is grant-dependent. scopesHint is the complete set advertised by its official OAuth protected-resource metadata.",
-        "This is the personal hosted Slack MCP. The separate OpenGeni Slack bot is an Integration, not a catalog connector.",
-        "connectionOwnership is personal_only: the hosted Slack MCP is a human's grant. Shared workspace access is the OpenGeni bot, never a shared user token."
+        "This is the hosted Slack MCP, authenticated as a Slack user. The separate OpenGeni Slack bot is an Integration, not a catalog connector."
       ],
-      "connectionOwnership": "personal_only"
+      "defaultConnectionOwnership": "workspace"
     },
     {
       "mcpUrl": "https://api.mobbin.com/mcp",

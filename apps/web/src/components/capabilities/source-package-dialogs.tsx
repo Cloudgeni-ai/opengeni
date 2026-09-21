@@ -4,7 +4,9 @@
  * its exact shared-ownership impact. Lazily loaded, because neither is needed
  * until an admin actually starts one of those flows.
  */
-import { PackageIcon, ShieldCheckIcon } from "lucide-react";
+import { ShieldCheckIcon } from "lucide-react";
+import type { RefObject } from "react";
+import { PluginRemovalImpact } from "./plugin-removal-impact";
 
 import { SourceImportDialog } from "@/components/capabilities/source-import-dialog";
 import type { SourceImportState } from "@/components/capabilities/source-import-flow";
@@ -26,6 +28,9 @@ export function SourcePackageDialogs({
   onBack,
   onRemoveClose,
   onRemoveConfirm,
+  removeNotice,
+  restoreFocusRef,
+  restoreFocusFallbackRef,
 }: {
   sourceImport: SourceImportState;
   connections: ConnectionMetadata[] | null;
@@ -40,6 +45,9 @@ export function SourcePackageDialogs({
   onBack: () => void;
   onRemoveClose: () => void;
   onRemoveConfirm: () => Promise<boolean>;
+  removeNotice?: string | null;
+  restoreFocusRef?: RefObject<HTMLElement | null>;
+  restoreFocusFallbackRef?: RefObject<HTMLElement | null>;
 }) {
   return (
     <>
@@ -63,11 +71,25 @@ export function SourcePackageDialogs({
         }}
         title={removeDialogTitle(removeTarget)}
         description={removeDialogDescription(removeTarget)}
-        confirmLabel={removeTarget?.kind === "skill" ? "Remove direct Skill" : "Remove Plugin"}
+        confirmLabel={removeTarget?.kind === "skill" ? "Remove direct Skill" : "Remove plugin"}
+        confirmDisabled={
+          removeTarget?.kind === "plugin" &&
+          removeTarget.preview.components.some((component) =>
+            component.retentionReasons.includes("registry_unavailable"),
+          )
+        }
+        pendingLabel="Removing…"
+        restoreFocusRef={restoreFocusRef}
+        restoreFocusFallbackRef={restoreFocusFallbackRef}
         cancelAutoFocus
         onConfirm={onRemoveConfirm}
       >
         <RemoveImpact target={removeTarget} />
+        {removeNotice ? (
+          <p role="alert" className="text-sm leading-5 text-fg-muted">
+            {removeNotice}
+          </p>
+        ) : null}
       </ConfirmDialog>
     </>
   );
@@ -89,31 +111,19 @@ function RemoveImpact({ target }: { target: SourceRemoveTarget | null }) {
       </div>
     );
   }
-  const retained = target.preview.components.filter((component) => component.retainedByOtherOwners);
-  return (
-    <div className="rounded-lg border border-border bg-bg/50 p-3 text-xs leading-5 text-fg-muted">
-      <div className="flex items-start gap-2">
-        <PackageIcon className="mt-0.5 size-4 shrink-0 text-brand" />
-        <p>
-          {target.preview.components.length} components are in this Plugin. {retained.length} will
-          remain because another Plugin, Pack, or direct installation also owns them. Connections
-          are never deleted by Plugin removal.
-        </p>
-      </div>
-    </div>
-  );
+  return <PluginRemovalImpact preview={target.preview} />;
 }
 
 function removeDialogTitle(target: SourceRemoveTarget | null): string {
   if (!target) return "Remove source package?";
   return target.kind === "skill"
     ? `Remove direct Skill “${target.skill.name}”?`
-    : `Remove Plugin “${target.plugin.name}”?`;
+    : `Remove ${target.plugin.name}?`;
 }
 
 function removeDialogDescription(target: SourceRemoveTarget | null): string {
   if (!target) return "Review the exact ownership impact before removal.";
   return target.kind === "skill"
     ? "This removes only the direct workspace owner. Shared ownership is retained and no Connection is deleted."
-    : "This removes the Plugin owner and only components no other owner retains. Existing Connections remain available.";
+    : "Remove this plugin from your workspace.";
 }

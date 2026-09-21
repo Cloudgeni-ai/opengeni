@@ -130,8 +130,8 @@ describe("IntegrationRow", () => {
     );
     try {
       const rows = [...rendered.container.querySelectorAll("[data-integration-row]")];
-      expect(rows[0]!.className).toContain("hover:bg-accent");
-      expect(rows[0]!.querySelector("button")!.className).not.toContain("hover:bg-");
+      expect(rows[0]!.className).toContain("og-capability-catalog-row");
+      expect(rows[0]!.querySelector("button")).toBeNull();
       const logo = rows[0]!.querySelector("img");
       expect(logo?.getAttribute("src")).toBe("https://example.test/github.svg");
       expect(rows[1]!.querySelector("img")).toBeNull();
@@ -145,7 +145,7 @@ describe("IntegrationRow", () => {
     }
   });
 
-  test("renders every integration through the same two-button row shape", async () => {
+  test("renders every integration through the same single-button row shape", async () => {
     const onOpen = mock(() => {});
     const rendered = await render(
       <>
@@ -173,24 +173,14 @@ describe("IntegrationRow", () => {
     try {
       const rowContainers = [...rendered.container.querySelectorAll("[data-integration-row]")];
       expect(rowContainers).toHaveLength(3);
-      // Every row's body-open button is a real sibling of the state indicator,
-      // never nested inside it - one clean click target per row. Its accessible
-      // name carries the connection state, so the state is never colour-only.
+      // The row is the sole button, including its decorative state glyph.
       for (const row of rowContainers) {
-        expect(row.tagName).not.toBe("BUTTON");
-        const openButton = row.querySelector("button");
-        expect(openButton).not.toBeNull();
-        expect(openButton?.querySelector("button")).toBeNull();
+        expect(row.tagName).toBe("BUTTON");
+        expect(row.querySelector("button")).toBeNull();
       }
-      expect(rowContainers[0]?.querySelector("button")?.getAttribute("aria-label")).toBe(
-        "Slack. Connected",
-      );
-      expect(rowContainers[1]?.querySelector("button")?.getAttribute("aria-label")).toBe(
-        "GitHub. Not connected",
-      );
-      expect(rowContainers[2]?.querySelector("button")?.getAttribute("aria-label")).toBe(
-        "Google Drive. Set up by an admin",
-      );
+      expect(rowContainers[0]?.getAttribute("aria-label")).toBe("Slack. Connected");
+      expect(rowContainers[1]?.getAttribute("aria-label")).toBe("GitHub. Not connected");
+      expect(rowContainers[2]?.getAttribute("aria-label")).toBe("Google Drive. Set up by an admin");
       // The indicator itself is decorative, so each row still exposes its state
       // as text for assistive tech and forced-colours users.
       expect(rowContainers[0]?.textContent).toContain("Connected");
@@ -198,10 +188,7 @@ describe("IntegrationRow", () => {
       for (const row of rowContainers) {
         expect(row.textContent).not.toContain("scope");
       }
-      const openButtons = rowContainers.map(
-        (row) => row.querySelector("button") as HTMLButtonElement,
-      );
-      await act(async () => openButtons[1]!.click());
+      await act(async () => (rowContainers[1] as HTMLButtonElement).click());
       expect(onOpen).toHaveBeenCalledTimes(1);
     } finally {
       await rendered.unmount();
@@ -215,10 +202,10 @@ describe("IntegrationRow", () => {
       <>
         <IntegrationRow
           model={model({
-            id: "pack:infra-ops",
+            id: "skill:infra-ops",
             name: "Infrastructure operations",
             chip: { label: "Not installed", tone: "idle" },
-            accessibleDetail: "Pack, curated by OpenGeni",
+            accessibleDetail: "Skill, curated by OpenGeni",
           })}
           onOpen={() => {}}
         />
@@ -231,13 +218,13 @@ describe("IntegrationRow", () => {
     try {
       expect(
         rendered.container
-          .querySelector('[data-integration-row="pack:infra-ops"] > button')
+          .querySelector('button[data-integration-row="skill:infra-ops"]')
           ?.getAttribute("aria-label"),
-      ).toBe("Infrastructure operations. Pack, curated by OpenGeni. Not installed");
+      ).toBe("Infrastructure operations. Skill, curated by OpenGeni. Not installed");
       // Nothing meaningful to add: the name reads exactly as it did before.
       expect(
         rendered.container
-          .querySelector('[data-integration-row="blank-detail"] > button')
+          .querySelector('button[data-integration-row="blank-detail"]')
           ?.getAttribute("aria-label"),
       ).toBe("Slack. Connected");
     } finally {
@@ -245,7 +232,7 @@ describe("IntegrationRow", () => {
     }
   });
 
-  test("only the not-connected state renders an interactive quick-connect icon", async () => {
+  test("clicking the plus uses the same setup action, even with a legacy quick-connect handler", async () => {
     const onOpen = mock(() => {});
     const onQuickConnect = mock(() => {});
     const rendered = await render(
@@ -263,21 +250,18 @@ describe("IntegrationRow", () => {
     );
     try {
       const rows = [...rendered.container.querySelectorAll("[data-integration-row]")];
-      // Connected: the indicator is decorative, not a button.
-      const connectedButtons = [...rows[0]!.querySelectorAll("button")];
-      expect(connectedButtons).toHaveLength(1);
-      // Not connected with a quick-connect handler: a second, real button.
-      const idleButtons = [...rows[1]!.querySelectorAll("button")];
-      expect(idleButtons).toHaveLength(2);
-      await act(async () => idleButtons[1]!.click());
-      expect(onQuickConnect).toHaveBeenCalledTimes(1);
-      expect(onOpen).not.toHaveBeenCalled();
+      expect(rows[0]!.querySelectorAll("button")).toHaveLength(0);
+      expect(rows[1]!.querySelectorAll("button")).toHaveLength(0);
+      const plus = rows[1]!.querySelector(".lucide-plus")!;
+      await act(async () => plus.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+      expect(onQuickConnect).not.toHaveBeenCalled();
+      expect(onOpen).toHaveBeenCalledTimes(1);
     } finally {
       await rendered.unmount();
     }
   });
 
-  test("omits the quick-connect icon entirely when no fast path exists, even if not connected", async () => {
+  test("available connections still show a plus when setup requires a dialog", async () => {
     const rendered = await render(
       <IntegrationRow
         model={model({ chip: { label: "Not connected", tone: "idle" } })}
@@ -286,7 +270,9 @@ describe("IntegrationRow", () => {
     );
     try {
       const row = rendered.container.querySelector("[data-integration-row]")!;
-      expect([...row.querySelectorAll("button")]).toHaveLength(1);
+      expect(row.tagName).toBe("BUTTON");
+      expect(row.querySelectorAll("button")).toHaveLength(0);
+      expect(row.querySelector(".lucide-plus")).not.toBeNull();
     } finally {
       await rendered.unmount();
     }

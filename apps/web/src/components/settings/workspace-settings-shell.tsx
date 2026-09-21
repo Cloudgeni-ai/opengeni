@@ -16,13 +16,11 @@ import {
   BoxesIcon,
   Building2Icon,
   ChevronRightIcon,
-  DatabaseIcon,
   KeyRoundIcon,
   LaptopIcon,
   PlugIcon,
   Settings2Icon,
   ShieldAlertIcon,
-  ShieldCheckIcon,
   SparklesIcon,
   UsersIcon,
 } from "lucide-react";
@@ -51,8 +49,7 @@ const SETTINGS_ITEMS: readonly SettingsItem[] = [
   { id: "learning", label: "Agent learning", icon: BotIcon },
   { id: "members", label: "Members", icon: UsersIcon },
   { id: "models", label: "Models", icon: SparklesIcon },
-  { id: "tools", label: "Agent tools", icon: ShieldCheckIcon },
-  { id: "plugins", label: "Plugins", icon: PlugIcon },
+  { id: "plugins", label: "Capabilities", icon: PlugIcon },
   { id: "api-keys", label: "API keys", icon: KeyRoundIcon },
   { id: "danger", label: "Danger zone", icon: ShieldAlertIcon },
 ];
@@ -64,19 +61,15 @@ const SECTION_COPY: Record<WorkspaceSettingsSection, { title: string; descriptio
   },
   learning: {
     title: "Agent learning",
-    description: "Defaults and exceptions for Knowledge, workspace instructions, and Skills.",
+    description: "Defaults for Knowledge, workspace instructions, and Skills.",
   },
   members: {
     title: "Members",
     description: "Manage who can access this workspace and what they can do.",
   },
-  tools: {
-    title: "Agent tools",
-    description: "Choose which built-in OpenGeni tools new sessions can use.",
-  },
   plugins: {
-    title: "Plugins",
-    description: "Choose which plugins new sessions may use when they are available.",
+    title: "Capabilities",
+    description: "Manage Plugins, Skills, and integrations for your workspace.",
   },
   models: {
     title: "Models",
@@ -109,16 +102,6 @@ const WORKSPACE_PAGE_GROUPS = [
     ],
   },
   {
-    label: "Knowledge",
-    items: [
-      {
-        to: "/workspaces/$workspaceId/memory" as const,
-        label: "Agent Knowledge",
-        icon: DatabaseIcon,
-      },
-    ],
-  },
-  {
     label: "Runtime",
     items: [
       {
@@ -128,7 +111,7 @@ const WORKSPACE_PAGE_GROUPS = [
       },
       {
         to: "/workspaces/$workspaceId/rigs" as const,
-        label: "Rigs",
+        label: "Sandbox Environments",
         icon: BoxIcon,
       },
       {

@@ -114,9 +114,12 @@ describe("Slack installation binding browser acceptance", () => {
 });
 
 async function openSlackSettings(page: Page, chip: string) {
-  const row = page.getByRole("button", { name: /^Slack\s/ }).filter({ hasText: chip });
+  await page.getByRole("tab", { name: "Connections", exact: true }).click();
+  const row = page
+    .locator(".og-connection-installed")
+    .getByRole("button", { name: new RegExp(`Slack.*${chip}`) });
   await row.waitFor({ state: "visible", timeout: 15_000 });
-  expect(await row.locator(".og-connection-catalog-status").textContent()).toBe(chip);
+  expect(await row.getAttribute("aria-label")).toContain(chip);
   await row.click();
   const settings = page.getByRole("region", { name: "Slack settings" });
   await settings.waitFor({ state: "visible", timeout: 15_000 });
@@ -137,6 +140,7 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
         headers: { "x-opengeni-api-contract": apiContractRevision },
         body: JSON.stringify(body),
       });
+    if (url.pathname.endsWith("/skills/search")) return json({ items: [], nextCursor: null });
     if (url.pathname === "/v1/config/client") {
       return json({
         deploymentRevision: "slack-binding-browser-test",
@@ -231,9 +235,7 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
       return json({ error: { message: "blocked fixture should not be called" } }, 500);
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/social/connections`) return json([]);
-    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({ packs: [], installations: [] });
-    }
+
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {

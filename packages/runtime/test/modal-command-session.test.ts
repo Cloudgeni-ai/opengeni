@@ -9,14 +9,14 @@ import {
   withProviderCommandHandle,
 } from "../src/sandbox/provider-command-session";
 import { installOpenGeniModalSnapshotPolicy } from "../src/sandbox/providers/modal";
-import { ModalCommandControl } from "../src/sandbox/providers/modal-command-control";
+import { ModalCommandControl } from "../src/sandbox/providers/modal-legacy-command-control";
 import { installModalCommandSession } from "../src/sandbox/providers/modal-command-session";
 import {
   type RoutingRetainedProcess,
   RoutingSandboxSession,
 } from "../src/sandbox/routing/routing-session";
 
-function fixture() {
+function fixture(verification = false) {
   let starts = 0;
   let failRead = false;
   let failStart = false;
@@ -43,18 +43,24 @@ function fixture() {
       const final = request.lastBatchIndex > 0;
       yield {
         batchIndex: final ? 2 : 1,
-        ...(final ? { exitCode: 7 } : {}),
+        ...(final ? { exitCode: verification ? 0 : 7 } : {}),
         items: [
           {
             fileDescriptor: request.fileDescriptor,
             messageBytes: Buffer.from(
-              request.fileDescriptor === 1
-                ? final
-                  ? "tail"
-                  : "start"
-                : final
-                  ? "error-tail"
-                  : "error-start",
+              verification
+                ? request.fileDescriptor === 1
+                  ? final
+                    ? "PATH_VISIBLE__"
+                    : "__OPENGENI_MATERIALIZED_"
+                  : ""
+                : request.fileDescriptor === 1
+                  ? final
+                    ? "tail"
+                    : "start"
+                  : final
+                    ? "error-tail"
+                    : "error-start",
             ),
           },
         ],
@@ -258,6 +264,41 @@ test("yielded SDK setup commands keep their own observer without colliding with 
     "observation unavailable",
   );
   expect(reads).toEqual([1]);
+});
+
+test("materialization verification observes its setup command without borrowing mutation identity", async () => {
+  const f = fixture(true);
+  let materializations = 0;
+  let setupStarts = 0;
+  const reads: number[] = [];
+  const session = f.session({
+    execCommand: async () => {
+      setupStarts++;
+      return "Process running with session ID 1\nOutput:\n__OPENGENI_MATERIALIZED_";
+    },
+    writeStdin: async ({ sessionId, chars }) => {
+      reads.push(sessionId);
+      expect(chars).toBe("");
+      return "Process exited with code 0\nOutput:\nPATH_VISIBLE__";
+    },
+  });
+  const backend = Object.assign(session, {
+    async materializeEntry() {
+      materializations++;
+    },
+  });
+  const proxy = new RoutingSandboxSession({
+    readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+    resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+    beforeMutation: async () => ({}),
+    providerCommandHandle: () => 73,
+  });
+  await proxy.materializeEntry({ path: "repos/example", entry: {} });
+  expect(materializations).toBe(1);
+  expect(setupStarts).toBe(0);
+  expect(reads).toEqual([]);
+  expect(f.starts()).toBe(1);
+  expect(session.getProviderCommand!(73)).toBeNull();
 });
 
 test("the pinned SDK completes a slow setup command through its original live process", async () => {

@@ -19,15 +19,19 @@ import ReactMarkdown, {
   type UrlTransform,
 } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { PanelsTopLeftIcon } from "lucide-react";
+import { ActivityDisclosure } from "../timeline/shared";
 import { cn } from "../lib/cn";
 import { tableElementToTsv } from "../lib/clipboard";
 import { prefersReducedMotion } from "../lib/motion";
 import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { CopyButton } from "./copy-button";
+import { PreviewLoading } from "./preview-loading";
 import type { observeMarkdownTableLayout } from "./markdown-table-layout";
 import { softenStreamingMarkdown } from "./soften-streaming-markdown";
 import { createStreamReveal, rehypeStreamReveal, type StreamReveal } from "./stream-reveal";
 import { TooltipProvider } from "./tooltip";
+import { searchMatchOffset, type TimelineSearchTarget } from "./timeline-search";
 
 /**
  * The default renderer for chat message bodies in {@link MessageTimeline}.
@@ -46,11 +50,14 @@ import { TooltipProvider } from "./tooltip";
 export type MarkdownInteractiveBlock = { kind: "html" | "site"; content: string };
 const InteractiveContext = createContext<{
   source: string;
+  streaming?: boolean | undefined;
   render?: (block: MarkdownInteractiveBlock) => ReactNode;
   renderImage?: (image: { src: string; alt: string }) => ReactNode;
 }>({ source: "" });
 
 export type MarkdownProps = {
+  /** Reveals a bounded source excerpt; closing Find retains it until explicit restore. */
+  searchTarget?: TimelineSearchTarget | null | undefined;
   renderImage?: ((image: { src: string; alt: string }) => ReactNode) | undefined;
   /** Host opt-in for assistant-authored interactive fences. */
   renderInteractiveBlock?: ((block: MarkdownInteractiveBlock) => ReactNode) | undefined;
@@ -406,7 +413,7 @@ function fenceLanguage(children: ReactNode): string | null {
 }
 
 function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"> & ExtraProps) {
-  const { source, render } = useContext(InteractiveContext);
+  const { source, render, streaming } = useContext(InteractiveContext);
   const language = fenceLanguage(children);
   if (render && (language === "opengeni-html" || language === "opengeni-site")) {
     const start = node?.position?.start.offset;
@@ -428,7 +435,23 @@ function InteractiveCodeBlock({ children, node }: ComponentPropsWithoutRef<"pre"
       closing &&
       closing.length >= opening[1]!.length &&
       [...closing].every((c) => c === opening[1]![0]);
-    if (!complete) return <p role="status">Preparing preview…</p>;
+    if (!complete) {
+      return (
+        <div role="status" aria-live="polite" aria-busy={streaming === true} className="my-3">
+          {streaming ? (
+            <PreviewLoading />
+          ) : (
+            <ActivityDisclosure
+              icon={<PanelsTopLeftIcon aria-hidden className="size-3.5" />}
+              title="Preview incomplete"
+              running={false}
+              expandable={false}
+              preview="Generation stopped before the preview was ready."
+            />
+          )}
+        </div>
+      );
+    }
     return (
       <>
         {render({
@@ -622,10 +645,11 @@ function MarkdownImpl({
   const interactiveContext = useMemo(
     () => ({
       source: children,
+      streaming,
       ...(renderInteractiveBlock ? { render: renderInteractiveBlock } : {}),
       ...(renderImage ? { renderImage } : {}),
     }),
-    [children, renderInteractiveBlock, renderImage],
+    [children, streaming, renderInteractiveBlock, renderImage],
   );
 
   // `min-w-0` lets the prose shrink inside flex parents (message bubbles) so
@@ -656,4 +680,62 @@ function MarkdownImpl({
 }
 
 /** Memoized so streaming re-renders of the parent don't re-parse settled bodies. */
-export const Markdown = memo(MarkdownImpl);
+export const Markdown = memo(function SearchableMarkdown(props: MarkdownProps) {
+  const [retained, setRetained] = useState<{ text: string; target: TimelineSearchTarget } | null>(
+    null,
+  );
+  if (
+    props.searchTarget &&
+    (retained?.target !== props.searchTarget || retained.text !== props.children)
+  ) {
+    setRetained({ text: props.children, target: props.searchTarget });
+  }
+  // Closing Find only removes the highlight. Retain the source window so a huge
+  // formatted message cannot replace it and unexpectedly move the reading point.
+  const target = props.searchTarget ?? (retained?.text === props.children ? retained.target : null);
+  if (!target) return <MarkdownImpl {...props} />;
+  const offset = searchMatchOffset(props.children, target);
+  if (offset < 0)
+    return props.searchTarget ? (
+      <div role="status">This match is no longer in the message source.</div>
+    ) : (
+      <MarkdownImpl {...props} />
+    );
+  // Bound mounted text even for multi-megabyte messages. Do not split a UTF-16 pair
+  // at excerpt edges; the selected range itself is validated against the source.
+  let start = Math.max(0, offset - 240);
+  let end = Math.min(props.children.length, offset + target.query.length + 240);
+  if (start > 0 && /[\uDC00-\uDFFF]/.test(props.children[start]!)) start--;
+  if (end < props.children.length && /[\uDC00-\uDFFF]/.test(props.children[end]!)) end++;
+  const MatchTag = props.searchTarget ? "mark" : "span";
+  return (
+    <div className={cn("og-markdown-body min-w-0 break-words", props.className)}>
+      <div data-og-annotation-chrome="" className="text-xs opacity-70">
+        Match in message source · Excerpt stays in place when Find closes
+        <button
+          type="button"
+          disabled={!!props.searchTarget}
+          title={props.searchTarget ? "Close Find to show the formatted message" : undefined}
+          className="ml-2 inline-flex min-h-7 items-center rounded-og-sm px-1.5 text-og-xs font-medium text-og-fg-muted outline-hidden hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/45 pointer-coarse:min-h-11 disabled:opacity-50"
+          onClick={() => setRetained(null)}
+        >
+          Show formatted message
+        </button>
+      </div>
+      <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+        {start > 0 ? "…" : ""}
+        {props.children.slice(start, offset)}
+        <MatchTag
+          data-og-search-occurrence={target.occurrence ?? 0}
+          data-og-search-sequence={target.sequence}
+          data-og-search-query={target.query}
+          data-og-search-offset={offset}
+        >
+          {props.children.slice(offset, offset + target.query.length)}
+        </MatchTag>
+        {props.children.slice(offset + target.query.length, end)}
+        {end < props.children.length ? "…" : ""}
+      </div>
+    </div>
+  );
+});

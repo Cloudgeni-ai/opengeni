@@ -174,13 +174,13 @@ function ChangeRow({
                 title={
                   canManage
                     ? "Promote into a new active version"
-                    : "Requires the Rigs manage permission"
+                    : "Requires the Sandbox Environments manage permission"
                 }
                 onClick={async () => {
                   const result = await onPromote(change.id);
                   if (result) {
                     toast.success("Change promoted", {
-                      description: "A new active rig version was minted.",
+                      description: "A new active sandbox environment version was minted.",
                     });
                   }
                 }}
@@ -191,7 +191,7 @@ function ChangeRow({
           </div>
           {promotable && !canManage ? (
             <p className="text-right text-2xs text-fg-subtle">
-              Promoting needs the Rigs manage permission.
+              Promoting needs the Sandbox Environments manage permission.
             </p>
           ) : null}
         </div>

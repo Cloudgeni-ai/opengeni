@@ -17,11 +17,6 @@ import type { ListViewState } from "@/lib/load-state";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem } from "@/types";
 
-/**
- * The kinds the Connectors grid can actually show. Skills, Plugins, and Packs
- * are Bundles and live in their own section, so offering
- * them here would only ever produce an empty grid.
- */
 export const CAPABILITY_FILTERS: readonly CapabilityFilter[] = ["all", "mcp", "api"];
 
 export function CapabilityDiscoveryControls({
@@ -64,10 +59,13 @@ export function CapabilityDiscoveryControls({
 export function PluginSearch({
   query,
   onQueryChange,
+  scope = "all",
 }: {
   query: string;
+  scope?: string;
   onQueryChange: (query: string) => void;
 }) {
+  const label = scope === "all" ? "Search connections, skills, and plugins" : `Search ${scope}`;
   return (
     <div className="relative mt-6">
       <SearchIcon className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-fg-subtle" />
@@ -76,20 +74,14 @@ export function PluginSearch({
         suppressAutofill
         value={query}
         onChange={(event) => onQueryChange(event.target.value)}
-        placeholder="Search connections, skills, and plugins"
+        placeholder={label}
         className="h-11 rounded-lg pl-11 text-sm shadow-none transition-none placeholder:text-fg-subtle"
-        aria-label="Search capabilities"
+        aria-label={label}
       />
     </div>
   );
 }
 
-/**
- * The enabled Connectors strip. Its input is already scoped to `mcp`/`api`
- * items (`isConnectorCatalogItem`), so no Skill, Plugin, or Pack reaches it:
- * Bundles have their own section, with their own authority rules and their own
- * remove affordance.
- */
 export function EnabledCapabilitiesSection({
   items,
   busyId,
@@ -225,7 +217,8 @@ export function CapabilityBrowseSection({
                   onLoadMore();
                   queueMicrotask(() => {
                     if (button.isConnected || !grid?.isConnected) return;
-                    grid.children[focusIndex]?.querySelector<HTMLButtonElement>("button")?.focus();
+                    const row = grid.children[focusIndex];
+                    if (row instanceof HTMLButtonElement) row.focus();
                   });
                 }}
               >

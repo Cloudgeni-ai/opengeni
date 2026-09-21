@@ -14,7 +14,7 @@ import {
 } from "@opengeni/contracts";
 import type {
   CreateSessionRequest,
-  McpConnectionAuthoritySelection,
+  McpConnectionAccountSelection,
   PersonalGitHubRepositorySelectionInput,
   SessionEvent,
 } from "@opengeni/sdk";
@@ -57,6 +57,8 @@ import {
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
+import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
+import { PersonalSecurityProvider } from "@/lib/personal-security-context";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Toaster } from "@/components/ui/sonner";
@@ -177,6 +179,12 @@ const ManagedAuthPanel = lazy(() =>
   })),
 );
 
+const SignedOutPage = lazy(() =>
+  import("@/components/signed-out-page").then((module) => ({
+    default: module.SignedOutPage,
+  })),
+);
+
 const BrowserAccountsRuntime = lazy(() =>
   import("@/components/browser-accounts-runtime").then((module) => ({
     default: module.BrowserAccountsRuntime,
@@ -280,7 +288,7 @@ export type AppContextValue = {
   setSelectedPersonalGitHubRepoIds: Dispatch<SetStateAction<Set<string>>>;
   selectedPersonalGitHubRepoRefs: Record<string, string>;
   setSelectedPersonalGitHubRepoRefs: Dispatch<SetStateAction<Record<string, string>>>;
-  personalGitHubAuthority: McpConnectionAuthoritySelection | null;
+  personalGitHubAuthority: McpConnectionAccountSelection | null;
   githubAppOpen: boolean;
   setGithubAppOpen: Dispatch<SetStateAction<boolean>>;
   githubOrg: string;
@@ -297,6 +305,8 @@ export type AppContextValue = {
   workspaceDefaultToolIds: string[];
   /** True once the workspace capability catalog has completed its authoritative load. */
   workspaceMcpCatalogReady: boolean;
+  /** Failed or pending reads must never remove a saved tool selection. */
+  workspaceMcpCatalogLoadedSuccessfully: boolean;
   /** The authoritative workspace catalog, shared by tool policy and timeline presentation. */
   workspaceCapabilityCatalog: CapabilityCatalogItem[];
   currentResources: ResourceRef[];
@@ -362,8 +372,7 @@ export type AppContextValue = {
   ) => Promise<boolean>;
   ensurePersonalGitHubAuthority: (
     workspaceId: string,
-    context?: "user_private" | "workspace_shared",
-  ) => Promise<McpConnectionAuthoritySelection | null>;
+  ) => Promise<McpConnectionAccountSelection | null>;
   togglePersonalGitHubRepository: (
     workspaceId: string,
     repository: PersonalGitHubRepositoryCatalogItem,
@@ -382,7 +391,11 @@ export type AppContextValue = {
       installedSkillIds?: string[];
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[];
-      newSessionDraftToolPolicy?: { tools: ToolRef[]; toolsProvided: boolean };
+      newSessionDraftToolPolicy?: {
+        tools: ToolRef[];
+        toolsProvided: boolean;
+        excludedMcpServerIds?: string[];
+      };
       targetSandboxId?: string | null;
       workingDir?: string | null;
       /** Workspace folder to file the new session under. */
@@ -647,6 +660,8 @@ export function RootRouteComponent() {
     CapabilityCatalogItem[]
   >([]);
   const [workspaceMcpCatalogReady, setWorkspaceMcpCatalogReady] = useState(false);
+  const [workspaceMcpCatalogLoadedSuccessfully, setWorkspaceMcpCatalogLoadedSuccessfully] =
+    useState(false);
   const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -786,6 +801,7 @@ export function RootRouteComponent() {
     setWorkspaceMcpServers([]);
     setWorkspaceCapabilityCatalog([]);
     setWorkspaceMcpCatalogReady(false);
+    setWorkspaceMcpCatalogLoadedSuccessfully(false);
   }, []);
 
   const resetWorkspaceState = useCallback(
@@ -1132,7 +1148,16 @@ export function RootRouteComponent() {
     const available = new Set(toolMcpServers.map((server) => server.id));
     const configured = configuredWorkspaceToolDefaults?.mcpServerIds;
     return configured
-      ? configured.filter((id) => available.has(id))
+      ? [
+          ...new Set([
+            ...configured.filter((id) => available.has(id)),
+            ...(configuredWorkspaceToolDefaults?.inheritConnectedMcpServers
+              ? toolMcpServers
+                  .filter((server) => !["opengeni", "files", "docs"].includes(server.id))
+                  .map((server) => server.id)
+              : []),
+          ]),
+        ]
       : toolMcpServers.map((server) => server.id);
   }, [configuredWorkspaceToolDefaults, toolMcpServers]);
   const lastValidResources = useRef<ResourceRef[]>([]);
@@ -1175,7 +1200,7 @@ export function RootRouteComponent() {
 
   useCapabilityToolDefaults({
     principalKey: JSON.stringify(principalTransitionIdentity.current),
-    ready: clientConfig !== null,
+    ready: clientConfig !== null && !/^\/workspaces\/[^/]+\/sessions\/?$/.test(pathname),
     workspaceId: routedWorkspaceId,
     configuredIds: configuredWorkspaceToolDefaults?.mcpServerIds,
     availableIds: toolMcpServers.map((server) => server.id),
@@ -1342,7 +1367,7 @@ export function RootRouteComponent() {
       setWorkspaces((current) => upsertWorkspace(current, update.value));
       return update.value;
     } catch (error) {
-      toast.error("Failed to update the workspace default rig", {
+      toast.error("Failed to update the workspace default sandbox environment", {
         description: error instanceof Error ? error.message : String(error),
       });
       return null;
@@ -1647,7 +1672,6 @@ export function RootRouteComponent() {
           reusablePersonalGitHubAuthority(current, {
             connectionId: connection.id,
             connectionVersion: connection.version,
-            connectionAuthorityGeneration: selection.connectionAuthorityGeneration,
           })
             ? current
             : null,
@@ -1745,44 +1769,16 @@ export function RootRouteComponent() {
   }
 
   async function ensurePersonalGitHubAuthority(
-    workspaceId: string,
-    context: "user_private" | "workspace_shared" = "workspace_shared",
-  ): Promise<McpConnectionAuthoritySelection | null> {
+    _workspaceId: string,
+  ): Promise<McpConnectionAccountSelection | null> {
     const connection = personalGitHubStatus?.connection;
     if (!connection?.authorityId || connection.status !== "active") {
       toast.error("Connect your GitHub account before selecting its repositories");
       return null;
     }
-    const cached = reusablePersonalGitHubAuthority(personalGitHubAuthorityCache, {
-      connectionId: connection.id,
-      connectionVersion: connection.version,
-      ...(personalGitHubSelection
-        ? { connectionAuthorityGeneration: personalGitHubSelection.connectionAuthorityGeneration }
-        : {}),
-      context,
-    });
-    if (cached) return cached;
-    try {
-      const response = await client.issueUserResourceGrant(workspaceId, connection.authorityId, {
-        scope: "user",
-        resourceKind: "connection",
-        mode: "always",
-        context,
-        workspaceSharedAcknowledged: context === "workspace_shared",
-      });
-      const authority = {
-        serverId: "github:personal",
-        connectionId: connection.id,
-        userDelegation: response.grant.delegation,
-      } satisfies McpConnectionAuthoritySelection;
-      setPersonalGitHubAuthorityCache({ authority, connectionVersion: connection.version });
-      return authority;
-    } catch (error) {
-      toast.error("Couldn't allow your GitHub identity here", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-      return null;
-    }
+    const authority = { serverId: "github:personal", connectionId: connection.id };
+    setPersonalGitHubAuthorityCache({ authority, connectionVersion: connection.version });
+    return authority;
   }
 
   async function togglePersonalGitHubRepository(
@@ -1820,6 +1816,7 @@ export function RootRouteComponent() {
     async (workspaceId: string, signal?: AbortSignal) => {
       const refreshId = mcpRefreshId.current + 1;
       mcpRefreshId.current = refreshId;
+      setWorkspaceMcpCatalogLoadedSuccessfully(false);
       const requestKey = `${accessKeyVersion}:${workspaceId}`;
       try {
         const result = await runCurrentWorkspaceRequest({
@@ -1847,11 +1844,13 @@ export function RootRouteComponent() {
           ),
         );
         setWorkspaceCapabilityCatalog(catalog.items);
+        setWorkspaceMcpCatalogLoadedSuccessfully(true);
         setWorkspaceMcpCatalogReady(true);
       } catch (error) {
         if (signal?.aborted || mcpRefreshId.current !== refreshId) throw error;
         // Fail-open: an unavailable catalog must not leave the create composer
         // stuck on draft hydrate / canSend=false.
+        setWorkspaceMcpCatalogLoadedSuccessfully(false);
         setWorkspaceMcpCatalogReady(true);
         throw error;
       }
@@ -1867,7 +1866,11 @@ export function RootRouteComponent() {
       installedSkillIds?: string[];
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[];
-      newSessionDraftToolPolicy?: { tools: ToolRef[]; toolsProvided: boolean };
+      newSessionDraftToolPolicy?: {
+        tools: ToolRef[];
+        toolsProvided: boolean;
+        excludedMcpServerIds?: string[];
+      };
       targetSandboxId?: string | null;
       workingDir?: string | null;
       channelId?: string | null;
@@ -1916,8 +1919,8 @@ export function RootRouteComponent() {
       const effectiveSubmission: TurnSubmission = includesPersonalGitHub
         ? {
             ...submission,
-            connectionAuthorities: [
-              ...(submission.connectionAuthorities ?? []).filter(
+            connectionAccounts: [
+              ...(submission.connectionAccounts ?? []).filter(
                 (authority) => authority.serverId !== "github:personal",
               ),
               personalGitHubAuthority!,
@@ -1943,8 +1946,7 @@ export function RootRouteComponent() {
           defaultLatencyMode: latencyMode,
           clientEventId: crypto.randomUUID(),
           idempotencyKey: freshIdempotencyKey,
-          workspaceDefaultMcpServerIds:
-            configuredWorkspaceToolDefaults?.mcpServerIds ?? workspaceDefaultToolIds,
+          workspaceDefaultMcpServerIds: workspaceDefaultToolIds,
           workspaceMcpCatalogReady,
           targetSandboxId: options?.targetSandboxId,
           workingDir: options?.workingDir,
@@ -2615,6 +2617,7 @@ export function RootRouteComponent() {
           toolMcpServers,
           workspaceDefaultToolIds,
           workspaceMcpCatalogReady,
+          workspaceMcpCatalogLoadedSuccessfully,
           workspaceCapabilityCatalog,
           currentResources,
           repositoryValidationError,
@@ -2736,6 +2739,7 @@ export function RootRouteComponent() {
     toolMcpServers,
     workspaceDefaultToolIds,
     workspaceMcpCatalogReady,
+    workspaceMcpCatalogLoadedSuccessfully,
     workspaceCapabilityCatalog,
     workspaceStateOwnerId,
     workspaces,
@@ -2779,33 +2783,59 @@ export function RootRouteComponent() {
     <LoadingPanel label="Checking session" />
   ) : managedAuthRequired && !authSession ? (
     <Suspense fallback={<LoadingPanel label="Loading sign in" />}>
-      {browserAccountsEnabled ? (
-        <BrowserAccountsSignedOutPanel
-          invitation={organizationInvitationContinuation}
-          emptySetRegistrationPanel={
-            clientConfig?.managedAuthSessionSetMode === "broker" ||
-            clientConfig?.managedAuthSessionSetMode === "dual" ? (
-              <ManagedAuthPanel
-                initialMode="signup"
-                allowedModes={["signup"]}
-                presentation="embedded"
-                onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
-                emailVerificationRequired={managedEmailVerificationRequired}
-              />
-            ) : undefined
-          }
-        />
-      ) : (
-        <ManagedAuthPanel
-          invitation={organizationInvitationContinuation}
-          onDismissInvitation={clearOrganizationInvitationContinuation}
-          onSubmit={handleManagedAuth}
-          emailVerificationRequired={managedEmailVerificationRequired}
-          socialProviders={managedSocialProviders}
-          onSocialSubmit={handleManagedSocialAuth}
-        />
-      )}
+      <SignedOutPage>
+        {browserAccountsEnabled ? (
+          <BrowserAccountsSignedOutPanel
+            presentation="embedded"
+            invitation={organizationInvitationContinuation}
+            emptySetRegistrationPanel={
+              clientConfig?.managedAuthSessionSetMode === "broker" ||
+              clientConfig?.managedAuthSessionSetMode === "dual" ? (
+                <ManagedAuthPanel
+                  initialMode="signup"
+                  allowedModes={["signup"]}
+                  presentation="embedded"
+                  onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
+                  emailVerificationRequired={managedEmailVerificationRequired}
+                />
+              ) : undefined
+            }
+          />
+        ) : (
+          <ManagedAuthPanel
+            presentation="embedded"
+            invitation={organizationInvitationContinuation}
+            onDismissInvitation={clearOrganizationInvitationContinuation}
+            onSubmit={handleManagedAuth}
+            emailVerificationRequired={managedEmailVerificationRequired}
+            socialProviders={managedSocialProviders}
+            onSocialSubmit={handleManagedSocialAuth}
+          />
+        )}
+      </SignedOutPage>
     </Suspense>
+  ) : /^\/settings\/security\/?$/.test(pathname) &&
+    managedAuthRequired &&
+    authSession &&
+    clientConfig ? (
+    // Personal security requires the selected managed human, never a workspace
+    // grant. Keep this after authentication but before access/onboarding gates.
+    // The outer BrowserAccountsRuntime still owns broker actor transitions.
+    browserAccountsConfigured && !browserAccountsEnabled ? (
+      <LoadingPanel label="Loading the selected browser account" />
+    ) : (
+      <PersonalSecurityProvider
+        value={{
+          clientConfig,
+          authSession,
+          accessKeyVersion,
+          handleManagedSignOut,
+          revalidatePrincipalAccess,
+        }}
+      >
+        <Outlet />
+      </PersonalSecurityProvider>
+    )
   ) : accessError && !accessLoading ? (
     <ProblemPanel
       title={accessError.title}
@@ -2912,6 +2942,7 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
+      <SignInCallbackNotice userId={authSession?.user.id ?? null} />
       {clientConfig ? (
         <Suspense fallback={null}>
           <AnalyticsManager

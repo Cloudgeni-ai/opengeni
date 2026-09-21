@@ -11,6 +11,15 @@ type ManagedAuthAttemptContext =
   | { kind: "discard_provider_session" };
 
 const managedAuthAttemptStorage = new AsyncLocalStorage<ManagedAuthAttemptContext>();
+const managedLinkIntentStorage = new AsyncLocalStorage<string>();
+
+export function runManagedSignInConnect<T>(intentId: string, action: () => T): T {
+  return managedLinkIntentStorage.run(intentId, action);
+}
+
+export function currentManagedSignInConnectIntent(): string | undefined {
+  return managedLinkIntentStorage.getStore();
+}
 
 export function runManagedAuthAttempt<T>(
   transactionId: string,

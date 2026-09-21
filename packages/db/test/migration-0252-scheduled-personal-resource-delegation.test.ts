@@ -273,7 +273,7 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
         cloneFunction: true,
         materializeFunction: true,
         executionFenceFunction: true,
-        hardenedSearchPaths: 6,
+        hardenedSearchPaths: 8,
         executionFenceTrigger: true,
         runTrigger: true,
         attemptTrigger: true,
@@ -326,7 +326,7 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
       }
       expect((scopeError as { code?: string } | undefined)?.code).toBe("42501");
       expect(await rejectedErrorChain(Promise.reject(scopeError))).toContain(
-        "scheduled connection clone scope or revision mismatch",
+        "scheduled personal-resource clone scope mismatch",
       );
       const [ledger] = await admin<Array<{ targetHeaders: number; capabilities: number }>>`
         select
@@ -815,7 +815,7 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
     }
   }, 180_000);
 
-  test("Temporal rollback clones the prior causal human instead of the task creator", async () => {
+  test("Temporal rollback cannot transfer the immutable schedule owner", async () => {
     const blank = await acquireMigrationTestDatabase("cross-human-rollback");
     if (!blank) return;
     const admin = postgres(blank.databaseUrl, { max: 2, prepare: false });
@@ -895,24 +895,18 @@ describe("migration 0252 scheduled personal-resource delegation", () => {
         authorityRevision: changed.authorityRevision + 1,
       });
       if (!restored) throw new Error("restored scheduled task is missing");
-      const restoredRun = await createScheduledTaskRun(client.db, {
-        workspaceId: fixture.targetWorkspaceId,
-        taskId: createdByOtherHuman.id,
-        ...executionBinding(restored),
-        triggerType: "scheduled",
-        producerKey: "scheduled-personal-cross-human-restored",
-      });
+      expect(restored.ownerSubjectId).toBe(fixture.otherSubjectId);
       expect(
-        await getScheduledTaskRunPersonalResourceAuthority(client.db, {
-          accountId: fixture.accountId,
-          workspaceId: fixture.targetWorkspaceId,
-          runId: restoredRun.id,
-        }),
-      ).toMatchObject({
-        taskAuthorityRevision: changed.authorityRevision + 1,
-        initiatingHumanSubjectId: fixture.subjectId,
-        resources: [expect.objectContaining({ resourceId: fixture.variableSetId })],
-      });
+        await rejectedErrorChain(
+          createScheduledTaskRun(client.db, {
+            workspaceId: fixture.targetWorkspaceId,
+            taskId: createdByOtherHuman.id,
+            ...executionBinding(restored),
+            triggerType: "scheduled",
+            producerKey: "scheduled-personal-cross-human-restored",
+          }),
+        ),
+      ).toContain("scheduled run differs from immutable execution owner");
     } finally {
       await client.close().catch(() => undefined);
       await admin.end({ timeout: 5 }).catch(() => undefined);

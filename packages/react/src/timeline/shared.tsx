@@ -1,5 +1,6 @@
 import { CameraIcon, CameraOffIcon, ChevronRightIcon } from "lucide-react";
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { useTimelineSearchReveal } from "../components/timeline-search";
 import { cn } from "../lib/cn";
 import { stringifyPayload } from "../lib/format";
 import { useForcedDefaultOpen } from "./disclosure-context";
@@ -154,6 +155,10 @@ export function ActivityDisclosure({
   // absent in normal app usage, where the row starts collapsed.
   const forcedDefaultOpen = useForcedDefaultOpen();
   const [open, setOpen] = useState(defaultOpen ?? forcedDefaultOpen ?? false);
+  const searchReveal = useTimelineSearchReveal();
+  useEffect(() => {
+    if (searchReveal) setOpen(true);
+  }, [searchReveal]);
   const truncation = useContext(ToolCallTruncationContext);
   const compact = useContext(CompactActivityContext);
   if (compact)

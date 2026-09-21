@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import type { EditableArtifactOutboxDispatchSummary } from "@opengeni/core";
 import type { Observability } from "@opengeni/observability";
 
@@ -17,6 +19,20 @@ const EMPTY_SUMMARY: EditableArtifactOutboxDispatchSummary = Object.freeze({
 });
 
 describe("editable artifact outbox sidecar", () => {
+  test("composes from its explicit environment without unrelated API or sandbox secrets", () => {
+    const result = spawnSync(
+      process.execPath,
+      [fileURLToPath(new URL("./fixtures/artifact-outbox-config.ts", import.meta.url))],
+      {
+        encoding: "utf8",
+        env: { PATH: process.env.PATH, OPENGENI_NATS_URL: "nats://ambient.invalid:4222" },
+        timeout: 20_000,
+      },
+    );
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("explicit sidecar environment composed");
+  });
   test("is disabled by default and validates the dedicated posture", () => {
     expect(readEditableArtifactOutboxSidecarEnvironment({})).toBeNull();
     expect(() =>

@@ -31,7 +31,18 @@ export type RepoDraft = {
 // whose default is one of those was overridden to "low" on every web turn
 // (billing impact — "low" beats the deployer's configured default server-side).
 export type IntelligenceEffort = ReasoningEffort;
-export type McpServerOption = { id: string; name: string };
+export type McpServerOption = {
+  id: string;
+  name: string;
+  logoSrc?: string | null;
+  detail?: string;
+  connectionStatus?: "ready" | "connect" | "reconnect" | "unavailable" | "unknown";
+};
+
+/** Composer connector menus omit builtins managed by workspace tool settings. */
+export function isComposerConnector(server: Pick<McpServerOption, "id">): boolean {
+  return !["opengeni", "files", "docs"].includes(server.id);
+}
 
 const NON_SELECTABLE_SESSION_MCP_SERVER_IDS = new Set(["opengeni"]);
 
@@ -48,6 +59,21 @@ export function isSelectableSessionMcpServerId(id: string): boolean {
 
 export function selectableSessionMcpServerIds(ids: Iterable<string>): Set<string> {
   return new Set([...ids].filter(isSelectableSessionMcpServerId));
+}
+
+/** Compare a retained draft with the current executable catalog, not saved defaults. */
+export function unavailableSessionMcpServerIds(
+  selectedIds: Iterable<string>,
+  servers: readonly McpServerOption[],
+  catalogLoadedSuccessfully: boolean,
+): string[] {
+  if (!catalogLoadedSuccessfully) return [];
+  const available = new Set(
+    servers
+      .filter((server) => server.connectionStatus !== "unavailable")
+      .map((server) => server.id),
+  );
+  return [...selectableSessionMcpServerIds(selectedIds)].filter((id) => !available.has(id));
 }
 
 const FIRST_PARTY_ACTION_LABELS: Partial<Record<FirstPartyMcpToolName, string>> = {
@@ -183,15 +209,24 @@ export function newSessionDraftToolPolicy(input: {
   workspaceDefaultMcpServerIds: Iterable<string>;
   catalogReady: boolean;
   explicit: boolean;
-}): { tools: ToolRef[]; toolsProvided: boolean } {
+  /** Header switch. Distinct from `explicit`, which pins the tool id list. */
+  customizing?: boolean;
+  excludedMcpServerIds?: Iterable<string>;
+}): { tools: ToolRef[]; toolsProvided: boolean; excludedMcpServerIds?: string[] } {
   if (!input.catalogReady) return { tools: [], toolsProvided: false };
-  const selected = buildOpenGeniUiTools(undefined, input.selectedMcpServerIds);
-  const baseline = buildOpenGeniUiTools(undefined, input.workspaceDefaultMcpServerIds);
-  const equal =
-    canonicalToolIds(selected).join("\u0000") === canonicalToolIds(baseline).join("\u0000");
-  return input.explicit || !equal
-    ? { tools: selected, toolsProvided: true }
-    : { tools: [], toolsProvided: false };
+  const customizing = input.customizing ?? input.explicit;
+  if (!customizing) return { tools: [], toolsProvided: false };
+  if (input.explicit) {
+    return {
+      tools: buildOpenGeniUiTools(undefined, input.selectedMcpServerIds),
+      toolsProvided: true,
+    };
+  }
+  return {
+    tools: [],
+    toolsProvided: true,
+    excludedMcpServerIds: [...new Set(input.excludedMcpServerIds ?? [])].sort(),
+  };
 }
 
 /**
@@ -210,7 +245,9 @@ export function sessionPolicyPickerIds(
   const mode = session.effectiveToolPolicy?.mode ?? session.toolPolicy.mode;
   const policyIds =
     mode === "workspace_default"
-      ? [...workspaceDefaultIds]
+      ? [...workspaceDefaultIds, ...session.tools.map((tool) => tool.id)].filter(
+          (id) => !session.toolPolicy.excludedMcpServerIds?.includes(id),
+        )
       : (session.effectiveToolPolicy?.effectiveIds ?? session.tools.map((tool) => tool.id));
   return new Set(policyIds.filter((id) => selectable.has(id)));
 }

@@ -18,7 +18,7 @@ import { useMemo, useState } from "react";
 
 import { activityEvents } from "@/dev/session-activity-events";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
-import { ModelPicker, SessionToolPicker } from "@/components/pickers";
+import { ModelPicker } from "@/components/pickers";
 import { SubagentTree } from "@/components/session/subagents";
 import {
   emptyAttachments,
@@ -185,6 +185,7 @@ export function ScenarioStack({
   const [model, setModel] = useState("gpt-5.6-sol");
   const [effort, setEffort] = useState<IntelligenceEffort>("medium");
   const [toolSelection, setToolSelection] = useState(galleryToolSelection);
+  const [connectorCustomizing, setConnectorCustomizing] = useState(false);
   const attachments = useMemo(() => emptyAttachments(), []);
   const { queue, dismissIncoming, addCommandResult } = useHarnessLiveQueue(scenario.queue);
   const goal = useHarnessLiveGoal(scenario.goal);
@@ -221,7 +222,6 @@ export function ScenarioStack({
 
   const chrome = (
     <SessionChrome
-      compact
       key={`${scenario.id}-${scenario.defaultActive ?? "none"}`}
       queue={queue}
       composer={composer}
@@ -267,7 +267,7 @@ export function ScenarioStack({
       queuedAheadCount={queue.queue.length}
       placeholder="Send a follow-up…"
       attachments={attachments}
-      attachButtonClassName="console-composer-wide-control max-sm:hidden"
+      attachButtonClassName="hidden"
       transcription={{
         client: fixtureClient as never,
         workspaceId: GALLERY_WORKSPACE_ID,
@@ -280,6 +280,8 @@ export function ScenarioStack({
           servers={galleryToolServers}
           firstPartyTools={galleryFirstPartyTools}
           selection={toolSelection}
+          connectorCustomizing={connectorCustomizing}
+          onConnectorCustomizingChange={setConnectorCustomizing}
           onToolSelectionChange={setToolSelection}
         />
       }
@@ -294,14 +296,6 @@ export function ScenarioStack({
             onModelChange={setModel}
             onEffortChange={setEffort}
             onLatencyModeChange={() => {}}
-          />
-          <SessionToolPicker
-            servers={galleryToolServers}
-            firstPartyTools={galleryFirstPartyTools}
-            selection={toolSelection}
-            menuSide="top"
-            triggerClassName="console-composer-wide-control max-sm:hidden"
-            onChange={setToolSelection}
           />
         </div>
       }

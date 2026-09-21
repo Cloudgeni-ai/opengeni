@@ -44,7 +44,7 @@ export function validateToolRefs(tools: ToolRef[], settings: McpSettings): ToolR
       }
       throw new HTTPException(422, { message: `unknown MCP server id: ${tool.id}` });
     }
-    // Tool refs are tri-state for pack portability across deployments:
+
     //  - bare / optional:false is STRICT: the id must be configured here and
     //    runtime connection failure fails closed when preparation is demanded.
     //    Only an independent eager:true marker makes that a startup barrier.
@@ -108,7 +108,14 @@ export function withWorkspaceDefaultMcpTools(
   return mergeToolRefs(
     tools,
     validateToolRefs(
-      defaults.mcpServerIds.map((id) => ({ kind: "mcp" as const, id, optional: true as const })),
+      [
+        ...defaults.mcpServerIds,
+        ...(defaults.inheritConnectedMcpServers
+          ? runtimeSettings.mcpServers
+              .filter((server) => !["opengeni", "files", "docs"].includes(server.id))
+              .map((server) => server.id)
+          : []),
+      ].map((id) => ({ kind: "mcp" as const, id, optional: true as const })),
       runtimeSettings,
     ),
   );

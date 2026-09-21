@@ -528,6 +528,9 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
       // never hands an envelope to the rail's array-only grouping helper.
       return json([]);
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`) {
+      return json({ items: [], nextCursor: null });
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) {
       return json({ skills: [] });
     }
@@ -540,9 +543,7 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`) {
       return json({ items: [], total: 0, nextOffset: null });
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({ packs: [], installations: [] });
-    }
+
     if (
       url.pathname === `/v1/workspaces/${workspaceId}/rigs` ||
       url.pathname === `/v1/workspaces/${workspaceId}/variable-sets` ||

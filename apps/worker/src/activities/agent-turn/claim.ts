@@ -1,3 +1,4 @@
+import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
 import {
   applySessionTurnSettlement,
   claimSessionWorkForAttempt,
@@ -14,6 +15,7 @@ import {
   type SessionTurnForExecution,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
+import { linkCurrentSpanToAdmission, turnExecutionTelemetryKey } from "@opengeni/observability";
 import { deliverChildRequiresActionToParent } from "../parent-wake";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
@@ -192,6 +194,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       update,
     });
   const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
+    filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
     sessionId: input.sessionId,
     workflowId: input.workflowId,
     workflowRunId: input.workflowRunId,
@@ -249,6 +252,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     db,
     mcpSettings,
     input.workspaceId,
+    turn.id,
   );
   const codexSettings = await settingsWithCodexCredential(
     db,
@@ -321,6 +325,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   if (!trigger) {
     throw new Error(`Trigger event not found: ${attempt.triggerEventId}`);
   }
+  if (trigger.type === "user.message") linkCurrentSpanToAdmission(trigger.id);
   const humanInputResume = await getHumanInputResumeForEvent(
     db,
     input.workspaceId,
@@ -336,6 +341,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   attempt.triggerType = trigger.type;
   const attachPendingUpdatesAfterOpenSuffix = async (): Promise<boolean> => {
     const attached = await claimSessionWorkForAttempt(db, input.workspaceId, {
+      filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
       sessionId: input.sessionId,
       workflowId: input.workflowId,
       workflowRunId: input.workflowRunId,
@@ -387,6 +393,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     turnId: attempt.turnId,
     opAcks: {},
   };
+  eventing.heartbeatDetails = heartbeatDetails;
   const opJournal = makeTurnOpJournal(activityContext, heartbeatDetails);
   eventing.heartbeatTimer = startActivityHeartbeat(activityContext, heartbeatDetails);
   let producerSeq = 0;
@@ -547,6 +554,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   throwIfTurnCancelled();
   recordTurnStartupPhase(observability, {
     phase: "claim_and_policy",
+    executionCorrelationId: turnExecutionTelemetryKey(
+      input.workspaceId,
+      input.sessionId,
+      input.attemptId,
+    ),
     provider: turnExecutionPolicy.providerId,
     backend: turn.sandboxBackend,
     outcome: "completed",

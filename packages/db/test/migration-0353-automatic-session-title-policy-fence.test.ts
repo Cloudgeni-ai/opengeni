@@ -990,13 +990,18 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // the 0401 setup-delivery transport routines, the 0422 Codex inventory,
     // the 0429 message-boundary fork overload,
     // the 0433 unified Skill tables/lifecycle capability, and the 0461 protected
-    // MCP operation ledger/command capability (which grants no direct DML).
+    // MCP operation ledger/command capability (which grants no direct DML), and
+    // the 0470 organization integration policy tables (SELECT-only at runtime),
+    // and the 0477 protected managed sign-in ledger and five runtime capabilities.
+    // It also retains the three Pack tables removed from the runtime contract
+    // by 0482 and predates the 0492 accepted Codex source table/capture capability.
     // Preserve those exact expected boundary gaps while continuing to
     // reject every other posture violation in this
     // rolling-compatibility test.
     const expectedPost0353EvaluatorGaps = [
-      "runtime privilege tables are missing: connect_attempts, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, session_attempt_model_context_snapshots, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads",
-      "protected tables are missing: agent_instruction_operations, agent_learning_revisions, agent_learning_snapshots, connect_attempts, external_identities, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, knowledge_entries, knowledge_entry_decisions, knowledge_entry_links, knowledge_entry_operations, knowledge_entry_revisions, knowledge_entry_search, knowledge_entry_vectors, knowledge_index_jobs, knowledge_review_batches, mcp_operations, session_attempt_model_context_snapshots, skill_config_conversion_receipts, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads",
+      "runtime privilege tables are missing: codex_turn_source_bindings, connect_attempts, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, organization_integration_policies, organization_integration_policy_operations, session_attempt_model_context_snapshots, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads",
+      "protected tables are missing: agent_instruction_operations, agent_learning_revisions, agent_learning_snapshots, codex_turn_source_bindings, connect_attempts, external_identities, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, knowledge_entries, knowledge_entry_decisions, knowledge_entry_links, knowledge_entry_operations, knowledge_entry_revisions, knowledge_entry_search, knowledge_entry_vectors, knowledge_index_jobs, knowledge_review_batches, managed_sign_in_method_operations, mcp_operations, organization_integration_policies, organization_integration_policy_operations, session_attempt_model_context_snapshots, skill_config_conversion_receipts, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads",
+      "RLS tables are absent from the declared contract: pack_installation_components, pack_installations, workspace_packs",
       "target-schema runtime capability knowledge_index_claim(text, integer, integer) is missing or ambiguous",
       "target-schema runtime capability knowledge_index_work(uuid, uuid, uuid, jsonb) is missing or ambiguous",
       "target-schema runtime capability knowledge_entry_apply(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
@@ -1021,11 +1026,18 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "target-schema runtime capability lookup_external_identity(uuid, text, text, text) is missing or ambiguous",
       "target-schema runtime capability prepare_external_workspace_membership_operation(jsonb) is missing or ambiguous",
       "target-schema runtime capability record_external_workspace_membership_operation(jsonb, jsonb) is missing or ambiguous",
+      "target-schema runtime capability capture_legacy_codex_turn_sources(uuid, uuid) is missing or ambiguous",
       "target-schema runtime capability list_organization_workspace_ids(uuid) is missing or ambiguous",
       "target-schema runtime capability list_organization_codex_workspace_ids(uuid) is missing or ambiguous",
       "target-schema runtime capability authorize_organization_shared_workspace_administration(uuid, uuid, text) is missing or ambiguous",
       "target-schema runtime capability claim_organization_user_setup_delivery_v2(jsonb) is missing or ambiguous",
       "target-schema runtime capability prepare_organization_user_setup_delivery_v2(jsonb) is missing or ambiguous",
+      "target-schema runtime capability list_owned_connection_accounts(uuid, uuid) is missing or ambiguous",
+      "target-schema runtime capability mutate_managed_sign_in_method(text, text, jsonb) is missing or ambiguous",
+      "target-schema runtime capability assert_managed_sign_in_recovery(text, text, uuid, jsonb) is missing or ambiguous",
+      "target-schema runtime capability replay_managed_sign_in_method(text, text, jsonb) is missing or ambiguous",
+      "target-schema runtime capability claim_managed_sign_in_notification(uuid, text, text, integer) is missing or ambiguous",
+      "target-schema runtime capability settle_managed_sign_in_notification(uuid, uuid, text) is missing or ambiguous",
     ];
     const sessionSetTables = new Set([
       "managed_auth_actor_mutation_leases",

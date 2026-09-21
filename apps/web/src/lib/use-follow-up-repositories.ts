@@ -8,6 +8,7 @@ import { toast } from "sonner";
 
 import type { RepositoryContextPickerProps } from "@/components/repository-picker";
 import { useAppContext } from "@/context";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import {
   buildAdditionalRepositoryResources,
   repositorySelectionFromResources,
@@ -16,6 +17,85 @@ import {
 import type { GitHubRepository, ResourceRef, Session } from "@/types";
 
 type RepositoryResource = Extract<ResourceRef, { kind: "repository" }>;
+
+type RepositoryRefreshContext = Pick<
+  ReturnType<typeof useAppContext>,
+  | "accessContext"
+  | "captureWorkspaceInvocation"
+  | "refreshGitHub"
+  | "refreshPersonalGitHub"
+  | "repoBusy"
+  | "personalGitHubBusy"
+>;
+
+/** Keep this above the lazily mounted menu so rapid reopenings share one cooldown. */
+export function useRepositoryCatalogRefresh(
+  workspaceId: string,
+  context: RepositoryRefreshContext,
+) {
+  const gate = useRef<{ key: string; attemptedAt: number; inFlight: Promise<void> | null } | null>(
+    null,
+  );
+  const canUseGitHub = hasWorkspacePermission(context.accessContext, workspaceId, "github:use");
+  const canManageGitHub = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "github:manage",
+  );
+  const canReadPersonal = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "connections:read",
+  );
+  const refresh = useCallback(
+    async (explicit: boolean) => {
+      const transition = context.captureWorkspaceInvocation(workspaceId);
+      if (!transition || (!canUseGitHub && !canReadPersonal)) return;
+      // A principal/workspace/permission transition must not inherit another scope's cooldown.
+      const key = JSON.stringify([
+        context.accessContext.subjectId,
+        workspaceId,
+        transition.revision,
+        canUseGitHub,
+        canManageGitHub,
+        canReadPersonal,
+      ]);
+      const previous = gate.current;
+      if (previous?.key === key) {
+        if (previous.inFlight) return previous.inFlight;
+        if (!explicit && Date.now() - previous.attemptedAt < 30_000) return;
+      }
+      if ((canUseGitHub && context.repoBusy) || (canReadPersonal && context.personalGitHubBusy))
+        return;
+      const accepted = { key, attemptedAt: Date.now(), inFlight: null as Promise<void> | null };
+      gate.current = accepted;
+      // Opening is read-only. Explicit refresh may sync for an App manager;
+      // ordinary users keep catalog reads. Context retains its async ownership fences.
+      const request = Promise.all([
+        ...(canUseGitHub
+          ? [
+              context.refreshGitHub(workspaceId, undefined, {
+                sync: explicit && canManageGitHub,
+              }),
+            ]
+          : []),
+        ...(canReadPersonal ? [context.refreshPersonalGitHub(workspaceId)] : []),
+      ]).then(() => undefined);
+      accepted.inFlight = request;
+      try {
+        await request;
+      } finally {
+        accepted.inFlight = null;
+      }
+    },
+    [context, workspaceId, canUseGitHub, canManageGitHub, canReadPersonal],
+  );
+  return {
+    refreshAllowed: canUseGitHub || canReadPersonal,
+    onOpenRefresh: useCallback(() => refresh(false), [refresh]),
+    onRefresh: useCallback(() => refresh(true), [refresh]),
+  };
+}
 
 function manualDraftSignature(draft: RepoDraft): string | null {
   try {
@@ -45,6 +125,7 @@ export function useFollowUpRepositories(session: Session): {
   commitSent: (resources: ResourceRef[]) => void;
 } {
   const context = useAppContext();
+  const catalogRefresh = useRepositoryCatalogRefresh(session.workspaceId, context);
   const [pendingRepoIds, setPendingRepoIds] = useState<Set<number>>(() => new Set());
   const [pendingRepoRefs, setPendingRepoRefs] = useState<Record<number, string>>({});
   const [pendingPersonalRepoIds, setPendingPersonalRepoIds] = useState<Set<string>>(
@@ -310,13 +391,16 @@ export function useFollowUpRepositories(session: Session): {
       lockedRepoIds: mountedRepositorySelection.selectedRepoIds,
       lockedPersonalGitHubRepoIds: mountedPersonalRepoIds,
       lockedManualRepoIds,
+      unavailableMountedRepositories: mountedRepositoryResources.filter(
+        (resource) =>
+          resource.connectionType === "github_personal" &&
+          (context.personalGitHubStatus?.connection?.status !== "active" ||
+            !context.personalGitHubRepositories.some(
+              (repo) => repo.repositoryId === resource.repositoryId && repo.selectedAccess !== null,
+            )),
+      ),
       validationError: pendingBuild.error,
-      onRefresh: async () => {
-        await Promise.all([
-          context.refreshGitHub(session.workspaceId, undefined, { sync: true }),
-          context.refreshPersonalGitHub(session.workspaceId),
-        ]);
-      },
+      ...catalogRefresh,
       onConnectPersonalGitHub: () => void context.connectPersonalGitHub(session.workspaceId),
       onTogglePersonalGitHubRepo: (repo) => void togglePendingPersonalRepository(repo),
       onPersonalGitHubRefChange: (repositoryId, ref) =>
@@ -503,11 +587,13 @@ export function useFollowUpRepositories(session: Session): {
       onDisconnectInstallation: disconnectRepositoryInstallation,
     }),
     [
+      catalogRefresh,
       context,
       disconnectRepositoryInstallation,
       lockedManualRepoIds,
       manualReposOpen,
       mountedManualRepos,
+      mountedRepositoryResources,
       mountedPersonalRepoIds,
       mountedRepositorySelection.selectedRepoIds,
       pendingBuild.error,

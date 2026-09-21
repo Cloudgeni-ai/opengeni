@@ -54,6 +54,7 @@ for (const scenario of [
       "pending_quiescence",
       "pending_machine_input",
       "pending_input_wait",
+      "session_unavailable",
     ] as const
   ).map((blocker) => ({
     receipt: { action: "pending_admission", blocker } as const,

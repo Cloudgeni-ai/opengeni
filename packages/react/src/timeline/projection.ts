@@ -129,10 +129,20 @@ function timelineAnnotationToolOutputText(output: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
-export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
+export function buildTimeline(
+  events: SessionEvent[],
+  options: { partialStart?: boolean } = {},
+): TimelineItem[] {
   const items: TimelineItem[] = [];
   const prescan = prescanTurnAnchors(events);
   const ordered = orderTimelineEvents(events, prescan);
+  // A bounded replay can begin halfway through a message (including inside an
+  // interactive fence). Never parse that suffix as a complete Markdown source.
+  // Keep the raw events available for pagination; a completed receipt restores
+  // the authoritative message without requiring an unbounded history fetch.
+  let completeHistoryPrefix = options.partialStart !== true;
+  const knownMessagePrefixTurns = new Set<string | null>();
+  const incompleteMessageKeys = new Set<string>();
   const pendingWaitOutcomeByTurn = new Map<string | null, PendingWaitOutcome>();
   const latestAgentResponseByTurn = new Map<string | null, TrackedAgentResponse>();
   const identifiedMessages = new Map<string, AgentMessageItem>();
@@ -299,6 +309,18 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   for (const event of ordered) {
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
+    if (event.type === "session.created") {
+      completeHistoryPrefix = true;
+    } else if (
+      event.type === "turn.started" ||
+      (event.type === "user.message" &&
+        payload.delivery !== "steer" &&
+        payload.routing !== "accepted_for_steering")
+    ) {
+      // Accepted Steer is visible before its replacement turn starts. It says
+      // nothing about the prefix of a still-streaming message from the old turn.
+      knownMessagePrefixTurns.add(turnId);
+    }
     startupEvent = event;
     startupTurnId = turnId;
     startupAttemptId =
@@ -415,6 +437,13 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         }
         const messageId = stringValue(payload.messageId);
         const messageKey = messageId ? JSON.stringify([turnId, messageId]) : null;
+        if (
+          (!completeHistoryPrefix && !knownMessagePrefixTurns.has(turnId)) ||
+          (messageKey && incompleteMessageKeys.has(messageKey))
+        ) {
+          if (messageKey) incompleteMessageKeys.add(messageKey);
+          break;
+        }
         const identified = messageKey ? identifiedMessages.get(messageKey) : undefined;
         if (identified) {
           if (identified.annotationSource?.eventType !== "agent.message.completed") {
@@ -470,6 +499,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "agent.message.completed": {
+        knownMessagePrefixTurns.add(turnId);
         const text = stringValue(payload.text);
         const messageId = stringValue(payload.messageId);
         const messageKey = messageId ? JSON.stringify([turnId, messageId]) : null;
@@ -915,6 +945,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
           estimatedTokensAfter: null,
           skipReason: null,
+          providerRejection: null,
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -932,6 +963,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
           estimatedTokensAfter: numberOrNull(payload.estimatedTokensAfter),
           skipReason: null,
+          providerRejection: null,
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -949,6 +981,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
           estimatedTokensAfter: null,
           skipReason: typeof payload.reason === "string" ? payload.reason : null,
+          providerRejection: compactionProviderRejection(payload),
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -1001,6 +1034,13 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           id: event.id,
           turnId,
           serverId: typeof payload.serverId === "string" ? payload.serverId : null,
+          canonicalServerId:
+            typeof payload.canonicalServerId === "string" ? payload.canonicalServerId : null,
+          connectionSubjectScope:
+            payload.connectionSubjectScope === "subject" ||
+            payload.connectionSubjectScope === "workspace"
+              ? payload.connectionSubjectScope
+              : null,
           source: capability
             ? "capability"
             : event.type === "tool.auth_needed"
@@ -1277,7 +1317,16 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
     }
   }
 
+  const sourceEventsById = new Map(events.map((event) => [event.id, event]));
   for (const item of items) {
+    const source = sourceEventsById.get(item.id);
+    const canonical = "annotationSource" in item ? item.annotationSource : undefined;
+    item.sourceEvents = [
+      ...(source ? [{ eventId: source.id, sequence: source.sequence }] : []),
+      ...(canonical && canonical.eventId !== source?.id
+        ? [{ eventId: canonical.eventId, sequence: canonical.sequence }]
+        : []),
+    ];
     if (item.kind === "agent-message") {
       item.text = stripOpaqueCitationTokens(item.text);
     }
@@ -2096,6 +2145,29 @@ function numberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+/**
+ * Read the closed provider-rejection record a `summarization_failed` skip
+ * carries. Only bounded identifiers are accepted; a provider message is never
+ * part of the payload and would be ignored here anyway.
+ */
+function compactionProviderRejection(
+  payload: Record<string, unknown>,
+): ContextCompactionItem["providerRejection"] {
+  const record = asRecord(payload.providerRejection);
+  if (typeof record.httpStatus !== "number" || !Number.isFinite(record.httpStatus)) {
+    return null;
+  }
+  const text = (value: unknown): string | null =>
+    typeof value === "string" && value.trim() ? value : null;
+  return {
+    httpStatus: record.httpStatus,
+    type: text(record.type),
+    code: text(record.code),
+    param: text(record.param),
+    requestId: text(record.requestId),
+  };
+}
+
 function compactionTrigger(payload: Record<string, unknown>): ContextCompactionItem["trigger"] {
   const trigger = payload.trigger;
   return trigger === "auto" ||
@@ -2527,7 +2599,7 @@ function capabilityAuthorizationRequest(
   if (
     typeof record.id !== "string" ||
     typeof record.name !== "string" ||
-    !["pack", "mcp", "api", "skill", "plugin"].includes(String(kind)) ||
+    !["mcp", "api", "skill", "plugin"].includes(String(kind)) ||
     !["built_in", "library", "configured", "public_registry", "registry", "manual"].includes(
       String(source),
     ) ||

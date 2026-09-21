@@ -1922,7 +1922,8 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(settled).toBeTruthy();
     expect(live).toBeTruthy();
     expect(settled?.querySelectorAll("svg")).toHaveLength(1);
-    expect(settled?.querySelector(".animate-og-pulse")).not.toBeNull();
+    // Settled activity stays neutral even while a later cluster is running.
+    expect(settled?.querySelector(".animate-og-pulse")).toBeNull();
     // The live tail stays expanded: its command is visible without expanding.
     expect(r.container.textContent).toContain("step two");
     // The folded cluster's contents are NOT in the DOM until expanded.
@@ -3027,7 +3028,9 @@ describe("StartupPhaseRow", () => {
 
     const text = r.container.textContent ?? "";
     expect(text).toContain("Model request dispatched");
-    expect(text).toContain("Includes overlapping sandbox, rig, repository, and runtime setup");
+    expect(text).toContain(
+      "Includes overlapping sandbox startup, custom environment setup, repository preparation, and runtime setup",
+    );
     expect(text).toContain("27.5s");
 
     await r.unmount();

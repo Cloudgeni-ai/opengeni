@@ -101,9 +101,30 @@ describe("shared capability connection lifecycle", () => {
     const h = harness();
     await performCapabilityAction(h.options, action);
     expect(h.enableCapability.mock.calls[0]?.[2]).toMatchObject({
-      connectionRef: { connectionId: "connection", providerDomain: "canonical.example.com" },
+      connectionRef: { accountSelection: "all_eligible", providerDomain: "canonical.example.com" },
     });
+    expect(h.enableCapability.mock.calls[0]?.[2]?.connectionRef).not.toHaveProperty("connectionId");
     expect(h.options.onComplete).toHaveBeenCalledTimes(1);
+  });
+  test("connecting an already exact-pinned installation does not convert it into a selector", async () => {
+    const h = harness();
+    const exact = {
+      ...item,
+      enabled: true,
+      connectionRef: {
+        providerDomain: "canonical.example.com",
+        kind: "api_key",
+        connectionId: "existing",
+        subjectScope: "workspace" as const,
+      },
+    };
+    await performCapabilityAction({ ...h.options, item: exact }, { ...action, item: exact });
+    expect(h.enableCapability.mock.calls[0]?.[2]?.connectionRef).toMatchObject({
+      connectionId: "existing",
+    });
+    expect(h.enableCapability.mock.calls[0]?.[2]?.connectionRef).not.toHaveProperty(
+      "accountSelection",
+    );
   });
   test("a failed enable never announces completion and a retry reuses the existing credential", async () => {
     const h = harness();

@@ -10,7 +10,15 @@ import {
   FolderOpenIcon,
   MoreHorizontalIcon,
 } from "lucide-react";
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -21,6 +29,7 @@ import {
 import { useAppContext } from "@/context";
 import { cn } from "@/lib/utils";
 import { relativeTimeLabel } from "@/lib/sessions-group";
+import { KnowledgeCollectionRequests } from "./knowledge-collection-requests";
 
 import { KNOWLEDGE_SOURCE_LABEL as SOURCE } from "./knowledge-labels";
 
@@ -107,6 +116,7 @@ type TreeProps = {
   workspaceId: string;
   entries: KnowledgeEntrySummary[];
   scope?: KnowledgeEntryScope;
+  includeEvidence?: boolean;
   refresh: number;
   canEdit: boolean;
   canWriteOrganization?: boolean;
@@ -114,6 +124,7 @@ type TreeProps = {
   onCreate: (kind: "note" | "group", parent: KnowledgeCollection) => void;
 };
 type TreeState = TreeProps & {
+  requests: KnowledgeCollectionRequests;
   expanded: Set<string>;
   active: string;
   setActive: (path: string) => void;
@@ -121,6 +132,22 @@ type TreeState = TreeProps & {
 };
 
 export function KnowledgeTree(props: TreeProps) {
+  const { client, accessContext, workspaceStateOwnerId } = useAppContext();
+  // A new request context also remounts each open collection before it can display rows
+  // belonging to the previous principal/workspace/filter or edit generation.
+  const requests = useMemo(
+    () => new KnowledgeCollectionRequests(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- these identities invalidate retained Knowledge, not constructor inputs
+    [
+      client,
+      accessContext,
+      workspaceStateOwnerId,
+      props.workspaceId,
+      props.scope,
+      props.includeEvidence,
+      props.refresh,
+    ],
+  );
   // Paths, rather than IDs: a record can belong to several collections.
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [active, setActive] = useState("");
@@ -128,6 +155,7 @@ export function KnowledgeTree(props: TreeProps) {
   const roots = treeOrder(props.entries);
   const state: TreeState = {
     ...props,
+    requests,
     expanded,
     active: active || roots[0]?.id || "",
     setActive,
@@ -283,6 +311,7 @@ function TreeNode({
       </div>
       {folder && open ? (
         <CollectionChildren
+          key={state.requests.id}
           entry={entry}
           path={path}
           ancestors={[...ancestors, entry.id]}
@@ -305,27 +334,31 @@ function CollectionChildren({
   state: TreeState;
 }) {
   const { client } = useAppContext();
+  const request: KnowledgeEntryListRequest = {
+    groupId: entry.id,
+    scope: state.scope,
+    ...(state.includeEvidence ? { includeEvidence: true } : {}),
+    view: "published",
+    limit: 50,
+  };
+  const requestKey = JSON.stringify(request);
   const [entries, setEntries] = useState<KnowledgeEntrySummary[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
   const generation = useRef(0);
-  const request: KnowledgeEntryListRequest = {
-    groupId: entry.id,
-    scope: state.scope,
-    view: "published",
-    limit: 50,
-  };
-  const requestKey = JSON.stringify(request);
+  const requests = state.requests;
   useEffect(() => {
     const current = ++generation.current;
-    setLoading(true);
     setError(null);
+    setLoading(true);
     setEntries([]);
     setCursor(null);
-    void client
-      .listKnowledgeEntries(state.workspaceId, JSON.parse(requestKey))
+    void requests
+      .load(requestKey, () =>
+        client.listKnowledgeEntries(state.workspaceId, JSON.parse(requestKey)),
+      )
       .then((result) => {
         if (generation.current !== current) return;
         setEntries(result.entries);
@@ -342,13 +375,15 @@ function CollectionChildren({
       // eslint-disable-next-line react-hooks/exhaustive-deps -- invalidate pending pages on unmount
       ++generation.current;
     };
-  }, [client, state.workspaceId, requestKey, state.refresh, retry]);
+  }, [client, state.workspaceId, requestKey, requests, retry]);
   async function more() {
     if (!cursor || loading) return;
     const current = generation.current;
     setLoading(true);
     setError(null);
     try {
+      // Continuation pages are fetched directly; only pending first-page reads
+      // are shared across collection expansions.
       const result = await client.listKnowledgeEntries(state.workspaceId, {
         ...request,
         cursor,
@@ -365,10 +400,11 @@ function CollectionChildren({
     }
   }
   const visible = treeOrder(entries.filter((child) => !ancestors.includes(child.id)));
+  // Actions own their disabled state: disabling this row also disables its
+  // Retry and Load more descendants for assistive technology and automation.
   const status = (content: ReactNode) => (
     <div
       role="treeitem"
-      aria-disabled="true"
       className="flex flex-wrap items-center gap-2 px-9 py-2 text-xs text-fg-muted"
     >
       {content}

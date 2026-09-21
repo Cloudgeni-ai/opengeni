@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { writeManagedCodemodeClient } from "./build-managed-codemode-client";
 
 type TsupOptions = Record<string, unknown> & { dts?: unknown };
 type TsupConfigExport =
@@ -29,6 +30,16 @@ for (const config of configs) {
   // declaration bundler requires the removed legacy compiler API, so retain
   // tsup for JavaScript and source maps while emitting declarations below.
   await build({ ...config, dts: false });
+}
+
+if (
+  JSON.parse(await readFile(join(packageDirectory, "package.json"), "utf8")).name ===
+  "@opengeni/runtime"
+) {
+  await writeManagedCodemodeClient(
+    resolve(packageDirectory, "../.."),
+    join(packageDirectory, "dist/assets/codemode-client.json"),
+  );
 }
 
 const transientDirectory = join(packageDirectory, ".opengeni");

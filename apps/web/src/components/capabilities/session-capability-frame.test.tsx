@@ -14,36 +14,40 @@ const props = {
   actionLabel: "Review skill",
   note: "Skill content is reviewed separately from permission to use any integration.",
   onOpen: () => {},
+  onClose: () => {},
 };
 
 describe("compact conversation card states", () => {
   test("suggestion has the preview hierarchy, monogram and reassurance", () => {
     const html = renderToStaticMarkup(<SessionCapabilityFrame {...props} />);
     expect(html).toContain('data-state="suggested"');
-    expect(html).toContain("session-capability-card");
+    expect(html).toContain("og-session-capability-shell");
     expect(html).toContain("Guidance only · no account access");
     expect(html).toContain("Review skill");
-    expect(html).toContain("<span>W</span>");
+    expect(html).toContain('aria-hidden="true">WR</span>');
     expect(html).not.toContain("sparkles");
   });
 
-  test("setup keeps one provider header and renders the form inside the same shell", () => {
+  test("setup keeps the compact shell and its dialog opener without an inline form", () => {
     const html = renderToStaticMarkup(
       <SessionCapabilityFrame {...props} expanded>
         <form aria-label="Skill review" />
       </SessionCapabilityFrame>,
     );
     expect(html).toContain('data-state="setup"');
-    expect(html.match(/<h3 /g)).toHaveLength(1);
-    expect(html).toContain('aria-label="Skill review"');
-    expect(html).not.toContain(">Review skill</button>");
+    expect(html.match(/<h3>/g)).toHaveLength(1);
+    expect(html).not.toContain('aria-label="Skill review"');
+    expect(html).toContain('aria-haspopup="dialog"');
+    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain(">Review skill</button>");
   });
 
-  test("completed Skill state uses neutral theme colors and removes setup actions and disclaimer", () => {
+  test("completed Skill state uses the shared completion shell and removes setup actions and disclaimer", () => {
     const html = renderToStaticMarkup(<SessionCapabilityFrame {...props} complete />);
     expect(html).toContain('role="status"');
     expect(html).toContain("Installed · Workspace");
-    expect(html).toContain("bg-surface-2/50");
+    expect(html).toContain('data-state="complete"');
+    expect(html).toContain("og-session-capability-shell");
     expect(html).not.toContain("<button");
     expect(html).not.toContain(props.note);
     expect(html).not.toContain("green");

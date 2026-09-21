@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 
-import { stableJson, type McpServerConnectionRef } from "@opengeni/contracts";
+import {
+  assertOrganizationIntegrationAllowed,
+  stableJson,
+  type IntegrationSource,
+  type McpServerConnectionRef,
+} from "@opengeni/contracts";
 import { and, asc, eq, inArray, ne, or, sql } from "drizzle-orm";
 
 import {
@@ -16,6 +21,7 @@ import {
   type Database,
 } from "./database";
 import { connectionScopeKey } from "./connection-scopes";
+import { withOrganizationIntegrationPolicyFence } from "./organization-integration-policy";
 import {
   ensureIntegrationFacetDefinition,
   integrationBindingKey,
@@ -184,7 +190,7 @@ export type ApiIntegrationRuntime = {
 };
 
 export type ApiIntegrationOwner = {
-  kind: "direct" | "plugin" | "pack" | "migration";
+  kind: "direct" | "plugin" | "migration";
   id: string;
   removable: boolean;
 };
@@ -227,6 +233,25 @@ export class ApiIntegrationInstallationVersionConflictError extends Error {
 export async function installApiIntegration(
   db: Database,
   input: InstallApiIntegrationInput,
+): Promise<InstalledApiIntegration> {
+  // Inputs here are server-resolved immutable previews, not deserialized client
+  // provenance. Custom documents never gain curated permission by their URL.
+  const snapshot = structuredClone(input);
+  const key =
+    snapshot.definitionProvenance === "curated"
+      ? snapshot.definitionId
+      : `custom:${snapshot.protocol}`;
+  return withOrganizationIntegrationPolicyFence(db, snapshot, (tx, policy) =>
+    installApiIntegrationInScope(tx, snapshot, () =>
+      assertOrganizationIntegrationAllowed(policy, key),
+    ),
+  );
+}
+
+async function installApiIntegrationInScope(
+  db: Database,
+  input: InstallApiIntegrationInput,
+  assertAcquisition: () => void,
 ): Promise<InstalledApiIntegration> {
   assertInstallInput(input);
   return await withRlsContext(
@@ -407,6 +432,12 @@ export async function installApiIntegration(
         const displayName =
           input.displayName?.trim() ||
           (instanceKey === "default" ? input.name : `${input.name} — connected account`);
+        // Capture immutable definition identity before any ensure helper can
+        // repair it. A repair/addition is acquisition, not unchanged replay.
+        const previousDefinitions = await tx
+          .select()
+          .from(schema.integrationFacetDefinitions)
+          .where(eq(schema.integrationFacetDefinitions.integrationFacetId, integrationFacet.id));
         const toolsFacet = await ensureIntegrationFacetDefinition(tx as unknown as Database, {
           integrationFacetId: integrationFacet.id,
           facetKey: "tools",
@@ -536,6 +567,116 @@ export async function installApiIntegration(
         const approvalRequiredTools = input.revision.tools
           .filter((tool) => selectedTools.includes(tool.id) && tool.approvalMode === "ask")
           .map((tool) => tool.id);
+        const nextConfig = {
+          baseServerId: input.serverId,
+          allowedTools: selectedTools,
+          requireApproval: approvalRequiredTools,
+          connectionKind: connection?.kind ?? null,
+          subjectScope: connection?.subjectId ? "subject" : connection ? "workspace" : "none",
+        };
+        // This is the same advisory -> row prefix used by the binding upsert.
+        // All preceding ensure writes are local to this transaction and roll
+        // back if admission below denies a new acquisition.
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`integration-binding:${input.workspaceId}:${runtimeServerId}`}, 0))`,
+        );
+        const [previousBinding] = await tx
+          .select()
+          .from(schema.integrationFacetBindings)
+          .where(
+            and(
+              eq(schema.integrationFacetBindings.workspaceId, input.workspaceId),
+              eq(schema.integrationFacetBindings.runtimeKey, runtimeServerId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        const bindingOwners = previousBinding
+          ? await listIntegrationFacetBindingOwners(tx as unknown as Database, previousBinding.id)
+          : [];
+        const componentOwners = await tx
+          .select()
+          .from(schema.capabilityComponentOwners)
+          .where(
+            inArray(schema.capabilityComponentOwners.facetInstallationId, [
+              integrationFacetInstallation.id,
+              apiFacetInstallation.id,
+            ]),
+          );
+        const [storedSpec] = await tx
+          .select()
+          .from(schema.integrationSpecRevisions)
+          .where(
+            and(
+              eq(schema.integrationSpecRevisions.apiFacetId, apiFacet.id),
+              eq(schema.integrationSpecRevisions.status, "active"),
+            ),
+          )
+          .limit(1);
+        const [storedAuthority] = await tx
+          .select()
+          .from(schema.capabilityIntegrationFacets)
+          .where(eq(schema.capabilityIntegrationFacets.facetId, integrationFacet.id))
+          .limit(1);
+        const [storedApi] = await tx
+          .select()
+          .from(schema.capabilityApiFacets)
+          .where(eq(schema.capabilityApiFacets.facetId, apiFacet.id))
+          .limit(1);
+        const sameOwner = (candidate: { kind: string; id: string; removable: boolean }) =>
+          candidate.kind === owner.kind &&
+          candidate.id === owner.id &&
+          candidate.removable === owner.removable;
+        const unchangedAuthority =
+          existingPluginInstallation?.status === "active" &&
+          existingPluginInstallation.pluginVersionId === pluginVersion.id &&
+          !integrationFacetInstallationResult.changed &&
+          !apiFacetInstallationResult.changed &&
+          previousBinding?.status === "active" &&
+          previousBinding.bindingKey === instanceKey &&
+          previousBinding.integrationFacetInstallationId === integrationFacetInstallation.id &&
+          previousBinding.facetDefinitionId === toolsFacet.id &&
+          previousBinding.connectionId === (input.connectionId ?? null) &&
+          isApiIntegrationPermissionReduction(previousBinding.config, nextConfig) &&
+          bindingOwners.some(sameOwner) &&
+          [integrationFacetInstallation.id, apiFacetInstallation.id].every((id) =>
+            componentOwners.some(
+              (candidate) =>
+                candidate.facetInstallationId === id &&
+                sameOwner({
+                  kind: candidate.ownerKind,
+                  id: candidate.ownerId,
+                  removable: candidate.removable,
+                }),
+            ),
+          ) &&
+          stableJson(storedSpec?.spec) === stableJson(input.revision) &&
+          storedApi?.protocol === input.protocol &&
+          storedApi.baseUrl === input.baseUrl &&
+          storedApi.specSourceUrl === (input.sourceUrl ?? null) &&
+          storedAuthority?.providerDomain === input.providerDomain &&
+          stableJson(storedApi?.authScheme) === stableJson(input.authScheme ?? {}) &&
+          stableJson(storedAuthority?.requiredScopes) ===
+            stableJson(normalizedStrings(input.requiredScopes ?? [], 256)) &&
+          storedAuthority?.ownership ===
+            (input.ownership ?? (connection?.subjectId ? "subject" : "workspace")) &&
+          previousDefinitions.some(
+            (definition) =>
+              definition.id === toolsFacet.id &&
+              definition.kind === toolsFacet.kind &&
+              stableJson(definition.configSchema) === stableJson(toolsFacet.configSchema) &&
+              stableJson(definition.capabilities) === stableJson(toolsFacet.capabilities),
+          ) &&
+          (input.facetDefinitions ?? []).every((definition) =>
+            previousDefinitions.some(
+              (old) =>
+                old.facetKey === definition.facetKey &&
+                old.kind === definition.kind &&
+                stableJson(old.configSchema) === stableJson(definition.configSchema) &&
+                stableJson(old.capabilities) === stableJson(definition.capabilities),
+            ),
+          );
+        if (!unchangedAuthority) assertAcquisition();
         const bindingResult = await upsertIntegrationFacetBinding(tx as unknown as Database, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -545,13 +686,7 @@ export async function installApiIntegration(
           displayName,
           runtimeKey: runtimeServerId,
           connectionId: input.connectionId ?? null,
-          config: {
-            baseServerId: input.serverId,
-            allowedTools: selectedTools,
-            requireApproval: approvalRequiredTools,
-            connectionKind: connection?.kind ?? null,
-            subjectScope: connection?.subjectId ? "subject" : connection ? "workspace" : "none",
-          },
+          config: nextConfig,
           createdBySubjectId: input.subjectId,
           owner,
           ...(input.expectedInstanceVersion !== undefined
@@ -812,12 +947,6 @@ export async function listInstalledApiIntegrationServerIdsForDelegations(
   return [...byServerId];
 }
 
-/**
- * Read installed API Integrations from a transaction that already carries the
- * workspace RLS context. This is intentionally separate from the public
- * wrapper so compound Plugin/Pack lifecycle transactions never open a nested
- * transaction or lose their advisory locks.
- */
 export async function listInstalledApiIntegrationsInRlsContext(
   scopedDb: Database,
   workspaceId: string,
@@ -1074,6 +1203,133 @@ export async function getApiIntegrationUninstallPreview(
         remainingOwners.length === 0 &&
         !hasOtherDirectInstance &&
         remainingDefinitionOwners.length === 0,
+    };
+  });
+}
+
+/** No discovery or new authority: recover only an exact, currently visible and
+ * directly owned installed source. The installer must still lock and recheck
+ * the snapshot before committing; this read is not installation admission.
+ */
+export async function getApiIntegrationReconciliationSnapshot(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    source: IntegrationSource;
+    connectionId?: string;
+    instanceKey?: string;
+    expectedRevisionId: string;
+    expectedContentSha256: string;
+    allowedTools?: string[];
+  },
+): Promise<{
+  runtime: ApiIntegrationRuntime;
+  baseServerId: string;
+  name: string;
+  provider: string | null;
+  requiredScopes: string[];
+} | null> {
+  return withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const instanceKey = integrationBindingKey(input.connectionId, input.instanceKey);
+    const candidates = (
+      await listInstalledApiIntegrationsInRlsContext(tx, input.workspaceId, input.subjectId)
+    ).filter((runtime) => {
+      if (
+        runtime.instanceKey !== instanceKey ||
+        (runtime.connectionRef?.connectionId ?? null) !== (input.connectionId ?? null) ||
+        runtime.revision.id !== input.expectedRevisionId ||
+        runtime.revision.contentSha256 !== input.expectedContentSha256 ||
+        !(input.allowedTools ?? runtime.revision.tools.map((tool) => tool.id)).every((tool) =>
+          runtime.allowedTools.includes(tool),
+        )
+      )
+        return false;
+      const source = input.source;
+      if (source.kind === "definition")
+        return (
+          runtime.definitionProvenance === "curated" && runtime.definitionId === source.definitionId
+        );
+      if (runtime.definitionProvenance !== "workspace") return false;
+      if (source.kind === "graphql")
+        return runtime.protocol === "graphql" && source.endpoint === runtime.sourceUrl;
+      return (
+        (source.kind === "auto" || runtime.protocol === "openapi") &&
+        source.url === runtime.sourceUrl &&
+        (source.baseUrl === undefined || source.baseUrl === runtime.baseUrl)
+      );
+    });
+    if (candidates.length !== 1) return null;
+    const runtime = candidates[0]!;
+    const owners = await listIntegrationFacetBindingOwners(tx, runtime.instanceId);
+    if (
+      !owners.some(
+        (owner) => owner.kind === "direct" && owner.id === runtime.capabilityId && owner.removable,
+      )
+    )
+      return null;
+    const [stored] = await tx
+      .select({
+        manifest: schema.capabilityPluginVersions.manifest,
+        name: schema.capabilityPlugins.name,
+        requiredScopes: schema.capabilityIntegrationFacets.requiredScopes,
+      })
+      .from(schema.capabilityPluginInstallations)
+      .innerJoin(
+        schema.capabilityPlugins,
+        eq(schema.capabilityPlugins.id, schema.capabilityPluginInstallations.pluginId),
+      )
+      .innerJoin(
+        schema.capabilityPluginVersions,
+        eq(
+          schema.capabilityPluginVersions.id,
+          schema.capabilityPluginInstallations.pluginVersionId,
+        ),
+      )
+      .innerJoin(
+        schema.integrationFacetBindings,
+        eq(schema.integrationFacetBindings.id, runtime.instanceId),
+      )
+      .innerJoin(
+        schema.integrationFacetDefinitions,
+        eq(
+          schema.integrationFacetDefinitions.id,
+          schema.integrationFacetBindings.facetDefinitionId,
+        ),
+      )
+      .innerJoin(
+        schema.capabilityIntegrationFacets,
+        eq(
+          schema.capabilityIntegrationFacets.facetId,
+          schema.integrationFacetDefinitions.integrationFacetId,
+        ),
+      )
+      .where(
+        and(
+          eq(schema.capabilityPluginInstallations.id, runtime.pluginInstallationId),
+          eq(schema.capabilityPluginInstallations.accountId, input.accountId),
+          eq(schema.capabilityPluginInstallations.workspaceId, input.workspaceId),
+          eq(schema.capabilityPluginInstallations.status, "active"),
+        ),
+      )
+      .limit(1);
+    const manifest = objectValue(stored?.manifest);
+    const baseServerId = stringValue(manifest.serverId);
+    if (
+      !stored ||
+      !baseServerId ||
+      manifest.revisionId !== runtime.revision.id ||
+      manifest.contentSha256 !== runtime.revision.contentSha256 ||
+      manifest.capabilityId !== runtime.capabilityId
+    )
+      return null;
+    return {
+      runtime,
+      baseServerId,
+      name: stored.name,
+      provider: stringValue(manifest.provider) ?? null,
+      requiredScopes: stored.requiredScopes,
     };
   });
 }
@@ -1631,12 +1887,7 @@ async function integrationOwners(
     );
   const owners = new Map<string, ApiIntegrationOwner>();
   for (const row of rows) {
-    if (
-      row.kind !== "direct" &&
-      row.kind !== "plugin" &&
-      row.kind !== "pack" &&
-      row.kind !== "migration"
-    ) {
+    if (row.kind !== "direct" && row.kind !== "plugin" && row.kind !== "migration") {
       throw new Error(`Unknown API Integration owner kind: ${row.kind}`);
     }
     const key = `${row.kind}\0${row.id}`;
@@ -1701,6 +1952,35 @@ function selectedToolIds(input: InstallApiIntegrationInput): string[] {
     throw new Error("API Integration selected an unknown tool");
   }
   return selected;
+}
+
+function isApiIntegrationPermissionReduction(
+  previous: Record<string, unknown>,
+  next: Record<string, unknown>,
+): boolean {
+  const {
+    allowedTools: previousTools,
+    requireApproval: previousApproval,
+    ...previousIdentity
+  } = previous;
+  const { allowedTools: nextTools, requireApproval: nextApproval, ...nextIdentity } = next;
+  const before = stringArray(previousTools);
+  const after = stringArray(nextTools);
+  const requiredBefore = stringArray(previousApproval);
+  const requiredAfter = stringArray(nextApproval);
+  return (
+    before !== undefined &&
+    after !== undefined &&
+    requiredAfter !== undefined &&
+    (previousApproval === true || requiredBefore !== undefined) &&
+    stableJson(previousIdentity) === stableJson(nextIdentity) &&
+    after.every(
+      (tool) =>
+        before.includes(tool) &&
+        (!(previousApproval === true || requiredBefore?.includes(tool)) ||
+          requiredAfter.includes(tool)),
+    )
+  );
 }
 
 function storedRevision(value: Record<string, unknown>): StoredApiIntegrationRevision {

@@ -1,5 +1,9 @@
 import type { ArtifactCatalogListOptions, ArtifactCatalogListResponse } from "./artifact-catalog";
 import type {
+  SessionMessageSearchRequest,
+  SessionMessageSearchResponse,
+} from "./session-message-search";
+import type {
   KnowledgeOriginalFileDownload,
   AgentLearningContext,
   AgentLearningSettingsRecord,
@@ -151,6 +155,7 @@ import type {
   BillingEntitlementsResponse,
   CodexAccount,
   CodexAccountsResponse,
+  SessionCodexAccountsResponse,
   CodexAppsUpdate,
   CodexRotationSettings,
   CodexOverviewResponse,
@@ -181,6 +186,8 @@ import type {
   BeginSessionRealtimeRequest,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
+  ConnectorToolPermissionsResponse,
+  UpdateConnectorToolPermissionsRequest,
   CapabilityInstallation,
   ApiIntegrationPreview,
   ApiIntegrationOAuthStartRequest,
@@ -278,8 +285,6 @@ import type {
   CreateWorkspaceRequest,
   EnsureWorkspaceRequest,
   EnsureWorkspaceResponse,
-  // Enrollment UX (design 11): the click-Grant approve-page lookup/deny + headless
-  // enroll-token mint.
   DeviceEnrollmentApproveRequest,
   DeviceEnrollmentApproveResponse,
   DeviceEnrollmentDenyResponse,
@@ -290,10 +295,8 @@ import type {
   Document,
   DocumentBase,
   EnableCapabilityRequest,
-  EnablePackRequest,
   FileAsset,
   FileDownloadUrlResponse,
-  GetPackResponse,
   GitHubActionPoliciesResponse,
   GitHubActionPolicyActorState,
   GitHubAppInfo,
@@ -307,8 +310,6 @@ import type {
   ListManagedOrganizationMembershipsResponse,
   ListUserResourceAuthoritiesOptions,
   ListUserResourceAuthoritiesResponse,
-  IssueUserResourceGrantRequest,
-  UserResourceGrantMutationResponse,
   UpdateGitHubActionPolicyRequest,
   RevokeUserResourceGrantResponse,
   ListOrganizationInvitationsPageResponse,
@@ -344,8 +345,6 @@ import type {
   StartOrganizationRecoveryOperationRequest,
   UpdateOrganizationWorkspaceRequest,
   UpdateOrganizationRetentionPolicyRequest,
-  ListPacksResponse,
-  // Bring-your-own-compute: the Machines dashboard + per-machine metrics (M10).
   MachinesResponse,
   MetricSample,
   MachineMetricsSeriesResponse,
@@ -354,20 +353,15 @@ import type {
   MachineOperationPolicy,
   UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
-  // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
   ListWorkspaceMembersResponse,
   ListWorkspaceMemberCandidatesResponse,
-  InstallPackRequest,
-  PackInstallationPreview,
   ListSlackUserLinkAccessRequestsResponse,
   PrepareSlackUserLinkAccessRequest,
   SlackUserLinkAccessMutationRequest,
   SlackUserLinkAccessRequest,
   ApproveSlackUserLinkAccessRequest,
-  PackInstallation,
-  PackUninstallPreview,
   RetainedScreenshotDownload,
   RetainedScreenshotDownloadOptions,
   RetainedArtifactDownload,
@@ -381,8 +375,6 @@ import type {
   VideoGenerationOperationSummary,
   VideoGenerationPolicy,
   WorkspaceVideoGenerationSettings,
-  RegisterCapabilityPackRequest,
-  PreviewPackInstallationRequest,
   PreviewSkillImportRequest,
   ScheduledTask,
   ScheduledTaskRun,
@@ -402,8 +394,6 @@ import type {
   UpdateSessionPinRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
-  UninstallPackRequest,
-  UninstallPackResult,
   SessionScopeSubjectId,
   SessionEvent,
   SessionEventCompactResult,
@@ -440,11 +430,15 @@ import type {
   SaveNewSessionDraftRequest,
   SteerSessionQueueItemRequest,
   SessionControlResponse,
+  SessionRetryRequest,
+  SandboxRecoveryProjection,
+  SandboxRecoveryRequest,
+  SandboxRecoveryResponse,
+  SessionRetryResponse,
   WorkspaceInferenceControlResponse,
   WorkspaceControlEvent,
   SessionTurn,
   SubmitHumanInputResponseRequest,
-  // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
   SessionCapabilities,
   AttachViewerRequest,
   AttachViewerResponse,
@@ -452,7 +446,6 @@ import type {
   AcknowledgeStreamResponse,
   ViewerHeartbeatRequest,
   ViewerHeartbeatResponse,
-  // Channel-A structured services (P4.4).
   FsListRequest,
   FsListResponse,
   FsListBatchRequest,
@@ -479,7 +472,6 @@ import type {
   GitLogResponse,
   GitShowRequest,
   GitShowResponse,
-  // Workbench v2 turn-end capture reads (M2).
   GetWorkspaceCaptureResponse,
   GetWorkspaceCaptureFileResponse,
   TerminalExecRequest,
@@ -521,7 +513,6 @@ import type {
   ProposeRigChangeRequest,
   WorkspaceMember,
   WorkspaceMemberCandidate,
-  WorkspaceRegisteredPack,
   Workspace,
   ListConnectionsResponse,
   ListSlackInstallationBindingsResponse,
@@ -644,6 +635,8 @@ export type SessionListPageOptions = {
   pinsOnly?: boolean;
   /** Return archived root chats instead of the active session list. */
   archivedOnly?: boolean;
+  sortBy?: "updatedAt" | "createdAt" | "name";
+  archiveStatus?: "active" | "archived" | "all";
   /** Stop this caller's finite page read when its owning route is abandoned. */
   signal?: AbortSignal | undefined;
 };
@@ -1312,6 +1305,31 @@ export class OpenGeniClient {
     );
   }
 
+  /** Search durable visible user/assistant text, including unloaded history.
+   * Pages may be empty with hasMore=true. Never fall back to title search on
+   * older servers. Use listEventPage before/after the returned sequence for context.
+   */
+  async searchSessionMessages(
+    workspaceId: string,
+    request: SessionMessageSearchRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<SessionMessageSearchResponse> {
+    return this.requestJson<SessionMessageSearchResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/session-message-search`,
+      undefined,
+      {
+        query: request.query,
+        ...(request.sessionId !== undefined ? { sessionId: request.sessionId } : {}),
+        ...(request.groupBy !== undefined ? { groupBy: request.groupBy } : {}),
+        ...(request.archiveStatus !== undefined ? { archiveStatus: request.archiveStatus } : {}),
+        ...(request.limit !== undefined ? { limit: String(request.limit) } : {}),
+        ...(request.cursor !== undefined ? { cursor: request.cursor } : {}),
+      },
+      options,
+    );
+  }
+
   async listSessions(
     workspaceId: string,
     options: {
@@ -1397,6 +1415,8 @@ export class OpenGeniClient {
           ...(options.createdBefore ? { createdBefore: options.createdBefore } : {}),
           ...(options.pinsOnly ? { pinsOnly: "true" } : {}),
           ...(options.archivedOnly ? { archivedOnly: "true" } : {}),
+          ...(options.sortBy ? { sortBy: options.sortBy } : {}),
+          ...(options.archiveStatus ? { archiveStatus: options.archiveStatus } : {}),
         },
         { signal: options.signal },
       );
@@ -1411,6 +1431,16 @@ export class OpenGeniClient {
         });
       }
       throw error;
+    }
+    if (
+      (options.sortBy !== undefined &&
+        (Array.isArray(response) || response.sortBy !== options.sortBy)) ||
+      (options.archiveStatus !== undefined &&
+        (Array.isArray(response) || response.archiveStatus !== options.archiveStatus))
+    ) {
+      throw new Error(
+        "The connected OpenGeni API does not support the requested session sorting/archive filter",
+      );
     }
     if (Array.isArray(response)) {
       // Rolling/same-major compatibility: an older API ignores `view=page` and
@@ -2485,6 +2515,43 @@ export class OpenGeniClient {
     return await this.requestSessionCommand<SubmitComposerDraftResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft/submit`,
+      request,
+    );
+  }
+
+  /** Inspect bounded checkpoint recovery eligibility without changing session state. */
+  async getSandboxRecovery(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SandboxRecoveryProjection> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/sandbox-recovery`,
+    );
+  }
+
+  /** Restore only the explicitly selected checkpoint; never retry a command. */
+  async recoverSandbox(
+    workspaceId: string,
+    sessionId: string,
+    request: SandboxRecoveryRequest,
+  ): Promise<SandboxRecoveryResponse> {
+    return this.requestSessionCommand(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/sandbox-recovery`,
+      request,
+    );
+  }
+
+  /** Retry the exact failed turn. Keep clientEventId unchanged on transport retries. */
+  async retrySession(
+    workspaceId: string,
+    sessionId: string,
+    request: SessionRetryRequest,
+  ): Promise<SessionRetryResponse> {
+    return await this.requestSessionCommand<SessionRetryResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/retry`,
       request,
     );
   }
@@ -4499,19 +4566,6 @@ export class OpenGeniClient {
     );
   }
 
-  /** Issue an exact-session or standing personal-resource grant. */
-  async issueUserResourceGrant(
-    workspaceId: string,
-    authorityId: string,
-    request: IssueUserResourceGrantRequest,
-  ): Promise<UserResourceGrantMutationResponse> {
-    return await this.requestJson<UserResourceGrantMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
-      request,
-    );
-  }
-
   /** Revoke an owner grant through the exact workspace it targets. */
   async revokeUserResourceGrant(
     workspaceId: string,
@@ -6101,11 +6155,11 @@ export class OpenGeniClient {
   async getFile(
     workspaceId: string,
     fileId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions & { sessionId?: string | undefined } = {},
   ): Promise<FileAsset> {
     return await this.requestJson<FileAsset>(
       "GET",
-      `/v1/workspaces/${workspaceId}/files/${fileId}`,
+      `/v1/workspaces/${workspaceId}/files/${fileId}${options.sessionId ? `?sessionId=${encodeURIComponent(options.sessionId)}` : ""}`,
       undefined,
       {},
       options,
@@ -6321,11 +6375,11 @@ export class OpenGeniClient {
   async createFileDownloadUrl(
     workspaceId: string,
     fileId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions & { sessionId?: string | undefined } = {},
   ): Promise<FileDownloadUrlResponse> {
     return await this.requestJson<FileDownloadUrlResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/files/${fileId}/download-url`,
+      `/v1/workspaces/${workspaceId}/files/${fileId}/download-url${options.sessionId ? `?sessionId=${encodeURIComponent(options.sessionId)}` : ""}`,
       undefined,
       {},
       options,
@@ -6687,105 +6741,7 @@ export class OpenGeniClient {
     );
   }
 
-  // --- Capability packs ------------------------------------------------------------------
-
-  /** Built-in + registered packs, with the workspace's installations. */
-  async listPacks(workspaceId: string): Promise<ListPacksResponse> {
-    return await this.requestJson<ListPacksResponse>("GET", `/v1/workspaces/${workspaceId}/packs`);
-  }
-
-  /** Register (or replace) a workspace-scoped pack from a manifest. */
-  async registerPack(
-    workspaceId: string,
-    manifest: RegisterCapabilityPackRequest,
-  ): Promise<WorkspaceRegisteredPack> {
-    return await this.requestJson<WorkspaceRegisteredPack>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/packs`,
-      manifest,
-    );
-  }
-
-  async getPack(workspaceId: string, packId: string): Promise<GetPackResponse> {
-    return await this.requestJson<GetPackResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}`,
-    );
-  }
-
-  async enablePack(
-    workspaceId: string,
-    packId: string,
-    request: EnablePackRequest = {},
-  ): Promise<PackInstallation> {
-    return await this.requestJson<PackInstallation>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/enable`,
-      request,
-    );
-  }
-
   /** Resolve pinned components, Variable Set, and Rig requirements before installation. */
-  async previewPackInstallation(
-    workspaceId: string,
-    packId: string,
-    request: PreviewPackInstallationRequest = {},
-  ): Promise<PackInstallationPreview> {
-    return await this.requestJson<PackInstallationPreview>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/installation-preview`,
-      request,
-    );
-  }
-
-  /** Install, update, or repair a Pack from an exact previewed manifest. */
-  async installPack(
-    workspaceId: string,
-    packId: string,
-    request: InstallPackRequest,
-  ): Promise<PackInstallation> {
-    return await this.requestJson<PackInstallation>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/install`,
-      request,
-    );
-  }
-
-  /** Preview which Pack-owned components will be retained by other owners. */
-  async previewPackUninstall(workspaceId: string, packId: string): Promise<PackUninstallPreview> {
-    return await this.requestJson<PackUninstallPreview>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/uninstall-preview`,
-    );
-  }
-
-  /** Safely release Pack ownership and disable only now-ownerless components. */
-  async uninstallPack(
-    workspaceId: string,
-    packId: string,
-    request: UninstallPackRequest,
-  ): Promise<UninstallPackResult> {
-    return await this.requestJson<UninstallPackResult>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/installation`,
-      request,
-    );
-  }
-
-  /** Unregister a workspace-scoped pack (built-in packs cannot be deleted). */
-  async deletePack(workspaceId: string, packId: string): Promise<void> {
-    await this.requestVoid(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}`,
-    );
-  }
-
-  async listPackInstallations(workspaceId: string): Promise<PackInstallation[]> {
-    return await this.requestJson<PackInstallation[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/packs/installations`,
-    );
-  }
 
   // --- Capabilities -------------------------------------------------------------------------
 
@@ -6805,6 +6761,35 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/capabilities`,
       request,
+    );
+  }
+
+  async getConnectorToolPermissions(
+    workspaceId: string,
+    capabilityId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ConnectorToolPermissionsResponse> {
+    return await this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  async updateConnectorToolPermissions(
+    workspaceId: string,
+    capabilityId: string,
+    request: UpdateConnectorToolPermissionsRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ saved: boolean }> {
+    return await this.requestJson(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions`,
+      request,
+      {},
+      options,
     );
   }
 
@@ -7379,6 +7364,15 @@ export class OpenGeniClient {
 
   // --- Connections -------------------------------------------------------------------------------
 
+  /** The authenticated user's active accounts across this organization. */
+  async listOwnConnectionAccounts(workspaceId: string): Promise<ConnectionMetadata[]> {
+    const response = await this.requestJson<ListConnectionsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/connections/accounts`,
+    );
+    return response.connections;
+  }
+
   async listConnections(workspaceId: string): Promise<ConnectionMetadata[]> {
     const response = await this.requestJson<ListConnectionsResponse>(
       "GET",
@@ -7675,6 +7669,27 @@ export class OpenGeniClient {
     return logoAssetPath ? `${this.baseUrl}/v1/${logoAssetPath}` : null;
   }
 
+  /** Read a passive catalog mark through this client's authenticated transport.
+   * Useful when an embedding backend protects even public upstream assets. */
+  async downloadCatalogAsset(
+    logoAssetPath: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<Blob> {
+    if (
+      !/^catalog-assets\/[a-zA-Z0-9_./-]+$/.test(logoAssetPath) ||
+      logoAssetPath.split("/").some((part) => !part || part === "." || part === "..")
+    )
+      throw new TypeError("A catalog asset path is required");
+    const response = await this.requestResponse("GET", `/v1/${logoAssetPath}`, {}, options);
+    const type = response.headers.get("content-type")?.split(";")[0] ?? "";
+    if (!type.startsWith("image/")) {
+      await response.body?.cancel();
+      throw new Error("The catalog asset is not an image");
+    }
+    const bytes = await readBoundedResponseBytes(response, 2_000_000, null);
+    return new Blob([Uint8Array.from(bytes)], { type });
+  }
+
   // --- GitHub ----------------------------------------------------------------------------------
 
   /** GitHub App server configuration plus truthful workspace binding status. */
@@ -7866,6 +7881,48 @@ export class OpenGeniClient {
     });
   }
 
+  async getOrganizationUsageSummary(
+    options: {
+      accountId: string;
+      period?: import("@opengeni/contracts").OrganizationUsagePeriod;
+    },
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<import("@opengeni/contracts").OrganizationUsageSummary> {
+    return await this.requestJson(
+      "GET",
+      "/v1/billing/usage-summary",
+      undefined,
+      {
+        accountId: options.accountId,
+        period: options.period ?? "month",
+      },
+      requestOptions,
+    );
+  }
+
+  async getOrganizationUsageWorkspacePage(
+    options: {
+      accountId: string;
+      period?: import("@opengeni/contracts").OrganizationUsagePeriod;
+      until: string;
+      afterWorkspaceId?: string;
+    },
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<import("@opengeni/contracts").OrganizationUsageWorkspacePage> {
+    return await this.requestJson(
+      "GET",
+      "/v1/billing/usage-workspaces",
+      undefined,
+      {
+        accountId: options.accountId,
+        period: options.period ?? "month",
+        until: options.until,
+        ...(options.afterWorkspaceId ? { afterWorkspaceId: options.afterWorkspaceId } : {}),
+      },
+      requestOptions,
+    );
+  }
+
   async getBillingUsage(
     options: { accountId?: string; workspaceId?: string } = {},
   ): Promise<BillingUsageResponse> {
@@ -7881,6 +7938,7 @@ export class OpenGeniClient {
       range?: InsightsRange;
       provider?: string;
       model?: string;
+      signal?: AbortSignal;
     } = {},
   ): Promise<WorkspaceInsightsResponse> {
     return await this.requestJson<WorkspaceInsightsResponse>(
@@ -7892,6 +7950,7 @@ export class OpenGeniClient {
         ...(options.provider !== undefined ? { provider: options.provider } : {}),
         ...(options.model !== undefined ? { model: options.model } : {}),
       },
+      { signal: options.signal },
     );
   }
 
@@ -8018,6 +8077,17 @@ export class OpenGeniClient {
     return await this.requestJson<CodexAccountsResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/codex/accounts`,
+    );
+  }
+
+  /** Session-authorized retry choices plus the current accepted account. */
+  async listSessionCodexAccounts(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionCodexAccountsResponse> {
+    return await this.requestJson<SessionCodexAccountsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-accounts`,
     );
   }
 

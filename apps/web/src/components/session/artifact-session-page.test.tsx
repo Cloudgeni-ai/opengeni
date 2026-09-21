@@ -46,14 +46,20 @@ for (const fromSession of [undefined, "33333333-3333-4333-8333-333333333333"]) {
       expect(links.map((link) => link.textContent)).toEqual(
         fromSession ? ["All artifacts", "Back to session"] : ["All artifacts"],
       );
-      expect(links[0]!.getAttribute("href")).toBe(`/workspaces/${workspaceId}/artifacts`);
+      expect(links[0]!.getAttribute("href")).toBe(
+        fromSession
+          ? `/workspaces/${workspaceId}/artifacts?fromSession=${fromSession}`
+          : `/workspaces/${workspaceId}/artifacts`,
+      );
       if (fromSession)
         expect(links[1]!.getAttribute("href")).toBe(
           `/workspaces/${workspaceId}/sessions/${fromSession}`,
         );
       await act(async () => links[0]!.click());
       expect(router.state.location.pathname).toBe(`/workspaces/${workspaceId}/artifacts`);
-      expect(router.state.location.searchStr).toBe("");
+      expect(router.state.location.searchStr).toBe(
+        fromSession ? `?fromSession=${fromSession}` : "",
+      );
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -90,17 +96,26 @@ test("full-page close returns to the originating session without relying on brow
       link.click();
     });
     expect(router.state.location.pathname).toBe(`/workspaces/${workspaceId}/sessions/${sessionId}`);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+
+  const standalone = document.createElement("div");
+  document.body.append(standalone);
+  const standaloneRoot = createRoot(standalone);
+  try {
     await act(async () => {
-      root.render(
+      standaloneRoot.render(
         <ArtifactSessionPage workspaceId={workspaceId}>
           <div>Standalone Site</div>
         </ArtifactSessionPage>,
       );
     });
-    expect(container.querySelector("a")).toBeNull();
-    expect(container.textContent).toBe("Standalone Site");
+    expect(standalone.querySelector("a")).toBeNull();
+    expect(standalone.textContent).toBe("Standalone Site");
   } finally {
-    await act(async () => root.unmount());
-    container.remove();
+    await act(async () => standaloneRoot.unmount());
+    standalone.remove();
   }
 });

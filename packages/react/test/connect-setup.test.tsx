@@ -76,7 +76,8 @@ test("credential fields use labels, required validation and password inputs with
     type: "credentials",
     fields: [{ name: "api_key", label: "API key", required: true, secret: true }],
   });
-  expect(html).toContain("Ownership: Personal");
+  expect(html).toContain("Personal connection");
+  expect(html).toContain("Only your work can use this connection.");
   expect(html).toContain('type="password"');
   expect(html).toContain("required");
   expect(html).toContain("API key");
@@ -122,7 +123,20 @@ test("preview does not silently preselect operations", async () => {
     },
     "preview",
   );
-  expect(html).toContain("Install selected operations");
+  expect(html).toContain("Add selected tools");
   expect(html).toContain("Write records");
   expect(html).not.toContain("checked");
+});
+
+test("OAuth presents one primary action without an empty credential form heading", async () => {
+  const html = await render({
+    type: "authorize",
+    url: "https://slack.com/oauth/authorize",
+  });
+  expect(html).toContain('class="og-connect-setup-primary"');
+  expect(html).toContain("Authorize connection");
+  expect(html).not.toContain("<legend>");
+  expect(html).toContain('class="og-connect-setup-secondary"');
+  expect(html).toContain("Check status");
+  expect(html).toContain("Cancel setup");
 });

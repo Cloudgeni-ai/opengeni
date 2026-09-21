@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { usePacks } from "@opengeni/react";
+
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
@@ -9,7 +9,6 @@ import { BundlesSection } from "./bundles-section";
 import { PluginDiscovery } from "./plugin-discovery";
 import type {
   CapabilityCatalogItem,
-  CapabilityPack,
   InstalledSkillSummary,
   PluginInstallationSummary,
 } from "@/types";
@@ -28,7 +27,6 @@ describe("BundlesSection", () => {
     for (const [query, expected] of [
       [" RESEARCH ", "plugin:example/research"],
       ["Terraform", "skill:terraform"],
-      ["Infrastructure operations", "pack:infra-ops"],
       ["release-operator", "imported:skill:release-operator-abc123"],
     ] as const) {
       const rendered = await renderSection({ query });
@@ -36,9 +34,9 @@ describe("BundlesSection", () => {
         if (expected.startsWith("plugin:")) {
           expect(
             rendered.container
-              .querySelector("[data-installed-plugin]")
-              ?.getAttribute("data-installed-plugin"),
-          ).toBe("example/research");
+              .querySelector(".og-connection-installed button")
+              ?.getAttribute("aria-label"),
+          ).toBe("Research suite · Installed");
           expect(rowIds(rendered.container)).toEqual([]);
         } else {
           expect(rowIds(rendered.container)).toEqual([expected]);
@@ -60,7 +58,7 @@ describe("BundlesSection", () => {
       await rendered.unmount();
     }
   });
-  test("lists skills and workflow templates alongside installed plugins", async () => {
+  test("lists skills alongside installed plugins", async () => {
     const rendered = await renderSection();
     try {
       const heading = rendered.container.querySelector("#bundles-heading");
@@ -70,17 +68,12 @@ describe("BundlesSection", () => {
       );
 
       const rows = rowIds(rendered.container);
-      expect(rows).toEqual([
-        "pack:infra-ops",
-        "imported:skill:release-operator-abc123",
-        "skill:terraform",
-      ]);
+      expect(rows).toEqual(["imported:skill:release-operator-abc123", "skill:terraform"]);
       // Skill and template rows preserve their provenance in the accessible name.
-      expect(rendered.container.querySelector("[data-installed-plugin]")?.textContent).toContain(
-        "Research suite",
-      );
+      expect(
+        rendered.container.querySelector(".og-connection-installed button")?.textContent,
+      ).toContain("Research suite");
       expect(rowNames(rendered.container)).toEqual([
-        "Infrastructure operations. Workflow template, registered in this workspace. Not installed",
         "release-operator. Skill, imported from source. Installed",
         "Terraform. Skill, curated by OpenGeni. Installed",
       ]);
@@ -109,8 +102,10 @@ describe("BundlesSection", () => {
   test("reports how much of the bundle list the search is showing", async () => {
     const rendered = await renderSection();
     try {
-      expect(count(rendered.container)).toBe("3 results");
-      expect(rendered.container.querySelectorAll("[data-installed-plugin]")).toHaveLength(1);
+      expect(count(rendered.container)).toBe("2 results");
+      expect(rendered.container.querySelectorAll(".og-connection-installed button")).toHaveLength(
+        1,
+      );
     } finally {
       await rendered.unmount();
     }
@@ -142,22 +137,12 @@ describe("BundlesSection", () => {
     }
   });
 
-  test("a failed Pack load is reported the same way", async () => {
-    const rendered = await renderSection({ empty: true, packsError: true });
-    try {
-      expect(rendered.container.textContent).toContain("Couldn't load Packs");
-      expect(rendered.container.textContent).not.toContain("No skills or plugins yet");
-    } finally {
-      await rendered.unmount();
-    }
-  });
-
   test("a catalog Skill row opens the catalog detail sheet rather than a second frame", async () => {
     const onOpenCatalogItem = mock((_item: CapabilityCatalogItem) => {});
     const rendered = await renderSection({ onOpenCatalogItem });
     try {
       const row = rendered.container.querySelector<HTMLElement>(
-        '[data-integration-row="skill:terraform"] button',
+        'button[data-integration-row="skill:terraform"]',
       );
       await act(async () => row!.click());
       expect(onOpenCatalogItem).toHaveBeenCalledTimes(1);
@@ -167,14 +152,14 @@ describe("BundlesSection", () => {
     }
   });
 
-  test("plugin import and manifest registration entry points stay reachable", async () => {
+  test("plugin import remains reachable without workflow template registration", async () => {
     const rendered = await renderSection({ section: "plugins" });
     try {
       const labels = [...rendered.container.querySelectorAll("button")].map(
         (candidate) => candidate.textContent ?? "",
       );
       expect(labels.some((label) => label.includes("Import plugin"))).toBe(true);
-      expect(labels.some((label) => label.includes("Add workflow template"))).toBe(true);
+      expect(labels.some((label) => label.includes("Add workflow template"))).toBe(false);
     } finally {
       await rendered.unmount();
     }
@@ -208,7 +193,9 @@ describe("BundlesSection", () => {
       />,
     );
     try {
-      const card = rendered.container.querySelector<HTMLButtonElement>(".og-plugin-discovery-row");
+      const card = rendered.container.querySelector<HTMLButtonElement>(
+        ".og-connection-installed button",
+      );
       expect(card?.textContent).toContain("Research suite");
       await act(async () => card!.click());
       expect(getInstalledPluginDetails).toHaveBeenCalledTimes(1);
@@ -229,7 +216,7 @@ describe("BundlesSection", () => {
       );
       // Every header action is a workspace-administrator action; none of them
       // may sit live directly under the sentence that says so.
-      for (const label of ["Import plugin", "Add workflow template"]) {
+      for (const label of ["Import plugin"]) {
         const button = [...rendered.container.querySelectorAll("button")].find((candidate) =>
           candidate.textContent?.includes(label),
         );
@@ -248,7 +235,7 @@ function rowIds(container: ParentNode): string[] {
 }
 
 function rowNames(container: ParentNode): string[] {
-  return [...container.querySelectorAll("[data-integration-row] > button")].map(
+  return [...container.querySelectorAll("button[data-integration-row]")].map(
     (row) => row.getAttribute("aria-label") ?? "",
   );
 }
@@ -263,7 +250,7 @@ async function renderSection(
     canManage?: boolean;
     empty?: boolean;
     loadError?: boolean;
-    packsError?: boolean;
+
     query?: string;
     onOpenCatalogItem?: (item: CapabilityCatalogItem) => void;
   } = {},
@@ -280,17 +267,6 @@ async function renderSection(
       logoUrl={() => null}
       busyCatalogId={null}
       onOpenCatalogItem={options.onOpenCatalogItem ?? (() => {})}
-      packs={packsState(options.empty ?? false, options.packsError ?? false)}
-      variableSets={[]}
-      rigs={[]}
-      busyPackId={null}
-      onRegisterPack={async () => true}
-      onPreviewPackInstall={async () => null}
-      onInstallPack={async () => true}
-      onPreviewPackUninstall={async () => null}
-      onUninstallPack={async () => true}
-      onUnregisterPack={async () => true}
-      onStartPackSession={() => {}}
       onChanged={() => {}}
     />,
   );
@@ -339,27 +315,6 @@ function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
   } as unknown as OpenGeniBrowserClient;
 }
 
-function packsState(empty: boolean, failed = false): ReturnType<typeof usePacks> {
-  return {
-    packs: empty ? [] : [pack()],
-    installations: [],
-    installationFor: () => null,
-    loading: false,
-    error: failed ? new Error("network is down") : null,
-    refresh: async () => {},
-    register: async () => null,
-    enable: async () => null,
-    previewInstallation: async () => null,
-    install: async () => null,
-    previewUninstall: async () => null,
-    uninstall: async () => null,
-    remove: async () => false,
-    mutating: false,
-    mutationError: null,
-    clearMutationError: () => {},
-  };
-}
-
 function catalogItems(): CapabilityCatalogItem[] {
   return [
     catalogItem({
@@ -375,13 +330,6 @@ function catalogItems(): CapabilityCatalogItem[] {
       source: "built_in",
       name: "Linear",
       description: "Issue tracking.",
-    }),
-    catalogItem({
-      id: "pack:infra-ops",
-      kind: "pack",
-      source: "manual",
-      name: "Infrastructure operations",
-      description: "Pinned infrastructure automation capabilities.",
     }),
   ];
 }
@@ -455,23 +403,5 @@ function installedPlugin(): PluginInstallationSummary {
     status: "active",
     installedAt: "2026-08-11T00:00:00.000Z",
     updatedAt: "2026-08-11T00:00:00.000Z",
-  };
-}
-
-function pack(): CapabilityPack {
-  return {
-    id: "infra-ops",
-    name: "Infrastructure operations",
-    description: "Pinned infrastructure automation capabilities.",
-    role: "infrastructure",
-    category: "operations",
-    version: "2.0.0",
-    skills: [],
-    components: [],
-    tools: [],
-    connectors: [],
-    knowledge: [],
-    scheduledTaskTemplates: [],
-    metadata: {},
   };
 }

@@ -7,6 +7,8 @@ import {
   refreshCodexUsageAndRepairCapacityWaiters,
   signalCodexCapacityWakeTargets,
 } from "../src/activities/codex-capacity";
+import { selectCodexCredentialLeaseForTurn } from "../src/activities/codex-rotation";
+import { unresolvedCodexCredentialFailures } from "../../../packages/db/src/codex-failure-eligibility";
 
 function account(
   id: string,
@@ -39,6 +41,149 @@ function account(
 }
 
 describe("Codex capacity availability diagnostics", () => {
+  for (const policy of ["sharded", "manual", "rotation_off"] as const) {
+    for (const kind of ["quota", "rate_limit", "status"] as const) {
+      test(`${policy} ${kind} refusal waits then recovers using the same fenced evidence as acquisition`, () => {
+        const now = new Date();
+        const future = new Date(now.getTime() + 60_000);
+        const metadata = {
+          codexCredentialFailedIds: ["a"],
+          codexCredentialFailureCooldownRevisions: { a: kind === "status" ? null : 3 },
+          codexCredentialFailureEvidenceV1: {
+            a: kind === "status" ? { kind, credentialVersion: 7 } : { kind, cooldownRevision: 3 },
+          },
+        };
+        const context: CodexCapacitySelectionContext = {
+          accounts: [
+            account("a", {
+              credentialVersion: 7,
+              exhaustedRevision: 3,
+              status: kind === "status" ? "needs_relogin" : "active",
+              exhaustedKind: kind === "status" ? null : kind,
+              exhaustedUntil: kind === "status" ? null : kind === "quota" ? new Date(0) : future,
+            }),
+          ],
+          activeCredentialId: "a",
+          rotationEnabled: policy !== "rotation_off",
+          rotationStrategy: "sharded",
+          existingCredentialId: null,
+          policyScope: null,
+          unavailableDiagnostics: [],
+          sessionId: "typed-recovery",
+          sessionPinnedCredentialId: policy === "manual" ? "a" : null,
+          sessionPinSource: policy === "manual" ? "manual" : null,
+          sessionLastCredentialId: "a",
+          policyHash: null,
+        };
+        context.failedCredentialIds = unresolvedCodexCredentialFailures(
+          metadata,
+          context.accounts,
+          now,
+        );
+        expect(codexCapacityDecision(context, now)).toMatchObject({
+          kind: "unavailable",
+          resetKind:
+            kind === "quota"
+              ? "bounded_refresh"
+              : kind === "rate_limit"
+                ? "authoritative"
+                : "mutation_only",
+        });
+        expect(
+          selectCodexCredentialLeaseForTurn({ ...context, context, now }).credentialId,
+        ).toBeNull();
+        const recoveredAt = kind === "rate_limit" ? new Date(future.getTime() + 1) : now;
+        if (kind === "quota")
+          context.accounts = [account("a", { exhaustedRevision: 4, credentialVersion: 7 })];
+        if (kind === "status")
+          context.accounts = [account("a", { exhaustedRevision: 3, credentialVersion: 8 })];
+        context.failedCredentialIds = unresolvedCodexCredentialFailures(
+          metadata,
+          context.accounts,
+          recoveredAt,
+        );
+        expect(codexCapacityDecision(context, recoveredAt)).toMatchObject({
+          kind: "available",
+          credentialId: "a",
+        });
+        expect(
+          selectCodexCredentialLeaseForTurn({ ...context, context, now: recoveredAt }).credentialId,
+        ).toBe("a");
+      });
+    }
+  }
+
+  test("checker and execution agree on selected model, failures, pins and rotation-off", () => {
+    const base: CodexCapacitySelectionContext = {
+      accounts: [account("a"), account("b")],
+      activeCredentialId: "a",
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+      existingCredentialId: null,
+      policyScope: null,
+      unavailableDiagnostics: [],
+      sessionId: "parity",
+      sessionPinnedCredentialId: null,
+      sessionPinSource: null,
+      sessionLastCredentialId: null,
+      policyHash: null,
+    };
+    for (const overrides of [
+      { failedCredentialIds: ["a", "b"] },
+      { failoverExhausted: true },
+      { modelId: "codex/selected", accounts: [account("a", { allowedModelIds: ["codex/other"] })] },
+      {
+        sessionPinnedCredentialId: "a",
+        sessionPinSource: "manual" as const,
+        accounts: [account("a", { primaryUsedPercent: 100 }), account("b")],
+      },
+      {
+        rotationEnabled: false,
+        accounts: [account("a", { primaryUsedPercent: 100 }), account("b")],
+      },
+    ]) {
+      const context = { ...base, ...overrides };
+      expect(codexCapacityDecision(context).kind).toBe("unavailable");
+      expect(
+        selectCodexCredentialLeaseForTurn({ ...context, context, now: new Date() }).credentialId,
+      ).toBeNull();
+    }
+  });
+
+  test("an expired refusal remains refreshable and a newer verified reset resumes the same account", () => {
+    const metadata = {
+      codexCredentialFailedIds: ["a"],
+      codexCredentialFailureCooldownRevisions: { a: 1 },
+    };
+    const context: CodexCapacitySelectionContext = {
+      accounts: [
+        account("a", { exhaustedRevision: 1, exhaustedKind: "quota", exhaustedUntil: new Date(0) }),
+      ],
+      activeCredentialId: "a",
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+      existingCredentialId: null,
+      policyScope: null,
+      unavailableDiagnostics: [],
+      sessionId: "reset",
+      sessionPinnedCredentialId: "a",
+      sessionPinSource: "policy",
+      sessionLastCredentialId: "a",
+      policyHash: null,
+    };
+    context.failedCredentialIds = unresolvedCodexCredentialFailures(metadata, context.accounts);
+    expect(codexCapacityDecision(context)).toMatchObject({
+      kind: "unavailable",
+      resetKind: "bounded_refresh",
+    });
+    context.accounts = [account("a", { exhaustedRevision: 2 })];
+    context.failedCredentialIds = unresolvedCodexCredentialFailures(metadata, context.accounts);
+    expect(codexCapacityDecision(context)).toMatchObject({ kind: "available", credentialId: "a" });
+    expect(
+      selectCodexCredentialLeaseForTurn({ ...context, context, now: new Date() }).credentialId,
+    ).toBe("a");
+  });
+
   test("eligibleCount uses the allocator's full health predicate", () => {
     const future = new Date("2100-01-01T00:00:00.000Z");
     const context: CodexCapacitySelectionContext = {

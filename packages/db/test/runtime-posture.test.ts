@@ -487,6 +487,22 @@ function safePosture(): RuntimeDatabasePosture {
     ],
     privateRoutines: [
       {
+        name: "update_organization_integration_policy(uuid, text, jsonb)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      },
+      {
+        name: "assert_organization_integration_policy_administrator(uuid, text)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      },
+      {
         name: "workspace_rls_visible(uuid, uuid)",
         owner: "opengeni_migrator",
         execute: true,
@@ -533,6 +549,42 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
+  test("organization usage read capability forbids direct runtime DML and PUBLIC execution", () => {
+    const posture = safePosture();
+    posture.tables.push({ ...knowledgeAuthorityTables()[0]!, name: "usage_events" });
+    const table = {
+      name: "organization_usage_read_capabilities",
+      owner: "opengeni_migrator",
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    };
+    const routine = {
+      name: "organization_usage_summary(uuid, timestamp with time zone, timestamp with time zone, text, uuid, boolean)",
+      owner: "opengeni_migrator",
+      securityDefiner: true,
+      execute: true,
+      publicExecute: false,
+    };
+    posture.privateTables.push(table);
+    posture.privateRoutines.push(routine);
+    expect(
+      evaluateRuntimeDatabasePosture(posture, options).filter((value) =>
+        value.includes("organization usage"),
+      ),
+    ).toEqual([]);
+    table.insert = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "organization usage capability has unsafe owner or direct runtime privileges",
+    );
+    table.insert = false;
+    routine.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "organization usage aggregate capability is missing or unsafe",
+    );
+  });
+
   test("private publication capabilities preserve the rolling table inventory and forbid direct DML", () => {
     const posture = safePosture();
     const table = {
@@ -683,6 +735,23 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0492 adds a database-authored, runtime-readable source receipt.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_ONLY_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 0482 removes the three full-DML, FORCE-RLS Pack tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? -3
+            : 0) +
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_ONLY_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 2
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
             ? 2
             : tables === RUNTIME_READ_INSERT_TABLES || tables === RUNTIME_READ_INSERT_UPDATE_TABLES
@@ -695,7 +764,7 @@ describe("runtime database posture evaluator", () => {
               personalResourceProtectedTableCount +
               managedAuthSessionSetProtectedTableCount +
               organizationRecoveryProtectedTableCount +
-              1 // Additive protected MCP operation ledger; no runtime DML.
+              2 // Protected MCP and managed sign-in operation ledgers; no runtime DML.
             : length);
         expect(tables).toHaveLength(expectedLength);
         expect(new Set(tables).size).toBe(tables.length);
@@ -703,12 +772,30 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 1 + 2;
+      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1;
+      for (const removed of [
+        "workspace_packs",
+        "pack_installations",
+        "pack_installation_components",
+      ]) {
+        expect(FORCE_RLS_TABLES as readonly string[]).not.toContain(removed);
+        expect(RUNTIME_TABLE_PRIVILEGES[removed]).toBeUndefined();
+      }
+      for (const table of [
+        "organization_integration_policies",
+        "organization_integration_policy_operations",
+      ] as const) {
+        expect(FORCE_RLS_TABLES).toContain(table);
+        expect(RUNTIME_TABLE_PRIVILEGES[table]).toEqual(["SELECT"]);
+      }
       expect(RUNTIME_TABLE_PRIVILEGES.host_mcp_resolvers).toEqual(["SELECT", "INSERT", "UPDATE"]);
       expect(RUNTIME_TABLE_PRIVILEGES.host_mcp_resolver_operations).toEqual(["SELECT", "INSERT"]);
       expect(FORCE_RLS_TABLES).toContain("mcp_operations");
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("mcp_operations");
       expect(RUNTIME_TABLE_PRIVILEGES.mcp_operations).toBeUndefined();
+      expect(FORCE_RLS_TABLES).toContain("managed_sign_in_method_operations");
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("managed_sign_in_method_operations");
+      expect(RUNTIME_TABLE_PRIVILEGES.managed_sign_in_method_operations).toBeUndefined();
       expect(FORCE_RLS_TABLES).toContain("host_mcp_turn_authorities");
       expect(RUNTIME_TABLE_PRIVILEGES.host_mcp_turn_authorities).toEqual(["SELECT", "INSERT"]);
       for (const table of ["host_mcp_bindings", "host_mcp_delegations"] as const) {
@@ -830,6 +917,49 @@ describe("runtime database posture evaluator", () => {
 
   test("accepts the exact least-privilege FORCE-RLS contract", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+  });
+
+  test("integration policy mutation requires a same-owner definer with a safe search path", () => {
+    const fixture = () => {
+      const posture = safePosture();
+      for (const name of [
+        "organization_integration_policies",
+        "organization_integration_policy_operations",
+        "organization_memberships",
+        "api_keys",
+        "workspaces",
+      ]) {
+        if (!posture.tables.some((table) => table.name === name))
+          posture.tables.push({ ...posture.tables[0]!, name });
+      }
+      return posture;
+    };
+    expect(evaluateRuntimeDatabasePosture(fixture(), options)).not.toContain(
+      "organization integration policy mutation capability is missing or unsafe",
+    );
+    for (const patch of [
+      { execute: false },
+      { publicExecute: true },
+      { securityDefiner: false },
+      { owner: "other_owner" },
+      { configuration: ["search_path=public"] },
+    ]) {
+      const posture = fixture();
+      const routine = posture.privateRoutines.find((candidate) =>
+        candidate.name.startsWith("update_organization_integration_policy("),
+      )!;
+      Object.assign(routine, patch);
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        "organization integration policy mutation capability is missing or unsafe",
+      );
+    }
+    const missing = fixture();
+    missing.privateRoutines = missing.privateRoutines.filter(
+      (candidate) => !candidate.name.startsWith("update_organization_integration_policy("),
+    );
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      "organization integration policy mutation capability is missing or unsafe",
+    );
   });
 
   test("external membership operation seams require the live credential authority owner", () => {
@@ -2036,6 +2166,43 @@ describe("runtime database posture evaluator", () => {
       routine.owner = "another_owner";
       expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
         `MCP operation internal routine ${name} owner does not match ledger owner`,
+      );
+    }
+  });
+
+  test("accepted MCP account binding helpers remain owner-only and use their exact execution modes", () => {
+    for (const name of [
+      "validate_mcp_account_bindings(jsonb, jsonb)",
+      "fence_mcp_account_bindings()",
+    ]) {
+      const posture = safePosture();
+      const routine = {
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: name === "fence_mcp_account_bindings()",
+      };
+      posture.privateRoutines.push(routine);
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+      routine.execute = true;
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `runtime or PUBLIC has forbidden EXECUTE on MCP account binding internal routine ${name}`,
+      );
+      routine.execute = false;
+      routine.publicExecute = true;
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `runtime or PUBLIC has forbidden EXECUTE on MCP account binding internal routine ${name}`,
+      );
+      routine.publicExecute = false;
+      routine.owner = "another_owner";
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `MCP account binding internal routine ${name} owner does not match turn owner`,
+      );
+      routine.owner = "opengeni_migrator";
+      routine.securityDefiner = !routine.securityDefiner;
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `MCP account binding internal routine ${name} has unsafe execution mode`,
       );
     }
   });

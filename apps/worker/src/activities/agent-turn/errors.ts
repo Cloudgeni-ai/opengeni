@@ -11,10 +11,16 @@ import {
   ActiveBackendUnresolvableError,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
+  compactionProviderRejection,
+  describeCompactionProviderRejection,
+  type CompactionProviderRejection,
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
   isModalTaskExecStartDnsResolutionError,
   RoutingWorkspaceRootChangedError,
+  SandboxMaterializationVerificationError,
+  materializationVerificationDiagnostic,
+  type MaterializationVerificationDiagnostic,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
 } from "@opengeni/runtime";
@@ -28,6 +34,7 @@ import { RetainedAttachmentTransportLimitError } from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {
   CodexReloginRequired,
+  classifyCodexEncryptedArtifactRejection,
   classifyCodexResponseTimeoutError,
   classifyCodexUsageLimitError,
   isCodexTransportError,
@@ -269,22 +276,38 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
  * Convert the atomic claim transaction's failure into a small, stable
  * Temporal wire contract. The original error remains in activity diagnostics,
  * but SQL text, parameters, and arbitrary invariant messages never enter
- * workflow history. Every database failure is safe to re-read after backoff
- * because the claim transaction contains no model/tool effects. Database
- * constraints and authorization guards can also be repaired by a deployment or
- * authority refresh, so they must preserve pending work. Only a non-database
- * claim invariant is terminal.
+ * workflow history. Operational failures retry; other persistence rejections
+ * retain accepted work behind a durable explicit-recheck fence. Repeating the
+ * same rejected transaction without changed conditions is not recovery.
  */
 export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
   const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
   const retryableCode = retryableDatabaseFailureCode(error);
-  // The workflow retries after a durable re-read and bounded delay. A
-  // SessionEventPersistenceError proves the failure happened inside the atomic
-  // claim boundary, before provider or tool work; retaining it is safer than
-  // destroying accepted machine input on an application SQLSTATE.
+  const rejectedClaim =
+    persistenceFailure?.details.stage === "session_attempts.claim" &&
+    persistenceFailure.details.retryOutcome === "not_retryable" &&
+    !retryableCode;
   const detail: PreClaimFailureDetail = {
-    disposition: persistenceFailure || retryableCode ? "retryable" : "permanent",
+    disposition: rejectedClaim
+      ? "blocked"
+      : persistenceFailure || retryableCode
+        ? "retryable"
+        : "permanent",
     code: retryableCode ?? persistenceFailure?.details.code ?? "claim_invariant",
+    ...(persistenceFailure && rejectedClaim
+      ? {
+          sqlState: persistenceFailure.details.sqlState,
+          reason:
+            persistenceFailure.details.stage === "session_attempts.claim" &&
+            persistenceFailure.details.sqlState === "OG001"
+              ? ("initiator_membership_required" as const)
+              : persistenceFailure.details.stage === "session_attempts.claim" &&
+                  persistenceFailure.details.sqlState === "OG002"
+                ? ("personal_resource_grant_required" as const)
+                : ("database_claim_rejected" as const),
+          retryPolicy: "explicit_recheck" as const,
+        }
+      : {}),
   };
   return ApplicationFailure.create({
     message: PRE_CLAIM_FAILURE_MESSAGE,
@@ -574,7 +597,21 @@ export function safeErrorForTelemetry(error: unknown): Error {
   return safe;
 }
 
+/**
+ * Guidance appended to a definitive provider rejection. Repeating the exact
+ * request cannot succeed, so the generic "send another message to retry"
+ * advice is wrong here: a new prompt re-sends the same rejected history.
+ */
+export const COMPACTION_PROVIDER_REJECTION_GUIDANCE =
+  "The provider refused this exact request, so repeating it fails the same way until the conversation changes. If a new message fails again, start a new session.";
+
 export function compactionFailureReasonFromError(error: unknown): string {
+  const rejection = compactionProviderRejection(error);
+  if (rejection) {
+    return compactionFailureReason(
+      `the model provider rejected the compaction request (${describeCompactionProviderRejection(rejection)}). Active history was preserved. ${COMPACTION_PROVIDER_REJECTION_GUIDANCE}`,
+    );
+  }
   if (
     error instanceof CompactionProviderResponseError ||
     error instanceof EmptyCompactionSummaryError
@@ -583,6 +620,34 @@ export function compactionFailureReasonFromError(error: unknown): string {
   }
   const errorName = error instanceof Error && error.name ? error.name : "unknown error";
   return compactionFailureReason(`unexpected ${errorName}`);
+}
+
+/**
+ * Exact `turn.failed` payload for a terminal compaction failure. A definitive
+ * provider rejection additionally carries its closed identifier record so the
+ * timeline, API consumers, and operators can name the rejected field without
+ * parsing the message.
+ */
+export function compactionFailureTurnEventPayload(
+  error: unknown,
+  overrides: { error?: string } = {},
+): {
+  error: string;
+  code: "context_compaction_failed";
+  retryable: false;
+  recovery: "user_message";
+  compacted: false;
+  providerRejection?: CompactionProviderRejection;
+} {
+  const rejection = compactionProviderRejection(error);
+  return {
+    error: overrides.error ?? compactionFailureReasonFromError(error),
+    code: "context_compaction_failed",
+    retryable: false,
+    recovery: "user_message",
+    compacted: false,
+    ...(rejection ? { providerRejection: rejection } : {}),
+  };
 }
 
 export function isCompactionSummaryFailure(error: unknown): boolean {
@@ -594,6 +659,11 @@ export function isCompactionSummaryFailure(error: unknown): boolean {
 export function shouldRecoverCompactionProviderFailure(error: unknown): boolean {
   if (!(error instanceof CompactionProviderResponseError)) return false;
   if (isCodexTransportError(error) && classifyCodexUsageLimitError(error)) return true;
+  // Codex may reject an opaque artifact it minted itself on the compaction
+  // request exactly as it can on an ordinary request. Failure settlement
+  // invalidates only the exact participating artifacts and recovers the same
+  // logical turn; when nothing can be invalidated it fails closed there.
+  if (classifyCodexEncryptedArtifactRejection(error)) return true;
   return agentRunFailurePayload(error).retryable === true;
 }
 
@@ -851,6 +921,15 @@ function findPostgresDriverError(error: unknown): Record<string, unknown> | null
 export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  const failure = baseAgentRunFailurePayload(error, options);
+  const diagnostic = materializationVerificationDiagnostic(error);
+  return diagnostic ? { ...failure, materializationDiagnostic: diagnostic } : failure;
+}
+
+function baseAgentRunFailurePayload(
+  error: unknown,
+  options: { isCodexTurn?: boolean } = {},
 ): {
   error: string;
   code?: string;
@@ -870,7 +949,16 @@ export function agentRunFailurePayload(
   database?: Record<string, string>;
   historyPersistenceStage?: MandatoryHistoryPersistenceStage;
   mcpTransportDiagnostic?: McpTransportRequestFailureDiagnostic;
+  materializationDiagnostic?: MaterializationVerificationDiagnostic;
 } {
+  if (error instanceof SandboxMaterializationVerificationError) {
+    return {
+      error: error.message,
+      code: error.code,
+      retryable: false,
+      materializationDiagnostic: error.diagnostic,
+    };
+  }
   if (error instanceof RetainedAttachmentTransportLimitError) {
     return { error: error.message, code: "retained_attachment_transport_limit", retryable: false };
   }

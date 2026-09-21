@@ -181,6 +181,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/chat-media-entry.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts": [
     "@opengeni/artifact-tool",
     "@opengeni/react",
@@ -245,6 +251,17 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/composer-pane.browser.e2e.ts": ["opengeni-web", "@opengeni/react", "@opengeni/testing"],
+  "test/e2e/composer-menus.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
+  "test/e2e/connector-accounts.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
+  "test/e2e/compact-session-view.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/queue-surface.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/user-message-disclosure.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/realtime-demo.browser.e2e.ts": [
@@ -253,6 +270,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/react-compiled-css.browser.e2e.ts": ["@opengeni/react"],
+  "test/e2e/preview-loading.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/restored-attachment-preview.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -318,8 +336,14 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/browser-account-request-observation.browser.e2e.ts": [],
+  "test/e2e/managed-actor-response.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/browser-account-read-diagnostics.test.ts": [],
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/appearance.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/signed-out-page.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/capability-catalog.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/plugin-discovery.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/plugin-removal.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/capability-details.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/workspace-switcher-trigger.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-rail-row-metadata.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
@@ -339,7 +363,20 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/session-capability-cards.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/session-search.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/api-router",
+    "@opengeni/db",
+    "@opengeni/testing",
+  ],
   "test/e2e/session-lazy-panels.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/failed-session-recovery.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
     "@opengeni/sdk",
@@ -369,6 +406,7 @@ const BROWSER_ACCEPTANCE_TESTS: Readonly<Record<BrowserAcceptanceLane, readonly 
     "test/e2e/timeline-tip-follow.browser.e2e.ts",
     "test/e2e/lossless-message.browser.e2e.ts",
     "test/e2e/user-message-disclosure.browser.e2e.ts",
+    "test/e2e/session-search.browser.e2e.ts",
     "test/e2e/realtime-demo.browser.e2e.ts",
     "test/e2e/source-packages-control-center.browser.e2e.ts",
   ],
@@ -388,6 +426,14 @@ for (const path of TEMPORAL_WORKFLOW_INTEGRATION_TESTS) {
 }
 
 const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {
+  "test/e2e/browser-account-read-diagnostics.ts": [
+    "test/e2e/browser-accounts-acceptance.e2e.ts",
+    "test/e2e/browser-account-read-diagnostics.test.ts",
+  ],
+  "test/e2e/browser-account-axe-diagnostics.ts": [
+    "test/e2e/browser-accounts-acceptance.e2e.ts",
+    "test/e2e/browser-account-request-observation.browser.e2e.ts",
+  ],
   "test/e2e/browser-account-request-observation.ts": [
     "test/e2e/browser-accounts-acceptance.e2e.ts",
     "test/e2e/browser-account-request-observation.browser.e2e.ts",

@@ -24,13 +24,15 @@ describe("personal connection disclosures", () => {
     await act(async () =>
       root.render(
         <SchedulePersonalConnectionDisclosure
-          connections={[{ serverId: "linear", providerDomain: "linear.app" }]}
+          ownerSubjectId="user:alice"
+          viewerSubjectId="user:alice"
         />,
       ),
     );
     try {
-      expect(container.textContent).toContain("Personal access");
-      expect(container.textContent).toContain("linear.app");
+      expect(container.textContent).toContain("Runs as you");
+      expect(container.textContent).toContain("connected accounts");
+      expect(container.textContent).not.toContain("user:alice");
       expect(container.textContent).not.toContain("connectionId");
       expect(container.textContent).not.toContain("ownerSubjectId");
     } finally {
@@ -39,11 +41,15 @@ describe("personal connection disclosures", () => {
     }
   });
 
-  test("renders nothing without delegated personal access", async () => {
+  test("renders nothing for a workspace-owned schedule", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
-    await act(async () => root.render(<SchedulePersonalConnectionDisclosure connections={[]} />));
+    await act(async () =>
+      root.render(
+        <SchedulePersonalConnectionDisclosure ownerSubjectId={null} viewerSubjectId="user:alice" />,
+      ),
+    );
     try {
       expect(container.textContent).toBe("");
     } finally {

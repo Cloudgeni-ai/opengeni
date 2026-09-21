@@ -86,6 +86,9 @@ function stringValue(row: JsonRecord, key: string): string {
  * One read for the three existing usage windows. The event-type arrays are
  * deliberately closed so the authority function can keep selective predicates
  * inside its scan while all rollup math remains outside the billing path.
+ * Only the reused current window needs a second materialization: aggregate the
+ * single-use prior/month SRFs directly, since their volatile calls prevent CTE
+ * inlining even without an explicit MATERIALIZED keyword.
  */
 export async function readWorkspaceInsightsUsageBundle(
   db: Database,
@@ -103,27 +106,11 @@ export async function readWorkspaceInsightsUsageBundle(
       with current_visible as materialized (
         select usage_row.event_type, usage_row.quantity, usage_row.occurred_at,
           usage_row.source_resource_id
-        from opengeni_private.visible_workspace_insights_usage_events(
+        from opengeni_private.visible_workspace_insights_usage_projection(
           ${input.workspaceId},
           ${input.since.toISOString()}::timestamp with time zone,
           ${input.until.toISOString()}::timestamp with time zone,
           array['model.cost', 'sandbox.warm_seconds']::text[]
-        ) usage_row
-      ), prior_visible as materialized (
-        select usage_row.event_type, usage_row.quantity
-        from opengeni_private.visible_workspace_insights_usage_events(
-          ${input.workspaceId},
-          ${input.priorSince.toISOString()}::timestamp with time zone,
-          ${input.priorUntil.toISOString()}::timestamp with time zone,
-          array['model.cost', 'sandbox.warm_seconds']::text[]
-        ) usage_row
-      ), month_visible as materialized (
-        select usage_row.event_type, usage_row.quantity, usage_row.occurred_at
-        from opengeni_private.visible_workspace_insights_usage_events(
-          ${input.workspaceId},
-          ${input.monthSince.toISOString()}::timestamp with time zone,
-          'infinity'::timestamp with time zone,
-          array['model.tokens', 'agent_run.created']::text[]
         ) usage_row
       ), current_totals as (
         select
@@ -142,7 +129,12 @@ export async function readWorkspaceInsightsUsageBundle(
           coalesce(sum(usage_row.quantity) filter (
             where usage_row.event_type = 'sandbox.warm_seconds'
           ), 0) as prior_warm_seconds
-        from prior_visible usage_row
+        from opengeni_private.visible_workspace_insights_usage_projection(
+          ${input.workspaceId},
+          ${input.priorSince.toISOString()}::timestamp with time zone,
+          ${input.priorUntil.toISOString()}::timestamp with time zone,
+          array['model.cost', 'sandbox.warm_seconds']::text[]
+        ) usage_row
       ), month_totals as (
         select
           coalesce(sum(usage_row.quantity) filter (
@@ -153,7 +145,12 @@ export async function readWorkspaceInsightsUsageBundle(
             where usage_row.event_type = 'agent_run.created'
               and usage_row.occurred_at > ${input.monthSince.toISOString()}::timestamp with time zone
           ), 0) as agent_runs_used
-        from month_visible usage_row
+        from opengeni_private.visible_workspace_insights_usage_projection(
+          ${input.workspaceId},
+          ${input.monthSince.toISOString()}::timestamp with time zone,
+          'infinity'::timestamp with time zone,
+          array['model.tokens', 'agent_run.created']::text[]
+        ) usage_row
       ), bucket_rows as (
         select
           ${bucket} as bucket,

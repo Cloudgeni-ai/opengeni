@@ -6,7 +6,25 @@ Variable sets are named encrypted secret collections with one explicit owner sco
 - **Workspace:** discoverable only in the origin workspace. This is the default and preserves legacy `/environments` behavior.
 - **Only me:** owned by the authenticated active organization member, private by default, and discoverable from any workspace that member currently accesses.
 
-A variable set is attached to runnable things — a session, a scheduled task, or a capability pack installation that declares it uses one — and its values are injected only after exact runtime authority is revalidated. A session may select up to 25 explicit Variable Sets in ordered low-to-high precedence. The legacy singular `variableSetId` remains an alias for the final, highest-precedence explicit set.
+A variable set is attached to runnable things — a session or a scheduled task — and its values are injected only after exact runtime authority is revalidated. A session may select up to 25 explicit Variable Sets in ordered low-to-high precedence. The legacy singular `variableSetId` remains an alias for the final, highest-precedence explicit set.
+
+The chat composer presents explicit sets **highest priority first**. It reverses
+enabled rows when writing the existing low-to-high API selection, and reverses
+loaded selections so existing collision winners do not change. The shortlist and
+searchable add view scroll without pagination; no more than 25 sets can be on.
+Off rows remain in place (including after Save), and their ordering controls are
+disabled. X removes a row from this shortlist, never deletes the Variable Set.
+Undo and Cancel restore the saved list, switches, and order. Existing chats keep
+the idle, permission, and post-save refresh guards; new chats save into the draft.
+
+Shortlist presentation is a browser-local preference, following the web app's
+versioned localStorage convention. `og.variable-set-shortlist:v1` keys encode the
+authenticated subject, workspace, and chat ID (or `new-chat` draft namespace).
+Only IDs, array order, and enabled booleans are stored, never names or secret
+values. Server/draft attachment IDs always determine runtime enabled membership;
+remembered flags cannot re-enable a set. This preference is not synchronized
+between browsers, and blocked storage falls back to in-memory editing. No API,
+authorization, database, or inspector restart contract changes are involved.
 
 The web creation form makes this scope a required, explicit choice and every
 list row carries the same Organization, Workspace, or Only me label. Scope is a
@@ -17,7 +35,7 @@ requires account-administrator authority.
 ## Invariants
 
 1. **Plaintext has one explicit read boundary.** Generic workspace, session, event, capability, installation, list, and variable-set metadata responses remain value-free. One dedicated REST route and one live-session MCP tool return exactly one configured value, and only when the caller holds both the resource permission and literal `secrets:read`.
-2. **No attachment, no injection.** A run whose session has an empty `variableSetIds` selection and no Rig defaults gets exactly the pre-existing behavior: the deployment env allowlist, git identity, and run-scoped GitHub auth. Nothing more. (This injection describes a **managed sandbox**; a Connected Machine session is not injected this way — see [Env injection is a managed-sandbox concept](#env-injection-is-a-managed-sandbox-concept).)
+2. **No attachment, no injection.** A run whose session has an empty `variableSetIds` selection and no Sandbox Environment defaults gets exactly the pre-existing behavior: the deployment env allowlist, git identity, and run-scoped GitHub auth. Nothing more. (This injection describes a **managed sandbox**; a Connected Machine session is not injected this way — see [Env injection is a managed-sandbox concept](#env-injection-is-a-managed-sandbox-concept).)
 3. **Attachment and use are separate.** Creating or changing a runnable attachment requires both `variable-sets:attach` and `variable-sets:use`; neither permission implies the other. `variable-sets:attach` alone permits detaching, while `variable-sets:use` alone permits neither attaching nor detaching. Neither implies metadata, write, or plaintext-read authority.
 4. **Capability-only storage boundary.** The runtime role has no direct DML on variable-set or ciphertext tables. Security-definer routines enforce organization/workspace/user visibility and mutation rules under forced RLS.
 5. **Encryption at rest.** Values are AES-256-GCM encrypted with an operator key (`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`) held outside Postgres. A database dump alone does not reveal values.
@@ -32,7 +50,7 @@ rewritten by an older release cannot be reconstructed.
 
 ## Deliberate v1 storage decision
 
-`docs/packs.md` states that connector secrets should live behind `credentialRef` in an external broker, not in Postgres. Scoped Variable Sets deliberately differ: they DO store secret values in Postgres, encrypted with an operator key that lives only in the deployment's secret set. The current lossless `v2:` envelope preserves every UTF-16 code unit and the reader retains historical `v1:` compatibility; a future keyed envelope or external reference can still use another prefix without a schema change. Use `credentialRef` connectors for OAuth-broker-shaped credentials; use Variable Sets for plain `NAME=value` material an agent process expects.
+Scoped Variable Sets store secret values in Postgres encrypted with an operator key held in the deployment secret set. The lossless `v2:` envelope preserves every UTF-16 code unit; the reader retains historical `v1:` compatibility. Use Connections for provider credentials and Variable Sets for plain `NAME=value` material an agent process expects.
 
 ## Configuration
 
@@ -103,7 +121,7 @@ Attachment points:
 - `PUT /v1/workspaces/:id/sessions/:sessionId/variable-sets` replaces the complete ordered explicit selection. It is a control-plane change, not a `user.message` field: the session must have no active turn, must own a singleton sandbox group, and must have no live lease holders. A successful change emits `session.variable_sets.updated`, records metadata-only attach/detach/reorder audit facts, and expires any warm lease so neither a cached manifest nor a baked process environment can serve the new selection. The next turn or sandbox operation starts from a cold runtime boundary.
 - Create, Send, and Steer may also carry `personalResourceAttachment` with
   `once | session | always`. This does not change the session's fixed
-  ordered Variable Set selection, Rig, or Rig version. It atomically issues authority for the
+  ordered Variable Set selection, Sandbox Environment, or Sandbox Environment version. It atomically issues authority for the
   server-derived personal subset of that current closure in the same transaction
   that accepts the logical turn. Established-session requests must carry the
   expected session authority epoch; create binds the new epoch server-side.
@@ -117,7 +135,7 @@ Attachment points:
   The new-session browser uses ordinary target-workspace scoped metadata as its
   choice catalog only when the grant holds both `variable-sets:list` and
   `secrets:list`. An attach/use-only grant never calls that catalog: restored
-  ids and selected Rig defaults go through exact attachment resolution, which
+  ids and selected Sandbox Environment defaults go through exact attachment resolution, which
   returns only accessible `{ id, scope }` pairs and omits inaccessible ids.
   This keeps inaccessible choices absent, preserves create-by-id authority, and
   prevents a metadata request from blocking an otherwise valid selection. The
@@ -141,14 +159,13 @@ Attachment points:
   state; revocation blocks future use but cannot erase already-injected secrets.
 - `POST`/`PATCH /v1/workspaces/:id/scheduled-tasks` accept `variableSetId` (null detaches on update). Setting or changing a non-null attachment requires both permissions; detaching requires `variable-sets:attach`. Changing the attachment of a task with a live reusable session returns 409 because the task's accepted execution snapshot must remain stable; explicitly reconfigure the quiescent target session or recreate the task instead.
 - Organization- and workspace-scoped Variable Sets on scheduled runs materialize under the exact fenced service turn (`scheduler`) and do not invent an initiating human. User-scoped Variable Sets remain different: they require the frozen causal human and exact personal-resource grant described next. This distinction applies identically to standalone database decryption and a host-provided `sandboxSecrets` credential boundary.
-- When the selected Variable Set, Rig, or one of the Rig version's defaults is personal, scheduled-task acceptance freezes the causal human plus exact membership/resource/grant generations. Each occurrence revalidates and copies that immutable authority before dispatch; task edits, current Rig defaults, the current API user, and workspace defaults are never fallback authority. `once` grants belong to one admitted occurrence across recovery attempts. A rolling upgrade pauses legacy tasks that lack this ledger, and an explicit resume converts them before dispatch; old-writer authority-free runs are rejected in PostgreSQL. Only identifiers and generations are stored in this ledger; plaintext still crosses only the ordinary materialization/read boundaries described above.
+- When the selected Variable Set, Sandbox Environment, or one of the Sandbox Environment version's defaults is personal, scheduled-task acceptance freezes the causal human plus exact membership/resource/grant generations. Each occurrence revalidates and copies that immutable authority before dispatch; task edits, current Sandbox Environment defaults, the current API user, and workspace defaults are never fallback authority. `once` grants belong to one admitted occurrence across recovery attempts. A rolling upgrade pauses legacy tasks that lack this ledger, and an explicit resume converts them before dispatch; old-writer authority-free runs are rejected in PostgreSQL. Only identifiers and generations are stored in this ledger; plaintext still crosses only the ordinary materialization/read boundaries described above.
 - Direct session `once` follows the same logical-work rule: acceptance consumes
   it once for the turn, while same-turn worker recovery reuses the accepted
   receipt. New goal continuations and machine-input successor turns do not
   inherit a once snapshot; machine updates already coalesced into the accepted
   turn remain part of that exact turn. A nonowner in a shared session cannot
   attach or resolve the owner's personal fixed resources.
-- `POST /v1/workspaces/:id/packs/:packId/enable` accepts `variableSetId` when a pack declares a `variable set` block and requires both attachment permissions; required variables are checked by **name**. Scheduled tasks created from that installation's templates inherit the attachment without re-checking either permission on the caller — both were authorized at enable time.
 
 An organization- or user-scoped `variableSetId` may originate in another workspace in the same organization when its scoped authority makes it visible from the target workspace. Unknown, inaccessible, workspace-scoped foreign, and cross-organization ids return `422 unknown variableSetId`; RLS makes those cases indistinguishable by design.
 
@@ -167,7 +184,7 @@ Names must match `^[A-Z][A-Z0-9_]*$` (max 128 chars). Names the platform manages
 deployment allowlist < git identity < ordered explicit session Variable Sets < run-scoped GitHub auth
 ```
 
-Later wins. A session bound to a [rig](rigs.md) with `defaultVariableSetIds` gets those defaults first, in the Rig version's listed order, followed by every explicit session set in the session's listed order: `deployment allowlist < git identity < ordered Rig defaults < ordered explicit session sets < run-scoped GitHub auth`. Scope never changes precedence. A Rig default is pure convenience for tooling every session on that Rig should have; any later explicit session set wins the same-name collision. Reserved-name validation prevents collisions with the platform-managed git/GitHub entries, so the run-scoped GitHub token block always applies last untouched. Note that sandbox lifecycle hooks are profile-driven: workspace-provided `AZURE_CLIENT_ID`/`AZURE_CLIENT_SECRET`/`AZURE_TENANT_ID` only trigger the `azure-cli-login` hook on deployments that enable the `azure` preparation profile; on profile-less deployments the values are injected but no login hook runs.
+Later wins. A session bound to a [sandbox environment](rigs.md) with `defaultVariableSetIds` gets those defaults first, in the Sandbox Environment version's listed order, followed by every explicit session set in the session's listed order: `deployment allowlist < git identity < ordered sandbox environment defaults < ordered explicit session sets < run-scoped GitHub auth`. Scope never changes precedence. A Sandbox Environment default is pure convenience for tooling every session on that Sandbox Environment should have; any later explicit session set wins the same-name collision. Reserved-name validation prevents collisions with the platform-managed git/GitHub entries, so the run-scoped GitHub token block always applies last untouched. Note that sandbox lifecycle hooks are profile-driven: workspace-provided `AZURE_CLIENT_ID`/`AZURE_CLIENT_SECRET`/`AZURE_TENANT_ID` only trigger the `azure-cli-login` hook on deployments that enable the `azure` preparation profile; on profile-less deployments the values are injected but no login hook runs.
 
 ### Env injection is a managed-sandbox concept
 

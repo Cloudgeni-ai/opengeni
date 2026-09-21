@@ -6,6 +6,7 @@ import {
   CpuIcon,
   DatabaseIcon,
   LayoutDashboardIcon,
+  PlugIcon,
   ShieldCheckIcon,
   UsersIcon,
 } from "lucide-react";
@@ -30,6 +31,7 @@ const ITEMS: readonly OrganizationSettingsItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboardIcon },
   { id: "knowledge", label: "Knowledge", icon: BrainCircuitIcon },
   { id: "models", label: "Models", icon: CpuIcon },
+  { id: "integrations", label: "Integrations", icon: PlugIcon },
   { id: "people", label: "People & invitations", icon: UsersIcon },
   { id: "recovery", label: "Recovery", icon: ShieldCheckIcon },
   { id: "retention", label: "Retention", icon: DatabaseIcon },
@@ -50,6 +52,10 @@ const COPY: Record<OrganizationAdminSection, { title: string; description: strin
   models: {
     title: "Models",
     description: "Manage subscriptions and provider accounts shared with your workspaces.",
+  },
+  integrations: {
+    title: "Integrations",
+    description: "Choose which integrations can be connected across organization workspaces.",
   },
   people: {
     title: "People & invitations",
@@ -97,6 +103,7 @@ export function OrganizationSettingsShell({
       </a>
       <SettingsSidebar
         workspaceId={workspaceId}
+        backToWorkspaceSettings
         label="Organization settings"
         currentPage={copy.title}
         identity={

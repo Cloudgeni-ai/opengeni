@@ -1,4 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { spawn, spawnSync, execFile, type ChildProcess } from "node:child_process";
+import { mkdtempSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve, join } from "node:path";
+import { promisify } from "node:util";
 import postgres from "postgres";
 import type { SandboxProviderCommand } from "@opengeni/contracts";
 import {
@@ -13,6 +18,12 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import {
+  addSessionSystemUpdate,
+  applySessionTurnSettlement,
+  getSessionTurn,
+  peekSessionWork,
+  recoverSessionDispatch,
+  reconcileSessionAttemptQuiescence,
   adoptManagedSessionBackgroundCommand,
   advanceWorkspaceGeneration,
   advanceWorkspaceGenerationForDirectRequest,
@@ -35,6 +46,7 @@ import {
   SandboxRetainedProcessTerminalError,
   SessionBackgroundCommandAdoptionFencedError,
   SandboxWorkspaceMutationFencedError,
+  verifyWorkspaceMutationSettlement,
   settleRetainedProcess,
   type Database,
   type DbClient,
@@ -274,6 +286,7 @@ async function promoteTurnProcess(
     providerSessionId?: number;
     backgroundCommand?: string;
     providerCommand?: boolean;
+    supervised?: boolean;
     providerCommandSandboxId?: string;
   } = {},
 ): Promise<ProcessFixture> {
@@ -300,18 +313,36 @@ async function promoteTurnProcess(
   });
   const processId = crypto.randomUUID();
   const providerSessionId = input.providerSessionId ?? 71;
-  const command: SandboxProviderCommand | null = input.providerCommand
+  const invocationId = crypto.randomUUID();
+  const command: SandboxProviderCommand | null = input.supervised
     ? {
-        kind: "modal-control-v1",
-        sandboxId: input.providerCommandSandboxId ?? instanceId,
+        kind: "modal-router-v1",
+        sandboxId: instanceId,
         taskId: "ta-test",
-        execId: `tp-${crypto.randomUUID()}`,
+        execId: crypto.randomUUID(),
+        supervision: {
+          protocol: "native-subreaper-v1",
+          invocationId,
+          nonce: "a".repeat(64),
+          controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
+        },
         streams: {
-          stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
-          stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+          stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+          stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
         },
       }
-    : null;
+    : input.providerCommand
+      ? {
+          kind: "modal-control-v1",
+          sandboxId: input.providerCommandSandboxId ?? instanceId,
+          taskId: "ta-test",
+          execId: `tp-${crypto.randomUUID()}`,
+          streams: {
+            stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+            stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+          },
+        }
+      : null;
   const process = await retainWorkspaceProviderCommand(db, {
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
@@ -544,6 +575,404 @@ afterAll(async () => {
 }, 180_000);
 
 describe("retained-process terminal-owner reconciliation", () => {
+  test.skipIf(process.platform !== "linux")(
+    "SIGKILL after native launch preserves the pre-dispatch DB reservation and cancels the original idle invocation",
+    async () => {
+      const ids = await freshWorkspace();
+      const attempt = await freshTurn(ids);
+      const { leaseId, instanceId } = await insertWarmLease(ids, {
+        sessionId: attempt.sessionId,
+        holderId: attempt.holderId,
+        holderKind: "turn",
+      });
+      const operation = "execCommand";
+      const admission = await advanceWorkspaceGeneration(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 7,
+        expectedInstanceId: instanceId,
+        operation,
+      });
+      const directory = mkdtempSync(join(tmpdir(), "sandbox_rotation-launch-crash-"));
+      const binary = join(directory, "supervisor");
+      const marker = join(directory, "user-code-ran");
+      const source = resolve(
+        import.meta.dir,
+        "../../../agent/native/command-supervisor/supervisor.c",
+      );
+      const compilation = spawnSync("cc", ["-O2", "-o", binary, source], { encoding: "utf8" });
+      expect(compilation.status).toBe(0);
+      let native: ChildProcess | undefined;
+      let providerTerminal: Promise<number | null> | undefined;
+      let reserved: SandboxRetainedProcess | undefined;
+      let starts = 0;
+      let serverError: unknown;
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        async fetch(request) {
+          try {
+            const body = await request.json();
+            if (new URL(request.url).pathname === "/reserve") {
+              expect(starts).toBe(0);
+              reserved = await retainWorkspaceProviderCommand(db, {
+                accountId: ids.accountId,
+                workspaceId: ids.workspaceId,
+                sessionId: attempt.sessionId,
+                processId: body.id,
+                providerSessionId: body.providerSessionId,
+                providerCommand: body.providerCommand,
+                admissionId: admission.id,
+                admittedWorkspaceGeneration: admission.workspaceGeneration,
+                operation,
+                providerBinding: MODAL_PROVIDER_BINDING,
+                owner: {
+                  kind: "turn",
+                  turnId: attempt.turnId,
+                  executionGeneration: attempt.executionGeneration,
+                  attemptId: attempt.attemptId,
+                  holderId: attempt.holderId,
+                  sandboxGroupId: ids.groupId,
+                  expectedEpoch: 7,
+                  expectedInstanceId: instanceId,
+                },
+              });
+              return Response.json({ retained: true });
+            }
+            expect(reserved).toBeDefined();
+            const committed = await getRetainedProviderCommand(db, {
+              accountId: ids.accountId,
+              workspaceId: ids.workspaceId,
+              sessionId: attempt.sessionId,
+              processId: reserved!.id,
+            });
+            expect(committed?.execId).toBe(body.execId);
+            starts++;
+            native = spawn(binary, body.commandArgs.slice(1), {
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+            providerTerminal = new Promise((resolveExit, reject) => {
+              native!.once("error", reject);
+              native!.once("exit", (code) => resolveExit(code));
+            });
+            const socket = body.commandArgs[body.commandArgs.indexOf("--socket") + 1];
+            for (let poll = 0; poll < 100 && !existsSync(socket); poll++) await Bun.sleep(10);
+            expect(existsSync(socket)).toBe(true);
+            return Response.json({ accepted: true });
+          } catch (error) {
+            serverError = error;
+            return new Response("fixture failed", { status: 500 });
+          }
+        },
+      });
+      const worker = spawn(
+        process.execPath,
+        [resolve(import.meta.dir, "fixtures/supervised-launch-crash-worker.ts")],
+        {
+          env: {
+            ...process.env,
+            TEST_SUPERVISION_ENDPOINT: `http://127.0.0.1:${server.port}`,
+            TEST_SUPERVISION_SANDBOX: instanceId,
+            TEST_SUPERVISION_MARKER: marker,
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let workerError = "";
+      worker.stderr!.on("data", (chunk) => {
+        workerError += chunk;
+      });
+      try {
+        const signal = await new Promise<NodeJS.Signals | null>((resolveExit, reject) => {
+          worker.once("error", reject);
+          worker.once("exit", (_code, exitSignal) => resolveExit(exitSignal));
+        });
+        if (serverError) throw serverError;
+        expect(workerError).toBe("");
+        expect(signal).toBe("SIGKILL");
+        expect(starts).toBe(1);
+        expect(existsSync(marker)).toBe(false);
+        const scope = {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId: reserved!.id,
+        };
+        const command = await getRetainedProviderCommand(db, scope);
+        if (command?.kind !== "modal-router-v1" || !command.supervision)
+          throw new Error("Lost durable reservation");
+        const control = async (action: string, receiptId?: string) =>
+          JSON.parse(
+            (
+              await promisify(execFile)(
+                binary,
+                [
+                  "control",
+                  "--invocation",
+                  command.supervision!.invocationId,
+                  "--nonce",
+                  command.supervision!.nonce,
+                  "--socket",
+                  command.supervision!.controlPath,
+                  "--action",
+                  action,
+                  ...(receiptId ? ["--receipt", receiptId] : []),
+                ],
+                { timeout: 5_000 },
+              )
+            ).stdout,
+          );
+        expect((await control("status")).state).toBe("idle");
+        await closeTurnOwner(ids, attempt, "failed");
+        await admin`update sandbox_leases set rotation_requested_at=now(), rotation_reason='provider_deadline' where id=${leaseId}`;
+        await runReaper(async (_settings, _lease, retained, _mode, _capture, persistence) => {
+          expect(retained.id).toBe(reserved!.id);
+          expect(await persistence!.load()).toEqual(command);
+          expect(await persistence!.cancellationRequested!()).toBe(true);
+          let observation = await control("cancel");
+          for (let n = 0; n < 100 && !observation.receipt; n++) {
+            await Bun.sleep(10);
+            observation = await control("status");
+          }
+          expect(observation.receipt.leaderExitCode).toBe(125);
+          await persistence!.recordSupervisionReceipt!(observation.receipt);
+          await control("ack", observation.receipt.receiptId);
+          expect(await providerTerminal).toBe(0);
+          const terminal = structuredClone(command);
+          for (const stream of ["stdout", "stderr"] as const)
+            terminal.streams[stream] = { ...terminal.streams[stream], eof: true, exitCode: 0 };
+          await persistence!.captureRouterPage!({
+            expected: command,
+            command: terminal,
+            stdout: "",
+            stderr: "",
+          });
+          return {
+            status: "proved",
+            proof: { outcome: "exited", exitCode: 125, reason: "provider_exit_banner" },
+          };
+        });
+        expect((await getRetainedProcess(db, scope))?.state).toBe("exited");
+        expect(starts).toBe(1);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        worker.kill("SIGKILL");
+        if (native?.exitCode === null) native.kill("SIGKILL");
+        server.stop(true);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
+
+  test("supervised background command survives turn completion and settles only after deadline dual proof", async () => {
+    const fixture = await promoteTurnProcess({
+      supervised: true,
+      outcome: "completed",
+      backgroundCommand: "preview",
+    });
+    let observations = 0;
+    await runReaper(async (_settings, _lease, _process, _mode, _capture, persistence) => {
+      observations++;
+      expect(await persistence!.cancellationRequested!()).toBe(false);
+      return { status: "deferred", reason: "provider_running" };
+    });
+    expect(observations).toBe(1);
+    expect((await durableProcess(fixture)).state).toBe("active");
+    await admin`update sandbox_leases set rotation_requested_at=now(), rotation_reason='provider_deadline' where id=${fixture.leaseId}`;
+    await admin`update sandbox_retained_processes set reconcile_after=now()-interval '1 second' where id=${fixture.process.id}`;
+    await runReaper(async (_settings, _lease, _process, _mode, _capture, persistence) => {
+      observations++;
+      expect(await persistence!.cancellationRequested!()).toBe(true);
+      const command = await persistence!.load();
+      if (command?.kind !== "modal-router-v1" || !command.supervision)
+        throw new Error("Expected supervised command");
+      await persistence!.recordSupervisionReceipt!({
+        protocol: "native-subreaper-v1",
+        invocationId: command.supervision.invocationId,
+        receiptId: crypto.randomUUID(),
+        leaderExitCode: 7,
+      });
+      const terminal = structuredClone(command);
+      for (const stream of ["stdout", "stderr"] as const)
+        terminal.streams[stream] = { ...terminal.streams[stream], eof: true, exitCode: 0 };
+      await persistence!.captureRouterPage!({
+        expected: command,
+        command: terminal,
+        stdout: "",
+        stderr: "",
+      });
+      return {
+        status: "proved",
+        proof: { outcome: "exited", exitCode: 7, reason: "provider_exit_banner" },
+      };
+    });
+    expect(observations).toBe(2);
+    expect(await durableProcess(fixture)).toMatchObject({ state: "exited", exitCode: 7 });
+  }, 60_000);
+
+  test("a completed attempt's final provider mutation re-arms the cleanup wake", async () => {
+    if (!available) throw new Error("PostgreSQL is required for cleanup admission proof");
+    const ids = await freshWorkspace();
+    const attempt = await freshTurn(ids);
+    const { instanceId } = await insertWarmLease(ids, {
+      sessionId: attempt.sessionId,
+      holderId: attempt.holderId,
+      holderKind: "turn",
+    });
+    const authority = {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      turnId: attempt.turnId,
+      executionGeneration: attempt.executionGeneration,
+      attemptId: attempt.attemptId,
+      holderId: attempt.holderId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 7,
+      expectedInstanceId: instanceId,
+      operation: "test-final-mutation",
+    };
+    const admission = await advanceWorkspaceGeneration(db, authority);
+    await applySessionTurnSettlement(db, ids.workspaceId, {
+      sessionId: attempt.sessionId,
+      turnId: attempt.turnId,
+      triggerEventId: attempt.triggerEventId,
+      attemptId: attempt.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { output: "done" } }],
+    });
+    expect(await peekSessionWork(db, ids.workspaceId, attempt.sessionId)).toEqual({
+      kind: "cancellation-wait",
+      attemptId: attempt.attemptId,
+    });
+    const [before] =
+      await admin`select wake_revision from session_workflow_wake_outbox where session_id=${attempt.sessionId}`;
+    await verifyWorkspaceMutationSettlement(db, { ...authority, admission, outcome: "rejected" });
+    const [after] =
+      await admin`select wake_revision from session_workflow_wake_outbox where session_id=${attempt.sessionId}`;
+    expect(Number(after!.wake_revision)).toBeGreaterThan(Number(before!.wake_revision));
+    expect(await peekSessionWork(db, ids.workspaceId, attempt.sessionId)).toEqual({ kind: "idle" });
+    await verifyWorkspaceMutationSettlement(db, { ...authority, admission, outcome: "rejected" });
+    const [replayed] =
+      await admin`select wake_revision from session_workflow_wake_outbox where session_id=${attempt.sessionId}`;
+    expect(replayed!.wake_revision).toBe(after!.wake_revision);
+  }, 60_000);
+
+  for (const adopted of [false, true]) {
+    test(`completed cleanup fences unadopted remote writers (adopted=${adopted})`, async () => {
+      if (!available) throw new Error("PostgreSQL is required for cleanup admission proof");
+      const fixture = await promoteTurnProcess(
+        adopted ? { backgroundCommand: "independent work" } : {},
+      );
+      const attempt = fixture.attempt!;
+      await applySessionTurnSettlement(db, fixture.workspaceId, {
+        sessionId: fixture.sessionId,
+        turnId: attempt.turnId,
+        triggerEventId: attempt.triggerEventId,
+        attemptId: attempt.attemptId,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [{ type: "turn.completed", payload: { output: "done" } }],
+      });
+      const update = await addSessionSystemUpdate(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        kind: "child_terminal_result",
+        classification: "success",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: crypto.randomUUID(),
+        summary: "Child finished",
+        payload: {
+          type: "child_terminal_result",
+          childSessionId: crypto.randomUUID(),
+          status: "idle",
+        },
+      });
+      expect(update.added).toBe(true);
+      expect(
+        await recoverSessionDispatch(db, fixture.workspaceId, {
+          sessionId: fixture.sessionId,
+          attemptId: attempt.attemptId,
+          timeoutType: "HEARTBEAT",
+          maxRedispatches: 3,
+        }),
+      ).toMatchObject({ action: "stale", turnStatus: "completed" });
+      const claim = () =>
+        claimSessionWorkForAttempt(db, fixture.workspaceId, {
+          sessionId: fixture.sessionId,
+          workflowId: `session-${fixture.sessionId}`,
+          workflowRunId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+          dispatchId: crypto.randomUUID(),
+          trigger: { kind: "next" },
+        });
+      if (adopted) {
+        expect(await peekSessionWork(db, fixture.workspaceId, fixture.sessionId)).toEqual({
+          kind: "runnable",
+        });
+        expect((await claim()).action).toBe("claimed");
+        expect(
+          (await getRetainedProcess(db, { ...fixture, processId: fixture.process.id }))?.state,
+        ).toBe("active");
+        return;
+      }
+      expect(await peekSessionWork(db, fixture.workspaceId, fixture.sessionId)).toEqual({
+        kind: "cancellation-wait",
+        attemptId: attempt.attemptId,
+      });
+      expect(await claim()).toEqual({ action: "unclaimed", reason: "control-pending" });
+      const [dispatch] =
+        await admin`select temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id from session_turn_attempts where id=${attempt.attemptId}`;
+      expect(
+        await reconcileSessionAttemptQuiescence(db, {
+          accountId: fixture.accountId,
+          workspaceId: fixture.workspaceId,
+          sessionId: fixture.sessionId,
+          attemptId: attempt.attemptId,
+          temporalWorkflowId: dispatch!.temporal_workflow_id,
+          temporalWorkflowRunId: dispatch!.temporal_workflow_run_id,
+          temporalActivityId: dispatch!.temporal_activity_id,
+          activitySettled: true,
+        }),
+      ).toEqual({ action: "pending", events: [] });
+      const [before] =
+        await admin`select wake_revision from session_workflow_wake_outbox where session_id=${fixture.sessionId}`;
+      await settleRetainedProcess(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        processId: fixture.process.id,
+        expected: retainedProcessSettlementIdentity(fixture.process),
+        outcome: "exited",
+        exitCode: 0,
+        reason: "provider_exit_banner",
+        idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+      });
+      const [after] =
+        await admin`select wake_revision from session_workflow_wake_outbox where session_id=${fixture.sessionId}`;
+      expect(Number(after!.wake_revision)).toBeGreaterThan(Number(before!.wake_revision));
+      expect(await peekSessionWork(db, fixture.workspaceId, fixture.sessionId)).toEqual({
+        kind: "runnable",
+      });
+      expect((await claim()).action).toBe("claimed");
+      expect(await getSessionTurn(db, fixture.workspaceId, attempt.turnId)).toMatchObject({
+        status: "completed",
+        executionGeneration: attempt.executionGeneration,
+      });
+    }, 60_000);
+  }
+
   test("provider identity and cursors survive fresh database reads without accepting a rebind", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({ providerCommand: true });
@@ -609,6 +1038,35 @@ describe("retained-process terminal-owner reconciliation", () => {
     );
     expect(recovered).toMatchObject({ status: "proved", proof: { exitCode: 0 } });
     expect(new Set(chunkIds).size).toBe(1);
+  }, 60_000);
+
+  test("local SDK resume identity can recover retained terminal output without crossing providers", async () => {
+    if (!available) throw new Error("PostgreSQL required for retained-process regression");
+    const fixture = await promoteTurnProcess({ outcome: "completed" });
+    const originalLease = await readLease(db, fixture.workspaceId, fixture.groupId);
+    if (!originalLease) throw new Error("Expected lease");
+    const process = { ...fixture.process, providerBackend: "local" };
+    const lease = { ...originalLease, backend: "local", resumeBackendId: "unix_local" };
+    const result = "Process exited with code 0\n\nOutput:\nretained tail";
+    await expect(
+      captureRetainedProbeOutput(process.id, result, async () => {
+        throw new Error("temporary persistence failure");
+      }),
+    ).rejects.toThrow("temporary persistence failure");
+    expect(
+      await probeRetainedProcessAtProvider(
+        SETTINGS,
+        { ...lease, resumeBackendId: "docker" },
+        process,
+      ),
+    ).toEqual({ status: "deferred", reason: "identity_mismatch" });
+    const outputs: unknown[] = [];
+    expect(
+      await probeRetainedProcessAtProvider(SETTINGS, lease, process, "observe", async (output) => {
+        outputs.push(output);
+      }),
+    ).toMatchObject({ status: "proved", proof: { outcome: "exited", exitCode: 0 } });
+    expect(outputs).toEqual([result]);
   }, 60_000);
 
   test("running and terminal reaper output is retained without observing completion", async () => {

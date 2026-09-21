@@ -14,7 +14,7 @@ export function sessionStatusLabel(status: Session["status"]): string {
     case "running":
       return "Running";
     case "queued":
-      return "Starting";
+      return "Queued";
     case "failed":
       return "Failed";
     case "cancelled":

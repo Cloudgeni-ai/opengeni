@@ -1,3 +1,4 @@
+import { seedSenderConnections } from "./sender-connection-fixture";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { MODEL_CONTEXT_LABEL, type McpPersonalConnectionDelegation } from "@opengeni/contracts";
 import { and, asc, eq } from "drizzle-orm";
@@ -6,7 +7,12 @@ import {
   applySessionTurnSettlement,
   addSessionSystemUpdate,
   bootstrapWorkspace,
+  blockSessionWorkBeforeAttemptClaim,
+  peekSessionWork,
+  evaluateSessionControl,
+  getSessionGoal,
   claimSessionWorkForAttempt,
+  initializeSessionStartAtomically,
   createDb,
   createSession,
   createSessionGoal,
@@ -83,6 +89,11 @@ async function submit(
   delivery: "send" | "steer" = "send",
   personalConnectionDelegations: McpPersonalConnectionDelegation[] = [],
 ) {
+  await seedSenderConnections(
+    shared.admin,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId! },
+    personalConnectionDelegations,
+  );
   return await withWorkspaceSubjectRls(client.db, grant.workspaceId!, grant.subjectId, (db) =>
     db.transaction((tx) =>
       submitHumanPromptInTransaction(tx as unknown as typeof db, {
@@ -149,6 +160,267 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 }
 
 describe("attempt-fenced Agent session commands", () => {
+  test("a service-origin message cannot borrow the receiving session creator's human", async () => {
+    const grant = await fixture();
+    const sender = await makeSession(grant);
+    await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: sender.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const source = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: sender.id,
+      workflowId: `session-${sender.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (source.action !== "claimed") throw new Error("Service source was not claimed");
+    expect(source.turn.initiatingHumanSubjectId).toBeNull();
+    const target = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      parentSessionId: sender.id,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: grant.subjectId },
+    });
+    await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        sendAgentMessageInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: target.id,
+          actor: {
+            type: "agent_attempt",
+            sessionId: sender.id,
+            turnId: source.turn.id,
+            attemptId,
+            executionGeneration: source.turn.executionGeneration,
+          },
+          operationKey: crypto.randomUUID(),
+          text: "Service work",
+        }),
+      ),
+    );
+    const received = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (received.action !== "claimed") throw new Error("Service message was not claimed");
+    expect(received.turn.initiatingHumanSubjectId).toBeNull();
+    expect(received.turn.initiator.kind).toBe("service");
+  });
+  test("ordinary messages retain the initiating human across two hops with no connections", async () => {
+    const grant = await fixture();
+    const sender = await activeAgent(grant);
+    const first = await makeSession(grant, sender.session.id);
+    const second = await makeSession(grant, sender.session.id);
+    let actor = sender.actor;
+    for (const target of [first, second]) {
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          sendAgentMessageInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            targetSessionId: target.id,
+            actor,
+            operationKey: crypto.randomUUID(),
+            text: "Continue delegated work",
+          }),
+        ),
+      );
+      const attemptId = crypto.randomUUID();
+      const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+        sessionId: target.id,
+        workflowId: `session-${target.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claim.action !== "claimed") throw new Error(`Not claimed: ${claim.reason}`);
+      expect(claim.turn.initiatingHumanSubjectId).toBe(grant.subjectId);
+      expect(claim.turn.initiator).toMatchObject({ kind: "subject", subjectId: grant.subjectId });
+      expect(claim.turn.personalConnectionDelegations).toEqual([]);
+      expect(claim.turn.initiatorContext.via).toContainEqual({
+        kind: "agent",
+        sessionId: actor.sessionId,
+        turnId: actor.turnId,
+        attemptId: actor.attemptId,
+        executionGeneration: actor.executionGeneration,
+      });
+      actor = {
+        type: "agent_attempt",
+        sessionId: target.id,
+        turnId: claim.turn.id,
+        attemptId,
+        executionGeneration: claim.turn.executionGeneration,
+      };
+    }
+  });
+  test("parent admission recheck preserves independent child control and goal pauses", async () => {
+    const grant = await fixture();
+    const parent = await makeSession(grant);
+    const child = await makeSession(grant, parent.id);
+    const workspaceId = grant.workspaceId!;
+    await submit(grant, parent.id, "accepted parent work");
+    await submit(grant, child.id, "accepted child work");
+    const control = (sessionId: string, action: "pause" | "resume") =>
+      withWorkspaceRls(client.db, workspaceId, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            actor: { type: "human", subjectId: grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            action,
+          }),
+        ),
+      );
+    const beforeHierarchyChange = await peekSessionWork(client.db, workspaceId, parent.id, true);
+    if (beforeHierarchyChange.kind !== "runnable" || !beforeHierarchyChange.admissionFence)
+      throw new Error("Missing pre-control fence");
+    await control(child.id, "pause");
+    expect(
+      (
+        await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+          accountId: grant.accountId,
+          sessionId: parent.id,
+          workflowId: `session-${parent.id}`,
+          attemptId: crypto.randomUUID(),
+          fence: beforeHierarchyChange.admissionFence,
+          reason: "database_claim_rejected",
+          sqlState: "42501",
+        })
+      ).action,
+    ).toBe("stale");
+    await createSessionGoal(client.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: parent.id,
+      text: "explicitly paused objective",
+      createdBy: "api",
+    });
+    await setSessionGoalStatus(client.db, workspaceId, parent.id, {
+      status: "paused",
+      rationale: "human decision pending",
+    });
+    const peek = await peekSessionWork(client.db, workspaceId, parent.id, true);
+    if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("Missing fence");
+    expect(
+      (
+        await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+          accountId: grant.accountId,
+          sessionId: parent.id,
+          workflowId: `session-${parent.id}`,
+          attemptId: crypto.randomUUID(),
+          fence: peek.admissionFence,
+          reason: "database_claim_rejected",
+          sqlState: "42501",
+        })
+      ).action,
+    ).toBe("blocked");
+    await control(parent.id, "resume");
+    expect((await getSession(client.db, workspaceId, parent.id))?.admissionBlock).toBeNull();
+    expect(
+      await withWorkspaceRls(client.db, workspaceId, (db) =>
+        evaluateSessionControl(db, workspaceId, child.id),
+      ),
+    ).toMatchObject({ state: "paused" });
+    expect(await getSessionGoal(client.db, workspaceId, parent.id)).toMatchObject({
+      status: "paused",
+    });
+  });
+
+  test("agent messages preserve admission blocking; fresh Steer rechecks but receipt replay does not", async () => {
+    const grant = await fixture();
+    const caller = await activeAgent(grant);
+    const target = await makeSession(grant, caller.session.id);
+    await submit(grant, target.id, "accepted before admission denial");
+    const workspaceId = grant.workspaceId!;
+    const park = async () => {
+      const peek = await peekSessionWork(client.db, workspaceId, target.id, true);
+      if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("Missing fence");
+      expect(
+        (
+          await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+            accountId: grant.accountId,
+            sessionId: target.id,
+            workflowId: `session-${target.id}`,
+            attemptId: crypto.randomUUID(),
+            fence: peek.admissionFence,
+            reason: "personal_resource_grant_required",
+            sqlState: "OG002",
+          })
+        ).action,
+      ).toBe("blocked");
+    };
+    await park();
+    const wakeBefore = await wakeRow(workspaceId, target.id);
+    const message = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db.transaction((tx) =>
+        sendAgentMessageInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId,
+          targetSessionId: target.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          text: "durable while blocked",
+        }),
+      ),
+    );
+    expect(message.replay).toBe(false);
+    expect(await wakeRow(workspaceId, target.id)).toEqual(wakeBefore);
+    expect(await getSession(client.db, workspaceId, target.id)).toMatchObject({
+      status: "requires_action",
+      admissionBlock: { reason: "personal_resource_grant_required" },
+    });
+    expect(
+      (await listOutstandingSessionSystemUpdates(client.db, workspaceId, target.id)).some(
+        (update) => update.id === message.updateId,
+      ),
+    ).toBe(true);
+    const operationKey = crypto.randomUUID();
+    const steer = () =>
+      withWorkspaceRls(client.db, workspaceId, (db) =>
+        db.transaction((tx) =>
+          steerAgentSessionInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId,
+            targetSessionId: target.id,
+            actor: caller.actor,
+            operationKey,
+            instruction: "explicit authorized recheck",
+          }),
+        ),
+      );
+    expect((await steer()).replay).toBe(false);
+    expect((await getSession(client.db, workspaceId, target.id))?.admissionBlock).toBeNull();
+    await park();
+    const blocked = await getSession(client.db, workspaceId, target.id);
+    const reblockedWake = await wakeRow(workspaceId, target.id);
+    expect((await steer()).replay).toBe(true);
+    expect((await getSession(client.db, workspaceId, target.id))?.admissionBlock).toEqual(
+      blocked?.admissionBlock,
+    );
+    expect(await wakeRow(workspaceId, target.id)).toEqual(reblockedWake);
+  });
+
   test("Agent Message and Steer freeze caller authority while queue disclosure stays public-safe", async () => {
     const grant = await fixture();
     const connectionId = crypto.randomUUID();

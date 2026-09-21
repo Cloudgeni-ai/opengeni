@@ -27,6 +27,7 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["GET", "/lineage", "session.lineage.read"],
   ["GET", "/background-commands", "session.read"],
   ["GET", "/model-context", "session.read"],
+  ["GET", "/codex-accounts", "session.read"],
   ["DELETE", "/background-commands/33333333-3333-4333-8333-333333333333", "session.control"],
   ["POST", "/codex-account", "session.codex_account.write"],
   ["POST", "/realtime/webrtc", "session.realtime.start"],

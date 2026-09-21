@@ -67,16 +67,6 @@ import {
   UninstallApiIntegrationRequest as ContractUninstallApiIntegrationRequest,
   UninstallApiIntegrationResult as ContractUninstallApiIntegrationResult,
   UpsertIntegrationFacetRequest as ContractUpsertIntegrationFacetRequest,
-  CapabilityPack as ContractCapabilityPack,
-  InstallPackRequest as ContractInstallPackRequest,
-  PackInstallation as ContractPackInstallation,
-  PackInstallationPreview as ContractPackInstallationPreview,
-  PackUninstallPreview as ContractPackUninstallPreview,
-  PreviewPackInstallationRequest as ContractPreviewPackInstallationRequest,
-  RegisterCapabilityPackRequest as ContractRegisterCapabilityPackRequest,
-  UninstallPackRequest as ContractUninstallPackRequest,
-  UninstallPackResult as ContractUninstallPackResult,
-  WorkspaceRegisteredPack as ContractWorkspaceRegisteredPack,
   InstallPluginRequest as ContractInstallPluginRequest,
   InstalledPlugin as ContractInstalledPlugin,
   ListInstalledPluginsResponse as ContractListInstalledPluginsResponse,
@@ -109,6 +99,7 @@ import {
   SessionMcpServerMetadata as ContractSessionMcpServerMetadata,
   UpdateSessionMcpApprovalPolicyRequest as ContractUpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionMcpApprovalPolicyResponse as ContractUpdateSessionMcpApprovalPolicyResponse,
+  HumanInputQuestion as ContractHumanInputQuestion,
   SessionEventType as ContractSessionEventType,
   TranscriptionEvent as ContractTranscriptionEvent,
   SessionHumanInputRequest as ContractSessionHumanInputRequest,
@@ -215,16 +206,6 @@ import type {
   UninstallApiIntegrationRequest,
   UninstallApiIntegrationResult,
   UpsertIntegrationFacetRequest,
-  CapabilityPack,
-  InstallPackRequest,
-  PackInstallation,
-  PackInstallationPreview,
-  PackUninstallPreview,
-  PreviewPackInstallationRequest,
-  RegisterCapabilityPackRequest,
-  UninstallPackRequest,
-  UninstallPackResult,
-  WorkspaceRegisteredPack,
   InstallPluginRequest,
   InstalledPlugin,
   ListInstalledPluginsResponse,
@@ -257,6 +238,7 @@ import type {
   ProposeRigChangeRequest,
   Session,
   ForkSessionRequest,
+  HumanInputQuestion,
   ForkSessionResponse,
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
@@ -626,6 +608,61 @@ describe("SDK / contracts parity", () => {
     expect(ContractSessionMcpServerInput.parse(sdkMcpServer)).toEqual(sdkMcpServer);
   });
 
+  test("human-input skillReview present, absent, and null stay assignable to SDK types", () => {
+    const question = {
+      id: "choice",
+      kind: "single_select" as const,
+      prompt: "Choose a format",
+      options: [{ id: "text", label: "Text" }],
+    };
+    const skillReview = {
+      sourceOperationId: "11111111-1111-4111-8111-111111111111",
+      skillId: "22222222-2222-4222-8222-222222222222",
+      revisionId: "33333333-3333-4333-8333-333333333333",
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+    };
+    const requestBase = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      workspaceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      sessionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      turnId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      turnGeneration: 1,
+      creationAttemptId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      toolCallId: "call_skill_review",
+      status: "pending" as const,
+      allowSkip: false,
+      response: null,
+      respondedBy: null,
+      respondedAt: null,
+      expiresAt: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const acceptQuestion = (
+      value: z.infer<typeof ContractHumanInputQuestion>,
+    ): HumanInputQuestion => value;
+    const acceptRequest = (
+      value: z.infer<typeof ContractSessionHumanInputRequest>,
+    ): SessionHumanInputRequest => value;
+
+    const absentQuestion = ContractHumanInputQuestion.parse(question);
+    const nullQuestion = ContractHumanInputQuestion.parse({ ...question, skillReview: null });
+    const presentQuestion = ContractHumanInputQuestion.parse({ ...question, skillReview });
+
+    expect(acceptQuestion(absentQuestion).skillReview).toBeUndefined();
+    expect(acceptQuestion(nullQuestion).skillReview).toBeNull();
+    expect(acceptQuestion(presentQuestion).skillReview).toEqual(skillReview);
+
+    for (const parsed of [
+      ContractSessionHumanInputRequest.parse({ ...requestBase, questions: [absentQuestion] }),
+      ContractSessionHumanInputRequest.parse({ ...requestBase, questions: [nullQuestion] }),
+      ContractSessionHumanInputRequest.parse({ ...requestBase, questions: [presentQuestion] }),
+    ]) {
+      expect(typeof acceptRequest(parsed)).toBe("object");
+    }
+  });
+
   test("new-session draft response and save shapes stay in SDK/contracts parity", () => {
     const acceptDraft = (value: z.infer<typeof ContractNewSessionDraft>): NewSessionDraft => value;
     // Like CreateSessionRequest, the dependency-free SDK deliberately accepts
@@ -676,7 +713,7 @@ describe("SDK / contracts parity", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
       latencyMode: "priority",
-      connectionAuthorities: [],
+      connectionAccounts: [],
     };
     expect(ContractSubmitComposerDraftRequest.safeParse(submit).success).toBe(true);
     const { latencyMode: _latencyMode, ...missingLatency } = submit;
@@ -791,7 +828,7 @@ describe("SDK / contracts parity", () => {
         text: "hello",
         controlEtag: "control-1",
         expectedDraftRevision: 3,
-        connectionAuthorities: [],
+        connectionAccounts: [],
       },
     };
     const approval: ClientSessionEventInput = {
@@ -1111,84 +1148,6 @@ describe("SDK / contracts parity", () => {
     expect(ContractPreviewPluginRequest.safeParse(previewRequest).success).toBe(true);
     expect(ContractInstallPluginRequest.safeParse(installRequest).success).toBe(true);
     expect(ContractUninstallPluginRequest.safeParse(uninstallRequest).success).toBe(true);
-  });
-
-  test("Pack composition request and response shapes match the contracts", () => {
-    const acceptManifest = (value: z.infer<typeof ContractCapabilityPack>): CapabilityPack => value;
-    const acceptRegistered = (
-      value: z.infer<typeof ContractWorkspaceRegisteredPack>,
-    ): WorkspaceRegisteredPack => value;
-    const acceptInstallation = (
-      value: z.infer<typeof ContractPackInstallation>,
-    ): PackInstallation => value;
-    const acceptPreview = (
-      value: z.infer<typeof ContractPackInstallationPreview>,
-    ): PackInstallationPreview => value;
-    const acceptUninstallPreview = (
-      value: z.infer<typeof ContractPackUninstallPreview>,
-    ): PackUninstallPreview => value;
-    const acceptUninstallResult = (
-      value: z.infer<typeof ContractUninstallPackResult>,
-    ): UninstallPackResult => value;
-    expect(
-      [
-        acceptManifest,
-        acceptRegistered,
-        acceptInstallation,
-        acceptPreview,
-        acceptUninstallPreview,
-        acceptUninstallResult,
-      ].every((fn) => typeof fn === "function"),
-    ).toBe(true);
-
-    const manifest: RegisterCapabilityPackRequest = {
-      id: "infrastructure/safe-operations",
-      name: "Safe infrastructure operations",
-      description: "Pinned infrastructure capabilities and runtime requirements.",
-      role: "infrastructure",
-      category: "operations",
-      version: "2.0.0",
-      components: [
-        {
-          key: "skill/safe-operations",
-          kind: "skill",
-          capabilityId: "skill:portable/safe-operations",
-          contentSha256: "a".repeat(64),
-        },
-        {
-          key: "integration/linear/main",
-          kind: "integration",
-          capabilityId: "integration:linear",
-          instanceKey: "main",
-          revisionId: "openapi:linear-v1",
-          contentSha256: "b".repeat(64),
-        },
-      ],
-      rig: {
-        required: true,
-        requireVerified: true,
-      },
-    };
-    const previewRequest: PreviewPackInstallationRequest = {
-      rigId: "00000000-0000-4000-8000-000000000300",
-      variableSetId: "00000000-0000-4000-8000-000000000301",
-    };
-    const installRequest: InstallPackRequest = {
-      expectedManifestDigest: "c".repeat(64),
-      expectedInstallationVersion: 3,
-      rigId: previewRequest.rigId,
-      variableSetId: previewRequest.variableSetId,
-      idempotencyKey: "00000000-0000-4000-8000-000000000302",
-      metadata: { source: "capabilities-ui" },
-    };
-    const uninstallRequest: UninstallPackRequest = {
-      expectedInstallationVersion: 4,
-      idempotencyKey: "00000000-0000-4000-8000-000000000303",
-    };
-    expect(ContractRegisterCapabilityPackRequest.safeParse(manifest).success).toBe(true);
-    expect(ContractPreviewPackInstallationRequest.safeParse(previewRequest).success).toBe(true);
-    expect(ContractInstallPackRequest.safeParse(installRequest).success).toBe(true);
-    expect(ContractUninstallPackRequest.safeParse(uninstallRequest).success).toBe(true);
   });
 
   test("multi-instance API Integration shapes match the contracts", () => {

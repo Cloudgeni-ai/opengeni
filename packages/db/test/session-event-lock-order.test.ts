@@ -2022,6 +2022,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
                   parentSessionId: parent.sessionId,
                 },
                 personalConnectionDelegations: [],
+                mcpAccountBindings: [],
                 xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
               });
           }

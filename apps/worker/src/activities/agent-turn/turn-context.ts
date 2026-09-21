@@ -1,3 +1,4 @@
+import type { TurnHeartbeatDetails } from "../../op-journal";
 import type { Settings } from "@opengeni/config";
 import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
 import type { AppendEventInput, ApplySessionTurnSettlementInput } from "@opengeni/db";
@@ -123,6 +124,7 @@ export type RenewalState = {
 };
 
 export type EventingState = {
+  heartbeatDetails: TurnHeartbeatDetails | null;
   heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
   batcher: ReturnType<typeof createRuntimeBatcher> | null;
   preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null;
@@ -254,6 +256,7 @@ export function createTurnContext(input: {
       publishedRunCredentialNotices: new Set(),
     },
     eventing: {
+      heartbeatDetails: null,
       heartbeatTimer: undefined,
       batcher: null,
       preparedTools: null,

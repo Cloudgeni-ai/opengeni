@@ -673,7 +673,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 70
     strategy:
       fail-fast: false
       matrix:
@@ -785,6 +785,18 @@ jobs:
             ./test/e2e/custom-api-control-center.browser.e2e.ts \
             ./test/e2e/source-packages-control-center.browser.e2e.ts
 
+      - name: Compact session-search header browser acceptance
+        if: ${{ matrix.lane == 'interaction' }}
+        id: session_search_header_browser
+        timeout-minutes: 8
+        env:
+          OPENGENI_REQUIRE_REAL_DB: "1"
+          OPENGENI_SESSION_SEARCH_ARTIFACT_DIR: /tmp/session-search-header-evidence
+        run: >-
+          bun test --max-concurrency=1 --timeout 300000
+          --test-name-pattern 'desktop expanded header keeps icon-only search inline'
+          ./test/e2e/session-search.browser.e2e.ts
+
       - name: Queue surface browser acceptance
         if: ${{ matrix.lane == 'interaction' }}
         id: queue_surface_browser
@@ -850,7 +862,10 @@ jobs:
         run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/workbench.browser.e2e.ts
 
       - name: Upload browser account acceptance evidence
-        if: ${{ matrix.lane == 'accounts' && steps.browser_accounts.outcome == 'success' }}
+        if: >-
+          ${{ always() && matrix.lane == 'accounts' &&
+          (steps.browser_accounts.outcome == 'success' ||
+          steps.browser_accounts.outcome == 'failure') }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: browser-account-acceptance-${{ matrix.engine }}
@@ -883,6 +898,18 @@ jobs:
             /tmp/sessionpin-session-pin-mobile-dark.png
             /tmp/sessionpin-session-pin-mobile-375-light.png
             /tmp/sessionpin-session-pin-mobile-375-dark.png
+
+      - name: Upload compact session-search header evidence
+        if: >-
+          ${{ always() && matrix.lane == 'interaction' &&
+          (steps.session_search_header_browser.outcome == 'success' ||
+          steps.session_search_header_browser.outcome == 'failure') }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: session-search-header-evidence
+          if-no-files-found: error
+          retention-days: 14
+          path: /tmp/session-search-header-evidence
 
       - name: Upload Codex quota visual evidence
         if: ${{ always() && matrix.lane == 'interaction' }}
@@ -1016,6 +1043,23 @@ jobs:
             --output "$ARTIFACT_NATIVE_TEST_ROOT"
           OPENGENI_ARTIFACT_KERNEL_NATIVE_PATH="$ARTIFACT_NATIVE_TEST_ROOT/native/linux-x64-gnu/opengeni_artifact_kernel.node" \
             bun run --cwd packages/artifact-tool test:production-native
+
+      - name: Native report delivery contracts
+        # Dedicated-lane discovery keeps the Rust/runtime prerequisite out of
+        # ordinary hermetic unit shards. The API's publishable dependency graph
+        # selects this required job for report/backend/native source changes.
+        env:
+          NODE_ENV: development
+          OPENGENI_REQUIRE_REAL_DB: "1"
+          OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES: opengeni_app
+          OPENGENI_ARTIFACT_DEVELOPMENT_RUNTIME_MANIFEST: ${{ github.workspace }}/.opengeni/artifact-runtime-report-ci/installation.development.json
+          OPENGENI_ARTIFACT_TOOL_ENTRY: ${{ github.workspace }}/.opengeni/artifact-runtime-report-ci/skill-facade-entry.mjs
+        run: |
+          set -euo pipefail
+          bun scripts/prepare-development-artifact-runtime.ts \
+            --repository-root "$GITHUB_WORKSPACE" \
+            --output "$GITHUB_WORKSPACE/.opengeni/artifact-runtime-report-ci"
+          bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts
 
       - name: Build client packages (contracts + SDK + React)
         timeout-minutes: 21

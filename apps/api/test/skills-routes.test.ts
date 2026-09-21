@@ -133,6 +133,69 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
 }
 
 describe("portable Skill routes", () => {
+  test("permanent deletion approval replays through HTTP after the Skill is gone", async () => {
+    if (!available || !shared) return;
+    const skillId = crypto.randomUUID();
+    const created = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify({
+        skillId,
+        operationId: crypto.randomUUID(),
+        expectedRevisionId: null,
+        expectedScopeVersion: 1,
+        stableKey: `remove-${skillId}`,
+        files: [{ path: "SKILL.md", content: skillMarkdown }],
+        reason: "Removal fixture",
+      }),
+    });
+    expect(created.status).toBe(200);
+    const saved = await created.json();
+    const removalOperationId = crypto.randomUUID();
+    // Seed the same immutable pending proposal emitted by the agent lifecycle;
+    // the HTTP surface only admits human decisions, not agent writes.
+    const [proposal] = await shared.admin`INSERT INTO preference_registry_revisions
+      (account_id,preference_id,title,description,content,content_hash,conflict_strategy,
+       provenance_source,provenance_source_id,trust,created_by_subject_id,corrects_revision_id,
+       skill_files,skill_activation_mode,skill_removal_operation_id)
+      SELECT account_id,preference_id,title,description,content,content_hash,'override',
+        'agent',${crypto.randomUUID()},'untrusted_proposal',${subjectId},id,
+        skill_files,skill_activation_mode,${removalOperationId}
+      FROM preference_registry_revisions WHERE id=${saved.revisionId} RETURNING id`;
+    const skillReview = {
+      sourceOperationId: removalOperationId,
+      removalOperationId,
+      skillId,
+      revisionId: proposal!.id,
+      expectedRevisionId: saved.revisionId,
+      expectedScopeVersion: 1,
+    };
+    await shared.admin`INSERT INTO skill_write_receipts(account_id,workspace_id,operation_id,fingerprint,actor,receipt)
+      VALUES(${accountId},${workspaceId},${removalOperationId},'http-removal-fixture',
+        ${shared.admin.json({ kind: "agent" })},${shared.admin.json({ outcome: "pending", skillId, skillReview })})`;
+    const body = {
+      operationId: crypto.randomUUID(),
+      revisionId: proposal!.id,
+      expectedRevisionId: saved.revisionId,
+      expectedScopeVersion: 1,
+      removalOperationId,
+      reason: "Approve deletion",
+    };
+    const apply = () =>
+      request(`/skills/content/${skillId}/approve`, { method: "POST", body: JSON.stringify(body) });
+    const first = await apply();
+    expect(first.status).toBe(200);
+    const receipt = await first.json();
+    expect(receipt).toMatchObject({ removed: true, replayed: false });
+    expect((await request(`/skills/content/${skillId}`)).status).toBe(404);
+    const retry = await apply();
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toEqual({ ...receipt, replayed: true });
+    const changed = await request(`/skills/content/${skillId}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ ...body, reason: "Changed retry" }),
+    });
+    expect(changed.status).toBe(409);
+  });
   test("legacy metadata-writing endpoints are retired without changing content", async () => {
     if (!available) return;
     const before = await request("/skills/content").then((response) => response.json());

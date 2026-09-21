@@ -57,7 +57,8 @@ export function CodexSourceSettings({
             ? "Uses only the organization's subscriptions. Manage them in organization model settings."
             : source.mode === "workspace"
               ? "Uses only subscriptions connected here, even when the organization has a subscription."
-              : "Codex models are unavailable in this workspace."}
+              : "Codex models are unavailable for new work in this workspace."}
+        {" Changes apply to new work. Work already in progress keeps its subscription source."}
       </p>
     </FormDisclosure>
   );

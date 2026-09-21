@@ -2,14 +2,24 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { and, eq, sql } from "drizzle-orm";
 import { readTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { createSessionStateActivities } from "../../../apps/worker/src/activities/session-state";
 import {
   bootstrapWorkspace,
+  blockSessionWorkBeforeAttemptClaim,
+  peekSessionWork,
+  isSessionEventPersistenceError,
+  lockSessionEventWriteRows,
+  nestedPostgresSqlState,
+  addSessionSystemUpdate,
+  evaluateSessionControl,
+  listOutstandingSessionSystemUpdates,
   claimPendingSessionWorkflowWakes,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   enqueueSessionWorkflowWake,
   getSessionTurn,
+  getSession,
   initializeSessionStartAtomically,
   listSessionEvents,
   listSessionTurns,
@@ -131,6 +141,704 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 }
 
 describe("transactional session workflow wake outbox", () => {
+  test("safe observer preserves unavailable work and reports an exact live owner without dispatch", async () => {
+    const ctx = await fixture();
+    await send(ctx, "preserve this accepted input");
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    const observe = (accountId = ctx.grant.accountId) =>
+      peekSessionWork(client.db, workspaceId, sessionId, false, accountId);
+    const before = await listSessionTurns(client.db, workspaceId, sessionId);
+    expect(await observe(crypto.randomUUID())).toEqual({ kind: "unavailable" });
+    expect(
+      await peekSessionWork(
+        client.db,
+        workspaceId,
+        crypto.randomUUID(),
+        false,
+        ctx.grant.accountId,
+      ),
+    ).toEqual({ kind: "unavailable" });
+    expect(await observe()).toEqual({ kind: "runnable" });
+    expect(await listSessionTurns(client.db, workspaceId, sessionId)).toEqual(before);
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${sessionId}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId,
+      workflowId,
+      workflowRunId,
+      dispatchId,
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error("Missing owner");
+    expect(await observe()).toEqual({
+      kind: "attempt-owned",
+      turnId: claim.turn.id,
+      attemptId,
+      executionGeneration: claim.turn.executionGeneration,
+      activityRef: { workflowId, workflowRunId, activityId: dispatchId, quiesced: false },
+    });
+    expect((await getSessionTurn(client.db, workspaceId, claim.turn.id))?.activeAttemptId).toBe(
+      attemptId,
+    );
+    const wake = await wakeRow(workspaceId, sessionId);
+    if (!wake) throw new Error("Missing accepted wake");
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId,
+        sessionId: crypto.randomUUID(),
+        temporalWorkflowId: workflowId,
+        wakeRevision: wake.wakeRevision,
+      }),
+    ).toEqual({ action: "pending_admission", blocker: "session_unavailable" });
+    expect(await wakeRow(workspaceId, sessionId)).toEqual(wake);
+    // Run the actual activity factory and real DB peeks. Only the external
+    // Temporal metadata service is a barrier; it does not mutate database state.
+    const startInspection = (expectedActivityId: string) => {
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const activities = createSessionStateActivities(
+        async () =>
+          ({
+            db: client.db,
+            inspectSessionAttemptActivity: async (ref: { activityId: string }) => {
+              expect(ref.activityId).toBe(expectedActivityId);
+              entered();
+              await released;
+              return "settled" as const;
+            },
+          }) as any,
+      );
+      const result = activities.peekSessionWork({
+        workspaceId,
+        sessionId,
+        observerAccountId: ctx.grant.accountId,
+      });
+      return { started, release, result };
+    };
+    const originalInspection = startInspection(dispatchId);
+    await originalInspection.started;
+    await requestSessionTurnRecovery(client.db, workspaceId, {
+      sessionId,
+      turnId: claim.turn.id,
+      triggerEventId: claim.turn.triggerEventId,
+      attemptId,
+      reason: "worker_shutdown",
+    });
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId,
+      sessionId,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+    });
+    const nextAttemptId = crypto.randomUUID();
+    const nextDispatchId = crypto.randomUUID();
+    const successor = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId,
+      workflowId,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: nextDispatchId,
+      attemptId: nextAttemptId,
+      trigger: { kind: "next" },
+    });
+    if (successor.action !== "claimed") throw new Error("Missing successor");
+    const replacementEvents = await listSessionEvents(client.db, workspaceId, sessionId);
+    originalInspection.release();
+    const replacedObservation = await originalInspection.result;
+    expect(replacedObservation).toMatchObject({
+      kind: "attempt-owned",
+      attemptId: nextAttemptId,
+      turnId: claim.turn.id,
+      executionGeneration: claim.turn.executionGeneration + 1,
+    });
+    expect(replacedObservation).not.toHaveProperty("ownerActivityState");
+    expect(await listSessionEvents(client.db, workspaceId, sessionId)).toEqual(replacementEvents);
+    const currentInspection = startInspection(nextDispatchId);
+    await currentInspection.started;
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId,
+          sessionId,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    const pausedEvents = await listSessionEvents(client.db, workspaceId, sessionId);
+    currentInspection.release();
+    expect(await currentInspection.result).toEqual({
+      kind: "interruption-pending",
+      attemptId: nextAttemptId,
+    });
+    expect(await listSessionEvents(client.db, workspaceId, sessionId)).toEqual(pausedEvents);
+    expect((await getSessionTurn(client.db, workspaceId, claim.turn.id))?.activeAttemptId).toBe(
+      nextAttemptId,
+    );
+  });
+
+  test("blocked recovery retains its active logical turn on Send but explicit Steer supersedes it", async () => {
+    for (const delivery of ["send", "steer"] as const) {
+      const ctx = await fixture();
+      await send(ctx, "original logical turn");
+      const workspaceId = ctx.grant.workspaceId!;
+      const sessionId = ctx.session.id;
+      const workflowId = `session-${sessionId}`;
+      const workflowRunId = crypto.randomUUID();
+      const dispatchId = crypto.randomUUID();
+      const attemptId = crypto.randomUUID();
+      const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId,
+        workflowId,
+        workflowRunId,
+        dispatchId,
+        attemptId,
+        trigger: { kind: "next" },
+      });
+      if (claim.action !== "claimed") throw new Error("Missing active turn");
+      await requestSessionTurnRecovery(client.db, workspaceId, {
+        sessionId,
+        turnId: claim.turn.id,
+        triggerEventId: claim.turn.triggerEventId,
+        attemptId,
+        reason: "worker_shutdown",
+      });
+      await markSessionAttemptQuiesced(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId,
+        sessionId,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+      });
+      const peek = await peekSessionWork(client.db, workspaceId, sessionId, true);
+      if (peek.kind !== "runnable" || !peek.admissionFence)
+        throw new Error("Missing recovery fence");
+      expect((await getSession(client.db, workspaceId, sessionId))?.activeTurnId).toBe(
+        claim.turn.id,
+      );
+      expect(
+        (
+          await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+            accountId: ctx.grant.accountId,
+            sessionId,
+            workflowId,
+            attemptId: crypto.randomUUID(),
+            fence: peek.admissionFence,
+            reason: "database_claim_rejected",
+            sqlState: "42501",
+          })
+        ).action,
+      ).toBe("blocked");
+      await send(ctx, "new explicit direction", delivery);
+      const rechecked = await getSession(client.db, workspaceId, sessionId);
+      expect(rechecked?.admissionBlock).toBeNull();
+      const prior = await getSessionTurn(client.db, workspaceId, claim.turn.id);
+      if (delivery === "send") {
+        expect(prior).toMatchObject({
+          status: "recovering",
+          activeAttemptId: null,
+          cancelReason: null,
+          finishedAt: null,
+        });
+        expect(rechecked).toMatchObject({ status: "recovering", activeTurnId: claim.turn.id });
+      } else {
+        expect(prior).toMatchObject({
+          status: "superseded",
+          cancelReason: "steer",
+          activeAttemptId: null,
+        });
+        expect(prior?.finishedAt).toBeString();
+        expect(rechecked).toMatchObject({ status: "queued", activeTurnId: null });
+      }
+    }
+  });
+
+  test("admission fencing uses the event cursor and rejects events appended after the peek", async () => {
+    const ctx = await fixture();
+    await send(ctx, "preserved accepted input");
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    // Simulate a pure append: allocate from the canonical cursor without
+    // advancing the compatibility projection on the wide session row.
+    const append = () =>
+      withWorkspaceRls(client.db, workspaceId, (db) =>
+        db.transaction(async (tx) => {
+          const locks = await lockSessionEventWriteRows(tx as unknown as typeof db, {
+            workspaceId,
+            controlLock: "none",
+            sessionIds: [sessionId],
+          });
+          await tx.insert(schema.sessionEvents).values({
+            accountId: ctx.grant.accountId,
+            workspaceId,
+            sessionId,
+            sequence: locks.sessions[0]!.lastSequence + 1,
+            type: "agent.message.delta",
+            payload: { text: "admission cursor regression" },
+            occurredAt: new Date(),
+          });
+        }),
+      );
+    await append();
+    const [sequences] = await shared.admin<{ projection: number; cursor: number }[]>`
+      select s.last_sequence as projection, c.last_sequence as cursor
+      from sessions s join session_event_cursors c on c.session_id = s.id
+        and c.workspace_id = s.workspace_id where s.id = ${sessionId}
+    `;
+    expect(sequences!.cursor).toBeGreaterThan(sequences!.projection);
+    const peek = await peekSessionWork(client.db, workspaceId, sessionId, true);
+    if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("Missing fence");
+    expect(peek.admissionFence.lastSequence).toBe(sequences!.cursor);
+    await append();
+    const input = {
+      accountId: ctx.grant.accountId,
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      attemptId: crypto.randomUUID(),
+      fence: peek.admissionFence,
+      reason: "database_claim_rejected" as const,
+      sqlState: "42501",
+    };
+    expect((await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, input)).action).toBe(
+      "stale",
+    );
+    const fresh = await peekSessionWork(client.db, workspaceId, sessionId, true);
+    if (fresh.kind !== "runnable" || !fresh.admissionFence) throw new Error("Missing fresh fence");
+    expect(
+      (
+        await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+          ...input,
+          fence: fresh.admissionFence,
+        })
+      ).action,
+    ).toBe("blocked");
+  });
+
+  test("active blocked Resume honors its control fence and replay cannot clear a later denial", async () => {
+    const ctx = await fixture();
+    await send(ctx, "accepted before denial");
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    const park = async () => {
+      const peek = await peekSessionWork(client.db, workspaceId, sessionId, true);
+      if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("Missing fence");
+      expect(
+        (
+          await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+            accountId: ctx.grant.accountId,
+            sessionId,
+            workflowId: `session-${sessionId}`,
+            attemptId: crypto.randomUUID(),
+            fence: peek.admissionFence,
+            reason: "initiator_membership_required",
+            sqlState: "OG001",
+          })
+        ).action,
+      ).toBe("blocked");
+    };
+    await park();
+    const before = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      evaluateSessionControl(db, workspaceId, sessionId),
+    );
+    expect(before.state).toBe("active");
+    const operationKey = crypto.randomUUID();
+    const resume = () =>
+      withWorkspaceRls(client.db, workspaceId, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
+            accountId: ctx.grant.accountId,
+            workspaceId,
+            sessionId,
+            actor: { type: "human", subjectId: ctx.grant.subjectId },
+            operationKey,
+            action: "resume",
+            expectedControlEtag: before.controlEtag,
+          }),
+        ),
+      );
+    expect((await resume()).replay).toBe(false);
+    expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toBeNull();
+    await park();
+    const blocked = await getSession(client.db, workspaceId, sessionId);
+    const wakeBefore = await wakeRow(workspaceId, sessionId);
+    expect((await resume()).replay).toBe(true);
+    expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toEqual(
+      blocked?.admissionBlock,
+    );
+    expect(await wakeRow(workspaceId, sessionId)).toEqual(wakeBefore);
+  });
+
+  test("Send clears admission blocking without overriding explicit Pause", async () => {
+    const ctx = await fixture();
+    await send(ctx, "accepted before pause");
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    const peek = await peekSessionWork(client.db, workspaceId, sessionId, true);
+    if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("Missing fence");
+    await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+      accountId: ctx.grant.accountId,
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      attemptId: crypto.randomUUID(),
+      fence: peek.admissionFence,
+      reason: "database_claim_rejected",
+      sqlState: "42501",
+    });
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId,
+          sessionId,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    await send(ctx, "accepted while explicitly paused");
+    expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toBeNull();
+    expect(
+      await withWorkspaceRls(client.db, workspaceId, (db) =>
+        evaluateSessionControl(db, workspaceId, sessionId),
+      ),
+    ).toMatchObject({ state: "paused" });
+    expect(await peekSessionWork(client.db, workspaceId, sessionId)).toEqual({ kind: "idle" });
+    expect(
+      (await listSessionTurns(client.db, workspaceId, sessionId)).filter(
+        (turn) => turn.status === "queued",
+      ),
+    ).toHaveLength(2);
+  });
+
+  test("rejected preclaim parks accepted work, acknowledges wakes, and explicit Resume retries the same turn", async () => {
+    const ctx = await fixture();
+    const queued = await send(ctx, "preserve this exact accepted input");
+    const workspaceId = ctx.grant.workspaceId!;
+    const sessionId = ctx.session.id;
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId,
+      sessionId,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: crypto.randomUUID(),
+      summary: "preserved machine input",
+      payload: {
+        type: "agent_message",
+        text: "preserved machine input",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!update.added) throw new Error("Machine input not accepted");
+    const peek = await peekSessionWork(client.db, workspaceId, sessionId, true);
+    if (peek.kind !== "runnable" || !peek.admissionFence)
+      throw new Error("Missing admission fence");
+    const attemptId = crypto.randomUUID();
+    const acceptedTurns = await listSessionTurns(client.db, workspaceId, sessionId);
+    const claimInput = {
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" as const },
+    };
+    // Failure injection is confined to this test database and exact session.
+    await shared.admin
+      .unsafe(`CREATE FUNCTION test_preclaim_denial() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.session_id = '${sessionId}'::uuid THEN
+        RAISE EXCEPTION 'test authorization rejection' USING ERRCODE = '42501';
+      END IF; RETURN NEW; END $$;
+      CREATE TRIGGER zz_test_preclaim_denial BEFORE INSERT ON session_turn_attempts
+      FOR EACH ROW EXECUTE FUNCTION test_preclaim_denial();`);
+    try {
+      let failure: unknown;
+      try {
+        await claimSessionWorkForAttempt(client.db, workspaceId, claimInput);
+      } catch (error) {
+        failure = error;
+      }
+      expect(isSessionEventPersistenceError(failure)).toBe(true);
+      if (!isSessionEventPersistenceError(failure)) throw failure;
+      expect(failure.details).toMatchObject({ sqlState: "42501", stage: "session_attempts.claim" });
+      const blockInput = {
+        accountId: ctx.grant.accountId,
+        sessionId,
+        workflowId: claimInput.workflowId,
+        attemptId,
+        fence: peek.admissionFence,
+        reason: "database_claim_rejected" as const,
+        sqlState: "42501",
+      };
+      expect(
+        (await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, blockInput)).action,
+      ).toBe("blocked");
+      expect(
+        (await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, blockInput)).events,
+      ).toEqual([]);
+      for (let index = 0; index < 3; index++) {
+        expect(await peekSessionWork(client.db, workspaceId, sessionId)).toEqual({
+          kind: "admission-blocked",
+        });
+        expect(await claimSessionWorkForAttempt(client.db, workspaceId, claimInput)).toEqual({
+          action: "unclaimed",
+          reason: "gate-closed",
+        });
+      }
+      const turns = await listSessionTurns(client.db, workspaceId, sessionId);
+      expect(turns).toEqual(acceptedTurns);
+      expect(turns).toHaveLength(1);
+      expect(turns[0]).toMatchObject({ status: "queued", executionGeneration: 0 });
+      // A pre-upgrade writer ignores the TypeScript admission field. The
+      // installed DB trigger still rejects its INSERT before any claim commits.
+      let legacyFailure: unknown;
+      try {
+        await withWorkspaceRls(client.db, workspaceId, (db) =>
+          db.transaction(async (tx) => {
+            await lockSessionEventWriteRows(tx as unknown as typeof db, {
+              workspaceId,
+              controlLock: "share",
+              sessionIds: [sessionId],
+            });
+            await tx.insert(schema.sessionTurnAttempts).values({
+              id: crypto.randomUUID(),
+              accountId: ctx.grant.accountId,
+              workspaceId,
+              sessionId,
+              turnId: turns[0]!.id,
+              executionGeneration: 1,
+              temporalWorkflowId: claimInput.workflowId,
+              temporalWorkflowRunId: crypto.randomUUID(),
+              temporalActivityId: crypto.randomUUID(),
+              verifiedControlRevision: peek.admissionFence!.controlVersion,
+              authorityEpoch: 1,
+              authorityVisibility: "workspace_shared",
+              mcpApprovalPolicies: {},
+            });
+          }),
+        );
+      } catch (error) {
+        legacyFailure = error;
+      }
+      expect(nestedPostgresSqlState(legacyFailure)).toBe("OG003");
+      expect(
+        await shared.admin`select id from session_turn_attempts where session_id = ${sessionId}`,
+      ).toHaveLength(0);
+      expect(
+        await shared.admin`select id from session_history_items where session_id = ${sessionId}`,
+      ).toHaveLength(0);
+      expect(
+        (await listOutstandingSessionSystemUpdates(client.db, workspaceId, sessionId)).map(
+          (u) => u.id,
+        ),
+      ).toContain(update.update.id);
+      const parkedWake = await wakeRow(workspaceId, sessionId);
+      const laterUpdate = await addSessionSystemUpdate(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId,
+        sessionId,
+        kind: "agent_message",
+        classification: "info",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: crypto.randomUUID(),
+        summary: "later machine input",
+        payload: {
+          type: "agent_message",
+          text: "later machine input",
+          operationId: crypto.randomUUID(),
+        },
+      });
+      expect(laterUpdate).toMatchObject({ added: true, shouldWake: false });
+      expect((await wakeRow(workspaceId, sessionId))!.wakeRevision).toBe(parkedWake!.wakeRevision);
+      expect((await getSession(client.db, workspaceId, sessionId))?.status).toBe("requires_action");
+      expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toMatchObject({
+        reason: "database_claim_rejected",
+        sqlState: "42501",
+        retryPolicy: "explicit_recheck",
+      });
+      expect(
+        await markSessionWorkflowWakeDelivered(client.db, {
+          accountId: ctx.grant.accountId,
+          workspaceId,
+          sessionId,
+          temporalWorkflowId: claimInput.workflowId,
+          wakeRevision: (await wakeRow(workspaceId, sessionId))!.wakeRevision,
+        }),
+      ).toEqual({ action: "acknowledged" });
+      await shared.admin.unsafe(
+        "DROP TRIGGER zz_test_preclaim_denial ON session_turn_attempts; DROP FUNCTION test_preclaim_denial();",
+      );
+      await withWorkspaceRls(client.db, workspaceId, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
+            accountId: ctx.grant.accountId,
+            workspaceId,
+            sessionId,
+            actor: { type: "human", subjectId: ctx.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            action: "resume",
+          }),
+        ),
+      );
+      expect((await wakeRow(workspaceId, sessionId))!.wakeRevision).toBeGreaterThan(
+        queued.wakeRevision,
+      );
+      expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toBeNull();
+      const claimed = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        ...claimInput,
+        attemptId: crypto.randomUUID(),
+      });
+      expect(claimed.action).toBe("claimed");
+      if (claimed.action !== "claimed") throw new Error("Expected same accepted turn");
+      expect(claimed.turn.id).toBe(turns[0]!.id);
+      expect(
+        await listOutstandingSessionSystemUpdates(client.db, workspaceId, sessionId),
+      ).toMatchObject([
+        { id: laterUpdate.added ? laterUpdate.update.id : "missing", state: "pending" },
+      ]);
+    } finally {
+      await shared.admin.unsafe(
+        "DROP TRIGGER IF EXISTS zz_test_preclaim_denial ON session_turn_attempts; DROP FUNCTION IF EXISTS test_preclaim_denial();",
+      );
+    }
+  });
+
+  test("real deadlock and serialization retries recover without blocking or duplicate input", async () => {
+    for (const sqlState of ["40P01", "40001"] as const) {
+      const ctx = await fixture();
+      await send(ctx, `transient ${sqlState}`);
+      const sessionId = ctx.session.id;
+      await shared.admin.unsafe(`CREATE SEQUENCE test_preclaim_counter;
+        CREATE FUNCTION test_preclaim_transient() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+        BEGIN IF NEW.session_id = '${sessionId}'::uuid AND nextval('test_preclaim_counter') = 1 THEN
+          RAISE EXCEPTION 'transient test failure' USING ERRCODE = '${sqlState}';
+        END IF; RETURN NEW; END $$;
+        CREATE TRIGGER zz_test_preclaim_transient BEFORE INSERT ON session_turn_attempts
+        FOR EACH ROW EXECUTE FUNCTION test_preclaim_transient();`);
+      try {
+        const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+          sessionId,
+          workflowId: `session-${sessionId}`,
+          workflowRunId: crypto.randomUUID(),
+          attemptId: crypto.randomUUID(),
+          dispatchId: crypto.randomUUID(),
+          trigger: { kind: "next" },
+        });
+        expect(claimed.action).toBe("claimed");
+        expect(
+          await shared.admin`select id from session_turn_attempts where session_id = ${sessionId}`,
+        ).toHaveLength(1);
+        expect(
+          (await getSession(client.db, ctx.grant.workspaceId!, sessionId))?.admissionBlock,
+        ).toBeNull();
+        expect(await shared.admin`select last_value from test_preclaim_counter`).toMatchObject([
+          { last_value: "2" },
+        ]);
+      } finally {
+        await shared.admin.unsafe(
+          "DROP TRIGGER zz_test_preclaim_transient ON session_turn_attempts; DROP FUNCTION test_preclaim_transient(); DROP SEQUENCE test_preclaim_counter;",
+        );
+      }
+    }
+  });
+
+  test("new Send and Steer recheck a block, stale failures cannot reblock, and cancellation wins", async () => {
+    for (const action of ["send", "steer", "cancel", "pause"] as const) {
+      const ctx = await fixture();
+      await send(ctx, "original accepted input");
+      const workspaceId = ctx.grant.workspaceId!;
+      const sessionId = ctx.session.id;
+      const peek = await peekSessionWork(client.db, workspaceId, sessionId, true);
+      if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("Missing fence");
+      const input = {
+        accountId: ctx.grant.accountId,
+        sessionId,
+        workflowId: `session-${sessionId}`,
+        attemptId: crypto.randomUUID(),
+        fence: peek.admissionFence,
+        reason: "database_claim_rejected" as const,
+        sqlState: "P0002",
+      };
+      expect((await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, input)).action).toBe(
+        "blocked",
+      );
+      if (action === "cancel" || action === "pause") {
+        await withWorkspaceRls(client.db, workspaceId, (db) =>
+          db.transaction((tx) =>
+            mutateSessionControlInTransaction(tx as unknown as typeof db, {
+              accountId: ctx.grant.accountId,
+              workspaceId,
+              sessionId,
+              actor: { type: "human", subjectId: ctx.grant.subjectId },
+              operationKey: crypto.randomUUID(),
+              action,
+            }),
+          ),
+        );
+        if (action === "cancel")
+          expect(
+            (await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, input)).action,
+          ).toBe("terminal");
+        expect(await peekSessionWork(client.db, workspaceId, sessionId)).toEqual({ kind: "idle" });
+        if (action === "pause") {
+          expect(
+            (await getSession(client.db, workspaceId, sessionId))?.admissionBlock,
+          ).not.toBeNull();
+          await withWorkspaceRls(client.db, workspaceId, (db) =>
+            db.transaction((tx) =>
+              mutateSessionControlInTransaction(tx as unknown as typeof db, {
+                accountId: ctx.grant.accountId,
+                workspaceId,
+                sessionId,
+                actor: { type: "human", subjectId: ctx.grant.subjectId },
+                operationKey: crypto.randomUUID(),
+                action: "resume",
+              }),
+            ),
+          );
+          expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toBeNull();
+          expect(await peekSessionWork(client.db, workspaceId, sessionId)).toEqual({
+            kind: "runnable",
+          });
+        }
+      } else {
+        await send(ctx, "new authorized input", action);
+        expect(
+          (await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, input)).action,
+        ).toBe("stale");
+        expect((await getSession(client.db, workspaceId, sessionId))?.admissionBlock).toBeNull();
+        expect(await peekSessionWork(client.db, workspaceId, sessionId)).toEqual({
+          kind: "runnable",
+        });
+        if (action === "send")
+          expect(
+            (await listSessionTurns(client.db, workspaceId, sessionId)).filter(
+              (t) => t.status === "queued",
+            ),
+          ).toHaveLength(2);
+      }
+    }
+  });
+
   test("initial session state, first turn, and wake commit once under concurrent retries", async () => {
     const ctx = await fixture();
     const turnExecutionPolicy = TurnExecutionPolicyV1.parse({
@@ -413,6 +1121,18 @@ describe("transactional session workflow wake outbox", () => {
         wakeRevision: queued.wakeRevision,
         deliveredRevision: 0,
       });
+      const waiting = await getSession(client.db, ctx.grant.workspaceId!, ctx.session.id);
+      expect(waiting).toMatchObject({
+        status: "queued",
+        activeTurnId: null,
+        dispatchWait: { state: "pending", attempts: 1, lastError: null },
+      });
+      expect(waiting?.dispatchWait?.nextAttemptAt).toBeTruthy();
+      await markSessionWorkflowWakeFailed(client.db, claimedWake!, "Control worker unavailable");
+      expect(
+        (await getSession(client.db, ctx.grant.workspaceId!, ctx.session.id))?.dispatchWait
+          ?.lastError,
+      ).toBe("Control worker unavailable");
 
       const claimedTurn = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
         sessionId: ctx.session.id,
@@ -424,6 +1144,9 @@ describe("transactional session workflow wake outbox", () => {
       });
       expect(claimedTurn.action).toBe("claimed");
       if (claimedTurn.action !== "claimed") throw new Error(`${delivery} turn was not claimed`);
+      expect(
+        (await getSession(client.db, ctx.grant.workspaceId!, ctx.session.id))?.dispatchWait,
+      ).toBeNull();
 
       expect(await markSessionWorkflowWakeDelivered(client.db, claimedWake!)).toEqual({
         action: "acknowledged",
