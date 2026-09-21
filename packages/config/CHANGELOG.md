@@ -1,5 +1,89 @@
 # @opengeni/config
 
+## 2.0.0
+
+### Major Changes
+
+- 1bfb6a4: Remove Packs and their Workflow templates from the application, public clients,
+  runtime, and active database schema. Plugins, Skills, Connections, sandbox
+  environments, Knowledge, scheduled tasks, and event automations remain independent.
+
+  PR Review now has its own setup authority and fixed automation template. Generic
+  automation routes cannot mutate review-owned sources or triggers. The API contract
+  revision changes; deploy matching server and client versions together.
+
+  Migration 0482 is a destructive maintenance cutover: drain all API and worker
+  database clients, settle Pack-related operations and queued Pack automation work,
+  then apply migrations and provision roles before starting only matching binaries.
+  It removes Pack data without a compatibility layer or data-preservation migration.
+  Historical events mixing Pack and independent automation work block the cutover
+  for explicit operator resolution; independent execution history is never silently deleted.
+  Customized, shared, and re-scoped Skills, Connections, and session history are
+  preserved; source-only Skills lose their active distribution owner.
+
+- c66ba31: Unify interactive and trusted-backend OAuth setup on native workspace connections
+  with optional canonical-user ownership, persisted lifecycle bindings, native
+  credential refresh, and captured execution authority.
+
+  Remove the superseded host binding, delegation, and credential-resolver API/SDK
+  surfaces and runtime configuration. Migrate integrations to ordinary OAuth
+  connections before upgrading; retired host selections are rejected rather than
+  translated or silently replaced. Apply the matching database migrations and role
+  provisioning with the runtime. Historical records remain preserved. See
+  `docs/remote-mcp-credentials.md` for the cutover contract.
+
+  Share connection setup, provider identity, loading states, conversation cards,
+  composer, and activity surfaces between the console and React SDK. Preserve
+  personal-account consent and native sharing authority, and keep interaction-only
+  connection and command panels outside the initial session bundle.
+
+### Patch Changes
+
+- c702159: Stop retrying permanent runtime database posture and configuration failures as
+  connection errors. Validate local startup prerequisites, prevent overlapping
+  launchers from rotating live database credentials, and check database posture
+  before building the development sandbox.
+- 9d9b94b: Keep the published dependency closure aligned with the updated plugin removal
+  contracts. The SDK exposes named removal outcomes and optional preview-token
+  confirmation alongside the existing installation-version check.
+- f90d628: Add durable native supervision for supported stock Modal non-PTY commands. Retain
+  the idle invocation before provider dispatch and user-code release, verify native
+  capability on the exact warm instance, persist descendant-quiescence proof
+  before supervisor acknowledgment, and fence canonical settlement on provider exit
+  plus captured output. Deadline cancellation keeps a monotonic stdin fence without
+  cancelling ordinarily adopted background commands. Unsupported and legacy paths
+  remain explicit and cannot manufacture supervision proof.
+- a6251eb: Add isolated async trace context, parent/link export, bounded trace batching and
+  retry health, and opt-in protected failure diagnostics independent of the
+  application database. Preserve the public telemetry privacy projection.
+- ac006ef: Add opt-in durable GPT-6 Astra reasoning effort updates with a stable request-level baseline, retry fencing, SDK replay, and explicit compaction restoration. Disabled by default pending live backend verification.
+- c2b66d5: Parse artifact dispatcher and materializer settings independently from API and agent settings. Preserve database, telemetry, broker, and storage validation without requiring unrelated authentication or sandbox secrets in least-privilege sidecars.
+- Updated dependencies [6d0a4de]
+- Updated dependencies [c64a94f]
+- Updated dependencies [c387603]
+- Updated dependencies [1c924ed]
+- Updated dependencies [c31a951]
+- Updated dependencies [f90d628]
+- Updated dependencies [aa09567]
+- Updated dependencies [d1ab270]
+- Updated dependencies [c8bb974]
+- Updated dependencies [3fa175e]
+- Updated dependencies [332a02d]
+- Updated dependencies [132b945]
+- Updated dependencies [779b16b]
+- Updated dependencies [1cb688d]
+- Updated dependencies [621201d]
+- Updated dependencies [f90d628]
+- Updated dependencies [ac006ef]
+- Updated dependencies [1bfb6a4]
+- Updated dependencies [7e2436a]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [c66ba31]
+- Updated dependencies [f7c9169]
+- Updated dependencies [0ea365c]
+  - @opengeni/contracts@5.0.0
+  - @opengeni/codex@0.2.24
+
 ## 1.2.2
 
 ### Patch Changes

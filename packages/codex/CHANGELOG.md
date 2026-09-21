@@ -1,5 +1,12 @@
 # @opengeni/codex
 
+## 0.2.24
+
+### Patch Changes
+
+- c387603: Classify streaming response completion after parsing the final SSE block, so successful responses without a trailing blank separator do not produce false failed-request telemetry. Preserve genuine missing-terminal and provider failures and exactly one terminal audit event per attempt.
+- ac006ef: Add opt-in durable GPT-6 Astra reasoning effort updates with a stable request-level baseline, retry fencing, SDK replay, and explicit compaction restoration. Disabled by default pending live backend verification.
+
 ## 0.2.23
 
 ### Patch Changes
