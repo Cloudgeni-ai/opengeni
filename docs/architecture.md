@@ -1526,6 +1526,12 @@ Turn-end review capture yields to queued turns and fences late commits. Single-r
 runtime-role/RLS posture.
 
 Postgres owns object access, upload completion, and retained-evidence liveness.
+Retained screenshot reads resolve forked history through recorded session ancestry
+and an exact copied image receipt (`getRetainedScreenshotArtifact` in `packages/db`).
+The original artifact and bytes stay unchanged; existing workspace/private-file
+RLS, expiry and cleanup still apply. A fork relationship or a textual artifact UUID
+alone never grants a screenshot read. Existing forks use the same resolution
+without rewriting their history or backfilling file ownership.
 Storage endpoints and signed URLs are transport details; keep URLs, object keys,
 and provider identities out of prompt history when a provider-neutral receipt suffices.
 
