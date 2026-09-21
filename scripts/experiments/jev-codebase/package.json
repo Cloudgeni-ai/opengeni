@@ -1,0 +1,8 @@
+{
+  "name": "opengeni-jev-codebase-experiment",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "bun test ./core.test.ts", "typecheck": "tsc --noEmit" },
+  "dependencies": { "ai": "7.0.106", "@ai-sdk/gateway": "4.0.86" },
+  "devDependencies": { "@types/bun": "1.3.14", "typescript": "5.9.3" }
+}

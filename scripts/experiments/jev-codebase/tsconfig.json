@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "target": "ESNext", "module": "Preserve", "moduleResolution": "bundler",
+    "strict": true, "noEmit": true, "skipLibCheck": true, "types": ["bun"]
+  },
+  "include": ["*.ts"],
+  "exclude": ["fixtures", "node_modules", "runs"]
+}
