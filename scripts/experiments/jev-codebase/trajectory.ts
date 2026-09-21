@@ -48,6 +48,7 @@ export function validateCases(cases: BenchmarkCase[]): void {
       typeof c.context !== "string" ||
       !["binary", "evidence"].includes(c.mode) ||
       !["yes", "no", "indecisive"].includes(c.expectedAnswer) ||
+      (c.mode === "evidence" && c.expectedAnswer !== "indecisive") ||
       !Array.isArray(c.requiredSpans) ||
       !c.requiredSpans.length
     )

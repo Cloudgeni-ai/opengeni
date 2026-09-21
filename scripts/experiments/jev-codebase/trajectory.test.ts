@@ -121,6 +121,19 @@ test("absolute remaining time rejects late completion", () => {
   expect(() => remainingTime(100, 300, 200)).toThrow("trajectory_deadline");
 });
 test("empty oracle spans and duplicate cases are rejected", () => {
+  const valid: BenchmarkCase = {
+    id: "valid",
+    question: "question",
+    context: "context",
+    mode: "binary",
+    expectedAnswer: "no",
+    requiredSpans: [{ path: "a.ts", startLine: 1, endLine: 1 }],
+    category: "negative",
+    acceptableConclusion: "no",
+    oracleRationale: "source",
+  };
+  expect(() => validateCases([valid, valid])).toThrow("invalid_case");
+  expect(() => validateCases([{ ...valid, mode: "evidence" }])).toThrow("invalid_case");
   expect(() => validateCases([])).toThrow();
   expect(() =>
     validateCases([
