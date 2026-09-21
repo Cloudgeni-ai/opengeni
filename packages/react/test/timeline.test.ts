@@ -24,6 +24,22 @@ import {
 } from "../src/timeline";
 
 describe("toolDisplayName", () => {
+  test("persisted account labels survive reload without interpreting a model hash as a title", () => {
+    const name = "a".repeat(64);
+    const display = {
+      toolName: "search_documents",
+      title: "Search documents",
+      accountLabel: "Documents — Personal: alice@example.test",
+    };
+    const events = [
+      event("agent.toolCall.created", { id: "account-call", name, arguments: {}, display }),
+    ];
+    const [item] = buildTimeline(JSON.parse(JSON.stringify(events)));
+    expect(item).toMatchObject({ kind: "tool-call", name, display });
+    expect(toolDisplayName(name, display)).toBe(
+      "Search documents — Documents — Personal: alice@example.test",
+    );
+  });
   test("strips the MCP server-id prefix and title-cases the leaf", () => {
     // Catalog-imported MCP server: <opaque slug+hash>__<tool>.
     expect(

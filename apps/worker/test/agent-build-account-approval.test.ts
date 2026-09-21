@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { parseSync, type Node } from "oxc-parser";
 import type { Settings } from "@opengeni/config";
 import {
@@ -47,9 +48,10 @@ function modelSettingsAtBuild(
   );
 }
 
-test.each(["approve", "reject"] as const)(
+test.each(["approve", "reject", "legacy approve", "legacy reject"] as const)(
   "account-qualified worker calls interrupt and %s after reconstruction",
   async (decision) => {
+    const approve = decision.endsWith("approve");
     const mcp = startTestMcpServer();
     const otherMcp = startTestMcpServer();
     const serverId = `account-${"a".repeat(64)}`;
@@ -121,7 +123,11 @@ test.each(["approve", "reject"] as const)(
           {
             output: [
               functionCall(
-                prefixedMcpToolName(serverId, "search_documents"),
+                decision.startsWith("legacy")
+                  ? createHash("sha256")
+                      .update(JSON.stringify([serverId, "search_documents"]))
+                      .digest("hex")
+                  : prefixedMcpToolName(serverId, "search_documents"),
                 { query: "example" },
                 callId,
               ),
@@ -159,12 +165,12 @@ test.each(["approve", "reject"] as const)(
         mcpServers: prepared.mcpServers,
         resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
         connectorActionPolicy: hooks,
-        ...(decision === "approve" ? { approvedToolCallId: callId } : {}),
+        ...(approve ? { approvedToolCallId: callId } : {}),
       });
       const restored = await restoreInterruptedRunState(resumedAgent, serialized);
       const [interruption] = restored.getInterruptions();
       if (!interruption) throw new Error("missing approval");
-      if (decision === "approve") restored.approve(interruption);
+      if (approve) restored.approve(interruption);
       else restored.reject(interruption);
       const resumed = await runAgentStream(resumedAgent, restored, settings);
       for await (const _event of resumed.toStream()) {
@@ -173,12 +179,10 @@ test.each(["approve", "reject"] as const)(
       await resumed.completed;
       expect(resumed.interruptions).toHaveLength(0);
       expect(mcp.calls).toEqual(
-        decision === "approve" ? [{ tool: "search_documents", args: { query: "example" } }] : [],
+        approve ? [{ tool: "search_documents", args: { query: "example" } }] : [],
       );
       expect(otherMcp.calls).toHaveLength(0);
-      expect(acceptedCalls).toEqual(
-        decision === "approve" ? [`${serverId}:connection-1:${callId}`] : [],
-      );
+      expect(acceptedCalls).toEqual(approve ? [`${serverId}:connection-1:${callId}`] : []);
       expect(settings.mcpServers).toEqual(routed.mcpServers);
       expect({ ...settings, mcpServers: canonical.mcpServers }).toEqual(canonical);
     } finally {

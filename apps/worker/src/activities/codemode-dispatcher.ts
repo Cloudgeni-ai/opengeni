@@ -16,6 +16,7 @@ import {
   CODEMODE_MAX_CONCURRENT_CALLS_PER_ATTEMPT,
   type CodemodeOperation,
   type SessionEvent,
+  type ToolDisplayMetadata,
 } from "@opengeni/contracts";
 import {
   cancelQueuedCodemodeOperationsForAttempt,
@@ -70,6 +71,7 @@ export class CodemodeAttemptDispatcher {
     private readonly turnSignal?: AbortSignal,
     private readonly maxConcurrentCalls = CODEMODE_MAX_CONCURRENT_CALLS_PER_ATTEMPT,
     timings: CodemodeDispatcherTimings = {},
+    private readonly toolDisplayMetadata?: (modelName: string) => ToolDisplayMetadata | undefined,
   ) {
     if (
       environment.catalog.accountId !== scope.accountId ||
@@ -371,6 +373,10 @@ export class CodemodeAttemptDispatcher {
             payload: {
               id: operation.operationId,
               name: entry.modelName,
+              display: this.toolDisplayMetadata?.(entry.modelName) ?? {
+                toolName: entry.identity.toolName,
+                ...(entry.title ? { title: entry.title } : {}),
+              },
               arguments: operation.arguments,
               origin: "codemode",
               subjectId: operation.caller.subjectId,
