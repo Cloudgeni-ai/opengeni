@@ -44,4 +44,6 @@ export const embeddingMigrationTail = [
   // Rewrites the original-file policy introduced by 0461.
   "0499_session_attachment_access.sql",
   "0501_session_sharing_execution.sql",
+  // Reads the cursor table from 0374, withheld by these historical fixtures.
+  "0503_session_meaningful_attention.sql",
 ];

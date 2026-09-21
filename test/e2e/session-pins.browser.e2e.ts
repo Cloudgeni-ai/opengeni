@@ -59,6 +59,21 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
   let browser: Browser;
   let apiBaseUrl: string;
   let webBaseUrl: string;
+  let bus: MemoryEventBus;
+
+  async function publishAnswer(workspaceId: string, sessionId: string, text: string) {
+    // The workflow is stubbed: settle the fixture explicitly, otherwise its
+    // queued status correctly takes precedence over the rail's unread label.
+    const events = await appendSessionEventsAndUpdateSession(
+      dbClient.db,
+      workspaceId,
+      sessionId,
+      [{ type: "agent.message.completed", payload: { text } }],
+      { status: "idle" },
+    );
+    await bus.publish(workspaceId, sessionId, events);
+    return events.at(-1)!.sequence;
+  }
 
   beforeAll(async () => {
     // Build before acquiring/migrating the real database and starting the API.
@@ -90,6 +105,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
     shared = acquired;
     dbClient = createDb(shared.appUrl);
+    bus = new MemoryEventBus();
     const app = createApp({
       // Exercise the normal configured-principal access path so independent
       // contexts can represent either the same member on another device or a
@@ -102,7 +118,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         delegationSecret: undefined,
       }),
       db: dbClient.db,
-      bus: new MemoryEventBus(),
+      bus,
       workflowClient,
     });
     api = Bun.serve({
@@ -721,6 +737,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         workspaceId,
         "Unread active chat",
       );
+      await publishAnswer(workspaceId, target.id, "Initial answer awaiting attention");
       const attentionPath = `/v1/workspaces/${workspaceId}/sessions/${target.id}/attention`;
       let acknowledgementAttempts = 0;
       const firstAcknowledgementRelease = new Promise<void>((resolve) => {
@@ -792,29 +809,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           new URL(response.url()).pathname === attentionPath,
         { timeout: ACKNOWLEDGEMENT_TIMEOUT_MS },
       );
-      const sendResponse = await page.evaluate(
-        async ({ browserApiBaseUrl, targetWorkspaceId, targetSessionId }) => {
-          const response = await fetch(
-            `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions/${targetSessionId}/events`,
-            {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                type: "user.message",
-                clientEventId: crypto.randomUUID(),
-                payload: { text: "Later output arrived while the chat stayed open" },
-              }),
-            },
-          );
-          return { status: response.status, body: await response.text() };
-        },
-        {
-          browserApiBaseUrl: apiBaseUrl,
-          targetWorkspaceId: workspaceId,
-          targetSessionId: target.id,
-        },
+      await publishAnswer(
+        workspaceId,
+        target.id,
+        "Later output arrived while the chat stayed open",
       );
-      expect(sendResponse).toEqual({ status: 202, body: expect.any(String) });
       const laterAcknowledgementResponse = await laterAcknowledgement;
       expect(laterAcknowledgementResponse.status()).toBe(200);
       expect(
@@ -831,6 +830,36 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
               .__activeSessionUnreadFlash,
         ),
       ).toBe(false);
+
+      // Once consumed, a closed chat must stay read through durable cleanup.
+      // Reload from the API so optimistic active-chat suppression cannot hide
+      // a server-side regression in the meaningful frontier.
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      const cleanup = await appendSessionEvents(dbClient.db, workspaceId, target.id, [
+        { type: "sandbox.box.terminated", payload: { reason: "fixture cleanup" } },
+        { type: "workspace.revision.captured", payload: {} },
+        { type: "turn.event.rejected_late", payload: {} },
+      ]);
+      await bus.publish(workspaceId, target.id, cleanup);
+      await page.reload();
+      await targetRow.waitFor();
+      expect(await targetRow.getAttribute("aria-label")).not.toContain("unread");
+      const afterCleanup = await listPageFromBrowser(page, apiBaseUrl, workspaceId, { limit: 50 });
+      expect(afterCleanup.sessions.find((session) => session.id === target.id)?.unread).toBe(false);
+
+      expect(new URL(page.url()).pathname).toBe(`/workspaces/${workspaceId}/sessions`);
+      expect(await targetRow.getAttribute("aria-current")).toBeNull();
+      await publishAnswer(workspaceId, target.id, "New unseen substantive answer");
+      const unseen = await listPageFromBrowser(page, apiBaseUrl, workspaceId, { limit: 50 });
+      expect(unseen.sessions.find((session) => session.id === target.id)?.unread).toBe(true);
+      await page.reload();
+      await targetRow.waitFor();
+      expect(new URL(page.url()).pathname).toBe(`/workspaces/${workspaceId}/sessions`);
+      await waitFor(
+        async () => (await targetRow.getAttribute("aria-label"))?.includes("unread") === true,
+      );
+      const afterAnswer = await listPageFromBrowser(page, apiBaseUrl, workspaceId, { limit: 50 });
+      expect(afterAnswer.sessions.find((session) => session.id === target.id)?.unread).toBe(true);
     } finally {
       releaseFirstAcknowledgement();
       await context.close();
@@ -854,6 +883,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           workspaceId,
           `Attention ${transition} fence`,
         );
+        await publishAnswer(workspaceId, target.id, "Initial answer awaiting attention");
         let nextWorkspaceId = workspaceId;
         if (transition === "workspace") {
           const response = await fetch(`${apiBaseUrl}/v1/workspaces`, {
@@ -902,19 +932,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
               response.ok() &&
               Number(response.request().postDataJSON().acknowledgedThroughSequence) > firstSequence,
           );
-          const message = await fetch(
-            `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}/events`,
-            {
-              method: "POST",
-              headers: { ...ownerHeaders, "content-type": "application/json" },
-              body: JSON.stringify({
-                type: "user.message",
-                clientEventId: crypto.randomUUID(),
-                payload: { text: "A newer visible frontier" },
-              }),
-            },
-          );
-          expect(message.status).toBe(202);
+          await publishAnswer(workspaceId, target.id, "A newer visible frontier");
           await newer;
         } else {
           const documentMarker = await page.evaluate(() => {
@@ -967,9 +985,42 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         workspaceId,
         "Rapid read second chat",
       );
+      const firstAnswerSequence = await publishAnswer(workspaceId, first.id, "First chat answer");
+      const secondAnswerSequence = await publishAnswer(
+        workspaceId,
+        second.id,
+        "Second chat answer",
+      );
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
-      await page.locator(`a[data-session-row="${first.id}"]`).waitFor();
-      await page.locator(`a[data-session-row="${second.id}"]`).waitFor();
+      await page.bringToFront();
+      for (const target of [first, second]) {
+        const row = page.locator(`a[data-session-row="${target.id}"]`);
+        await row.waitFor();
+        await waitFor(
+          async () => (await row.getAttribute("aria-label"))?.includes("unread") === true,
+        );
+      }
+      expect(await page.evaluate(() => document.hasFocus())).toBe(true);
+      const beforeSwitch = await listPageFromBrowser(page, apiBaseUrl, workspaceId, { limit: 50 });
+      for (const target of [first, second]) {
+        expect(beforeSwitch.sessions.find((session) => session.id === target.id)?.unread).toBe(
+          true,
+        );
+      }
+
+      // Arm both receipts before either click. Completion of the second write
+      // does not prove the independent first write committed; a reload must not
+      // race that still-in-flight request.
+      const acknowledgements = [first, second].map((target) =>
+        page.waitForResponse(
+          (response) =>
+            response.ok() &&
+            response.request().method() === "PUT" &&
+            new URL(response.url()).pathname ===
+              `/v1/workspaces/${workspaceId}/sessions/${target.id}/attention`,
+          { timeout: 10_000 },
+        ),
+      );
 
       // Exercise the real rail links inside the old 750 ms acknowledgement
       // window. Merely visiting the first chat must commit its read receipt;
@@ -984,14 +1035,29 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         { firstId: first.id, secondId: second.id },
       );
       await page.waitForURL(`**/sessions/${second.id}`);
-      await page.waitForResponse(
-        (response) =>
-          response.ok() &&
-          response.request().method() === "PUT" &&
-          new URL(response.url()).pathname ===
-            `/v1/workspaces/${workspaceId}/sessions/${second.id}/attention`,
-        { timeout: 10_000 },
-      );
+      const receipts = await Promise.all(acknowledgements);
+      for (const [index, receipt] of receipts.entries()) {
+        expect(receipt.request().postDataJSON().acknowledgedThroughSequence).toBeGreaterThanOrEqual(
+          [firstAnswerSequence, secondAnswerSequence][index]!,
+        );
+        expect((await receipt.json()).unread).toBe(false);
+      }
+      // The configured header is an external identity label, not the durable
+      // subject ID (configured auth namespaces it). Resolve the same browser
+      // principal that authored both receipts instead of guessing its DB key.
+      const accessResponse = await page.request.get(`${apiBaseUrl}/v1/access/me`);
+      expect(accessResponse.ok()).toBe(true);
+      const access = await accessResponse.json();
+      expect(access.subjectId).toBe("configured:sessionpin-owner");
+      const persisted = await shared.admin<{ acknowledgedSequence: number }[]>`
+        select acknowledged_sequence as "acknowledgedSequence"
+        from session_pins
+        where workspace_id = ${workspaceId} and session_id = ${first.id}
+          and subject_id = ${access.subjectId}
+      `;
+      expect(persisted).toHaveLength(1);
+      expect(typeof persisted[0]!.acknowledgedSequence).toBe("number");
+      expect(persisted[0]!.acknowledgedSequence).toBeGreaterThanOrEqual(firstAnswerSequence);
 
       await page.reload();
       const firstRow = page.locator(`a[data-session-row="${first.id}"]`);

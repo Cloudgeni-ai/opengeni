@@ -52,26 +52,30 @@ Account isolation: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-a
 Postgres commits precede notifications. NATS transports fanout, invalidations,
 request/reply and machine streams—not durable commit evidence.
 
-`session_event_cursors` verifies every append transactionally and owns monotonic
-per-session sequencing. Semantic writers lock the session row for atomic state/event
-commits. Accepted raw exact-attempt batches hold session identity
-with `FOR KEY SHARE`, serialize on the cursor, retain exact turn/attempt fences,
-and never update the wide session row. Public
-`lastSequence`, unread, child acknowledgment, and viewer-specific tree
-attention projections (including unacknowledged failed descendants) read the
-cursor; `sessions.last_sequence` remains only a semantic/legacy compatibility
-projection. Legacy SQL writers are rebased at the database boundary; late
-raw events roll back, then retry the semantic gate before becoming
-rejected audit evidence. SSE clients replay durable events, subscribe to live
-fanout, and backfill sequence gaps from Postgres. NATS restarts may interrupt
-delivery or machine reachability, never session history or queued obligations.
+`session_event_cursors` transactionally verifies appends and owns monotonic
+per-session sequencing/public `lastSequence`. Semantic writers lock sessions for
+atomic state/event commits; `sessions.last_sequence` is compatibility-only.
+Raw exact-attempt batches retain turn/attempt fences, hold session `FOR KEY SHARE`,
+serialize on cursors, and never update sessions. Legacy SQL writers rebase at the
+database boundary; late raw events roll back and retry semantic admission before
+rejected audit persistence.
+
+Unread/tree attention share the indexed meaningful frontier in
+`packages/db/src/session-meaningful-events.ts`, excluding bookkeeping. Claimed
+lifecycle content and exact parent reads acknowledge only the frozen human's
+direct-child content. Complete finals cover earlier activity, never newer answers;
+other filtered reads cannot skip unseen content. Manual unread survives old
+replay; newer consumed activity or explicit mark-read supersedes it.
+[Bounded reads/reconciliation](session-monitoring-mcp.md).
+
+SSE replays durable events, subscribes to fanout, and backfills gaps from Postgres.
+NATS restarts affect delivery/reachability, never history or queued obligations.
 
 Raw-isolation rollback:
 `OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED=false` keeps cursor allocation and
 validation active while restoring wide-session locking and compatibility writes.
 
-Commands acknowledge durable transactions; replayable NATS/Temporal notifications
-never gate committed-command success.
+Commands acknowledge durable commits, independent of replayable NATS/Temporal notifications.
 
 Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 `packages/sdk/src/stream.ts`, and [`run-lifecycle.md`](run-lifecycle.md).
@@ -691,16 +695,11 @@ A new attempt does not imply a new prompt. A new prompt does imply a new turn.
 This distinction is the basis for safe worker-death recovery and protection
 against duplicate external effects.
 
-Automatic semantic naming is an attempt-owned auxiliary branch, not part of the
-main model/tool loop. When the durable title is still pending and exact session
-tool policy permits naming, the production runtime starts one bounded tool-less
-title request in parallel with the ordinary stream, meters it independently,
-and joins it before atomic turn settlement. A normal fast response waits for the
-already-running bounded title request instead of cancelling it; exceptional or
-cancelled exits abort and join it. The title write uses the generic session-title
-lifecycle and still loses to a human rename. Custom runtimes without the
-optional auxiliary seam retain the serialized `set_session_title` compatibility
-path.
+Semantic naming is attempt-owned auxiliary work. Pending titles and exact-session
+policy authorize one bounded, tool-less request parallel to the main stream,
+metered separately. Normal completion joins it before atomic settlement;
+exceptional/cancelled exits abort and join. Generic title writes lose to human
+renames. Runtimes without this seam retain serialized `set_session_title`.
 
 `packages/db/src/session-execution-policy.ts` derives execution/display policy from the latest started turn, otherwise creation defaults.
 

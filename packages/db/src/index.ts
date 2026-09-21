@@ -24,6 +24,18 @@ import {
 } from "@opengeni/codex";
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
 import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
+import {
+  childLifecycleEvidenceCandidatesSql,
+  completeMeaningfulSessionEventSql,
+  meaningfulSessionEventSql,
+  meaningfulSessionSequenceSql,
+} from "./session-meaningful-events";
+import {
+  boundedChildLifecycleEvidence,
+  logicalChildReadEvent,
+  historicalChildReadItems,
+  historicalChildReadMatches,
+} from "./child-read-reconciliation";
 import { createRetryFailedSessionInTransaction } from "./session-retry";
 export { SessionRetryConflictError, getSessionRetryReceiptInTransaction } from "./session-retry";
 import { retainedProviderCommandPersistence as retainedProviderCommandState } from "./retained-provider-commands";
@@ -34634,6 +34646,7 @@ type SessionPinRow = Pick<
   | "pinnedAt"
   | "version"
   | "acknowledgedSequence"
+  | "manuallyUnreadThrough"
   | "activelyWorking"
   | "attentionVersion"
   | "archived"
@@ -34653,7 +34666,10 @@ function mapSessionPin(
     : { pinned: false, pinnedAt: null, pinVersion: 0 };
 }
 
-type SessionRow = typeof schema.sessions.$inferSelect & { currentInputWait?: Session["inputWait"] };
+type SessionRow = typeof schema.sessions.$inferSelect & {
+  currentInputWait?: Session["inputWait"];
+  meaningfulSequence?: number;
+};
 
 /** One bounded query in the caller's RLS scope; never infer waits from history text. */
 async function withCurrentSessionInputWait(
@@ -34712,9 +34728,9 @@ async function withCurrentSessionInputWait(
 }
 
 /**
- * Public sequence and unread projections are cursor-authoritative after the
- * raw-lane activation. The compatibility column may intentionally lag raw
- * deltas, but it may never lead the durable cursor.
+ * Public sequence remains cursor-authoritative. Attention has its own derived
+ * meaningful frontier; raw deltas and housekeeping must not create unread dots.
+ * The compatibility column may lag raw deltas but cannot lead the durable cursor.
  */
 async function canonicalSessionRowsFromEventCursors(
   db: Database,
@@ -34729,6 +34745,10 @@ async function canonicalSessionRowsFromEventCursors(
       workspaceId: schema.sessionEventCursors.workspaceId,
       sessionId: schema.sessionEventCursors.sessionId,
       lastSequence: schema.sessionEventCursors.lastSequence,
+      meaningfulSequence: meaningfulSessionSequenceSql(
+        schema.sessionEventCursors.workspaceId,
+        schema.sessionEventCursors.sessionId,
+      ),
     })
     .from(schema.sessionEventCursors)
     .where(
@@ -34751,20 +34771,24 @@ async function canonicalSessionRowsFromEventCursors(
       ) {
         throw new Error(`Session event cursor invariant failed for session ${row.id}`);
       }
-      return cursor.lastSequence === row.lastSequence
-        ? row
-        : { ...row, lastSequence: cursor.lastSequence };
+      return {
+        ...row,
+        lastSequence: cursor.lastSequence,
+        meaningfulSequence: cursor.meaningfulSequence,
+      };
     }),
   );
 }
 
 function mapSessionAttention(
-  session: Pick<typeof schema.sessions.$inferSelect, "lastSequence">,
+  session: Pick<SessionRow, "lastSequence" | "meaningfulSequence">,
   row: SessionPinRow | null | undefined,
 ): Pick<Session, "unread" | "activelyWorking" | "attentionVersion"> {
   return row
     ? {
-        unread: session.lastSequence > row.acknowledgedSequence,
+        unread:
+          row.manuallyUnreadThrough != null ||
+          (session.meaningfulSequence ?? session.lastSequence) > row.acknowledgedSequence,
         activelyWorking: row.activelyWorking,
         attentionVersion: Number(row.attentionVersion),
       }
@@ -34772,7 +34796,7 @@ function mapSessionAttention(
         // An absent personal row means this subject has never acknowledged a
         // completion. Existing and newly discovered finished work therefore
         // remains visible until the member explicitly marks it read.
-        unread: session.lastSequence > 0,
+        unread: (session.meaningfulSequence ?? session.lastSequence) > 0,
         activelyWorking: false,
         attentionVersion: 0,
       };
@@ -34978,7 +35002,7 @@ export async function sessionTreeStatsForSessions(
           select
             root.id,
             root.status,
-            root_cursor.last_sequence,
+            ${meaningfulSessionSequenceSql(sql`root.workspace_id`, sql`root.id`)},
             greatest(
               case
                 when workspace_control.workspace_state = 'paused'
@@ -35003,7 +35027,7 @@ export async function sessionTreeStatsForSessions(
           select
             child.id,
             child.status,
-            child_cursor.last_sequence,
+            ${meaningfulSessionSequenceSql(sql`child.workspace_id`, sql`child.id`)},
             greatest(
               case
                 -- A subtree resume defeats every inherited pause older than it.
@@ -35106,7 +35130,7 @@ export async function sessionTreeStatsForSessions(
               and status = 'failed'
               and ${subjectId ?? null}::text is not null
               and last_sequence > coalesce((
-                select personal.acknowledged_sequence
+                select case when personal.manually_unread_through is not null then -1 else personal.acknowledged_sequence end
                 from ${schema.sessionPins} personal
                 where personal.workspace_id = ${workspaceId}
                   and personal.subject_id = ${subjectId ?? null}
@@ -35118,7 +35142,7 @@ export async function sessionTreeStatsForSessions(
               and depth > 0
               and ${subjectId ?? null}::text is not null
               and last_sequence > coalesce((
-                select personal.acknowledged_sequence
+                select case when personal.manually_unread_through is not null then -1 else personal.acknowledged_sequence end
                 from ${schema.sessionPins} personal
                 where personal.workspace_id = ${workspaceId}
                   and personal.subject_id = ${subjectId ?? null}
@@ -36368,6 +36392,10 @@ export async function getSessionForSubject(
         session: schema.sessions,
         pin: schema.sessionPins,
         cursor: schema.sessionEventCursors,
+        meaningfulSequence: meaningfulSessionSequenceSql(
+          schema.sessions.workspaceId,
+          schema.sessions.id,
+        ),
       })
       .from(schema.sessions)
       // Status and replay cursor must share one statement snapshot. Otherwise a
@@ -36415,7 +36443,11 @@ export async function getSessionForSubject(
       scopedDb,
       workspaceId,
       await withCurrentSessionInputWait(scopedDb, workspaceId, [
-        { ...row.session, lastSequence: row.cursor.lastSequence },
+        {
+          ...row.session,
+          lastSequence: row.cursor.lastSequence,
+          meaningfulSequence: row.meaningfulSequence,
+        },
       ]),
     );
     if (!session) throw new Error(`Session event cursor missing for session ${sessionId}`);
@@ -36652,9 +36684,7 @@ export async function setSessionAttention(
           input.unread === undefined
             ? currentAcknowledgedSequence
             : input.unread
-              ? current.unread
-                ? currentAcknowledgedSequence
-                : Math.max(-1, session.lastSequence - 1)
+              ? -1
               : Math.max(
                   currentAcknowledgedSequence,
                   Math.min(
@@ -36663,8 +36693,15 @@ export async function setSessionAttention(
                   ),
                 );
         const desiredActivelyWorking = input.activelyWorking ?? current.activelyWorking;
+        const manuallyUnreadThrough =
+          input.unread === undefined
+            ? (existing?.manuallyUnreadThrough ?? null)
+            : input.unread
+              ? session.lastSequence
+              : null;
         if (
           acknowledgedSequence === currentAcknowledgedSequence &&
+          manuallyUnreadThrough === (existing?.manuallyUnreadThrough ?? null) &&
           desiredActivelyWorking === current.activelyWorking
         ) {
           const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
@@ -36709,6 +36746,7 @@ export async function setSessionAttention(
               pinnedAt: null,
               version: 0,
               acknowledgedSequence,
+              manuallyUnreadThrough,
               activelyWorking: desiredActivelyWorking,
               attentionVersion: 1,
               archiveVersion: 0,
@@ -36721,6 +36759,7 @@ export async function setSessionAttention(
               ],
               set: {
                 acknowledgedSequence: acknowledgedSequenceWrite,
+                manuallyUnreadThrough,
                 activelyWorking: desiredActivelyWorking,
                 attentionVersion: sql`${schema.sessionPins.attentionVersion} + 1`,
               },
@@ -36732,6 +36771,7 @@ export async function setSessionAttention(
             .update(schema.sessionPins)
             .set({
               acknowledgedSequence: acknowledgedSequenceWrite,
+              manuallyUnreadThrough,
               activelyWorking: desiredActivelyWorking,
               attentionVersion: sql`${schema.sessionPins.attentionVersion} + 1`,
             })
@@ -66167,38 +66207,56 @@ function isChildLifecycleSystemUpdatePayload(
 function consumedChildLifecycleSessionIds(
   updates: ReadonlyArray<typeof schema.sessionSystemUpdates.$inferSelect>,
   payloadsById: ReadonlyMap<string, SessionSystemUpdatePayload>,
-): string[] {
-  const childSessionIds = new Set<string>();
+): ConsumedChildEvidence[] {
+  const children: ConsumedChildEvidence[] = [];
   for (const update of updates) {
     if (!isChildLifecycleSystemUpdateKind(update.kind)) continue;
     const payload = payloadsById.get(update.id);
     // The row's kind and its payload discriminator are written together; narrow
     // on the discriminator so the shared field access is typed rather than cast.
     if (!payload || !isChildLifecycleSystemUpdatePayload(payload)) continue;
-    childSessionIds.add(payload.childSessionId);
+    const evidence = payload.childEventEvidence;
+    if (!Array.isArray(evidence) || evidence.length > 32) continue;
+    for (const event of evidence) {
+      if (
+        event &&
+        typeof event === "object" &&
+        Number.isSafeInteger(event.sequence) &&
+        event.sequence > 0 &&
+        event.sequence <= POSTGRES_INT_MAX &&
+        typeof event.type === "string" &&
+        "payload" in event
+      ) {
+        children.push({
+          sessionId: payload.childSessionId,
+          sequence: event.sequence,
+          type: event.type,
+          payload: event.payload,
+        });
+      }
+    }
   }
-  return [...childSessionIds];
+  return children;
 }
+
+type ConsumedChildEvidence = {
+  sessionId: string;
+  sequence: number;
+  type: string;
+  payload: unknown;
+};
 
 /**
  * Acknowledge every child whose lifecycle notice this claim just turned into
  * durable model input, for the receiving turn's frozen initiating human only.
  *
- * A parent agent that consumed a child's result, pause, capacity wait, progress
- * note, or human-input boundary has already carried that fact to the human who
- * started the turn, so the child's blue unread dot is pure noise: an
- * orchestrator with dozens of children otherwise leaves dozens of permanently
- * unread rows until a human opens each one by hand. This advances exactly the
- * per-viewer fence `setSessionAttention` writes, as if that human had viewed the
- * child. A pure service turn has no initiating human and writes nothing.
- *
- * `failed` and `requires_action` indicators are derived from `sessions.status`
- * and rank above unread, so an acknowledged child that still needs a human keeps
- * saying so, and a child that emits a further event goes unread again on its own
- * because unread is only the sequence comparison in {@link mapSessionAttention}.
- * The fence is monotone, so it also advances past a human's earlier explicit
- * mark-unread once the parent consumes a newer notice: consumption is the
- * signal, and OpenGeni keeps no durable "keep this unread" intent.
+ * Only complete immutable event evidence carried in the claimed payload counts.
+ * A terminal status alone does not prove that the parent saw the child's answer.
+ * Pure service turns and legacy notices without content evidence write nothing.
+ * A complete final answer is a cumulative read watermark. Other evidence advances
+ * only a contiguous meaningful prefix. The shared writer preserves newer
+ * personal attention mutations, and never reads the child's current raw cursor
+ * as consumption evidence. Failed/requires_action lifecycle indicators remain.
  *
  * This deliberately does NOT touch `attention_version`. That revision exists
  * only to order explicit human attention mutations against each other, and this
@@ -66234,13 +66292,12 @@ function consumedChildLifecycleSessionIds(
  * The upsert is monotone: the conflict path re-reads the committed row under its
  * own row lock and refuses to move a fence backward.
  *
- * There is no membership probe. The write grants nothing and discloses nothing
- * (a fence is visible only to its own subject), the subject comes from durable
- * frozen turn provenance rather than a request, membership removal deletes these
- * rows and is serialized against this writer by the fence above, and the
- * personal-workspace-owner exception a bare membership probe would need is
- * authorized by an API-layer canonical-managed-cookie stamp that this worker path
- * does not have. Both RLS policies on `session_pins` still apply through the
+ * Current authority is rechecked inside the advisory fence, so historical replay
+ * after membership removal cannot recreate deleted personal state. Frozen turn
+ * provenance identifies the human; the canonical live-authority resolver only
+ * checks that human's still-active shared membership or exact Personal pointer,
+ * and is not used to authorize a caller or grant access. No creator fallback or
+ * request-derived human is accepted. Both RLS policies on `session_pins` still apply through the
  * temporary subject scope, and the insert is additionally fenced on
  * `parent_session_id`, so a payload field can never decide whose personal state
  * is mutated on an unrelated session.
@@ -66251,11 +66308,239 @@ async function acknowledgeConsumedChildLifecycleNotices(
     workspaceId: string;
     sessionId: string;
     subjectId: string | null;
-    childSessionIds: readonly string[];
+    childSessionIds: readonly ConsumedChildEvidence[];
   },
 ): Promise<void> {
   const subjectId = input.subjectId?.trim();
   if (!subjectId || input.childSessionIds.length === 0) return;
+  // Payloads are evidence, not authority. Verify every complete snapshot against
+  // its immutable child event before accepting the claimed model-input receipt.
+  const proven = new Map<string, number[]>();
+  const grouped = new Map<string, ConsumedChildEvidence[]>();
+  for (const evidence of input.childSessionIds) {
+    const group = grouped.get(evidence.sessionId) ?? [];
+    group.push(evidence);
+    grouped.set(evidence.sessionId, group);
+  }
+  for (const [childId, evidence] of grouped) {
+    const events = await tx
+      .select({
+        sequence: schema.sessionEvents.sequence,
+        type: schema.sessionEvents.type,
+        payload: schema.sessionEvents.payload,
+        payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+      })
+      .from(schema.sessionEvents)
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.workspaceId, schema.sessionEvents.workspaceId),
+          eq(schema.sessions.id, schema.sessionEvents.sessionId),
+          eq(schema.sessions.parentSessionId, input.sessionId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, childId),
+          inArray(schema.sessionEvents.sequence, [
+            ...new Set(evidence.map((event) => event.sequence)),
+          ]),
+        ),
+      );
+    const bySequence = new Map(
+      events.map((event) => [event.sequence, logicalChildReadEvent(event)]),
+    );
+    const sequences = evidence
+      .filter((proof) => {
+        const event = bySequence.get(proof.sequence);
+        return event?.type === proof.type && isDeepStrictEqual(event.payload, proof.payload);
+      })
+      .map((event) => event.sequence);
+    if (sequences.length > 0) proven.set(childId, sequences);
+  }
+  await acknowledgeConsumedChildSequencesInTransaction(tx, {
+    ...input,
+    children: [...proven].map(([sessionId, sequences]) => ({ sessionId, sequences })),
+  });
+}
+
+/** Internal read receipt. Call only after the complete bounded response has been
+ * constructed and the exact caller attempt's frozen human reauthorized. */
+export async function acknowledgeConsumedChildEvents(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string | null;
+    children: readonly { sessionId: string; sequences: readonly number[] }[];
+  },
+): Promise<void> {
+  await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    await acknowledgeConsumedChildSequencesInTransaction(tx, input);
+  });
+}
+
+/** Bounded operator reconciliation, dry-run by default. No timestamps, session
+ * creator or latest human are evidence of consumption. Unrecognized historical
+ * providers/Codemode layouts remain untouched rather than guessed. */
+export async function reconcileHistoricalChildReadAcknowledgments(
+  db: Database,
+  input: {
+    workspaceId: string;
+    parentSessionId: string;
+    afterSequence?: number;
+    limit?: number;
+    apply?: boolean;
+  },
+): Promise<{
+  scanned: number;
+  provenEvents: number;
+  unsupportedReceipts: number;
+  nextAfter: number;
+  hasMore: boolean;
+  applied: boolean;
+}> {
+  const limit = Math.max(1, Math.min(100, input.limit ?? 50));
+  return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const outputs = await tx
+      .select()
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.parentSessionId),
+          eq(schema.sessionEvents.type, "agent.toolCall.output"),
+          gt(schema.sessionEvents.sequence, input.afterSequence ?? 0),
+          isNull(schema.sessionEvents.duplicateOfEventId),
+          eq(schema.sessionEvents.turnAssociation, "current"),
+          sql`octet_length(${schema.sessionEvents.payload}::text) <= 262144`,
+        ),
+      )
+      .orderBy(asc(schema.sessionEvents.sequence))
+      .limit(limit + 1);
+    let provenEvents = 0;
+    let unsupportedReceipts = 0;
+    for (const output of outputs.slice(0, limit)) {
+      const payload = logicalChildReadEvent(output).payload as Record<string, unknown> | null;
+      if (!output.turnId || !payload || typeof payload.id !== "string" || payload.truncation) {
+        unsupportedReceipts += 1;
+        continue;
+      }
+      const [turn] = await tx
+        .select()
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.sessionId, input.parentSessionId),
+            eq(schema.sessionTurns.id, output.turnId),
+          ),
+        )
+        .limit(1);
+      const subjectId =
+        turn?.initiatingHumanSubjectId ??
+        (turn?.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
+      if (!subjectId) {
+        unsupportedReceipts += 1;
+        continue;
+      }
+      const calls = await tx
+        .select()
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.sessionId, input.parentSessionId),
+            eq(schema.sessionEvents.turnId, output.turnId),
+            eq(schema.sessionEvents.type, "agent.toolCall.created"),
+            eq(schema.sessionEvents.turnAssociation, "current"),
+            isNull(schema.sessionEvents.duplicateOfEventId),
+            lt(schema.sessionEvents.sequence, output.sequence),
+            sql`${schema.sessionEvents.payload} ->> 'id' = ${payload.id}`,
+            sql`octet_length(${schema.sessionEvents.payload}::text) <= 16384`,
+          ),
+        )
+        .limit(2);
+      if (calls.length !== 1) {
+        unsupportedReceipts += 1;
+        continue;
+      }
+      const call = logicalChildReadEvent(calls[0]!).payload as Record<string, unknown>;
+      const candidates = historicalChildReadItems(call.name, call.arguments, payload.output);
+      const proven: ConsumedChildEvidence[] = [];
+      for (const candidate of candidates.slice(0, 100)) {
+        if (
+          !UUID_PATTERN.test(candidate.sessionId) ||
+          !Number.isSafeInteger(candidate.item.sequence) ||
+          (candidate.item.sequence as number) < 1 ||
+          (candidate.item.sequence as number) > POSTGRES_INT_MAX
+        )
+          continue;
+        const [source] = await tx
+          .select({ event: schema.sessionEvents })
+          .from(schema.sessionEvents)
+          .innerJoin(
+            schema.sessions,
+            and(
+              eq(schema.sessions.workspaceId, schema.sessionEvents.workspaceId),
+              eq(schema.sessions.id, schema.sessionEvents.sessionId),
+              eq(schema.sessions.parentSessionId, input.parentSessionId),
+            ),
+          )
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, input.workspaceId),
+              eq(schema.sessionEvents.sessionId, candidate.sessionId),
+              eq(schema.sessionEvents.sequence, candidate.item.sequence as number),
+              completeMeaningfulSessionEventSql("session_events"),
+              sql`octet_length(${schema.sessionEvents.payload}::text) <= 262144`,
+            ),
+          )
+          .limit(1);
+        if (!source) continue;
+        const logicalEvent = logicalChildReadEvent(source.event);
+        if (!historicalChildReadMatches(candidate, logicalEvent)) continue;
+        proven.push({
+          sessionId: candidate.sessionId,
+          sequence: source.event.sequence,
+          type: source.event.type,
+          payload: logicalEvent.payload,
+        });
+      }
+      if (proven.length === 0) unsupportedReceipts += 1;
+      provenEvents += proven.length;
+      if (input.apply && proven.length > 0) {
+        await acknowledgeConsumedChildLifecycleNotices(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.parentSessionId,
+          subjectId,
+          childSessionIds: proven,
+        });
+      }
+    }
+    return {
+      scanned: Math.min(limit, outputs.length),
+      provenEvents,
+      unsupportedReceipts,
+      nextAfter: outputs[Math.min(limit, outputs.length) - 1]?.sequence ?? input.afterSequence ?? 0,
+      hasMore: outputs.length > limit,
+      applied: input.apply === true,
+    };
+  });
+}
+
+async function acknowledgeConsumedChildSequencesInTransaction(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string | null;
+    children: readonly { sessionId: string; sequences: readonly number[] }[];
+  },
+): Promise<void> {
+  const subjectId = input.subjectId?.trim();
+  if (!subjectId || input.children.length === 0) return;
   // SHARED, not exclusive. `listSessionsForSubject` holds the shared counterpart
   // of this fence for its whole rail-list transaction, and that list refreshes on
   // focus, online, and visibilitychange. An exclusive probe fails against a held
@@ -66275,9 +66560,47 @@ async function acknowledgeConsumedChildLifecycleNotices(
   if (!fence?.acquired) return;
   const pins = schema.sessionPins;
   const sessions = schema.sessions;
-  const cursors = schema.sessionEventCursors;
   await withTemporarySubjectRls(tx, subjectId, async () => {
-    await tx.execute(sql`
+    if (
+      !(await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+        accountId: await accountIdInRlsScope(tx),
+        workspaceId: input.workspaceId,
+        subjectId,
+      }))
+    )
+      return;
+    // Stable UUID order preserves the personal-row lock order. A complete final
+    // answer summarizes earlier work; nonfinal filtered reads cannot skip holes.
+    for (const child of [...input.children].sort((a, b) =>
+      a.sessionId.localeCompare(b.sessionId),
+    )) {
+      const requested = [
+        ...new Set(
+          child.sequences.filter(
+            (value) => Number.isSafeInteger(value) && value > 0 && value <= POSTGRES_INT_MAX,
+          ),
+        ),
+      ];
+      if (requested.length === 0) continue;
+      const events = await tx
+        .select({ sequence: schema.sessionEvents.sequence, type: schema.sessionEvents.type })
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.sessionId, child.sessionId),
+            inArray(schema.sessionEvents.sequence, requested),
+            completeMeaningfulSessionEventSql("session_events"),
+          ),
+        );
+      const sequences = events.map((event) => event.sequence);
+      if (sequences.length === 0) continue; // status-only reads do not acknowledge
+      const through = Math.max(...sequences);
+      const finalThrough = Math.max(
+        0,
+        ...events.filter((event) => event.type === "turn.completed").map((event) => event.sequence),
+      );
+      await tx.execute(sql`
       insert into ${pins} (
         account_id, workspace_id, subject_id, session_id,
         pinned, pinned_at, version,
@@ -66290,26 +66613,37 @@ async function acknowledgeConsumedChildLifecycleNotices(
         -- at the absent-row projection so a concurrent pin/archive writer
         -- holding that projection stays valid.
         false, null, 0,
-        ${cursors.lastSequence}, false, 0,
+        least(${through}, coalesce((
+          select min(unseen.sequence) - 1 from session_events unseen
+          where unseen.workspace_id = ${sessions.workspaceId} and unseen.session_id = ${sessions.id}
+            and unseen.sequence > greatest(
+              coalesce(personal.acknowledged_sequence, 0),
+              coalesce(personal.manually_unread_through, 0), ${finalThrough})
+            and unseen.sequence <= ${through}
+            and ${meaningfulSessionEventSql("unseen")}
+            and unseen.sequence not in (${sql.join(
+              sequences.map((sequence) => sql`${sequence}`),
+              sql`, `,
+            )})
+        ), ${through})), false, 0,
         false, null, 0
       from ${sessions}
-      join ${cursors}
-        on ${cursors.accountId} = ${sessions.accountId}
-       and ${cursors.workspaceId} = ${sessions.workspaceId}
-       and ${cursors.sessionId} = ${sessions.id}
+      left join ${pins} personal on personal.workspace_id = ${sessions.workspaceId}
+        and personal.session_id = ${sessions.id} and personal.subject_id = ${subjectId}
       where ${and(
         eq(sessions.workspaceId, input.workspaceId),
         eq(sessions.parentSessionId, input.sessionId),
-        inArray(sessions.id, [...input.childSessionIds]),
-        // Nothing to acknowledge on a child with no durable events: the
-        // absent-row projection already reports it read.
-        gt(cursors.lastSequence, 0),
+        eq(sessions.id, child.sessionId),
       )}
+        and (personal.manually_unread_through is null or ${through} > personal.manually_unread_through)
       order by ${sessions.id}
       on conflict (subject_id, workspace_id, session_id) do update
-        set acknowledged_sequence = excluded.acknowledged_sequence
+        set acknowledged_sequence = excluded.acknowledged_sequence,
+            manually_unread_through = null
         where ${pins.acknowledgedSequence} < excluded.acknowledged_sequence
+          and (${pins.manuallyUnreadThrough} is null or excluded.acknowledged_sequence > ${pins.manuallyUnreadThrough})
     `);
+    }
   });
 }
 
@@ -66385,7 +66719,7 @@ export async function claimSessionWorkForAttempt(
           historyItem: Record<string, unknown> | null;
           updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>;
           /** Deduped children the delivered batch reports on, in delivery order. */
-          childSessionIds: string[];
+          childSessionIds: ConsumedChildEvidence[];
           events: SessionEventInsertWithPayload[];
           event: SessionEventInsertWithPayload | null;
         }> => {
@@ -75751,6 +76085,20 @@ async function enqueueChildLifecycleNoticeOutboxTx(
     ...session,
     parentSessionId: session.parentSessionId,
   });
+  // Freeze complete content at notice creation, never at parent claim time.
+  // Oversized evidence is omitted, not truncated and then called consumed.
+  // Bound index candidates before payload filters, and prefer the newest complete
+  // result within the total budget. Explicit reads handle omitted evidence.
+  const candidates = await rawRows<{
+    sequence: number;
+    type: string;
+    payload: unknown;
+    payloadCodecVersion: number | null;
+  }>(tx, childLifecycleEvidenceCandidatesSql(sql`${workspaceId}::uuid`, sql`${session.id}::uuid`));
+  const noticePayload = {
+    ...input.payload,
+    childEventEvidence: boundedChildLifecycleEvidence(candidates),
+  };
   const inserted = await tx
     .insert(schema.sessionSystemUpdateOutbox)
     .values(
@@ -75766,7 +76114,7 @@ async function enqueueChildLifecycleNoticeOutboxTx(
             classification: input.classification,
             sourceId: session.id,
             summary: input.summary,
-            payload: input.payload,
+            payload: noticePayload,
             lineage: { ...authority.lineage, ...(input.lineage ?? {}) },
             personalConnectionDelegations: authority.personalConnectionDelegations,
             mcpAccountBindings: authority.mcpAccountBindings,
