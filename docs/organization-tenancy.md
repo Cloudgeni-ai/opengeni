@@ -1412,8 +1412,11 @@ complete opaque delegation.
 The managed-human fork request accepts an optional `sourceEventId`. The stock
 message action row supplies the selected durable user message or completed
 assistant message. Omission keeps the whole-session fork contract. The event id
-is included in the idempotency hash and resolved under the existing quiescent
-source locks to a unique canonical history boundary. Only history through that
+is included in the idempotency hash and resolved under the existing exclusive
+workspace tenancy fence and workspace/source row locks to a unique canonical
+history boundary. Active source work is allowed: history append and compaction
+serialize against those locks through validation and copying. The source is not
+paused, interrupted, or changed. Only history through that
 boundary is copied; events are never converted into model input. Runtime setup
 replacement cannot be combined with a message boundary.
 
@@ -1423,6 +1426,11 @@ Those cases remain eligible for the ordinary whole-session fork; there is no
 silent fallback. A committed message fork still replays after compaction or a
 source authorization change. The same actor, visibility, acknowledgement,
 workspace, and grant rules apply to both fork forms.
+
+Rolling migration `0502_active_message_boundary_forks.sql` removes only the
+message overload's source-quiescence requirement. Pending work after the
+selected boundary does not block a safe prefix copy. Whole-session forks and
+visibility transitions retain their separate existing quiescence rules.
 
 Migration `0429_message_boundary_session_forks.sql` adds an overload to the exact
 runtime routine contract. Drain API/control/turn workers, migrate, provision the
