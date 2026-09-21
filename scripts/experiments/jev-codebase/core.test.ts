@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { allowedPath, investigate, rankChunks, termsFor, validateAnswers, type Judge, type Question, type Snapshot } from "./core";
+import { allowedPath, investigate, localDependencies, namedEntryPaths, rankChunks, requiresRuntimeEvidence, termsFor, validateAnswers, type Judge, type Question, type Snapshot } from "./core";
 
 const snapshot: Snapshot = { revision: "fixed", digest: "hash", excluded: 0, limited: false, chunks: [
   { id: "e0", path: "src/cancel.ts", startLine: 1, endLine: 1, text: "export function run(signal) { signal.throwIfAborted(); execute(); }" },
@@ -46,5 +46,22 @@ describe("read-only investigation contract", () => {
   test("step budget produces partial evidence, no fabricated completion", async () => {
     const r = await investigate(snapshot, { question: "Trace behavior" }, judge({ relevant: "keep", answer: "indecisive", basis: "insufficient", control: "continue" }), { maxSteps: 1, candidateBatch: 2, maxEvidenceChars: 1000, deadlineMs: 1000 });
     expect(r.status).toBe("budget_exhausted"); expect(r.evidence).toHaveLength(1);
+  });
+  test("runtime claims yield even if the model confidently says yes", async () => {
+    const request = { question: "Does the live production deployment currently enable this?" };
+    expect(requiresRuntimeEvidence(request)).toBe(true);
+    const r = await investigate(snapshot, request, judge({ relevant: "keep", answer: "yes", basis: "witness", control: "finish" }));
+    expect(r.answer).toBe("indecisive"); expect(r.status).toBe("needs_guidance");
+  });
+  test("unread runtime import blocks premature completion", async () => {
+    const s = { ...snapshot, chunks: [{ ...snapshot.chunks[0], text: "import { log } from './log'; export function run() { log(); }" }, snapshot.chunks[1]] };
+    expect(localDependencies(s.chunks[0], s)).toEqual(["src/log.ts"]);
+    expect(namedEntryPaths(s, { question: "Does run log?" })).toEqual(["src/cancel.ts"]);
+    const r = await investigate(s, { question: "Does run log?" }, judge({ relevant: "keep", answer: "yes", basis: "witness", control: "finish" }), { maxSteps: 1, candidateBatch: 2, maxEvidenceChars: 1000, deadlineMs: 1000 });
+    expect(r.answer).toBe("indecisive"); expect(r.coverage.unresolvedLocalPaths).toEqual(["src/log.ts"]);
+  });
+  test("type-only imports do not force execution-path reads", () => {
+    const c = { ...snapshot.chunks[0], text: "import type { Logger } from './log'; export function run() {}" };
+    expect(localDependencies(c, snapshot)).toEqual([]);
   });
 });

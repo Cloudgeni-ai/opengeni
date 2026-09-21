@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { DEFAULT_LIMITS, hash, investigate, loadSnapshot, rankChunks, termsFor, type Request } from "./core";
+import { DEFAULT_LIMITS, POLICY_VERSION, hash, investigate, loadSnapshot, rankChunks, termsFor, type Request } from "./core";
 import { createJudge, preflight, type Arm, type Receipt } from "./gateway";
 
 // This executable is an experiment, not a registered OpenGeni tool or authority boundary.
@@ -28,13 +28,16 @@ async function main() {
   mkdirSync(output, { recursive: true, mode: 0o700 });
   // Exclusive manifest creation prevents rerunning paid work into an existing run directory.
   const setup = await preflight();
-  const manifest = { version: 1, createdAt: new Date().toISOString(), revision: snapshot.revision, snapshotDigest: snapshot.digest, snapshotMs, prices: setup.prices, priceCheckedAt: setup.checkedAt, maxRequests: 80, maxUsd: 0.50, concurrency: 1, retries: 0, limits: { ...DEFAULT_LIMITS, maxSteps: 4 }, note: "Local application guard, not provider-enforced budget. Main-agent costs are not measured by this script benchmark." };
+  const maxRequests = Number(option("--max-requests", "80"));
+  if (!Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > 80) throw new Error("invalid_request_budget");
+  const implementationDigest = hash(["core.ts", "gateway.ts", "run.ts", "bun.lock"].map(p => readFileSync(`${import.meta.dir}/${p}`, "utf8")).join("\n"));
+  const manifest = { version: 1, policyVersion: POLICY_VERSION, implementationDigest, bunVersion: Bun.version, createdAt: new Date().toISOString(), revision: snapshot.revision, snapshotDigest: snapshot.digest, snapshotMs, prices: setup.prices, priceCheckedAt: setup.checkedAt, maxRequests, maxUsd: 0.50, concurrency: 1, retries: 0, limits: { ...DEFAULT_LIMITS, maxSteps: 4 }, note: "Local application guard, not provider-enforced budget. Main-agent costs are not measured by this script benchmark." };
   writeFileSync(`${output}/manifest.json`, JSON.stringify(manifest, null, 2), { flag: "wx", mode: 0o600 });
   const journal = `${output}/requests.jsonl`;
   if (mode === "investigate") {
     const requestPath = option("--request"); if (!requestPath) throw new Error("request_file_required");
     const request = JSON.parse(readFileSync(requestPath, "utf8")) as Request;
-    const result = await investigate(snapshot, request, createJudge("jev", setup, journal), manifest.limits);
+    const result = await investigate(snapshot, request, createJudge("jev", setup, journal, maxRequests), manifest.limits);
     writeFileSync(`${output}/result.json`, JSON.stringify(result, null, 2), { mode: 0o600 });
     console.log(JSON.stringify(result)); return;
   }
@@ -53,7 +56,7 @@ async function main() {
     if (only && only !== "jev" && only !== "llm") throw new Error("invalid_arm");
     const arms: Arm[] = only ? [only as Arm] : index % 2 ? ["llm", "jev"] : ["jev", "llm"];
     for (const arm of arms) {
-      const result = await investigate(snapshot, request, createJudge(arm, setup, journal), manifest.limits);
+      const result = await investigate(snapshot, request, createJudge(arm, setup, journal, maxRequests), manifest.limits);
       const paths = new Set(result.evidence.map(e => e.path));
       const row = { caseId: c.id, split: c.split, category: c.category, arm, expectedAnswer: c.expectedAnswer, answerCorrect: result.answer === c.expectedAnswer, wrongDecisive: result.answer !== "indecisive" && result.answer !== c.expectedAnswer, requiredPathRecall: c.requiredPaths.length ? c.requiredPaths.filter(p => paths.has(p)).length / c.requiredPaths.length : null, returnedChars: result.evidence.reduce((n, e) => n + e.text.length, 0), result };
       records.push(row);
