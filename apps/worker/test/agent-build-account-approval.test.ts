@@ -1,10 +1,13 @@
-import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { parseSync, type Node } from "oxc-parser";
 import type { Settings } from "@opengeni/config";
+import * as db from "@opengeni/db";
+import { createObservability } from "@opengeni/observability";
+import { buildTurnAgent, type BuildTurnAgentDeps } from "../src/activities/agent-turn/agent-build";
+import { createTurnContext } from "../src/activities/agent-turn/turn-context";
 import {
   buildOpenGeniAgent,
+  type ConnectorActionPolicyHooks,
   prefixedMcpToolName,
   prepareAgentTools,
   restoreInterruptedRunState,
@@ -12,40 +15,94 @@ import {
 } from "@opengeni/runtime";
 import { ScriptedModel, functionCall, startTestMcpServer, testSettings } from "@opengeni/testing";
 
-// Exercise the real worker's settings expression, not a second hand-written
-// approximation of the boundary that lost account-qualified approval policy.
-function modelSettingsAtBuild(
+// Execute the production builder. Only unrelated persistence is stubbed; MCP
+// preparation, agent construction, approval interruption and replay remain real.
+async function buildWorkerAgent(
   modelRunSettings: Settings,
   mcpServers: Settings["mcpServers"],
-): Settings {
-  const source = readFileSync(
-    new URL("../src/activities/agent-turn/agent-build.ts", import.meta.url),
-    "utf8",
-  );
-  const parsed = parseSync("agent-build.ts", source);
-  expect(parsed.errors).toEqual([]);
-  const expressions: string[] = [];
-  const visit = (node: Node): void => {
-    if (
-      node.type === "CallExpression" &&
-      source.slice(node.callee.start, node.callee.end) === "runtime.buildAgent"
-    ) {
-      const argument = node.arguments[0]!;
-      expressions.push(source.slice(argument.start, argument.end));
-    }
-    for (const value of Object.values(node)) {
-      if (Array.isArray(value)) {
-        for (const child of value)
-          if (child && typeof child === "object" && "type" in child) visit(child as Node);
-      } else if (value && typeof value === "object" && "type" in value) visit(value as Node);
-    }
-  };
-  visit(parsed.program);
-  expect(expressions).toHaveLength(1);
-  return new Function("eventing", "mcpServers", `return (${expressions[0]});`)(
-    { modelRunSettings },
-    mcpServers,
-  );
+  prepared: Awaited<ReturnType<typeof prepareAgentTools>>,
+  hooks: ConnectorActionPolicyHooks,
+  model: ScriptedModel,
+  approvedToolCallId?: string,
+) {
+  const context = createTurnContext({ settings: modelRunSettings, cancellationRequestedAt: null });
+  context.eventing.preparedTools = prepared;
+  const persistence = [
+    spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
+    spyOn(db, "getWorkspaceVideoGenerationPolicy").mockResolvedValue({
+      schemaVersion: 1,
+      revision: 0,
+      fundingSource: "workspace_gateway",
+      enabledModelIds: [],
+      defaultModelId: null,
+    }),
+    spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, input) => input.catalog),
+    spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
+  ];
+  const builtSettings: Settings[] = [];
+  try {
+    // No sandbox, media, rig or database behavior is exercised by this fixture.
+    const deps: Partial<BuildTurnAgentDeps> = {
+      ...context,
+      input: {
+        accountId: "account",
+        workspaceId: "workspace",
+        sessionId: "session",
+        attemptId: "attempt",
+        workflowId: "workflow",
+        workflowRunId: "workflow-run",
+        trigger: { kind: "next" },
+      },
+      db: {} as BuildTurnAgentDeps["db"],
+      runtime: {
+        buildAgent: (settings: Settings, resources, options) => {
+          builtSettings.push(settings);
+          return buildOpenGeniAgent(settings, resources, { ...options, model });
+        },
+      } as BuildTurnAgentDeps["runtime"],
+      observability: createObservability(modelRunSettings, { component: "worker" }),
+      objectStorage: null,
+      media: {} as BuildTurnAgentDeps["media"],
+      turn: {
+        id: "turn",
+        executionGeneration: 1,
+        reasoningEffort: "low",
+      } as BuildTurnAgentDeps["turn"],
+      session: { id: "session" } as BuildTurnAgentDeps["session"],
+      runSettings: modelRunSettings,
+      mcpServers,
+      skillCatalog: [],
+      turnExecutionPolicy: {
+        providerId: "openai",
+        latencyMode: "standard",
+      } as BuildTurnAgentDeps["turnExecutionPolicy"],
+      runtimeResources: [],
+      sandboxEnvironment: {},
+      sandboxArtifactRuntime: { available: false, environment: {} },
+      fileResourceDownloads: [],
+      attemptConnectorActionBindings: [],
+      connectorActionPolicy: hooks,
+      modelInputPolicy: { inputFileMediaTypes: [], supportsImageInput: true },
+      preparationIndependentToolNames: [],
+      groupBoxBackend: "none",
+      postToolPreparationStartedAt: performance.now(),
+      trigger: (approvedToolCallId
+        ? {
+            type: "user.approvalDecision",
+            payload: { decision: "approve", approvalId: approvedToolCallId },
+          }
+        : { type: "user.message", payload: {} }) as BuildTurnAgentDeps["trigger"],
+    };
+    const result = await buildTurnAgent(deps as BuildTurnAgentDeps);
+    expect(builtSettings).toHaveLength(1);
+    expect(builtSettings[0]!.mcpServers).toEqual(mcpServers);
+    expect({ ...builtSettings[0], mcpServers: modelRunSettings.mcpServers }).toEqual(
+      modelRunSettings,
+    );
+    return result.agent;
+  } finally {
+    for (const spy of persistence) spy.mockRestore();
+  }
 }
 
 test.each(["approve", "reject", "legacy approve", "legacy reject"] as const)(
@@ -82,9 +139,9 @@ test.each(["approve", "reject", "legacy approve", "legacy reject"] as const)(
       ],
     };
     const acceptedCalls: string[] = [];
-    const hooks = {
+    const hooks: ConnectorActionPolicyHooks = {
       prepare: async () => ({ managed: true as const, decision: "ask" as const }),
-      begin: async (call: { serverId: string; connectionId: string; approvalId: string }) => {
+      begin: async (call) => {
         acceptedCalls.push(`${call.serverId}:${call.connectionId}:${call.approvalId}`);
         return {
           allowed: true as const,
@@ -116,10 +173,14 @@ test.each(["approve", "reject", "legacy approve", "legacy reject"] as const)(
       );
     let prepared = await prepare();
     try {
-      const settings = modelSettingsAtBuild(canonical, routed.mcpServers);
+      const settings = canonical;
       const callId = "account-call";
-      const agent = buildOpenGeniAgent(settings, [], {
-        model: new ScriptedModel([
+      const agent = await buildWorkerAgent(
+        settings,
+        routed.mcpServers,
+        prepared,
+        hooks,
+        new ScriptedModel([
           {
             output: [
               functionCall(
@@ -135,11 +196,7 @@ test.each(["approve", "reject", "legacy approve", "legacy reject"] as const)(
           },
           { outputText: "done" },
         ]),
-        hostedWebSearch: false,
-        mcpServers: prepared.mcpServers,
-        resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
-        connectorActionPolicy: hooks,
-      });
+      );
       const result = await runAgentStream(agent, "Search documents", settings);
       for await (const _event of result.toStream()) {
         /* consume through interruption */
@@ -159,14 +216,14 @@ test.each(["approve", "reject", "legacy approve", "legacy reject"] as const)(
           subjectId: "worker:mcp-model",
         }),
       ).rejects.toMatchObject({ code: "approval_required" });
-      const resumedAgent = buildOpenGeniAgent(settings, [], {
-        model: new ScriptedModel("done"),
-        hostedWebSearch: false,
-        mcpServers: prepared.mcpServers,
-        resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
-        connectorActionPolicy: hooks,
-        ...(approve ? { approvedToolCallId: callId } : {}),
-      });
+      const resumedAgent = await buildWorkerAgent(
+        settings,
+        routed.mcpServers,
+        prepared,
+        hooks,
+        new ScriptedModel("done"),
+        approve ? callId : undefined,
+      );
       const restored = await restoreInterruptedRunState(resumedAgent, serialized);
       const [interruption] = restored.getInterruptions();
       if (!interruption) throw new Error("missing approval");
@@ -183,8 +240,6 @@ test.each(["approve", "reject", "legacy approve", "legacy reject"] as const)(
       );
       expect(otherMcp.calls).toHaveLength(0);
       expect(acceptedCalls).toEqual(approve ? [`${serverId}:connection-1:${callId}`] : []);
-      expect(settings.mcpServers).toEqual(routed.mcpServers);
-      expect({ ...settings, mcpServers: canonical.mcpServers }).toEqual(canonical);
     } finally {
       await prepared.close();
       mcp.close();
