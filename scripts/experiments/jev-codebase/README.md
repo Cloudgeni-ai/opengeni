@@ -72,11 +72,19 @@ The default `v3` workflow separates entry discovery, bounded local dependency
 reads, evidence classification, answering the literal question, and verification
 of the proposed answer against the requested path. It reassembles overlapping
 source windows before parsing and recognizes named constants/arrow functions.
-The first named declaration in the question is an entry-point heuristic, not a
-semantic proof; other declarations remain contrast candidates. Two independent
+Code-shaped names (camelCase or underscore/dollar identifiers) take precedence
+over generic words such as `request`; the first matching declaration in that
+group is an entry-point heuristic, not a semantic proof. Other declarations
+remain contrast candidates. Two independent
 lexical candidates can expose alternate implementations without treating them
 as reachable from the entry point. `--workflow legacy` preserves the earlier
 per-excerpt loop for diagnosis; its outcomes must not be pooled with v3.
+
+An explicit unknown entry-selection result yields immediately. Gapped source
+windows remain separate excerpts rather than causing a global parsing error;
+an incomplete required file cannot justify a decisive answer. Contrast-only
+imports do not become mandatory execution dependencies. Evidence-only requests
+can return source even when it cannot establish an external runtime outcome.
 
 Each returned answer remains a model judgment, not a formally verified property.
 Verification is a second model judgment using the same provider and correlated

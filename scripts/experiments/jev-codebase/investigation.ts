@@ -15,14 +15,14 @@ import {
   type Snapshot,
 } from "./core";
 
-export const INVESTIGATION_VERSION = "code-investigation-v3";
+export const INVESTIGATION_VERSION = "code-investigation-v3.1";
 
 /** Reassemble overlapping line windows once; never concatenate duplicate source lines. */
 export function fileEvidence(snapshot: Snapshot): Chunk[] {
   const files = new Map<string, Chunk[]>();
   for (const chunk of snapshot.chunks)
     files.set(chunk.path, [...(files.get(chunk.path) ?? []), chunk]);
-  return [...files].map(([path, chunks]) => {
+  return [...files].flatMap(([path, chunks]) => {
     const lines = new Map<number, string>();
     for (const chunk of chunks.sort((a, b) => a.startLine - b.startLine)) {
       for (const [offset, line] of chunk.text.split("\n").entries()) {
@@ -34,15 +34,15 @@ export function fileEvidence(snapshot: Snapshot): Chunk[] {
     const first = Math.min(...lines.keys()),
       last = Math.max(...lines.keys());
     const ordered = Array.from({ length: last - first + 1 }, (_, i) => lines.get(first + i));
-    // A hole is not an exact source excerpt; retain original windows instead in the loader contract.
-    if (ordered.some((line) => line === undefined)) throw new Error("non_contiguous_snapshot");
-    return { id: chunks[0].id, path, startLine: first, endLine: last, text: ordered.join("\n") };
+    // Never invent missing lines or let an unrelated truncated file abort discovery.
+    if (ordered.some((line) => line === undefined)) return chunks;
+    return [{ id: chunks[0].id, path, startLine: first, endLine: last, text: ordered.join("\n") }];
   });
 }
 
 export function entryPaths(files: Chunk[], request: Request): string[] {
   const words = new Set(request.question.match(/[A-Za-z_$][\w$]*/g) ?? []);
-  const matches: { path: string; offset: number }[] = [];
+  const matches: { path: string; offset: number; distinctive: boolean }[] = [];
   for (const file of files) {
     if (!/\.[cm]?[jt]sx?$/.test(file.path)) continue;
     const tree = ts.createSourceFile(file.path, file.text, ts.ScriptTarget.Latest, true);
@@ -57,13 +57,21 @@ export function entryPaths(files: Chunk[], request: Request): string[] {
             : [];
       for (const name of names)
         if (words.has(name))
-          matches.push({ path: file.path, offset: request.question.indexOf(name) });
+          matches.push({
+            path: file.path,
+            offset: request.question.indexOf(name),
+            distinctive: /[a-z][A-Z]|[_$]/.test(name),
+          });
     }
   }
   // Later words can be the operation being asked about, not another entry point.
   // Other definitions remain discoverable as dependency/contrast candidates.
-  const first = Math.min(...matches.map((m) => m.offset));
-  return [...new Set(matches.filter((m) => m.offset === first).map((m) => m.path))];
+  // Explicit code-shaped names outrank generic prose such as "request" or "source".
+  const candidates = matches.some((m) => m.distinctive)
+    ? matches.filter((m) => m.distinctive)
+    : matches;
+  const first = Math.min(...candidates.map((m) => m.offset));
+  return [...new Set(candidates.filter((m) => m.offset === first).map((m) => m.path))];
 }
 
 export async function investigateV3(
@@ -115,6 +123,11 @@ export async function investigateV3(
   try {
     const files = fileEvidence(snapshot),
       byPath = new Map(files.map((f) => [f.path, f]));
+    const fragmented = new Set(
+      files
+        .filter((f, i) => files.findIndex((other) => other.path === f.path) !== i)
+        .map((f) => f.path),
+    );
     const roots = entryPaths(files, request);
     const ranked = rankChunks(files, termsFor(request));
     if (!roots.length) {
@@ -154,7 +167,8 @@ export async function investigateV3(
         return false;
       }
       read.set(path, file);
-      unresolved.delete(path);
+      if (mandatory && fragmented.has(path)) unresolved.add(path);
+      else unresolved.delete(path);
       return true;
     };
     const expand = () => {
@@ -174,7 +188,9 @@ export async function investigateV3(
     };
     expand();
     // Independent lexical contrast candidates can expose alternate paths; they are not proof of reachability.
-    for (const candidate of ranked.filter((c) => !required.has(c.path)).slice(0, 2))
+    for (const candidate of roots.length
+      ? ranked.filter((c) => !required.has(c.path)).slice(0, 2)
+      : [])
       add(candidate.path, false);
     for (let round = 0; round < limits.maxSteps && read.size; round++) {
       const questions: Record<string, Question> = {};
@@ -212,12 +228,15 @@ export async function investigateV3(
         if (required.has(file.path) || classification[file.id].choice !== "drop") {
           retained.set(file.path, file);
           // Required source is retained even if a classifier would prematurely discard it.
-          if (classification[file.id].choice === "keep")
+          if (required.has(file.path) && classification[file.id].choice === "keep")
             for (const dependency of localDependencies(file, snapshot)) required.add(dependency);
         }
       }
       trace.push({ stage: "evidence", selected: [...retained.keys()] });
-      if (classification.scope.choice === "external" || requiresRuntimeEvidence(request)) {
+      if (
+        request.requestedOutput !== "evidence" &&
+        (classification.scope.choice === "external" || requiresRuntimeEvidence(request))
+      ) {
         status = "needs_guidance";
         reasonCode = "runtime_evidence_required";
         break;
@@ -297,7 +316,12 @@ export async function investigateV3(
         ? error.message
         : "judge_or_validation_failure";
   }
-  const inspectedIds = snapshot.chunks.filter((c) => read.has(c.path)).map((c) => c.id);
+  const inspectedIds = snapshot.chunks
+    .filter((c) => {
+      const selected = read.get(c.path);
+      return selected && selected.startLine <= c.startLine && selected.endLine >= c.endLine;
+    })
+    .map((c) => c.id);
   return {
     policyVersion: INVESTIGATION_VERSION,
     revision: snapshot.revision,

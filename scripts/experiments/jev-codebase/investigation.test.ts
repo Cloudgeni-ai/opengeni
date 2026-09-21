@@ -76,6 +76,51 @@ test("v3 recognizes arrow-function and constant entry names", () => {
   const f = { ...snapshot.chunks[0], text: "export const useThing = () => true;" };
   expect(entryPaths([f], { question: "Does useThing return true?" })).toEqual(["entry.ts"]);
 });
+test("explicit code-shaped name outranks an earlier generic prose identifier", () => {
+  const files = [
+    { ...snapshot.chunks[0], path: "generic.ts", text: "const request = () => false;" },
+    { ...snapshot.chunks[1], path: "named.ts", text: "function runTask() { return true; }" },
+  ];
+  expect(
+    entryPaths(files, { question: "If a request completes, does runTask return true?" }),
+  ).toEqual(["named.ts"]);
+});
+test("contrast-only imports do not become mandatory execution dependencies", async () => {
+  const s = {
+    ...snapshot,
+    chunks: [
+      ...snapshot.chunks,
+      {
+        id: "e3",
+        path: "contrast.ts",
+        startLine: 1,
+        endLine: 2,
+        text: "import { missing } from './missing';\nexport function anotherReplay() { return missing(); }",
+      },
+    ],
+  };
+  const r = await investigateV3(
+    s,
+    { question: "Does replay persist its response?", searchHints: ["anotherReplay"] },
+    makeJudge(),
+  );
+  expect(r.coverage.unresolvedLocalPaths).toEqual([]);
+});
+test("evidence mode retains source even when runtime outcome is unknowable", async () => {
+  const delegate = makeJudge();
+  const r = await investigateV3(
+    snapshot,
+    { question: "Trace replay", requestedOutput: "evidence" },
+    async (s, qs, signal) => {
+      const result = await delegate(s, qs, signal);
+      if (qs.scope)
+        result.scope = { choice: "external", probabilities: { source: 0, external: 1 } };
+      return result;
+    },
+  );
+  expect(r.status).toBe("evidence_ready");
+  expect(r.evidence.length).toBeGreaterThan(0);
+});
 test("v3 gathers dependency evidence before answering and embeds actual question", async () => {
   const question = "Does replay persist its response?";
   let answerCalls = 0;
@@ -140,5 +185,36 @@ test("v3 failure cannot score as a negative answer", async () => {
     throw new Error("offline");
   });
   expect(r.status).toBe("error");
+  expect(r.answer).toBe("indecisive");
+});
+test("gapped unrelated windows preserve partial evidence rather than aborting", async () => {
+  const s = {
+    ...snapshot,
+    limited: true,
+    chunks: [
+      ...snapshot.chunks,
+      { id: "e3", path: "other.ts", startLine: 1, endLine: 1, text: "const other = 1;" },
+      { id: "e4", path: "other.ts", startLine: 71, endLine: 71, text: "const tail = 2;" },
+    ],
+  };
+  expect(fileEvidence(s).filter((f) => f.path === "other.ts")).toHaveLength(2);
+  const r = await investigateV3(s, { question: "Does replay persist?" }, makeJudge());
+  expect(r.status).toBe("partial");
+  expect(r.answer).toBe("indecisive");
+  expect(r.evidence.some((e) => e.path === "entry.ts")).toBe(true);
+});
+test("entry discovery unknown yields without answering unrelated contrast files", async () => {
+  let calls = 0;
+  const r = await investigateV3(
+    snapshot,
+    { question: "Where is cancellation handled?" },
+    async (_, qs) => {
+      calls++;
+      expect(qs.entry).toBeDefined();
+      return answers(qs, { entry: "unknown" });
+    },
+  );
+  expect(calls).toBe(1);
+  expect(r.status).toBe("needs_guidance");
   expect(r.answer).toBe("indecisive");
 });
