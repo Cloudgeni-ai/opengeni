@@ -19,6 +19,9 @@ bun fixtures/verify.ts
 Dependencies are isolated from production workspaces. The root repository pins
 Bun 1.4.0; use that version for repository-wide validation. Provider APIs are
 experimental and packages are pinned in this directory's lockfile.
+The experiment requires the TypeScript 5 compiler API, not the root TypeScript 7
+toolchain. Unit-shard CI installs this directory's frozen dependencies before
+running its discovered tests; local root-suite users must install them too.
 
 ## Offline snapshot plan
 
