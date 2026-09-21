@@ -1113,6 +1113,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   return {
     attemptConnectorActionBindings,
     connectorActionPolicy,
+    mcpServers: runSettings.mcpServers,
     generateSessionTitleInParallel: titleToolPlan.generateTitleInParallel,
     postToolPreparationStartedAt,
     preparationIndependentToolNames: [

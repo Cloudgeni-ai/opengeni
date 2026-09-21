@@ -1302,6 +1302,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 
           const builtAgent = await buildTurnAgent({
             skillCatalog: toolRuntime.skillCatalog,
+            mcpServers: toolRuntime.mcpServers,
             input,
             db,
             runtime,
