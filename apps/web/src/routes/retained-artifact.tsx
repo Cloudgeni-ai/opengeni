@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import { LightboxProvider } from "@opengeni/react";
-import { isRetainedImageContentType } from "@opengeni/react/artifacts";
 import {
   AlertTriangleIcon,
   ArrowLeftIcon,
@@ -12,7 +11,7 @@ import {
 } from "lucide-react";
 import { useAppContext } from "@/context";
 import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
-import { InlineChatImage } from "@/components/artifacts/inline-chat-image";
+import { RetainedFilePreview } from "@/components/artifacts/retained-file-preview";
 import { ContentPage } from "@/components/ui/content-layout";
 import { Button } from "@/components/ui/button";
 import { CopyableMono, PageHeader } from "@/components/common";
@@ -115,6 +114,17 @@ function RetainedArtifactDetail({
     setDownloadError(null);
     const generation = ++downloads.generation;
     try {
+      if (artifact.kind === "generated_video") {
+        const source = await client.createVideoArtifactPlaybackSource(workspaceId, artifactId);
+        if (generation === downloads.generation) {
+          const link = document.createElement("a");
+          link.href = source.url;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.click();
+        }
+        return;
+      }
       const result = await client.downloadRetainedArtifact(workspaceId, artifact);
       if (generation === downloads.generation)
         saveRetainedArtifact(artifact, result.bytes, filename);
@@ -152,7 +162,11 @@ function RetainedArtifactDetail({
             actions={
               <Button variant="outline" onClick={() => void download()} disabled={downloading}>
                 <DownloadIcon className="mr-2 size-4" />
-                {downloading ? "Downloading…" : "Download"}
+                {downloading
+                  ? "Opening…"
+                  : artifact.kind === "generated_video"
+                    ? "Open video"
+                    : "Download"}
               </Button>
             }
           />
@@ -161,18 +175,7 @@ function RetainedArtifactDetail({
               {downloadError}
             </p>
           ) : null}
-          {isRetainedImageContentType(artifact.contentType) ? (
-            <div className="flex min-h-48 justify-center rounded-lg bg-surface-2 p-4">
-              <InlineChatImage workspaceId={workspaceId} artifactId={artifactId} alt={filename} />
-            </div>
-          ) : (
-            <div className="flex min-h-48 flex-col items-center justify-center gap-3 rounded-lg bg-surface-2 px-6 text-center">
-              <FileIcon className="size-8 text-fg-subtle" />
-              <p className="text-sm text-fg-muted">
-                Preview is not available for this file. Download it to open it.
-              </p>
-            </div>
-          )}
+          <RetainedFilePreview workspaceId={workspaceId} artifact={artifact} title={filename} />
         </>
       ) : null}
     </ContentPage>

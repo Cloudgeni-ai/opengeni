@@ -56,6 +56,8 @@ const InteractiveContext = createContext<{
 }>({ source: "" });
 
 export type MarkdownProps = {
+  /** Resolve a retained-file reference to the host's authenticated artifact page. */
+  artifactHref?: ((artifactId: string) => string) | undefined;
   /** Reveals a bounded source excerpt; closing Find retains it until explicit restore. */
   searchTarget?: TimelineSearchTarget | null | undefined;
   renderImage?: ((image: { src: string; alt: string }) => ReactNode) | undefined;
@@ -217,10 +219,46 @@ const baseComponents: Components = {
 const MARKDOWN_LINK_CLASS =
   "break-words font-medium text-og-accent-strong underline-offset-2 hover:underline";
 
-function markdownComponents(onSandboxFile: MarkdownProps["onSandboxFile"]): Components {
+function markdownComponents(
+  onSandboxFile: MarkdownProps["onSandboxFile"],
+  artifactHref: MarkdownProps["artifactHref"],
+): Components {
   return {
     ...baseComponents,
+    p: ({ children, node, ...props }) => {
+      const containsArtifact = node?.children.some(
+        (child) =>
+          child.type === "element" &&
+          child.tagName === "img" &&
+          typeof child.properties.src === "string" &&
+          retainedImageId(child.properties.src),
+      );
+      const Tag = containsArtifact ? "div" : "p";
+      return (
+        <Tag className="my-2.5 leading-7 first:mt-0 last:mb-0" {...props}>
+          {children}
+        </Tag>
+      );
+    },
     a: ({ children, href, ...props }) => {
+      const artifactId = href ? retainedImageId(href) : null;
+      if (artifactId) {
+        const destination = artifactHref?.(artifactId);
+        return destination ? (
+          <a
+            className={MARKDOWN_LINK_CLASS}
+            href={defaultUrlTransform(destination)}
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            {children}
+          </a>
+        ) : (
+          <span title="This artifact requires a workspace-aware host">
+            {children} (artifact unavailable)
+          </span>
+        );
+      }
       const location = sandboxFileLocationFromHref(href);
       if (location !== null) {
         return (
@@ -232,7 +270,7 @@ function markdownComponents(onSandboxFile: MarkdownProps["onSandboxFile"]): Comp
       if (isSandboxHref(href) || !href) {
         return (
           <span
-            className="break-words font-medium text-og-fg-subtle underline decoration-dotted underline-offset-2"
+            className="break-words text-og-fg-subtle"
             aria-disabled="true"
             title={
               isSandboxHref(href)
@@ -240,7 +278,7 @@ function markdownComponents(onSandboxFile: MarkdownProps["onSandboxFile"]): Comp
                 : "This link is unavailable"
             }
           >
-            {children}
+            {children} (link unavailable)
           </span>
         );
       }
@@ -371,7 +409,7 @@ function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
 }
 
 const markdownUrlTransform: UrlTransform = (url, key, node) =>
-  (key === "href" && node.tagName === "a" && isSandboxHref(url)) ||
+  (key === "href" && node.tagName === "a" && (isSandboxHref(url) || retainedImageId(url))) ||
   (key === "src" && node.tagName === "img" && retainedImageId(url))
     ? url
     : defaultUrlTransform(url);
@@ -546,6 +584,7 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
 
 function MarkdownImpl({
   children,
+  artifactHref,
   className,
   streaming = false,
   onSandboxFile,
@@ -640,7 +679,10 @@ function MarkdownImpl({
   // fences don't snap to final GFM one commit before the crystallize morph.
   // Reveal identity still tracks the true source (`children`).
   const parseText = streaming || revealActive ? softenStreamingMarkdown(children) : children;
-  const components = useMemo(() => markdownComponents(onSandboxFile), [onSandboxFile]);
+  const components = useMemo(
+    () => markdownComponents(onSandboxFile, artifactHref),
+    [onSandboxFile, artifactHref],
+  );
 
   const interactiveContext = useMemo(
     () => ({
