@@ -7,6 +7,18 @@ import {
 } from "./compact-investigation";
 import { budgetState, withTransientDelegationFallback } from "./iteration-ledger";
 import type { Snapshot, Question } from "./core";
+import { batchedJudge } from "./batched-judge";
+import { journaledTransientFailure } from "./transient-failure";
+const transient = () =>
+  journaledTransientFailure(
+    "offline",
+    [
+      { id: "offline", kind: "started", reservedUsd: 0.01 },
+      { id: "offline", kind: "failed", statusCode: 503 },
+      { kind: "transient_reserved", failedId: "offline", reservedUsd: 0.01 },
+    ],
+    new Error("offline503"),
+  );
 const snapshot: Snapshot = {
   revision: "x",
   digest: "x",
@@ -38,6 +50,46 @@ const answers = (qs: Record<string, Question>, fn: (id: string) => string) =>
       ];
     }),
   );
+test("span failure preserves discovered paths without claiming selected evidence", async () => {
+  const r = await investigateCompact(
+    snapshot,
+    { question: "How is a machine selected?" },
+    async (_, qs) => {
+      if (qs.primary) return answers(qs, (id) => (id === "primary" ? "f1" : "none"));
+      throw transient();
+    },
+  );
+  expect(r.answer).toBe("indecisive");
+  expect(r.evidence).toEqual([]);
+  expect(r.status).toBe("needs_guidance");
+  expect("continuation" in r && r.continuation?.candidatePaths).toEqual(["selection.ts"]);
+});
+test("completed validated batches retain exact evidence after a later transient", async () => {
+  const r = await investigateCompact(
+    snapshot,
+    { question: "How is a machine selected?" },
+    batchedJudge(async (_, qs) => {
+      if (qs.primary) return answers(qs, () => "f1");
+      if (qs.companion) return answers(qs, () => "none");
+      if (qs.s0) return answers(qs, () => "essential");
+      throw transient();
+    }, 1),
+  );
+  expect(r.answer).toBe("indecisive");
+  expect(r.status).toBe("partial");
+  expect(r.evidence).toHaveLength(1);
+  expect(r.evidence[0].text).toContain("selectMachine");
+  expect(r.evidence[0].text).not.toContain("unrelated");
+  expect("continuation" in r && r.continuation?.completedSpanJudgments).toBe(1);
+});
+test("authentication and missing billing errors do not become partial success", async () => {
+  await expect(
+    investigateCompact(snapshot, { question: "How is a machine selected?" }, async (_, qs) => {
+      if (qs.primary) return answers(qs, (id) => (id === "primary" ? "f1" : "none"));
+      throw new Error("provider_or_usage_failure");
+    }),
+  ).rejects.toThrow("provider_or_usage_failure");
+});
 test("generic prose never forces a test variable into evidence", async () => {
   let calls = 0;
   const r = await investigateCompact(
@@ -268,7 +320,7 @@ test("duplicate companion is reconsidered without the primary candidate", async 
 });
 test("explicit exhausted Jev transient yields but auth/usage and unsettled failures do not", async () => {
   const output = await withTransientDelegationFallback(async () => {
-    throw new Error("transient_provider_unavailable");
+    throw transient();
   });
   expect(output.status).toBe("needs_guidance");
   expect(output.answer).toBe("indecisive");
@@ -277,6 +329,7 @@ test("explicit exhausted Jev transient yields but auth/usage and unsettled failu
     "provider_or_usage_failure",
     "unsettled_ledger",
     "experiment_budget_exhausted",
+    "transient_provider_unavailable",
   ])
     await expect(
       withTransientDelegationFallback(async () => {
@@ -286,4 +339,19 @@ test("explicit exhausted Jev transient yields but auth/usage and unsettled failu
   expect(await withTransientDelegationFallback(async () => ({ status: "evidence_ready" }))).toEqual(
     { status: "evidence_ready" },
   );
+});
+
+test("late transient cannot bypass controller deadline with partial recovery", async () => {
+  const r = await investigateCompact(
+    snapshot,
+    { question: "How is a machine selected?" },
+    async (_, qs) => {
+      if (qs.primary) return answers(qs, (id) => (id === "primary" ? "f1" : "none"));
+      await Bun.sleep(20);
+      throw transient();
+    },
+    10,
+  );
+  expect(r.reasonCode).toBe("compact_deadline");
+  expect(r.evidence).toEqual([]);
 });

@@ -17,6 +17,13 @@ import { observedGatewayFetch } from "./gateway-diagnostics";
 import { batchedJudge } from "./batched-judge";
 import { meteredGatewayCall } from "./gateway-call";
 import {
+  evaluateDirect,
+  TYPESAFE_MODEL,
+  TYPESAFE_INPUT_RATE,
+  assertNativeCredential,
+} from "./typesafe-direct";
+import { DIRECT_PASS_BUDGET } from "./direct-budget";
+import {
   SourceTools,
   scoreTrajectory,
   nonnegativeAmount,
@@ -27,8 +34,8 @@ import {
 } from "./trajectory";
 
 const MODELS = { terra: "openai/gpt-5.6-terra", jev: "typesafe-ai/jev" };
-const MAX_USD = 2.13,
-  MAX_REQUESTS = 496,
+const MAX_USD = 2.28,
+  MAX_REQUESTS = 536,
   MAX_OUTPUT = 2200,
   MAX_TURNS = 10;
 type Arm = "ordinary" | "jev-delegated";
@@ -57,6 +64,12 @@ async function main() {
   if (!casePath) throw new Error("cases_required");
   const key = process.env.VERCEL_AI_GATEWAY_API_KEY;
   if (!key) throw new Error("credential_missing");
+  const jevRoute = option("--jev-route") ?? "gateway";
+  if (!["gateway", "direct"].includes(jevRoute)) throw new Error("invalid_jev_route");
+  const nativeKey = process.env.JEV_API_KEY;
+  if (jevRoute === "direct" && !nativeKey) throw new Error("native_credential_missing");
+  if (jevRoute === "direct") assertNativeCredential(nativeKey, key);
+  const modelIds = { ...MODELS, jev: jevRoute === "direct" ? TYPESAFE_MODEL : MODELS.jev };
   mkdirSync(out, { recursive: true, mode: 0o700 });
   let activeRequestId: string | null = null;
   const gateway = createGateway({
@@ -72,6 +85,22 @@ async function main() {
   const models = Object.fromEntries(
     Object.entries(MODELS).map(([kind, id]) => [kind, catalog.data.find((m: any) => m.id === id)]),
   );
+  if (jevRoute === "direct") {
+    const docsResponse = await fetch("https://docs.typesafe.ai/models.md", {
+      signal: AbortSignal.timeout(30000),
+    });
+    const docs = await docsResponse.text();
+    if (!docsResponse.ok || !docs.includes(TYPESAFE_MODEL) || !docs.includes("0.042"))
+      throw new Error("native_pricing_reverify_required");
+    writeFileSync(out + "/native-models-documentation.txt", docs, { flag: "wx", mode: 0o600 });
+    models.jev = {
+      id: TYPESAFE_MODEL,
+      pricing: { input: String(TYPESAFE_INPUT_RATE), output: "0" },
+      source: "native documentation",
+      documentationHash: hash(docs),
+      costBasis: "catalog_estimate_not_invoice",
+    };
+  }
   if (Object.values(models).some((m) => !m)) throw new Error("required_model_unavailable");
   const credits = await gateway.getCredits();
   if (!(Number(credits.balance) > 0)) throw new Error("credit_unavailable");
@@ -92,6 +121,9 @@ async function main() {
   validateCases(cases);
   const workflow = option("--workflow") ?? "compact";
   if (!["compact", "legacy"].includes(workflow)) throw new Error("invalid_workflow");
+  const questionBatch = Number(option("--jev-question-batch") ?? 0);
+  if (!Number.isInteger(questionBatch) || questionBatch < 0 || questionBatch > 32)
+    throw new Error("invalid_question_batch");
   const resumeId = option("--resume-transient");
   if (resumeId) {
     const history = ledger(),
@@ -118,6 +150,9 @@ async function main() {
     "iteration-ledger.ts",
     "gateway-diagnostics.ts",
     "gateway-call.ts",
+    "typesafe-direct.ts",
+    "transient-failure.ts",
+    "direct-budget.ts",
     "batched-judge.ts",
     "package.json",
     "bun.lock",
@@ -134,6 +169,7 @@ async function main() {
   const manifest = {
     createdAt: new Date().toISOString(),
     models,
+    jevRoute,
     prices,
     preflightMs,
     implementationDigest,
@@ -142,14 +178,14 @@ async function main() {
       "Task-bound tool inherits active question/context; only search hints are generated. Generic controller still accepts explicit requests. No oracle state is inherited.",
     casesDigest: hash(JSON.stringify(cases)),
     maxUsd: MAX_USD,
+    passBudget: DIRECT_PASS_BUDGET,
     maxRequests: MAX_REQUESTS,
     maxTurns: MAX_TURNS,
     maxOutputTokens: MAX_OUTPUT,
     concurrency: 1,
-    maxQuestionsPerJevCall: 8,
-    retries: args.includes("--no-retry")
-      ? "No retries; explicit transient exhaustion yields to ordinary tools for Jev only."
-      : "One retry only for explicit HTTP429/502/503/504; unknown failed billing stays reserved. No SDK retries.",
+    maxQuestionsPerJevCall: questionBatch || null,
+    retries:
+      "No retries in this authorized pass; journaled Jev transients yield, unknown failed billing remains reserved.",
     reasoning: "provider default; no override",
     revision: option("--revision"),
     subdir: option("--subdir"),
@@ -175,16 +211,18 @@ async function main() {
   ) =>
     meteredGatewayCall(
       {
-        model: MODELS[kind],
+        model: modelIds[kind],
         stage,
         runId: out,
         attribution,
         price: prices[kind],
         maxUsd: MAX_USD,
+        passBudget: DIRECT_PASS_BUDGET,
         maxRequests: MAX_REQUESTS,
         maxOutput: MAX_OUTPUT,
-        retries: args.includes("--no-retry") ? 0 : 1,
-        secret: key,
+        retries: 0,
+        secret: kind === "jev" && jevRoute === "direct" ? nativeKey : key,
+        costPolicy: kind === "jev" && jevRoute === "direct" ? "typesafe_catalog" : "reported",
         history: ledger,
         append: (row) => append(ledgerPath, row),
         onStart: (id) => {
@@ -365,7 +403,7 @@ async function main() {
               output = source.read(a.path, a.startLine, a.endLine);
             else if (tc.toolName === "investigate" && !delegated) {
               delegated = true;
-              const judge: Judge = batchedJudge(async (state, questions, signal) => {
+              const rawJudge: Judge = async (state, questions, signal) => {
                 const phase =
                   questions.primary || questions.companion
                     ? "file_selection"
@@ -384,22 +422,28 @@ async function main() {
                   `jev_${phase}`,
                   { arm, caseId: c.id, turn },
                   { state, questions },
-                  () =>
-                    evaluate({
-                      model: gateway.evaluationModel(MODELS.jev),
-                      state: JSON.parse(JSON.stringify(state)),
-                      questions,
-                      maxRetries: 0,
-                      abortSignal: AbortSignal.any([
-                        ...(signal ? [signal] : []),
-                        AbortSignal.timeout(
-                          Math.min(30000, remainingTime(start, performance.now())),
-                        ),
-                      ]),
-                    }),
+                  () => {
+                    const abortSignal = AbortSignal.any([
+                      ...(signal ? [signal] : []),
+                      AbortSignal.timeout(Math.min(30000, remainingTime(start, performance.now()))),
+                    ]);
+                    return jevRoute === "direct"
+                      ? evaluateDirect(
+                          { state: JSON.parse(JSON.stringify(state)), questions },
+                          { apiKey: nativeKey!, signal: abortSignal },
+                        )
+                      : evaluate({
+                          model: gateway.evaluationModel(MODELS.jev),
+                          state: JSON.parse(JSON.stringify(state)),
+                          questions,
+                          maxRetries: 0,
+                          abortSignal,
+                        });
+                  },
                 );
                 return result.answers;
-              });
+              };
+              const judge = questionBatch ? batchedJudge(rawJudge, questionBatch) : rawJudge;
               const compactRequest = {
                 question: a.question ?? c.question,
                 context: a.context ?? c.context,
@@ -449,6 +493,7 @@ async function main() {
                   text,
                 })),
                 coverage: result.coverage,
+                ...("continuation" in result ? { continuation: result.continuation } : {}),
               };
             } else throw new Error("unexpected_tool");
             remainingTime(start, performance.now());
@@ -521,6 +566,8 @@ async function main() {
       if (
         error === "provider_or_usage_failure" ||
         error === "experiment_budget_exhausted" ||
+        error === "pass_budget_exhausted" ||
+        error === "pass_baseline_missing" ||
         error === "unsettled_or_failed_ledger" ||
         error === "unsettled_ledger" ||
         error === "failed_ledger_requires_authorization" ||

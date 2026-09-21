@@ -1,14 +1,13 @@
 export type LedgerRow = Record<string, any>;
-export const transientStatus = (status: unknown) =>
-  typeof status === "number" && [429, 502, 503, 504].includes(status);
+import { transientReceipt, transientStatus } from "./transient-failure";
+export { transientStatus };
 
 /** Only an already-journaled explicit transient exhaustion permits ordinary-tool fallback. */
 export async function withTransientDelegationFallback<T>(invoke: () => Promise<T>) {
   try {
     return await invoke();
   } catch (error) {
-    if (!(error instanceof Error) || error.message !== "transient_provider_unavailable")
-      throw error;
+    if (!transientReceipt(error)) throw error;
     return {
       version: "transient-delegation-fallback-v1",
       status: "needs_guidance",

@@ -7,10 +7,13 @@ import {
   type Judge,
   type Chunk,
   type Question,
+  type Judgment,
 } from "./core";
 import { fileEvidence } from "./investigation";
+import { partialJudgments } from "./batched-judge";
+import { transientReceipt } from "./transient-failure";
 
-export const COMPACT_VERSION = "compact-evidence-v6";
+export const COMPACT_VERSION = "compact-evidence-v7";
 const INTERNAL_CHARS = 48000,
   RETURN_CHARS = 6500;
 const isTest = (path: string) => /\.(test|spec)\.[cm]?[jt]sx?$/.test(path);
@@ -256,6 +259,7 @@ async function runCompact(snapshot: Snapshot, request: Request, judge: Judge, de
       answer: "indecisive",
       reasonCode: "no_candidate",
       evidence: [],
+      coverage: undefined,
       trace,
       internalChars: 0,
     };
@@ -309,22 +313,39 @@ async function runCompact(snapshot: Snapshot, request: Request, judge: Judge, de
       missing: "The implementation needed to answer was not found.",
     },
   };
-  const judgments = await ask(
-    {
-      question: request.question,
-      context: request.context ?? "",
-      roots,
-      unresolvedLocalPaths: [...unresolved],
-      source: spans,
-    },
-    questions,
-  );
+  let interrupted = false;
+  let judgments: Record<string, Judgment>;
+  try {
+    judgments = await ask(
+      {
+        question: request.question,
+        context: request.context ?? "",
+        roots,
+        unresolvedLocalPaths: [...unresolved],
+        source: spans,
+      },
+      questions,
+    );
+  } catch (error) {
+    if (!transientReceipt(error)) throw error;
+    if (performance.now() - start >= deadlineMs)
+      throw new Error("compact_deadline", { cause: error });
+    interrupted = true;
+    judgments = partialJudgments(error) ?? {};
+    // Authenticate subset IDs and distributions again at the controller boundary.
+    if (Object.keys(judgments).some((id) => !(id in questions)))
+      throw new Error("invalid_partial_judgment", { cause: error });
+    validateAnswers(
+      Object.fromEntries(Object.keys(judgments).map((id) => [id, questions[id]])),
+      judgments,
+    );
+  }
   trace.push({
     stage: "span_selection",
     judgments,
     inspectedPaths: [...new Set([...internal.values()].map((f) => f.path))],
   });
-  const candidates = spans.filter((s) => judgments[s.id].choice === "essential");
+  const candidates = spans.filter((s) => judgments[s.id]?.choice === "essential");
   const evidence: Chunk[] = [];
   let chars = 0,
     truncated = false;
@@ -337,16 +358,27 @@ async function runCompact(snapshot: Snapshot, request: Request, judge: Judge, de
     chars += span.text.length;
   }
   const status =
-    judgments.sufficiency.choice === "missing" || !evidence.length
+    judgments.sufficiency?.choice === "missing" || !evidence.length
       ? "needs_guidance"
-      : truncated || unresolved.size > 0 || snapshot.limited
+      : interrupted || truncated || unresolved.size > 0 || snapshot.limited
         ? "partial"
         : "evidence_ready";
   return {
     version: COMPACT_VERSION,
     status,
     answer: "indecisive",
-    reasonCode: judgments.sufficiency.choice,
+    reasonCode: interrupted ? "jev_temporarily_unavailable" : judgments.sufficiency.choice,
+    ...(interrupted
+      ? {
+          continuation: {
+            candidatePaths: roots,
+            completedSpanJudgments: spans.filter((s) => s.id in judgments).length,
+            totalSpanJudgments: spans.length,
+            instruction:
+              "Discovery selected these candidate paths, not a proven complete answer. Reuse the exact excerpts provided; read these paths for missing evidence before repeating broad search. Unjudged spans have not been classified as irrelevant.",
+          },
+        }
+      : {}),
     evidence,
     trace,
     internalChars,

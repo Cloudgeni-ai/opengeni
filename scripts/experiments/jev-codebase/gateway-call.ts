@@ -2,6 +2,7 @@ import { hash } from "./core";
 import { budgetState, transientStatus, type LedgerRow } from "./iteration-ledger";
 import { safeGatewayError } from "./gateway-diagnostics";
 import { nonnegativeAmount } from "./trajectory";
+import { journaledTransientFailure } from "./transient-failure";
 
 export interface CallOptions {
   model: string;
@@ -13,6 +14,13 @@ export interface CallOptions {
   maxRequests: number;
   maxOutput: number;
   retries: number;
+  passBudget?: {
+    baselineAttempts: number;
+    baselineUsd: number;
+    maxAdditionalAttempts: number;
+    maxAdditionalUsd: number;
+  };
+  costPolicy?: "reported" | "typesafe_catalog";
   retryDelayMs?: number;
   secret?: string;
   history: () => LedgerRow[];
@@ -27,12 +35,24 @@ export async function meteredGatewayCall(
   invoke: () => Promise<any>,
 ): Promise<any> {
   const o = options;
+  if (o.costPolicy === "typesafe_catalog" && o.model !== "jev-1.13.0")
+    throw new Error("invalid_catalog_cost_policy");
   const serialized = JSON.stringify(payload),
     bytes = Buffer.byteLength(serialized);
   if (bytes > 180000) throw new Error("request_size_budget");
   const reservedUsd = (bytes + 8192) * o.price.input + o.maxOutput * o.price.output;
   for (let attempt = 0; ; attempt++) {
     const budget = budgetState(o.history());
+    if (o.passBudget) {
+      const b = o.passBudget;
+      if (budget.attempts < b.baselineAttempts || budget.used + 1e-9 < b.baselineUsd)
+        throw new Error("pass_baseline_missing");
+      if (
+        budget.attempts - b.baselineAttempts >= b.maxAdditionalAttempts ||
+        budget.used - b.baselineUsd + reservedUsd > b.maxAdditionalUsd
+      )
+        throw new Error("pass_budget_exhausted");
+    }
     if (budget.attempts >= o.maxRequests || budget.used + reservedUsd > o.maxUsd)
       throw new Error("experiment_budget_exhausted");
     const base = {
@@ -82,10 +102,17 @@ export async function meteredGatewayCall(
         reportedUsd,
         resolvedModel: r.response?.modelId,
         generationId: r.providerMetadata?.gateway?.generationId,
+        nativeRequestId: r.providerMetadata?.typesafe?.requestId,
+        costBasis:
+          o.costPolicy === "typesafe_catalog"
+            ? "catalog_estimate_not_invoice"
+            : "reported_and_catalog",
         finishReason: r.finishReason ?? null,
       });
-      if (reportedUsd === null) throw new Error("cost_unavailable");
-      if (Math.max(nominalUsd, reportedUsd) > reservedUsd) throw new Error("reservation_exceeded");
+      if (reportedUsd === null && o.costPolicy !== "typesafe_catalog")
+        throw new Error("cost_unavailable");
+      if (Math.max(nominalUsd, reportedUsd ?? 0) > reservedUsd)
+        throw new Error("reservation_exceeded");
       return r;
     } catch (error) {
       const diagnostics = safeGatewayError(error, o.secret);
@@ -107,7 +134,7 @@ export async function meteredGatewayCall(
         timestamp: new Date().toISOString(),
         statusCode: diagnostics.statusCode,
       });
-      if (attempt >= o.retries) throw new Error("transient_provider_unavailable", { cause: error });
+      if (attempt >= o.retries) throw journaledTransientFailure(base.id, o.history(), error);
       await Bun.sleep(o.retryDelayMs ?? 1000);
     }
   }

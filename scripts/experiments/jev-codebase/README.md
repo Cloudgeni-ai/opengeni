@@ -179,14 +179,15 @@ before viewing fresh labels, alternate arm order, keep smoke/regression runs
 separate, and never overwrite output manifests. CLI work is read-only outside
 its output receipts. No staging integration or subscription billing is implied.
 
-The shared sequential journal caps the authorized reliability iteration at 496 cumulative inference requests
-and a conservative local $2.13 estimate, reserving each call before transport. This iteration
-started at 396 requests; earlier manifests retain their original ceilings. Unsettled,
+The shared sequential journal caps the authorized direct-route iteration at 536 cumulative inference requests
+and a conservative local $2.28 estimate, reserving each call before transport. This pass
+also enforces at most 40 additional attempts/$1 above the retained baseline of
+496 attempts/$1.287299332 known-or-reserved. Earlier manifests retain their original ceilings. Unsettled,
 authentication, missing-usage and ambiguous failures stop the experiment. Explicit
-HTTP 429/502/503/504 failures get one retry, with the unknown bill reserved; exhausted
-Jev delegation yields empty evidence to ordinary Terra tools, while exhausted Terra
-calls end that case. `--no-retry` disables the explicit retry for controlled reliability
-tests. Failed cases from earlier runs remain failures, not retroactively rescued.
+HTTP 429/502/503/504/529 failures are retained with the unknown bill reserved; failed
+Jev discovery yields empty evidence to ordinary Terra tools, while exhausted Terra
+calls end that case. This pass unconditionally disables retries; `--no-retry` remains
+accepted for command compatibility. Failed cases from earlier runs remain failures, not retroactively rescued.
 An old explicit
 transient failure requires `--resume-transient FAILED_REQUEST_UUID` in the same ledger;
 this records authorization, not settled billing. Never reset the ledger to bypass it.
@@ -211,15 +212,19 @@ character limits never truncate a physical line and label it exact. This is boun
 discovery, not repository-wide absence proof. A plausible wrong root can still miss
 other candidates. `--workflow legacy` remains available for explicit comparison.
 
-The runner partitions independent Jev questions into batches of at most eight,
+The optional `--jev-question-batch 8` partitions independent Jev questions into batches of at most eight,
 retaining identical full state in each batch and validating every answer. This is a
 workload mitigation, not a documented provider limit: an alternating diagnostic saw
 three 26-question controls fail with HTTP503 while all twelve calls in the equivalent
 three batched pipelines succeeded. It repeats source tokens and adds calls; both are
 metered, not treated as free. The subsequent no-retry end-to-end check still saw
 503s on an eight-question span batch and a two-question file selector: batching has
-not established reliable service or eliminated the failure. Any failed batch invalidates that delegation and yields
-only on explicit transient errors. Controller and task deadlines still apply.
+not established reliable service or eliminated the failure. Batching is off by default.
+Completed validated batch judgments can survive a later journaled transient as partial
+exact evidence; unjudged spans are never labeled irrelevant. Successful discovery paths
+survive a later selection failure as candidate paths, not proven answer evidence.
+Fallback requires a branded error linked to the failed/reserved ledger attempt, not
+an arbitrary matching error string. Controller and task deadlines still apply.
 
 `gateway-call.ts` is shared by the runner and diagnostic utility. Its offline SDK
 integration test covers two 503s, reserved unknown bills, ordinary fallback, and
@@ -231,6 +236,9 @@ must be handled with the same access controls as the repository. Each trajectory
 retains its implementation sources and digest alongside its manifest.
 
 The Gateway-only diagnostic utility uses the same cumulative ledger and no retries:
+
+Its historical 496-request ceiling remains unchanged. The newer `compare-routes.ts`
+and `trajectory-run.ts` use the explicit direct-pass authorization above.
 
 ```sh
 JEV_ALLOW_LIVE=1 bun diagnose-gateway.ts minimal \
@@ -248,6 +256,31 @@ direct/combined abort signals three times. `batches` alternates whole versus
 eight-question batches three times; `code` repeats supplied cases three times.
 Do not use a new ledger to evade the cumulative authorization. These diagnostics
 cannot attribute an uncorrelated upstream503 to Gateway versus TypeSafe by themselves.
+
+### Explicit native TypeSafe comparison
+
+The September 21 direct-route experiment was explicitly authorized by the user.
+`--jev-route direct` uses only `JEV_API_KEY` at the fixed TypeSafe endpoint, pins
+`jev-1.13.0`, rejects redirects and validates native Choice answers and usage.
+Terra still uses its Gateway credential. No silent endpoint fallback occurs;
+Gateway remains the default route unless the option is supplied.
+Native cost is recorded as catalog-estimated input cost with `reportedUsd: null`,
+not as a reported invoice charge. The native adapter deliberately supports Choice only.
+
+```sh
+JEV_ALLOW_LIVE=1 bun trajectory-run.ts --root /path/to/opengeni \
+  --revision COMMIT --subdir apps/web/src/lib --cases /path/to/cases.json \
+  --out runs/direct-new --ledger runs/terra-shared.jsonl --no-retry --jev-route direct
+JEV_ALLOW_LIVE=1 bun compare-routes.ts --plan /path/to/plan.json \
+  --out runs/route-comparison-new --ledger runs/terra-shared.jsonl
+```
+
+The route plan contains four `{file,id,label}` records identifying retained payloads
+in JSONL files. The comparison sends one native synthetic smoke, then two alternating
+route repetitions of each unchanged payload, with 30-second deadlines and no retries.
+The Gateway upstream version and provider-account configuration are not attested to
+match the pinned native version/account; this comparison does not prove a route-only
+causal effect or permanent availability. Do not reset the ledger to rerun beyond its cap.
 
 The harness's task-bound investigate tool accepts only search hints; runtime supplies
 the active question/context. The underlying controller accepts an explicit Request

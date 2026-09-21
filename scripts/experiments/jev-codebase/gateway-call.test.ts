@@ -110,3 +110,21 @@ test("authentication and missing cost fail closed without transient fallback", a
     expect(() => budgetState(rows)).toThrow("failed_ledger_requires_authorization");
   }
 });
+
+test("incremental budget rejects excess attempts and missing baseline before transport", async () => {
+  const rows: LedgerRow[] = [];
+  let invoked = false;
+  for (const passBudget of [
+    { baselineAttempts: 0, baselineUsd: 0, maxAdditionalAttempts: 0, maxAdditionalUsd: 1 },
+    { baselineAttempts: 1, baselineUsd: 0, maxAdditionalAttempts: 40, maxAdditionalUsd: 1 },
+    { baselineAttempts: 0, baselineUsd: 0, maxAdditionalAttempts: 40, maxAdditionalUsd: 0 },
+  ])
+    await expect(
+      meteredGatewayCall({ ...config(rows), passBudget }, {}, async () => {
+        invoked = true;
+        return success();
+      }),
+    ).rejects.toThrow();
+  expect(invoked).toBe(false);
+  expect(rows).toEqual([]);
+});
