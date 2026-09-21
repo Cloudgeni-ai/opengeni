@@ -1042,13 +1042,22 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         );
         expect((await receipt.json()).unread).toBe(false);
       }
-      const [persistedFirst] = await shared.admin<{ acknowledgedSequence: number }[]>`
+      // The configured header is an external identity label, not the durable
+      // subject ID (configured auth namespaces it). Resolve the same browser
+      // principal that authored both receipts instead of guessing its DB key.
+      const accessResponse = await page.request.get(`${apiBaseUrl}/v1/access/me`);
+      expect(accessResponse.ok()).toBe(true);
+      const access = await accessResponse.json();
+      expect(access.subjectId).toBe("configured:sessionpin-owner");
+      const persisted = await shared.admin<{ acknowledgedSequence: number }[]>`
         select acknowledged_sequence as "acknowledgedSequence"
         from session_pins
         where workspace_id = ${workspaceId} and session_id = ${first.id}
-          and subject_id = 'sessionpin-owner'
+          and subject_id = ${access.subjectId}
       `;
-      expect(persistedFirst?.acknowledgedSequence).toBeGreaterThanOrEqual(firstAnswerSequence);
+      expect(persisted).toHaveLength(1);
+      expect(typeof persisted[0]!.acknowledgedSequence).toBe("number");
+      expect(persisted[0]!.acknowledgedSequence).toBeGreaterThanOrEqual(firstAnswerSequence);
 
       await page.reload();
       const firstRow = page.locator(`a[data-session-row="${first.id}"]`);
