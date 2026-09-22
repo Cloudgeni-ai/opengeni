@@ -23,10 +23,7 @@ import {
   TYPESAFE_PRICING_DOCUMENT_HASH,
   assertNativeCredential,
 } from "./typesafe-direct";
-import {
-  CONTENT_PASS_BUDGET as IMPROVEMENT_PASS_BUDGET,
-  assertContentLedger,
-} from "./direct-budget";
+import { mainModelConfig, assertMainModelLedger } from "./main-model";
 import { investigateContent, CONTENT_VERSION } from "./content-investigation";
 import { searchContent, searchTerms } from "./content-search";
 import { CitationRegistry } from "./citation-registry";
@@ -40,7 +37,12 @@ import {
   type FinalAnswer,
 } from "./trajectory";
 
-const MODELS = { terra: "openai/gpt-5.6-terra", jev: "typesafe-ai/jev" };
+const args = process.argv.slice(2);
+const option = (k: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : undefined);
+const mainModel = mainModelConfig(option("--main-model"));
+const IMPROVEMENT_PASS_BUDGET = mainModel.budget;
+// Historical `terra` record key means the main LLM role; resolved IDs are explicit.
+const MODELS = { terra: mainModel.id, jev: "typesafe-ai/jev" };
 const MAX_USD = IMPROVEMENT_PASS_BUDGET.baselineUsd + IMPROVEMENT_PASS_BUDGET.maxAdditionalUsd,
   MAX_REQUESTS =
     IMPROVEMENT_PASS_BUDGET.baselineAttempts + IMPROVEMENT_PASS_BUDGET.maxAdditionalAttempts,
@@ -49,8 +51,6 @@ const MAX_USD = IMPROVEMENT_PASS_BUDGET.baselineUsd + IMPROVEMENT_PASS_BUDGET.ma
 type Arm = "ordinary" | "jev-delegated";
 type Price = { input: number; output: number; cached: number };
 type Row = Record<string, any>;
-const args = process.argv.slice(2);
-const option = (k: string) => (args.includes(k) ? args[args.indexOf(k) + 1] : undefined);
 const root = resolve(option("--root") || ".");
 const out = resolve(option("--out") || "runs/terra-trajectory");
 const casePath = option("--cases");
@@ -60,7 +60,7 @@ const append = (path: string, value: unknown) =>
   appendFileSync(path, JSON.stringify(value) + "\n", { mode: 0o600 });
 const ledger = (): Row[] => {
   const text = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
-  assertContentLedger(text);
+  assertMainModelLedger(text, mainModel.name);
   return text
     .trim()
     .split("\n")
@@ -169,6 +169,7 @@ async function main() {
     "evidence-package.ts",
     "transient-failure.ts",
     "direct-budget.ts",
+    "main-model.ts",
     "batched-judge.ts",
     "package.json",
     "bun.lock",
@@ -185,6 +186,7 @@ async function main() {
   const manifest = {
     createdAt: new Date().toISOString(),
     models,
+    mainModel: { name: mainModel.name, id: mainModel.id, legacyRoleKey: "terra" },
     jevRoute,
     citationMode,
     prices,
@@ -214,9 +216,9 @@ async function main() {
     revision: option("--revision"),
     subdir: option("--subdir"),
     protocol:
-      "Same Terra tools and instruction; delegated arm forced investigate first, once; ordinary fallback allowed. API usage, not subscription billing. One run per case/arm. No oracle labels supplied.",
+      "Same main LLM, tools and instruction; delegated arm forced investigate first, once; ordinary fallback allowed. API usage, not subscription billing. One run per case/arm. No oracle labels supplied.",
     contextEstimate:
-      "UTF8 bytes/4 proxy only; actual input/cached/output/reasoning tokens from provider usage. Not a Terra tokenizer.",
+      "UTF8 bytes/4 proxy only; actual input/cached/output/reasoning tokens from provider usage. Not a model-specific tokenizer.",
   };
   writeFileSync(out + "/manifest.json", JSON.stringify(manifest, null, 2), {
     flag: "wx",

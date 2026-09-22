@@ -251,6 +251,49 @@ historical reconciliation requires an exact completed replacement id/hash with
 matching task/model attribution; new nontransient failures stop the experiment.
 No automatic retries occurred.
 
+### Codex subscription script pilot
+
+`codex-tool.ts` is a read-only CLI wrapper for actual Codex agent sessions. It does
+not invoke a generative model or Vercel Gateway. The agent session selects
+`codex/gpt-6-astra`; only the delegated `investigate` operation calls native Jev,
+using the explicitly authorized `JEV_API_KEY` route. This is an experiment script,
+not a registered staging tool or a filesystem security boundary.
+
+Initialize one new shared ledger (`bun codex-tool.ts ledger-init DIR`), then each
+task (`bun codex-tool.ts init CONFIG.json`) immediately before dispatch. Config
+contains absolute canonical `root`, `outputDir`, `ledgerDir`, fixed `revision` and
+`subdir`, `question`, `context`, normalized `initialQueries`, `taskId`, `arm`
+(`ordinary` or `delegated`), `mode` (`evidence` or `answer_if_supported`),
+`deadlineMs` (at most 240000), and explicit `nativeAuthorized` boolean. The output
+directory must not already exist. The current pilot pins revision
+`b0a5a54f5ce6e1ab44d90eb5e2cd1193e14f45ae` and `apps/web/src/lib`.
+
+Send JSON on stdin to `bun codex-tool.ts request TASK_DIR`. First operation is
+`{"op":"discover"}` for ordinary or `{"op":"investigate"}` for delegated;
+initial queries are immutable. Follow-ups are `search` with `queries` and optional
+`offset`, `read` with `path/startLine/endLine`, and `finish` with
+`answer/explanation/citationIds`. The ten-operation cap includes finish. The task
+clock starts at the first accepted operation, with a separate ten-minute launch
+deadline. State, exact source citation handles, per-operation outputs and timings
+persist between processes. Native attempts have an append-only journal and shared
+32-attempt/$0.25 conservative estimate/reservation ceiling; failed or interrupted
+calls retain their reservations. No automatic retries or stale-lock recovery.
+
+For paired sessions, freeze identical case arguments and implementation, launch
+sequentially, and audit actual shell calls and received JSON against retained tool
+outputs before accepting a case. Same-user sandbox access is not isolation:
+out-of-scope reads, missing delivery or truncation invalidate the pilot result.
+Native request state and validated response telemetry are retained internally but
+are not included in the investigator's tool response. Invalid raw provider bodies
+are not retained; safe status/correlation diagnostics and unknown-bill reserves are.
+
+Use session `agent.model.usage` and `agent.model.request` events to verify the
+Codex subscription route and measure full input/cache/output/reasoning usage and
+timing. Subscription usage is not a per-token invoice. Any API-equivalent dollar
+estimate must be labeled separately from actual native Jev costs and subscription
+fees. Do not infer cash savings or equate this session pilot with the earlier
+Gateway harness.
+
 The historical `--workflow compact` controller ranks a source path/export index locally,
 lets Jev choose a primary/companion from 40 candidates, and broadens on unknown
 within six pages. If both choices duplicate the same file, a conditional judgment
