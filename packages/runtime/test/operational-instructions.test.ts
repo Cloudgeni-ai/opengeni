@@ -29,7 +29,7 @@ describe("provider-neutral operational instructions", () => {
     expect(guidance.length).toBeLessThan(1000);
   });
 
-  test("requires a design decision before committing to a host, provider, or credential", () => {
+  test("asks about out-of-scope architecture without blocking authorized choices", () => {
     const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
       "Decide the design before building it.",
     );
@@ -47,18 +47,24 @@ describe("provider-neutral operational instructions", () => {
       "a Site reaches the model and workspace tools through the host bridge",
     );
     expect(guidance).toContain(
-      "name the candidate designs and ask before building any of them",
+      "Follow the project's established architecture and choices the user has already authorized or delegated",
     );
     expect(guidance).toContain(
+      "Ask before making a new external commitment or materially departing from the established architecture beyond the authorized scope",
+    );
+    expect(guidance).toContain(
+      "do not start parallel work that assumes the unresolved choice",
+    );
+    expect(guidance).toContain(
+      "The absence of a native path alone does not require a question",
+    );
+    expect(guidance).not.toContain(
       "Do not commit to a host, provider, or credential the user did not name",
-    );
-    expect(guidance).toContain(
-      "do not start parallel work that assumes that choice",
     );
     expect(guidance.length).toBeLessThan(1000);
   });
 
-  test("keeps Connect cards for required integrations, not agent-chosen hosts", () => {
+  test("allows Connect cards for established or delegated designs", () => {
     const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
       "# Integration setup",
     );
@@ -68,9 +74,11 @@ describe("provider-neutral operational instructions", () => {
     );
     const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
     expect(guidance).toContain(
-      "A card is for an integration the task already requires, not for a host or provider you chose yourself",
+      "A card is for an integration required by the authorized design, including established or delegated choices",
     );
-    expect(guidance).toContain("that choice is a question, not a setup step");
+    expect(guidance).toContain(
+      "Resolve out-of-scope architecture choices before requesting setup",
+    );
   });
 
   test("separates command observation from conversation and diagnostic reads concisely", () => {

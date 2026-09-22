@@ -2,4 +2,4 @@
 "@opengeni/runtime": patch
 ---
 
-Teach agents that a Site reaches OpenGeni models and tools through the host bridge and never needs its own server, and to name candidate designs and ask before committing to a host, provider, or credential the user did not choose.
+Teach agents that a Site reaches OpenGeni models and tools through the host bridge and never needs its own server. Ask about external commitments or material architecture changes beyond the authorized scope while preserving established and delegated choices.
