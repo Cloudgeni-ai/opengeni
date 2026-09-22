@@ -48,6 +48,7 @@ import {
   stableJson,
   type AccessGrant,
   type ComposerDraft,
+  type WorkspaceSessionToolDefaults,
   type CreateSessionResponse,
   type GoalSpec,
   type FirstPartyMcpToolName,
@@ -3737,12 +3738,25 @@ async function acceptSessionUserMessageInFileScope(
       ),
       existingSession.mcpServers,
     );
+    // A `workspace_default` session stores only its creation-time tool
+    // snapshot and resolves the current workspace defaults at run time, so the
+    // raw column is not the connector allow-list this follow-up executes with.
+    // Freeze accounts against the same expanded list the composer and the
+    // worker see.
+    const connectionAccountTools = sessionToolsForConnectionAccounts({
+      session: existingSession,
+      settings,
+      runtimeSettings,
+      workspaceSessionToolDefaults: resolveWorkspaceSessionToolDefaults(
+        (await requireWorkspace(db, workspaceId)).settings,
+      ),
+    });
     const { personalConnectionDelegations, mcpAccountBindings } = await freezeConnectionAccounts({
       db,
       accountId: grant.accountId,
       workspaceId,
       settings: runtimeSettings,
-      tools: existingSession.tools,
+      tools: connectionAccountTools,
       resources: [...existingSession.resources, ...requestedResources],
       source: connectionDelegationSource,
       targetSessionId: sessionId,
@@ -4409,6 +4423,40 @@ function withFirstPartyTools(
     return tools;
   }
   return mergeToolRefs(tools, [{ kind: "mcp", id: "opengeni" }]);
+}
+
+/**
+ * The executable MCP tool list a follow-up on an existing session freezes
+ * connector accounts against.
+ *
+ * A `workspace_default` session stores only the tool snapshot taken when it
+ * was created and expands the current workspace defaults at run time, exactly
+ * as child creation expands a parent's effective list. A connector enabled
+ * after creation therefore never enters the stored column. The composer
+ * projects that same expansion and submits account selections for it, so
+ * freezing against the stored column rejected every such selection as
+ * unmatched and never froze its personal delegation. Explicit and inherited
+ * policies keep their stored refs; exclusions apply to both.
+ */
+export function sessionToolsForConnectionAccounts(input: {
+  session: Pick<Session, "tools" | "toolPolicy">;
+  settings: Pick<Settings, "mcpServers">;
+  runtimeSettings: Pick<Settings, "mcpServers">;
+  workspaceSessionToolDefaults: WorkspaceSessionToolDefaults | null;
+}): ToolRef[] {
+  const tracksWorkspaceDefaults = input.session.toolPolicy.mode === "workspace_default";
+  const expanded = tracksWorkspaceDefaults
+    ? withWorkspaceDefaultMcpTools(
+        availableToolRefs(input.session.tools, input.runtimeSettings),
+        input.settings,
+        input.runtimeSettings,
+        input.workspaceSessionToolDefaults,
+      )
+    : input.session.tools;
+  return withFirstPartyTools(
+    withoutExcludedMcpServers(expanded, input.session.toolPolicy.excludedMcpServerIds),
+    input.runtimeSettings,
+  );
 }
 
 function hasOwnProperty(value: unknown, key: string): boolean {
