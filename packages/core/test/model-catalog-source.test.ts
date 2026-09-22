@@ -54,6 +54,7 @@ describe("model catalog source resolution", () => {
       });
       const second = await resolveCatalogSettings({} as opengeniDb.Database, env);
       expect(second.version).toBe(2);
+      expect(() => canonicalConfiguredModel(second.settings, "codex/test-model")).toThrow();
       expect(
         resolveWorkspaceModelSelection({
           ...input,
