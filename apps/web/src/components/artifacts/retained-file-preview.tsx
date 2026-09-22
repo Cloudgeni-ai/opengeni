@@ -222,6 +222,7 @@ function InlineArtifactBody({
     client: typeof client;
     accessKeyVersion: number;
     artifact?: RetainedArtifactReference;
+    filename?: string;
     error?: boolean;
   } | null>(null);
   useEffect(() => {
@@ -229,13 +230,28 @@ function InlineArtifactBody({
     setLoaded(null);
     void client
       .getRetainedArtifact(workspaceId, artifactId)
-      .then((artifact) => {
+      .then(async (artifact) => {
+        if (!active) return;
+        if (!artifact.available || artifact.artifactId !== artifactId) {
+          setLoaded({ client, accessKeyVersion, error: true });
+          return;
+        }
+        // Legacy binary publications need their authorized saved filename, not
+        // model-authored alt text, to share the panel's media classification.
+        const file =
+          artifact.kind === "file" && artifact.contentType === "application/octet-stream"
+            ? await client.getFile(workspaceId, artifactId).catch(() => null)
+            : null;
         if (active)
-          setLoaded(
-            artifact.available && artifact.artifactId === artifactId
-              ? { client, accessKeyVersion, artifact }
-              : { client, accessKeyVersion, error: true },
-          );
+          setLoaded({
+            client,
+            accessKeyVersion,
+            artifact,
+            filename:
+              file?.id === artifactId && file.workspaceId === workspaceId
+                ? file.filename
+                : undefined,
+          });
       })
       .catch(() => {
         if (active) setLoaded({ client, accessKeyVersion, error: true });
@@ -254,6 +270,7 @@ function InlineArtifactBody({
         <RetainedFilePreview
           workspaceId={workspaceId}
           artifact={current.artifact}
+          filename={current.filename}
           title={alt || "Artifact"}
         />
       ) : (

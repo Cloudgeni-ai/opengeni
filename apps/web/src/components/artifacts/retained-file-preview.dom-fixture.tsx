@@ -14,6 +14,7 @@ const workspaceId = "11111111-1111-4111-8111-111111111111";
 let artifact: RetainedArtifactReference;
 let accessKeyVersion = 1;
 const client = {
+  getFile: mock(async () => ({ id, workspaceId, filename: "recording.mp4" })),
   getRetainedArtifact: mock(async () => artifact),
   createRetainedArtifactDownloadUrl: mock(
     async (_workspaceId: string, _artifact: RetainedArtifactReference) => ({
@@ -166,6 +167,7 @@ test("published link opens sidebar and embed renders playable video with stable 
       .querySelector("a")!
       .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })),
   );
+  expect(client.getFile).not.toHaveBeenCalled();
   expect(open).toHaveBeenCalledWith({ id, editable: false, kind: "file" });
   expect(container.querySelector("video")?.getAttribute("src")).toBe(
     "https://media.example/video.mp4",
@@ -254,3 +256,44 @@ test("unavailable artifact retains an actionable link without requesting media",
   expect(container.querySelector("a")?.getAttribute("href")).toContain(`/artifacts/files/${id}`);
   expect(client.createRetainedArtifactDownloadUrl).not.toHaveBeenCalled();
 });
+
+for (const [filename, element] of [
+  ["recording.mp4", "video"],
+  ["recording.wav", "audio"],
+]) {
+  test(`inline legacy ${element} uses authorized filename and unchanged receipt`, async () => {
+    artifact = { ...artifact, contentType: "application/octet-stream" };
+    client.getFile.mockResolvedValueOnce({ id, workspaceId, filename: filename! });
+    await act(async () =>
+      root.render(<InlineChatArtifact workspaceId={workspaceId} artifactId={id} alt="Showcase" />),
+    );
+    await act(async () => container.querySelector("button")?.click());
+    expect(client.getFile).toHaveBeenCalledWith(workspaceId, id);
+    expect(container.querySelector(element!)).not.toBeNull();
+    expect(client.createRetainedArtifactDownloadUrl.mock.calls[0]?.[1]).toBe(artifact);
+    expect(artifact.contentType).toBe("application/octet-stream");
+    expect(client.downloadRetainedArtifact).not.toHaveBeenCalled();
+  });
+}
+
+for (const kind of ["wrong workspace", "wrong id", "unavailable", "non-media"]) {
+  test(`inline filename fallback rejects ${kind} even with a video alt label`, async () => {
+    artifact = { ...artifact, contentType: "application/octet-stream" };
+    if (kind === "unavailable") client.getFile.mockRejectedValueOnce(new Error("Denied"));
+    else
+      client.getFile.mockResolvedValueOnce({
+        id: kind === "wrong id" ? workspaceId : id,
+        workspaceId: kind === "wrong workspace" ? id : workspaceId,
+        filename: kind === "non-media" ? "source.zip" : "recording.mp4",
+      });
+    await act(async () =>
+      root.render(
+        <InlineChatArtifact workspaceId={workspaceId} artifactId={id} alt="recording.mp4" />,
+      ),
+    );
+    await act(async () => container.querySelector("button")?.click());
+    expect(container.querySelector("video,audio")).toBeNull();
+    expect(container.textContent).toContain("Preview is not available");
+    expect(client.createRetainedArtifactDownloadUrl).not.toHaveBeenCalled();
+  });
+}
