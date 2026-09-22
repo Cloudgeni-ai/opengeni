@@ -48,7 +48,6 @@ import {
   stableJson,
   type AccessGrant,
   type ComposerDraft,
-  type WorkspaceSessionToolDefaults,
   type CreateSessionResponse,
   type GoalSpec,
   type FirstPartyMcpToolName,
@@ -182,6 +181,10 @@ import {
   workspaceCustomModelReference,
 } from "../model-catalog";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
+import {
+  resolveSessionToolPolicy,
+  workspaceSessionToolPolicyDefaultServerIdsFor,
+} from "./session-tool-policy";
 import { validateSubmittedTimelineAnnotations } from "./timeline-annotations";
 import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
 import {
@@ -3725,29 +3728,30 @@ async function acceptSessionUserMessageInFileScope(
             connectionDelegationSource.turnId,
           )
         : null;
+    const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
+      db,
+      workspaceId,
+      settings,
+      inheritedPersonalConnectionDelegations
+        ? {
+            personalConnectionDelegations: inheritedPersonalConnectionDelegations,
+          }
+        : { subjectId: grant.subjectId },
+    );
     const runtimeSettings = settingsWithSessionMcpServerMetadata(
-      await settingsWithEnabledCapabilityMcpServers(
-        db,
-        workspaceId,
-        settings,
-        inheritedPersonalConnectionDelegations
-          ? {
-              personalConnectionDelegations: inheritedPersonalConnectionDelegations,
-            }
-          : { subjectId: grant.subjectId },
-      ),
+      capabilityRuntimeSettings,
       existingSession.mcpServers,
     );
     // A `workspace_default` session stores only its creation-time tool
     // snapshot and resolves the current workspace defaults at run time, so the
     // raw column is not the connector allow-list this follow-up executes with.
-    // Freeze accounts against the same expanded list the composer and the
+    // Freeze accounts against the same resolved list the composer and the
     // worker see.
     const connectionAccountTools = sessionToolsForConnectionAccounts({
       session: existingSession,
-      settings,
-      runtimeSettings,
-      workspaceSessionToolDefaults: resolveWorkspaceSessionToolDefaults(
+      runtimeMcpServers: runtimeSettings.mcpServers,
+      defaultMcpServerIds: workspaceSessionToolPolicyDefaultServerIdsFor(
+        capabilityRuntimeSettings.mcpServers,
         (await requireWorkspace(db, workspaceId)).settings,
       ),
     });
@@ -4430,33 +4434,27 @@ function withFirstPartyTools(
  * connector accounts against.
  *
  * A `workspace_default` session stores only the tool snapshot taken when it
- * was created and expands the current workspace defaults at run time, exactly
- * as child creation expands a parent's effective list. A connector enabled
- * after creation therefore never enters the stored column. The composer
- * projects that same expansion and submits account selections for it, so
- * freezing against the stored column rejected every such selection as
- * unmatched and never froze its personal delegation. Explicit and inherited
- * policies keep their stored refs; exclusions apply to both.
+ * was created and expands the current workspace defaults at run time, so a
+ * connector enabled after creation never enters the stored column. The
+ * composer projects that same expansion and submits account selections for
+ * it, so freezing against the stored column rejected every such selection as
+ * unmatched and never froze its personal delegation. Resolve through the one
+ * ID-only policy resolver the API projection and the worker use, with the
+ * same omitted-tools default, so all three agree on the executable set.
  */
 export function sessionToolsForConnectionAccounts(input: {
   session: Pick<Session, "tools" | "toolPolicy">;
-  settings: Pick<Settings, "mcpServers">;
-  runtimeSettings: Pick<Settings, "mcpServers">;
-  workspaceSessionToolDefaults: WorkspaceSessionToolDefaults | null;
+  /** The resolved runtime registry, including session-local servers. */
+  runtimeMcpServers: Iterable<{ id: string }>;
+  /** The current omitted-tools default for this workspace. */
+  defaultMcpServerIds: Iterable<string>;
 }): ToolRef[] {
-  const tracksWorkspaceDefaults = input.session.toolPolicy.mode === "workspace_default";
-  const expanded = tracksWorkspaceDefaults
-    ? withWorkspaceDefaultMcpTools(
-        availableToolRefs(input.session.tools, input.runtimeSettings),
-        input.settings,
-        input.runtimeSettings,
-        input.workspaceSessionToolDefaults,
-      )
-    : input.session.tools;
-  return withFirstPartyTools(
-    withoutExcludedMcpServers(expanded, input.session.toolPolicy.excludedMcpServerIds),
-    input.runtimeSettings,
-  );
+  return resolveSessionToolPolicy({
+    toolPolicy: input.session.toolPolicy,
+    sessionTools: input.session.tools,
+    availableMcpServerIds: [...input.runtimeMcpServers].map((server) => server.id),
+    defaultMcpServerIds: input.defaultMcpServerIds,
+  }).toolRefs;
 }
 
 function hasOwnProperty(value: unknown, key: string): boolean {

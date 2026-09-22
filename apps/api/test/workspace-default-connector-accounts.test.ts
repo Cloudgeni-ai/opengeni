@@ -39,8 +39,8 @@ afterAll(async () => {
 // A `workspace_default` session tracks the current workspace defaults at run
 // time; its stored tool column is only the snapshot taken at creation. The
 // composer projects the current expansion and submits account selections for
-// it, so a follow-up must freeze accounts against that expansion rather than
-// the stale stored column.
+// it, so a follow-up must freeze accounts against that expansion, resolved the
+// same way the worker resolves it, rather than the stale stored column.
 test("a follow-up on a workspace-default session freezes the selected default connector account", async () => {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('Workspace default connector admission') returning id`;
@@ -137,35 +137,49 @@ test("a follow-up on a workspace-default session freezes the selected default co
     idempotencyKey: crypto.randomUUID(),
   });
   expect(session.toolPolicy.mode).toBe("workspace_default");
-  // A connector that becomes a workspace default after the session was created
-  // never enters the stored column: a workspace-default session tracks the
-  // current defaults at run time, and the stored snapshot stays as it was.
+  const turns = () =>
+    shared.admin`select personal_connection_delegations, mcp_account_bindings
+      from session_turns where session_id = ${session.id} order by created_at, id`;
+  const storedToolIds = async () => {
+    const [stored] = await shared.admin`select tools from sessions where id = ${session.id}`;
+    return (stored!.tools as { id: string }[]).map((tool) => tool.id);
+  };
+  const expectFrozen = (turn: Record<string, unknown> | undefined) => {
+    expect(turn?.personal_connection_delegations).toMatchObject([
+      { connectionId: connection.id, ownerSubjectId: identity.subjectId },
+    ]);
+    expect(turn?.mcp_account_bindings).toMatchObject([
+      { canonicalServerId: server.id, connectionId: connection.id },
+    ]);
+  };
+
+  // Without a workspace override every configured runtime connector is a
+  // default, so the static connector is effective for this session even though
+  // it never entered the stored snapshot.
+  expect(await storedToolIds()).not.toContain(server.id);
+  expect(
+    (await alice.getSession(workspace.id, session.id)).effectiveToolPolicy?.effectiveIds,
+  ).toContain(server.id);
+  await alice.sendMessage(workspace.id, session.id, {
+    text: "Read my account",
+    connectionAccounts: selection,
+  });
+  expect(await turns()).toHaveLength(1);
+  expectFrozen((await turns())[0]);
+
+  // An explicit workspace override that names the connector keeps it a default
+  // and still leaves the stored snapshot untouched.
   const configured = await alice.updateWorkspaceSettings(workspace.id, {
     sessionToolDefaults: { mcpServerIds: [server.id] },
   });
   expect(configured.settings.sessionToolDefaults).toEqual({
     mcpServerIds: [server.id],
   });
-  const [stored] = await shared.admin`select tools from sessions where id = ${session.id}`;
-  expect((stored!.tools as { id: string }[]).map((tool) => tool.id)).not.toContain(server.id);
-  expect(
-    (await alice.getSession(workspace.id, session.id)).effectiveToolPolicy?.effectiveIds,
-  ).toContain(server.id);
-
-  const turns = () =>
-    shared.admin`select personal_connection_delegations, mcp_account_bindings
-      from session_turns where session_id = ${session.id} order by created_at, id`;
-
+  expect(await storedToolIds()).not.toContain(server.id);
   await alice.sendMessage(workspace.id, session.id, {
-    text: "Read my account",
+    text: "Read my account again",
     connectionAccounts: selection,
   });
-  const [accepted] = await turns();
-  expect(accepted?.personal_connection_delegations).toMatchObject([
-    { connectionId: connection.id, ownerSubjectId: identity.subjectId },
-  ]);
-  expect(accepted?.mcp_account_bindings).toMatchObject([
-    { canonicalServerId: server.id, connectionId: connection.id },
-  ]);
-  expect(await turns()).toHaveLength(1);
+  expect(await turns()).toHaveLength(2);
+  expectFrozen((await turns())[1]);
 }, 120_000);
