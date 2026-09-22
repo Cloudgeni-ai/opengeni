@@ -174,6 +174,8 @@ the existing version-checked catalog upsert below; subsequent catalog reads and
 new-turn admission use that membership, while accepted turn policy remains
 frozen. Subscription enablement, credential readiness and workspace policy still
 apply. Catalog inclusion does not prove the provider supports a slug.
+Removal also makes previously accepted queued/resumed attempts fail their
+current-catalog check; this is not a hidden-but-executable retirement list.
 
 ```json
 {

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   applyModelCatalogDocument,
+  assertTurnExecutionPolicyMatchesConfigV1,
   configuredModels,
   getSettings,
   parseModelCatalogDocument,
@@ -77,6 +78,8 @@ test("new turn policy uses updated membership and cannot admit a removed model",
   });
   expect(() => resolveTurnExecutionPolicyV1(next, request)).toThrow();
   expect(accepted.productModelId).toBe("codex/test-model");
+  expect(() => assertTurnExecutionPolicyMatchesConfigV1(first, accepted, request)).not.toThrow();
+  expect(() => assertTurnExecutionPolicyMatchesConfigV1(next, accepted, request)).toThrow();
   expect(() =>
     resolveTurnExecutionPolicyV1({ ...first, codexSubscriptionEnabled: false }, request),
   ).toThrow();
