@@ -1378,6 +1378,7 @@ export type SessionBackgroundCommand = {
   provider: "managed" | "connected_machine";
   state: "running" | "stopping" | "exited" | "lost";
   commandPreview: string;
+  commandText?: string | undefined;
   cancelRequestedAt: string | null;
   exitCode: number | null;
   settlementReason: string | null;

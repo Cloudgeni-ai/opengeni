@@ -10241,6 +10241,7 @@ export const sessionBackgroundCommands = pgTable(
     connectionInstanceId: text("connection_instance_id"),
     opId: text("op_id"),
     commandPreview: text("command_preview").notNull().default(""),
+    commandText: text("command_text"),
     cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
     cancelRequestedBy: text("cancel_requested_by"),
     exitCode: integer("exit_code"),

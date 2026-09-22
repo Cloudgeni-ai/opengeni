@@ -1208,6 +1208,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 // invoke a helper through the mutable current route.
                 this.shellSessions.set(retainedProcess.providerSessionId, {
                   sessionId: retainedProcess.providerSessionId,
+                  command: parsed.cmd,
                   markerPath,
                   token,
                   interactive,
