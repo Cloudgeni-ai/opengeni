@@ -686,6 +686,7 @@ const SettingsSchema = z.object({
   // binding so database mode cannot be bypassed with a second source.
   resolvedGatewayModelsJson: z.string().optional(),
   resolvedOpenRouterModelsJson: z.string().optional(),
+  resolvedCodexModelsJson: z.string().optional(),
   // Extra (non-built-in) model providers, declared by the host as a JSON
   // provider registry. Each entry carries its own base URL, API key, wire API
   // ("responses" | "chat") and the models it exposes. The models a client may
@@ -2244,6 +2245,23 @@ const DeploymentGatewayCatalogModelSchema = GatewayCatalogModel.safeExtend({
   pricing: z.never().optional(),
 }).strict();
 
+const CodexCatalogModelSchema = RegistryModelSchema.safeExtend({
+  id: z.string().regex(/^codex\/[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+  upstreamModelId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+  capabilities: ModelCapabilitiesV1Schema,
+  pricing: z.never().optional(),
+})
+  .strict()
+  .superRefine((model, context) => {
+    if (model.id !== `${CODEX_MODEL_ID_PREFIX}${model.upstreamModelId}`) {
+      context.addIssue({
+        code: "custom",
+        path: ["id"],
+        message: "Codex product id must match its upstream model slug",
+      });
+    }
+  });
+
 export const ModelCatalogDocument = z
   .object({
     schemaVersion: z.literal(1),
@@ -2253,6 +2271,7 @@ export const ModelCatalogDocument = z
     defaultModel: z.string().min(1).optional(),
     builtInModels: z.array(z.string().min(1)).min(1),
     registryProviders: z.array(DeploymentRegistryProviderSchema).default([]),
+    codexModels: z.array(CodexCatalogModelSchema).optional(),
     gatewayModels: z.array(DeploymentGatewayCatalogModelSchema).default([]),
     openrouterModels: z.array(OpenRouterCatalogModel).default([]),
     modelNotes: z.record(z.string().min(1), ModelNote).default({}),
@@ -2284,6 +2303,7 @@ export const ModelCatalogDocument = z
       productIds.add(id);
     };
     document.builtInModels.forEach((id, index) => add(id, ["builtInModels", index]));
+    document.codexModels?.forEach((model, index) => add(model.id, ["codexModels", index, "id"]));
     document.registryProviders.forEach((provider, providerIndex) => {
       if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id)) {
         context.addIssue({
@@ -2333,7 +2353,10 @@ export const ModelCatalogDocument = z
     if (
       document.defaultModel &&
       !productIds.has(document.defaultModel) &&
-      !document.defaultModel.startsWith(CODEX_MODEL_ID_PREFIX) &&
+      !(
+        document.codexModels === undefined &&
+        document.defaultModel.startsWith(CODEX_MODEL_ID_PREFIX)
+      ) &&
       !document.defaultModel.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)
     ) {
       context.addIssue({
@@ -2418,6 +2441,8 @@ export function applyModelCatalogDocument(settings: Settings, rawDocument: unkno
     ),
     resolvedGatewayModelsJson: JSON.stringify(document.gatewayModels),
     resolvedOpenRouterModelsJson: JSON.stringify(document.openrouterModels),
+    resolvedCodexModelsJson:
+      document.codexModels === undefined ? undefined : JSON.stringify(document.codexModels),
     modelNotesJson: JSON.stringify(document.modelNotes),
   };
   return resolved;
@@ -4689,6 +4714,11 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
   if (providers.some((provider) => provider.id === CODEX_PROVIDER_ID)) {
     return settings;
   }
+  const catalogModels =
+    settings.resolvedCodexModelsJson === undefined
+      ? undefined
+      : z.array(CodexCatalogModelSchema).parse(JSON.parse(settings.resolvedCodexModelsJson));
+  if (catalogModels?.length === 0) return settings;
   const provider: RegistryProvider = {
     kind: "codex-subscription",
     id: CODEX_PROVIDER_ID,
@@ -4696,40 +4726,42 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
     api: "responses",
     wireProfile: "openai",
     baseUrl: CODEX_PROVIDER_BASE_URL,
-    models: CODEX_FALLBACK_MODEL_SLUGS.map((slug) => {
-      const capabilities = {
-        ...legacyModelCapabilities(settings, {
+    models:
+      catalogModels ??
+      CODEX_FALLBACK_MODEL_SLUGS.map((slug) => {
+        const capabilities = {
+          ...legacyModelCapabilities(settings, {
+            reasoningEffort: true,
+            hostedWebSearch: true,
+            vision: slug.startsWith("gpt-5.6-") || slug === "gpt-6-astra",
+          }),
+          ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
+            ? {
+                promptCaching: builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)!,
+              }
+            : {}),
+          latencyModes: builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`),
+        };
+        return {
+          id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
+          upstreamModelId: slug,
+          label: productLabelForModelId(slug),
+          ...(productShortLabelForModelId(slug)
+            ? { shortLabel: productShortLabelForModelId(slug)! }
+            : {}),
           reasoningEffort: true,
+          // The ChatGPT/Codex Responses backend accepts the native web_search
+          // hosted tool (unlike hosted apply_patch/computer transports). Declaring
+          // this here makes provider resolution truthful; the worker still applies
+          // the durable session/turn policy gate before attaching it.
           hostedWebSearch: true,
-          vision: slug.startsWith("gpt-5.6-") || slug === "gpt-6-astra",
-        }),
-        ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
-          ? {
-              promptCaching: builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)!,
-            }
-          : {}),
-        latencyModes: builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`),
-      };
-      return {
-        id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
-        upstreamModelId: slug,
-        label: productLabelForModelId(slug),
-        ...(productShortLabelForModelId(slug)
-          ? { shortLabel: productShortLabelForModelId(slug)! }
-          : {}),
-        reasoningEffort: true,
-        // The ChatGPT/Codex Responses backend accepts the native web_search
-        // hosted tool (unlike hosted apply_patch/computer transports). Declaring
-        // this here makes provider resolution truthful; the worker still applies
-        // the durable session/turn policy gate before attaching it.
-        hostedWebSearch: true,
-        capabilities,
-        contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
-        effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
-        autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
-        toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
-      };
-    }),
+          capabilities,
+          contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+          effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+          autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+          toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+        };
+      }),
   };
   return {
     ...settings,
@@ -7073,6 +7105,13 @@ export function validateModelCatalogSettings(
     models.filter((model) => model.credentialSource.kind === "deployment").map((model) => model.id),
   );
   const noteProductIds = new Set(models.map((model) => model.id));
+  if (settings.resolvedCodexModelsJson !== undefined) {
+    for (const model of z
+      .array(CodexCatalogModelSchema)
+      .parse(JSON.parse(settings.resolvedCodexModelsJson))) {
+      noteProductIds.add(model.id);
+    }
+  }
   for (const model of configuredGatewayCatalogModels(settings)) {
     deploymentProductIds.add(model.productId);
     noteProductIds.add(model.productId);

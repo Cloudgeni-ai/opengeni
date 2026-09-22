@@ -163,6 +163,18 @@ workspace-facing cost are deliberately independent:
 Database documents use schema version 1 and contain only reviewed membership
 and optional line-safe notes:
 
+The optional `codexModels` array replaces connected Codex membership without
+changing its credential broker. Omission preserves built-in defaults; `[]`
+removes all Codex models. Each entry requires `id: "codex/<slug>"`, matching
+`upstreamModelId: "<slug>"`, and a complete V1 `capabilities` object. Labels,
+aliases and context/compaction/tool-output token settings use the registry-model
+schema. Credentials, transport URLs, pricing and billing overrides are rejected.
+An explicit Codex default must belong to this list when supplied. Update through
+the existing version-checked catalog upsert below; subsequent catalog reads and
+new-turn admission use that membership, while accepted turn policy remains
+frozen. Subscription enablement, credential readiness and workspace policy still
+apply. Catalog inclusion does not prove the provider supports a slug.
+
 ```json
 {
   "schemaVersion": 1,

@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import {
   configuredModels,
+  withCodexCatalogProvider,
   resolveTurnExecutionPolicyV1,
   type ModelCatalogDocument,
 } from "@opengeni/config";
@@ -12,12 +13,58 @@ import {
   isWorkspaceOpenRouterCustomModelId,
   resolveCatalogSettings,
   resolveWorkspaceCatalogSettings,
+  resolveWorkspaceModelSelection,
 } from "../src/model-catalog";
 
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 
 describe("model catalog source resolution", () => {
+  test("hot subscription revisions reach picker and admission without granting readiness", async () => {
+    const env = testSettings({ modelCatalogSource: "database", codexSubscriptionEnabled: true });
+    const capabilities = configuredModels(withCodexCatalogProvider(env)).find((model) =>
+      model.id.startsWith("codex/"),
+    )!.capabilities;
+    const document = {
+      schemaVersion: 1,
+      builtInModels: ["gpt-5.6-luna"],
+      codexModels: [{ id: "codex/test-model", upstreamModelId: "test-model", capabilities }],
+    };
+    const getCatalog = spyOn(opengeniDb, "getDeploymentModelCatalog").mockResolvedValue({
+      document,
+      version: 1,
+      updatedAt: new Date(),
+    });
+    try {
+      const first = await resolveCatalogSettings({} as opengeniDb.Database, env);
+      const input = { settings: first.settings, policy: null, codexSubscriptionActive: false };
+      const unavailable = resolveWorkspaceModelSelection(input).find(
+        (entry) => entry.model.id === "codex/test-model",
+      );
+      expect(unavailable?.availability.selectable).toBe(false);
+      expect(
+        resolveWorkspaceModelSelection({ ...input, codexSubscriptionActive: true }).find(
+          (entry) => entry.model.id === "codex/test-model",
+        )?.availability.selectable,
+      ).toBe(true);
+      getCatalog.mockResolvedValue({
+        document: { ...document, codexModels: [] },
+        version: 2,
+        updatedAt: new Date(),
+      });
+      const second = await resolveCatalogSettings({} as opengeniDb.Database, env);
+      expect(second.version).toBe(2);
+      expect(
+        resolveWorkspaceModelSelection({
+          ...input,
+          settings: second.settings,
+          codexSubscriptionActive: true,
+        }).some((entry) => entry.model.id.startsWith("codex/")),
+      ).toBe(false);
+    } finally {
+      getCatalog.mockRestore();
+    }
+  });
   test("fails closed when database mode has no singleton row", async () => {
     const getCatalog = spyOn(opengeniDb, "getDeploymentModelCatalog").mockResolvedValue(null);
     try {
