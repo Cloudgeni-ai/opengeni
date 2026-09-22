@@ -36,6 +36,7 @@ export function RetainedArtifactRoute({
         workspaceId={workspaceId}
         artifactId={artifactId}
         fromSession={fromSession}
+        embedded={embedded}
       />
     </LightboxProvider>
   );
@@ -52,10 +53,12 @@ function RetainedArtifactDetail({
   workspaceId,
   artifactId,
   fromSession,
+  embedded,
 }: {
   workspaceId: string;
   artifactId: string;
   fromSession?: string;
+  embedded: boolean;
 }) {
   const { client, accessKeyVersion } = useAppContext();
   const key = `${workspaceId}:${artifactId}:${accessKeyVersion}`;
@@ -137,15 +140,17 @@ function RetainedArtifactDetail({
   };
   return (
     <ContentPage width="standard">
-      <Link
-        to="/workspaces/$workspaceId/artifacts"
-        params={{ workspaceId }}
-        search={fromSession ? { fromSession } : {}}
-        className="mb-5 flex min-h-10 items-center gap-2 text-sm text-fg-muted hover:text-fg"
-      >
-        <ArrowLeftIcon className="size-4" />
-        All artifacts
-      </Link>
+      {!embedded ? (
+        <Link
+          to="/workspaces/$workspaceId/artifacts"
+          params={{ workspaceId }}
+          search={fromSession ? { fromSession } : {}}
+          className="mb-5 flex min-h-10 items-center gap-2 text-sm text-fg-muted hover:text-fg"
+        >
+          <ArrowLeftIcon className="size-4" />
+          All artifacts
+        </Link>
+      ) : null}
       {!loaded ? <p role="status">Loading artifact…</p> : null}
       {loaded?.error ? (
         <RetainedArtifactLoadError

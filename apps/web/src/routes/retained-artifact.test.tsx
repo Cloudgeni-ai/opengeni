@@ -51,10 +51,16 @@ beforeAll(() => {
 });
 afterAll(() => GlobalRegistrator.unregister());
 
-async function renderRoute() {
+async function renderRoute(embedded = false) {
   const { RetainedArtifactRoute } = await import("./retained-artifact");
   const route = createRootRoute({
-    component: () => <RetainedArtifactRoute workspaceId={workspaceId} artifactId={artifactId} />,
+    component: () => (
+      <RetainedArtifactRoute
+        workspaceId={workspaceId}
+        artifactId={artifactId}
+        embedded={embedded}
+      />
+    ),
   });
   const router = createRouter({
     routeTree: route,
@@ -103,6 +109,31 @@ test("malformed retained-file ids show unavailable copy and All artifacts", asyn
     await rendered.unmount();
   }
 });
+
+for (const state of ["loading", "loaded", "error"] as const) {
+  test(`embedded retained artifact omits All artifacts while ${state}`, async () => {
+    artifactId = missingUuid;
+    loadError = state === "error" ? new Error("Unavailable") : null;
+    const originalLoad = context.client.getRetainedArtifact;
+    if (state === "loading") {
+      context.client.getRetainedArtifact = () => new Promise(() => {});
+    }
+    const rendered = await renderRoute(true);
+    try {
+      expect(rendered.container.textContent).not.toContain("All artifacts");
+      expect(rendered.container.textContent).toContain(
+        state === "loading"
+          ? "Loading artifact"
+          : state === "error"
+            ? "Artifact unavailable"
+            : "Download",
+      );
+    } finally {
+      await rendered.unmount();
+      context.client.getRetainedArtifact = originalLoad;
+    }
+  });
+}
 
 test("generated video opens the browser player without generic byte download", async () => {
   artifactId = missingUuid;
