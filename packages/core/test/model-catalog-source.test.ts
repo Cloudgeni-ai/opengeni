@@ -3,6 +3,8 @@ import {
   configuredModels,
   withCodexCatalogProvider,
   resolveTurnExecutionPolicyV1,
+  applyModelCatalogDocument,
+  settingsForAcceptedSubscriptionTurn,
   type ModelCatalogDocument,
 } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
@@ -20,6 +22,38 @@ const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 
 describe("model catalog source resolution", () => {
+  test("accepted retired execution never leaks into picker or child/new admission", () => {
+    const base = testSettings({ modelCatalogSource: "database", codexSubscriptionEnabled: true });
+    const capabilities = configuredModels(withCodexCatalogProvider(base)).find((model) =>
+      model.id.startsWith("codex/"),
+    )!.capabilities;
+    const model = { id: "codex/test-model", upstreamModelId: "test-model", capabilities };
+    const document = { schemaVersion: 1, builtInModels: ["gpt-5.6-luna"], codexModels: [model] };
+    const active = applyModelCatalogDocument(base, document);
+    const request = {
+      modelId: model.id,
+      requestedModelId: null,
+      modelSource: "session" as const,
+      reasoningEffort: "low" as const,
+      reasoningSource: "session" as const,
+    };
+    const accepted = resolveTurnExecutionPolicyV1(active, request);
+    const retired = applyModelCatalogDocument(base, {
+      ...document,
+      codexModels: [{ ...model, retired: true }],
+    });
+    const execution = settingsForAcceptedSubscriptionTurn(retired, accepted, request);
+    for (const settings of [retired, execution]) {
+      expect(() => canonicalConfiguredModel(settings, model.id)).toThrow();
+      expect(
+        resolveWorkspaceModelSelection({
+          settings,
+          policy: null,
+          codexSubscriptionActive: true,
+        }).some((entry) => entry.model.id === model.id),
+      ).toBe(false);
+    }
+  });
   test("hot subscription revisions reach picker and admission without granting readiness", async () => {
     const env = testSettings({ modelCatalogSource: "database", codexSubscriptionEnabled: true });
     const capabilities = configuredModels(withCodexCatalogProvider(env)).find((model) =>

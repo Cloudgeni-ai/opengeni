@@ -2246,6 +2246,7 @@ const DeploymentGatewayCatalogModelSchema = GatewayCatalogModel.safeExtend({
 }).strict();
 
 const CodexCatalogModelSchema = RegistryModelSchema.safeExtend({
+  retired: z.boolean().optional(),
   id: z.string().regex(/^codex\/[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
   upstreamModelId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
   capabilities: ModelCapabilitiesV1Schema,
@@ -2304,6 +2305,15 @@ export const ModelCatalogDocument = z
     };
     document.builtInModels.forEach((id, index) => add(id, ["builtInModels", index]));
     document.codexModels?.forEach((model, index) => add(model.id, ["codexModels", index, "id"]));
+    if (
+      document.codexModels?.some((model) => model.retired && model.id === document.defaultModel)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["defaultModel"],
+        message: "a retired model cannot be the deployment default",
+      });
+    }
     document.registryProviders.forEach((provider, providerIndex) => {
       if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id)) {
         context.addIssue({
@@ -4717,7 +4727,11 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
   const catalogModels =
     settings.resolvedCodexModelsJson === undefined
       ? undefined
-      : z.array(CodexCatalogModelSchema).parse(JSON.parse(settings.resolvedCodexModelsJson));
+      : z
+          .array(CodexCatalogModelSchema)
+          .parse(JSON.parse(settings.resolvedCodexModelsJson))
+          .filter((model) => !model.retired)
+          .map(({ retired: _retired, ...model }) => model);
   if (catalogModels?.length === 0) return settings;
   const provider: RegistryProvider = {
     kind: "codex-subscription",
@@ -5111,7 +5125,78 @@ export function canonicalizeConfiguredModelId(settings: Settings, modelId: strin
  * openai allow-list, then registry ids.
  */
 export function configuredAllowedModels(settings: Settings): string[] {
-  return configuredModels(settings).map((model) => model.id);
+  return configuredModels(settings)
+    .filter((model) => isModelAvailableForNewSelection(settings, model.id))
+    .map((model) => model.id);
+}
+
+/** Retirement is selection metadata, never provider authority or executable identity. */
+export function isModelAvailableForNewSelection(settings: Settings, modelId: string): boolean {
+  if (!modelId.startsWith(CODEX_MODEL_ID_PREFIX) || settings.resolvedCodexModelsJson === undefined)
+    return true;
+  const models = z
+    .array(CodexCatalogModelSchema)
+    .parse(JSON.parse(settings.resolvedCodexModelsJson));
+  return models.some((model) => model.id === modelId && !model.retired);
+}
+
+/** Called only with the durable policy installed for a claimed accepted attempt. */
+export function settingsForAcceptedSubscriptionTurn(
+  settings: Settings,
+  policy: TurnExecutionPolicyV1,
+  expected: {
+    modelId: string;
+    reasoningEffort: Settings["openaiReasoningEffort"];
+    latencyMode?: LatencyMode;
+  },
+): Settings {
+  const parsed = TurnExecutionPolicyV1.parse(policy);
+  if (!parsed.productModelId.startsWith(CODEX_MODEL_ID_PREFIX)) return settings;
+  if (!settings.codexSubscriptionEnabled) throw new Error("Codex subscription is disabled");
+  const models =
+    settings.resolvedCodexModelsJson === undefined
+      ? []
+      : z.array(CodexCatalogModelSchema).parse(JSON.parse(settings.resolvedCodexModelsJson));
+  const retained = models.find((model) => model.id === parsed.productModelId && model.retired);
+  if (!retained) {
+    assertTurnExecutionPolicyMatchesConfigV1(settings, parsed, expected);
+    return settings;
+  }
+  const { retired: _retired, ...model } = retained;
+  // Use the existing fixed broker transport. Only this exact definition is added;
+  // selection metadata remains retired in the original catalog JSON.
+  const withoutCodex = {
+    ...settings,
+    modelProvidersJson: JSON.stringify(
+      parseModelProvidersJson(settings.modelProvidersJson).filter(
+        (provider) => provider.id !== CODEX_PROVIDER_ID,
+      ),
+    ),
+  };
+  const providerSettings = withCodexCatalogProvider({
+    ...withoutCodex,
+    resolvedCodexModelsJson: JSON.stringify([model]),
+  });
+  const retainedProvider = parseModelProvidersJson(providerSettings.modelProvidersJson).find(
+    (provider) => provider.id === CODEX_PROVIDER_ID,
+  )!;
+  const providers = parseModelProvidersJson(settings.modelProvidersJson);
+  const current = providers.find((provider) => provider.id === CODEX_PROVIDER_ID);
+  const restored = {
+    ...settings,
+    modelProvidersJson: JSON.stringify([
+      ...providers.filter((provider) => provider.id !== CODEX_PROVIDER_ID),
+      {
+        ...retainedProvider,
+        models: [
+          ...(current?.models ?? []).filter((candidate) => candidate.id !== model.id),
+          model,
+        ],
+      },
+    ]),
+  };
+  assertTurnExecutionPolicyMatchesConfigV1(restored, parsed, expected);
+  return restored;
 }
 
 /**
@@ -5216,6 +5301,9 @@ export function resolveTurnExecutionPolicyV1(
 ): TurnExecutionPolicyV1 {
   const catalogSettings = settingsForTurnExecutionPolicy(settings, input.modelId);
   const productModelId = canonicalizeConfiguredModelId(catalogSettings, input.modelId);
+  if (!isModelAvailableForNewSelection(catalogSettings, productModelId)) {
+    throw new Error("Turn execution policy model is retired from new selection");
+  }
   const resolved = resolveModelProvider(catalogSettings, productModelId);
   if (!resolved) {
     throw new Error("Turn execution policy model is not present in the configured catalog");

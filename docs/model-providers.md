@@ -176,6 +176,15 @@ frozen. Subscription enablement, credential readiness and workspace policy still
 apply. Catalog inclusion does not prove the provider supports a slug.
 Removal also makes previously accepted queued/resumed attempts fail their
 current-catalog check; this is not a hidden-but-executable retirement list.
+To retire only from new selection, keep the exact model definition and set
+`retired: true` instead of deleting it. Retired entries are absent from pickers,
+`list_models`, and new-turn/child-session admission. A worker may restore only
+the exact retired definition referenced by an already persisted accepted-turn
+policy, after verifying its executable digest. Retirement itself does not change
+that digest. Missing-policy legacy turns are not granted this exception. Live
+workspace deny policy, session restrictions, subscription enablement, and broker
+credential checks still apply; retirement is not permission to bypass revocation.
+Choose an active deployment default before retiring its old entry.
 
 ```json
 {
