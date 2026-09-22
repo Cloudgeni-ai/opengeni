@@ -179,10 +179,10 @@ before viewing fresh labels, alternate arm order, keep smoke/regression runs
 separate, and never overwrite output manifests. CLI work is read-only outside
 its output receipts. No staging integration or subscription billing is implied.
 
-The shared sequential journal caps the current improvement iteration at 630 cumulative inference requests
-and $2.341899776 known-or-reserved, reserving each call before transport. This pass
-also enforces at most 100 additional attempts/$1 above the retained baseline of
-530 attempts/$1.341899776 known-or-reserved. The historical direct-route comparator
+The shared sequential journal caps the current content-first iteration at 697 cumulative inference requests
+and $2.564718566 known-or-reserved, reserving each call before transport. This pass
+also enforces at most 80 additional attempts/$1 above the retained baseline of
+617 attempts/$1.564718566 known-or-reserved. The historical direct-route comparator
 retains its 536/$2.28 ceiling and 496-attempt baseline; earlier manifests retain their original ceilings. Unsettled,
 authentication, missing-usage and ambiguous failures stop the experiment. Explicit
 HTTP 429/502/503/504/529 failures are retained with the unknown bill reserved; failed
@@ -202,7 +202,56 @@ Terra reasoning uses the provider default; resolved model
 and available reasoning-token usage are recorded, without assuming an exact
 upstream weight version. The earlier $2/200-request no-retry manifests remain historical evidence.
 
-The default `--workflow compact` controller ranks a source path/export index locally,
+### Content-first controller and equal-retrieval comparison
+
+The default `--workflow content` uses `content-investigation.ts`. Its reusable request
+accepts `question`, `context`, `searchHints` (literal content-query strings), and
+`requestedOutput`. Supplied hints are normalized but not supplemented with guessed
+filenames; if omitted, bounded question/context terms are extracted deterministically.
+No model call is needed to execute search, read files, or construct candidate IDs.
+
+`searchContent` searches file contents, not path names. It returns exact surrounding
+lines, ranks by content-term matches, and supports pagination. Jev evaluates those
+snippets, selects reads, then judges sufficiency and which exact source to return.
+For missing evidence it can request the next match page or select a named identifier
+from the source for another content search. Member/property/import identifiers are
+eligible, not only bare function calls. Bounds: three rounds, eight accepted reads,
+four new reads per round, 48,000 internal source characters, and 6,500 returned source
+characters. Reads share the ordinary `SourceTools.read` backend and must include the
+selected match. No match is an unknown, never a negative proof. Added unassessed
+import/helper context suppresses a decisive Jev answer. Terra still owns the final
+answer in this full-workflow benchmark; standalone typed yes/no/indecisive judgments
+remain advisory and can always be accompanied by evidence.
+
+For this comparison, the harness freezes initial terms from question/context only.
+Both initial tools require an actual `queries` string-array argument, with bounded
+length in the schema and exact equality checked at runtime against that same frozen
+array: ordinary `discover` returns content candidates to Terra; delegated
+`investigate` passes them internally to Jev. Both force one initial tool call, use
+the identical search backend, and retain ordinary content search/read for follow-up.
+Candidate digests allow exact retrieval parity to be audited. This isolates selection
+and delegation, **not** how freely acting agents generate search terms. Case labels,
+oracle spans, and rationale never enter the initial queries or model state.
+
+Search bounds are explicit: 8 million input characters, 200,000 scanned lines,
+50,000 retained matches, up to 16 snippets/16,000 characters per page, and periodic
+local deadline checks. Oversized context falls back to the exact matching line;
+unavailable lines and truncated scans are disclosed. Rare-term weighting is lexical,
+not semantic retrieval. Narrow caller terms generally avoid scanning many generic
+matches. Source exclusions and bounded recovery still prevent completeness claims.
+
+The September 22 content-first regression run completed all four pairs with identical
+initial candidate digests. Both arms passed strict evidence/label checks. These are
+previously seen regression cases, not new holdouts. The first run stopped on an initial
+Terra HTTP400; a manually corrected schema removed an array-valued enum, then a new
+run completed. The exact original provider explanation was not retained, so the
+schema cause is suspected, not proven. The failed request's full unknown-billing
+reservation remains in the ledger. There is no runtime HTTP400 recovery switch:
+historical reconciliation requires an exact completed replacement id/hash with
+matching task/model attribution; new nontransient failures stop the experiment.
+No automatic retries occurred.
+
+The historical `--workflow compact` controller ranks a source path/export index locally,
 lets Jev choose a primary/companion from 40 candidates, and broadens on unknown
 within six pages. If both choices duplicate the same file, a conditional judgment
 selects a distinct companion or none; that extra call is metered. It reads at most 48,000 source characters internally, includes

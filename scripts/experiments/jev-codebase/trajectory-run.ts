@@ -20,9 +20,15 @@ import {
   evaluateDirect,
   TYPESAFE_MODEL,
   TYPESAFE_INPUT_RATE,
+  TYPESAFE_PRICING_DOCUMENT_HASH,
   assertNativeCredential,
 } from "./typesafe-direct";
-import { IMPROVEMENT_PASS_BUDGET } from "./direct-budget";
+import {
+  CONTENT_PASS_BUDGET as IMPROVEMENT_PASS_BUDGET,
+  assertContentLedger,
+} from "./direct-budget";
+import { investigateContent, CONTENT_VERSION } from "./content-investigation";
+import { searchContent, searchTerms } from "./content-search";
 import { CitationRegistry } from "./citation-registry";
 import {
   SourceTools,
@@ -52,18 +58,20 @@ const ledgerPath = resolve(option("--ledger") ?? out + "/requests.jsonl");
 const json = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 const append = (path: string, value: unknown) =>
   appendFileSync(path, JSON.stringify(value) + "\n", { mode: 0o600 });
-const ledger = (): Row[] =>
-  existsSync(ledgerPath)
-    ? readFileSync(ledgerPath, "utf8")
-        .trim()
-        .split("\n")
-        .filter(Boolean)
-        .map((x) => JSON.parse(x))
-    : [];
+const ledger = (): Row[] => {
+  const text = existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "";
+  assertContentLedger(text);
+  return text
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((x) => JSON.parse(x));
+};
 
 async function main() {
   if (process.env.JEV_ALLOW_LIVE !== "1") throw new Error("live_opt_in_required");
   if (!casePath) throw new Error("cases_required");
+  budgetState(ledger()); // Check immutable history and fail closed before network.
   const key = process.env.VERCEL_AI_GATEWAY_API_KEY;
   if (!key) throw new Error("credential_missing");
   const jevRoute = option("--jev-route") ?? "gateway";
@@ -94,7 +102,7 @@ async function main() {
       signal: AbortSignal.timeout(30000),
     });
     const docs = await docsResponse.text();
-    if (!docsResponse.ok || !docs.includes(TYPESAFE_MODEL) || !docs.includes("0.042"))
+    if (!docsResponse.ok || hash(docs) !== TYPESAFE_PRICING_DOCUMENT_HASH)
       throw new Error("native_pricing_reverify_required");
     writeFileSync(out + "/native-models-documentation.txt", docs, { flag: "wx", mode: 0o600 });
     models.jev = {
@@ -123,8 +131,8 @@ async function main() {
   const preflightMs = performance.now() - preflightStart;
   const cases = json(casePath) as BenchmarkCase[];
   validateCases(cases);
-  const workflow = option("--workflow") ?? "compact";
-  if (!["compact", "legacy"].includes(workflow)) throw new Error("invalid_workflow");
+  const workflow = option("--workflow") ?? "content";
+  if (!["content", "compact", "legacy"].includes(workflow)) throw new Error("invalid_workflow");
   const questionBatch = Number(option("--jev-question-batch") ?? 0);
   if (!Number.isInteger(questionBatch) || questionBatch < 0 || questionBatch > 32)
     throw new Error("invalid_question_batch");
@@ -151,6 +159,8 @@ async function main() {
     "core.ts",
     "investigation.ts",
     "compact-investigation.ts",
+    "content-investigation.ts",
+    "content-search.ts",
     "iteration-ledger.ts",
     "gateway-diagnostics.ts",
     "gateway-call.ts",
@@ -180,9 +190,16 @@ async function main() {
     prices,
     preflightMs,
     implementationDigest,
-    workflow: workflow === "compact" ? COMPACT_VERSION : "legacy-v3.1",
+    workflow:
+      workflow === "content"
+        ? CONTENT_VERSION
+        : workflow === "compact"
+          ? COMPACT_VERSION
+          : "legacy-v3.1",
     delegationArguments:
-      "Task-bound tool inherits active question/context; only search hints are generated. Generic controller still accepts explicit requests. No oracle state is inherited.",
+      workflow === "content"
+        ? "Identical initial content queries deterministically derived from question/context, supplied as tool arguments by harness; no oracle fields. Ordinary discover and Jev investigate use the same searchContent backend. Subsequent search/read operations remain available. Generic controller accepts caller-provided searchHints."
+        : "Task-bound tool inherits active question/context; only search hints are generated. Generic controller still accepts explicit requests. No oracle state is inherited.",
     casesDigest: hash(JSON.stringify(cases)),
     maxUsd: MAX_USD,
     passBudget: IMPROVEMENT_PASS_BUDGET,
@@ -192,7 +209,7 @@ async function main() {
     concurrency: 1,
     maxQuestionsPerJevCall: questionBatch || null,
     retries:
-      "No retries in this authorized pass; journaled Jev transients yield, unknown failed billing remains reserved.",
+      "No automatic SDK/transport retries; journaled Jev transients yield, unknown failed billing remains reserved. Manual corrected-request runs, if any, are accounted separately.",
     reasoning: "provider default; no override",
     revision: option("--revision"),
     subdir: option("--subdir"),
@@ -259,13 +276,15 @@ async function main() {
       expectedSnapshotDigest = snapshot.digest;
       const source = new SourceTools(snapshot);
       const citations = new CitationRegistry();
+      const initialQueries = searchTerms({ question: c.question, context: c.context });
       const ingestionMs = performance.now() - start;
       const events: Row[] = [];
       let final: FinalAnswer | null = null,
         delegated = false,
         returnedChars = 0,
         error: string | null = null;
-      let deliveredCheckpoint = 0;
+      let deliveredCheckpoint = 0,
+        citationCheckpoint = 0;
       const messages: ModelMessage[] = [
         {
           role: "user",
@@ -273,6 +292,13 @@ async function main() {
             question: c.question,
             context: c.context,
             mode: c.mode,
+            ...(workflow === "content"
+              ? {
+                  initialSearchTerms: initialQueries,
+                  instruction:
+                    "The runtime has fixed initial content-search terms equally for both workflows. Use the initial tool once, then inspect returned evidence; ordinary content search/read remains available for gaps.",
+                }
+              : {}),
             scope: {
               revision: snapshot.revision,
               excluded: snapshot.excluded,
@@ -300,14 +326,19 @@ async function main() {
         }),
         search: tool({
           description:
-            "Case-insensitive literal source search, OR across 1-4 queries. Returns up to 30 matching lines. Narrow query if truncated.",
+            workflow === "content"
+              ? "Search file CONTENTS, case-insensitive literal OR. Returns exact surrounding snippets ranked by content matches; use nextOffset to paginate."
+              : "Case-insensitive literal source search, OR across 1-4 queries. Returns up to 30 matching lines. Narrow query if truncated.",
           inputSchema: schema({
             queries: {
               type: "array",
               items: { type: "string", minLength: 2, maxLength: 120 },
               minItems: 1,
-              maxItems: 4,
+              maxItems: workflow === "content" ? 32 : 4,
             },
+            ...(workflow === "content"
+              ? { offset: { type: "integer", minimum: 0, maximum: 50000 } }
+              : {}),
           }),
         }),
         read_file: tool({
@@ -357,13 +388,41 @@ async function main() {
       };
       const delegateTool = tool({
         description:
-          "Find compact verbatim source excerpts for the active task. Runtime supplies the task question/context; send only optional search hints, an empty array is allowed. Source paths/line ranges are directly citable without rereading. Inspect logic and finish if sufficient; use ordinary tools only for gaps. May yield. Available once.",
+          workflow === "content"
+            ? "Investigate the active question/context using its supplied initial content-search terms. Jev selects matching snippets, bounded reads and follow-up searches; returns exact citable source and a scoped judgment or yield. Finish from evidence if sufficient; ordinary tools remain available for gaps. Available once."
+            : "Find compact verbatim source excerpts for the active task. Runtime supplies the task question/context; send only optional search hints, an empty array is allowed. Source paths/line ranges are directly citable without rereading. Inspect logic and finish if sufficient; use ordinary tools only for gaps. May yield. Available once.",
         inputSchema: jsonSchema<any>({
           type: "object",
           additionalProperties: false,
-          required: ["searchHints"],
-          properties: {
-            searchHints: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 8 },
+          required: workflow === "content" ? ["queries"] : ["searchHints"],
+          properties:
+            workflow === "content"
+              ? {
+                  queries: {
+                    type: "array",
+                    items: { type: "string" },
+                    minItems: initialQueries.length,
+                    maxItems: initialQueries.length,
+                  },
+                }
+              : {
+                  searchHints: {
+                    type: "array",
+                    items: { type: "string", maxLength: 200 },
+                    maxItems: 8,
+                  },
+                },
+        }),
+      });
+      const discoverTool = tool({
+        description:
+          "Run the task's supplied initial search terms against file CONTENTS; return exact matching source snippets. This is the same candidate retrieval used inside Jev investigation.",
+        inputSchema: schema({
+          queries: {
+            type: "array",
+            items: { type: "string" },
+            minItems: initialQueries.length,
+            maxItems: initialQueries.length,
           },
         }),
       });
@@ -375,11 +434,15 @@ async function main() {
               ? { finish: definitions.finish }
               : arm === "jev-delegated" && !delegated
                 ? { ...definitions, investigate: delegateTool }
-                : definitions;
+                : workflow === "content" && arm === "ordinary" && turn === 0
+                  ? { ...definitions, discover: discoverTool }
+                  : definitions;
           const toolChoice =
             arm === "jev-delegated" && turn === 0
               ? { type: "tool" as const, toolName: "investigate" }
-              : ("required" as const);
+              : workflow === "content" && turn === 0
+                ? { type: "tool" as const, toolName: "discover" }
+                : ("required" as const);
           const toolDefinitions = await Promise.all(
             Object.entries(tools).map(async ([name, definition]) => ({
               name,
@@ -409,6 +472,9 @@ async function main() {
               }),
           );
           messages.push(...r.response.messages);
+          if (r.toolCalls.length !== 1) throw new Error("invalid_tool_cardinality");
+          if (typeof toolChoice === "object" && r.toolCalls[0].toolName !== toolChoice.toolName)
+            throw new Error("forced_tool_mismatch");
           remainingTime(start, performance.now());
           if (!r.toolCalls.length) throw new Error("no_tool_call");
           for (const tc of r.toolCalls) {
@@ -416,9 +482,17 @@ async function main() {
             const t = performance.now(),
               a = tc.input as any;
             const deliveredBefore = source.returned.length;
+            const citationBefore = citations.checkpoint();
             let output: any;
             let internalTelemetry: unknown;
             if (tc.invalid) throw new Error("invalid_tool_call");
+            if (!(tc.toolName in tools)) throw new Error("unavailable_tool");
+            if (
+              workflow === "content" &&
+              (tc.toolName === "discover" || tc.toolName === "investigate") &&
+              JSON.stringify(a.queries) !== JSON.stringify(initialQueries)
+            )
+              throw new Error("initial_query_mismatch");
             if (tc.toolName === "finish") {
               final =
                 citationMode === "ids"
@@ -435,7 +509,13 @@ async function main() {
                 instruction: "Finish with available evidence or indecisive.",
               };
             else if (tc.toolName === "list_files") output = source.list(a.filter, a.offset);
-            else if (tc.toolName === "search") output = source.search(a.queries);
+            else if (
+              workflow === "content" &&
+              (tc.toolName === "discover" || tc.toolName === "search")
+            ) {
+              output = searchContent(source, a.queries, tc.toolName === "discover" ? 0 : a.offset);
+              source.returned.push(...output.hits);
+            } else if (tc.toolName === "search") output = source.search(a.queries);
             else if (tc.toolName === "read_file")
               output = source.read(a.path, a.startLine, a.endLine);
             else if (tc.toolName === "investigate" && !delegated) {
@@ -484,33 +564,41 @@ async function main() {
               const compactRequest = {
                 question: a.question ?? c.question,
                 context: a.context ?? c.context,
-                searchHints: a.searchHints,
+                searchHints: workflow === "content" ? a.queries : a.searchHints,
                 requestedOutput:
                   c.mode === "evidence" ? ("evidence" as const) : ("answer_if_supported" as const),
               };
               const result = await withTransientDelegationFallback(async () =>
-                workflow === "compact"
-                  ? await investigateCompact(
+                workflow === "content"
+                  ? await investigateContent(
                       snapshot,
                       compactRequest,
                       judge,
                       Math.min(90000, remainingTime(start, performance.now())),
                     )
-                  : await investigateV3(
-                      snapshot,
-                      {
-                        question: a.question ?? c.question,
-                        context: a.context ?? c.context,
-                        searchHints: a.searchHints,
-                        requestedOutput: c.mode === "evidence" ? "evidence" : "answer_if_supported",
-                      },
-                      judge,
-                      {
-                        ...DEFAULT_LIMITS,
-                        maxSteps: 4,
-                        deadlineMs: Math.min(90000, remainingTime(start, performance.now())),
-                      },
-                    ),
+                  : workflow === "compact"
+                    ? await investigateCompact(
+                        snapshot,
+                        compactRequest,
+                        judge,
+                        Math.min(90000, remainingTime(start, performance.now())),
+                      )
+                    : await investigateV3(
+                        snapshot,
+                        {
+                          question: a.question ?? c.question,
+                          context: a.context ?? c.context,
+                          searchHints: a.searchHints,
+                          requestedOutput:
+                            c.mode === "evidence" ? "evidence" : "answer_if_supported",
+                        },
+                        judge,
+                        {
+                          ...DEFAULT_LIMITS,
+                          maxSteps: 4,
+                          deadlineMs: Math.min(90000, remainingTime(start, performance.now())),
+                        },
+                      ),
               );
               // Check caught legacy failures too. This telemetry never enters caller context.
               budgetState(ledger());
@@ -536,7 +624,19 @@ async function main() {
             if (citationMode === "ids") {
               if (tc.toolName === "read_file" && output.text !== undefined)
                 output = { ...output, citationId: citations.register(output) };
-              if (tc.toolName === "search")
+              if (
+                workflow === "content" &&
+                (tc.toolName === "discover" || tc.toolName === "search") &&
+                Array.isArray(output.hits)
+              )
+                output = {
+                  ...output,
+                  hits: output.hits.map((hit: any) => ({
+                    ...hit,
+                    citationId: citations.register(hit),
+                  })),
+                };
+              else if (tc.toolName === "search" && Array.isArray(output.hits))
                 output = {
                   ...output,
                   hits: output.hits.map((hit: any) => {
@@ -549,7 +649,7 @@ async function main() {
                     return exact ? { ...hit, citationId: citations.register(exact) } : hit;
                   }),
                 };
-              if (tc.toolName === "investigate")
+              if (tc.toolName === "investigate" && Array.isArray(output.evidence))
                 output = {
                   ...output,
                   evidence: output.evidence.map((span: any) => ({
@@ -561,6 +661,7 @@ async function main() {
             remainingTime(start, performance.now());
             if (tc.toolName !== "finish" && returnedChars + JSON.stringify(output).length > 60000) {
               source.returned.length = deliveredBefore;
+              citations.rollback(citationBefore);
               output = { error: "tool_result_budget_exhausted" };
             }
             const text = JSON.stringify(output),
@@ -590,11 +691,13 @@ async function main() {
               ],
             });
             deliveredCheckpoint = source.returned.length;
+            citationCheckpoint = citations.checkpoint();
           }
         }
         if (!final) error = "turn_limit";
       } catch (e) {
         source.returned.length = deliveredCheckpoint;
+        citations.rollback(citationCheckpoint);
         final = null;
         error = e instanceof Error ? e.message : "unknown";
       }

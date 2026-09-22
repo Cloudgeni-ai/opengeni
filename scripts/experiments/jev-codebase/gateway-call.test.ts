@@ -3,6 +3,68 @@ import { createGateway } from "@ai-sdk/gateway";
 import { experimental_evaluate as evaluate } from "ai";
 import { meteredGatewayCall, type CallOptions } from "./gateway-call";
 import { budgetState, withTransientDelegationFallback, type LedgerRow } from "./iteration-ledger";
+import { hash } from "./core";
+test("historical400 requires a bound completed replacement; no runtime recovery switch", async () => {
+  const original = { old: true },
+    attribution = { model: "typesafe-ai/jev", stage: "test", caseId: "case", arm: "ordinary" },
+    rows: LedgerRow[] = [
+      {
+        ...attribution,
+        id: "bad",
+        kind: "started",
+        payloadHash: hash(JSON.stringify(original)),
+        reservedUsd: 0.1,
+      },
+      { id: "bad", kind: "failed", statusCode: 400 },
+    ];
+  await expect(meteredGatewayCall(config(rows), original, success)).rejects.toThrow(
+    "unchanged_bad_request_payload",
+  );
+  const replacementHash = hash(JSON.stringify({ corrected: true }));
+  rows.push({
+    kind: "bad_request_correction",
+    failedId: "bad",
+    failedPayloadHash: rows[0].payloadHash,
+    replacementPayloadHash: replacementHash,
+  });
+  expect(() => budgetState(rows)).toThrow("failed_ledger_requires_authorization");
+  await expect(
+    meteredGatewayCall(config(rows), { oversized: "x".repeat(180001) }, success),
+  ).rejects.toThrow("request_size_budget");
+  expect(rows).toHaveLength(3);
+  rows.push({
+    kind: "bad_request_correction_settled",
+    failedId: "bad",
+    replacementId: "replacement",
+    replacementPayloadHash: replacementHash,
+  });
+  expect(() => budgetState(rows)).toThrow("failed_ledger_requires_authorization");
+  rows.push({
+    ...attribution,
+    id: "replacement",
+    kind: "started",
+    payloadHash: replacementHash,
+    reservedUsd: 0.1,
+  });
+  expect(() => budgetState(rows)).toThrow("failed_ledger_requires_authorization");
+  rows.push({ id: "replacement", kind: "completed", nominalUsd: 0.01 });
+  expect(budgetState(rows)).toEqual({ attempts: 2, used: 0.11 });
+  for (const key of ["model", "stage", "caseId", "arm", "payloadHash"]) {
+    const bad = structuredClone(rows);
+    bad[4][key] = "unrelated";
+    expect(() => budgetState(bad)).toThrow("failed_ledger_requires_authorization");
+  }
+  for (const statusCode of [401, 503]) {
+    const bad = structuredClone(rows);
+    bad[1].statusCode = statusCode;
+    expect(() => budgetState(bad)).toThrow("failed_ledger_requires_authorization");
+  }
+  rows.push(
+    { id: "another", kind: "started", reservedUsd: 0.1 },
+    { id: "another", kind: "failed", statusCode: 400 },
+  );
+  expect(() => budgetState(rows)).toThrow("failed_ledger_requires_authorization");
+});
 
 const config = (rows: LedgerRow[]): CallOptions => ({
   model: "typesafe-ai/jev",

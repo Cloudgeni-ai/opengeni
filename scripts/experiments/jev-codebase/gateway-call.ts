@@ -39,8 +39,17 @@ export async function meteredGatewayCall(
     throw new Error("invalid_catalog_cost_policy");
   const serialized = JSON.stringify(payload),
     bytes = Buffer.byteLength(serialized);
+  const history = o.history();
+  for (const failure of history.filter((r) => r.kind === "failed" && r.statusCode === 400)) {
+    const original = history.find((r) => r.kind === "started" && r.id === failure.id);
+    if (original?.payloadHash === hash(serialized))
+      throw new Error("unchanged_bad_request_payload");
+  }
   if (bytes > 180000) throw new Error("request_size_budget");
-  const reservedUsd = (bytes + 8192) * o.price.input + o.maxOutput * o.price.output;
+  const reservedUsd =
+    (o.costPolicy === "typesafe_catalog" ? Math.max(64000, bytes + 8192) : bytes + 8192) *
+      o.price.input +
+    o.maxOutput * o.price.output;
   for (let attempt = 0; ; attempt++) {
     const budget = budgetState(o.history());
     if (o.passBudget) {

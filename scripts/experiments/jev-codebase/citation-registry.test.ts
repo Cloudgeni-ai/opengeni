@@ -1,5 +1,17 @@
 import { test, expect } from "bun:test";
 import { CitationRegistry } from "./citation-registry";
+test("citation rollback removes only uncommitted handles", () => {
+  const r = new CitationRegistry(),
+    a = { path: "a", startLine: 1, endLine: 1 },
+    b = { path: "b", startLine: 1, endLine: 1 };
+  const first = r.register(a),
+    mark = r.checkpoint(),
+    dropped = r.register(b);
+  r.rollback(mark);
+  expect(r.resolve([first], [a])).toEqual([a]);
+  expect(() => r.resolve([dropped], [b])).toThrow("citation_not_delivered");
+  expect(r.register(b)).toBe(dropped);
+});
 test("stable citation handles resolve complete delivered ranges without model line arithmetic", () => {
   const r = new CitationRegistry(),
     span = { path: "a.ts", startLine: 51, endLine: 136 };

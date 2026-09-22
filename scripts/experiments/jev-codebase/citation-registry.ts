@@ -4,6 +4,19 @@ import { spanCovered, type Citation } from "./trajectory";
 export class CitationRegistry {
   private readonly spans = new Map<string, Citation>();
   private readonly ids = new Map<string, string>();
+  checkpoint() {
+    return this.spans.size;
+  }
+  rollback(checkpoint: number) {
+    if (!Number.isSafeInteger(checkpoint) || checkpoint < 0 || checkpoint > this.spans.size)
+      throw new Error("invalid_citation_checkpoint");
+    for (let i = this.spans.size - 1; i >= checkpoint; i--) {
+      const id = `c${i}`,
+        span = this.spans.get(id)!;
+      this.spans.delete(id);
+      this.ids.delete(JSON.stringify([span.path, span.startLine, span.endLine]));
+    }
+  }
   register(span: Citation): string {
     if (
       !span.path ||

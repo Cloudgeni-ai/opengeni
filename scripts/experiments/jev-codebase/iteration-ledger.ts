@@ -40,7 +40,40 @@ export function budgetState(history: LedgerRow[]) {
           ["resume_authorization", "transient_reserved"].includes(r.kind) &&
           r.failedId === started.id,
       );
-      if (!transientStatus(failed.statusCode) || !approved)
+      // Historical reconciliation only: there is no runtime correction switch.
+      // An unconsumed correction permission cannot unlock a failed ledger.
+      const correctedBadRequest =
+        failed.statusCode === 400 &&
+        history.some(
+          (r) =>
+            r.kind === "bad_request_correction" &&
+            r.failedId === started.id &&
+            r.failedPayloadHash === started.payloadHash &&
+            typeof r.replacementPayloadHash === "string" &&
+            /^[a-f0-9]{64}$/.test(r.replacementPayloadHash) &&
+            r.replacementPayloadHash !== started.payloadHash &&
+            history.some((binding) => {
+              if (
+                binding.kind !== "bad_request_correction_settled" ||
+                binding.failedId !== started.id ||
+                binding.replacementPayloadHash !== r.replacementPayloadHash
+              )
+                return false;
+              const replacement = history.find(
+                (item) => item.kind === "started" && item.id === binding.replacementId,
+              );
+              if (!replacement) return false;
+              return (
+                replacement?.payloadHash === r.replacementPayloadHash &&
+                ["model", "stage", "caseId", "arm"].every(
+                  (key) => typeof started[key] === "string" && replacement[key] === started[key],
+                ) &&
+                history.some((item) => item.kind === "completed" && item.id === replacement.id) &&
+                !history.some((item) => item.kind === "failed" && item.id === replacement.id)
+              );
+            }),
+        );
+      if ((!transientStatus(failed.statusCode) || !approved) && !correctedBadRequest)
         throw new Error("failed_ledger_requires_authorization");
     }
     const values = [

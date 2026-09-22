@@ -3,6 +3,10 @@ import { validateAnswers, type Question, type Judgment } from "./core";
 export const TYPESAFE_MODEL = "jev-1.13.0";
 export const TYPESAFE_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 export const TYPESAFE_INPUT_RATE = 0.042 / 1_000_000;
+// Complete official model document inspected 2026-09-22: Jev1.13 table plus
+// input-only/free-output contract. Any change requires explicit re-verification.
+export const TYPESAFE_PRICING_DOCUMENT_HASH =
+  "9d20bb3c90a0147532d0b20ddc4c64579391be7842e965543b27bad684eeb4d6";
 export function assertNativeCredential(
   apiKey: string | undefined,
   gatewayKey = process.env.VERCEL_AI_GATEWAY_API_KEY,
