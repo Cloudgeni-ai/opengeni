@@ -77,6 +77,11 @@ validation active while restoring wide-session locking and compatibility writes.
 
 Commands acknowledge durable commits, independent of replayable NATS/Temporal notifications.
 
+Workspace control revisions never move backwards. Migration 0505 repairs heads
+behind retained control events by advancing only the revision, preserving pause
+state, timers and event history. Fresh browser streams start at that head; old
+pause/resume events must not replay as current UI invalidations on every load.
+
 Canonical: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`,
 `packages/sdk/src/stream.ts`, and [`run-lifecycle.md`](run-lifecycle.md).
 

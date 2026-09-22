@@ -8,6 +8,7 @@ import {
   SESSION_EVENT_BROWSER_PENDING_MAX_BYTES,
   SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
   boundBrowserSessionEventWindow,
+  appendBrowserSessionEventWindow,
   type UseSessionEventsResult,
   useSessionEvents,
 } from "../src/hooks/use-session-events";
@@ -1268,11 +1269,11 @@ describe("useSessionEvents", () => {
         payloadMode: "full",
       },
     ]);
-    // The oldest-directed full window owns 1..10000. Reconnecting here would
+    // The oldest-directed full window owns the first max-count events. Reconnecting here would
     // immediately newest-bound it and evict the history the reader requested.
     expect(streamCalls).toEqual([0]);
     expect(hook.result.current.events[0]?.sequence).toBe(1);
-    expect(hook.result.current.events.at(-1)?.sequence).toBe(10_000);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT);
     expect(hook.result.current.lastSequence).toBe(streamed.length);
     expect(hook.result.current.hasOlder).toBeFalse();
     expect(hook.result.current.hasNewer).toBeTrue();
@@ -1285,7 +1286,7 @@ describe("useSessionEvents", () => {
     ).toBeTrue();
 
     await hook.unmount();
-  });
+  }, 30_000);
 
   test("flushes a synchronously yielded pending batch at its count high-water mark", async () => {
     let releaseStream!: () => void;
@@ -1537,8 +1538,8 @@ describe("useSessionEvents", () => {
     await flush(100);
 
     expect(hook.result.current.events[0]?.sequence).toBe(52);
-    expect(hook.result.current.events.at(-1)?.sequence).toBe(10_051);
-    expect(hook.result.current.lastSequence).toBe(10_051);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 51);
+    expect(hook.result.current.lastSequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 51);
 
     let automatic!: OlderHistoryLoadReceipt;
     await actRun(async () => {
@@ -1557,7 +1558,7 @@ describe("useSessionEvents", () => {
     expect(automatic.committed).toBe(false);
     expect(automatic.tailPreserved).toBe(true);
     expect(hook.result.current.events[0]?.sequence).toBe(52);
-    expect(hook.result.current.events.at(-1)?.sequence).toBe(10_051);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 51);
     expect(hook.result.current.hasNewer).toBe(false);
     expect(streamCalls).toEqual([0]);
     listCalls.length = 0;
@@ -1578,8 +1579,8 @@ describe("useSessionEvents", () => {
     // SSE here would newest-bound the browser window and evict them again.
     expect(streamCalls).toEqual([0]);
     expect(hook.result.current.events[0]?.sequence).toBe(20);
-    expect(hook.result.current.events.at(-1)?.sequence).toBe(10_019);
-    expect(hook.result.current.lastSequence).toBe(10_051);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 19);
+    expect(hook.result.current.lastSequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 51);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(hook.result.current.hasNewer).toBe(true);
     const sequences = hook.result.current.events.map((item) => item.sequence);
@@ -1588,10 +1589,10 @@ describe("useSessionEvents", () => {
     ).toBeTrue();
     expect(sequences).toContain(20);
     expect(sequences).not.toContain(1);
-    expect(sequences).toContain(10_001);
+    expect(sequences).toContain(SESSION_EVENT_BROWSER_MAX_COUNT + 1);
 
     await hook.unmount();
-  });
+  }, 30_000);
 
   test("loadOldest jumps to the durable start without walking the middle gap", async () => {
     const store = Array.from({ length: 5_000 }, (_, index) => event(index + 1));
@@ -1722,7 +1723,7 @@ describe("useSessionEvents", () => {
     await actRun(() => hook.result.current.loadOldest());
     expect(hook.result.current.error).toBeNull();
     await hook.unmount();
-  });
+  }, 30_000);
 
   test("late newer page rejection cannot publish into a replacement session", async () => {
     const store = Array.from({ length: 2000 }, (_, index) => event(index + 1));
@@ -1865,7 +1866,65 @@ describe("useSessionEvents", () => {
   });
 });
 
+describe("appendBrowserSessionEventWindow", () => {
+  test("matches full reduction across byte, count, oversized and multibyte boundaries", () => {
+    const events = Array.from({ length: 30 }, (_, index) =>
+      event(index + 1, "agent.toolCall.output", {
+        output: index % 7 === 0 ? "界🙂".repeat(3000) : `output-${index}`,
+      }),
+    );
+    for (const maxBytes of [1024, 5000, 100_000]) {
+      for (const maxCount of [1, 3, 100]) {
+        for (const batchSize of [1, 4, 30]) {
+          const options = { maxBytes, maxCount };
+          let current = boundBrowserSessionEventWindow([], options);
+          for (let index = 0; index < events.length; index += batchSize) {
+            const batch = events.slice(index, index + batchSize);
+            const expected = boundBrowserSessionEventWindow([...current.events, ...batch], options);
+            const next = appendBrowserSessionEventWindow(current, batch, options);
+            expect(next).toEqual({
+              ...expected,
+              truncated: current.truncated || expected.truncated,
+            });
+            current = next;
+          }
+        }
+      }
+    }
+  });
+
+  test("does not serialize retained payloads when appending below the limits", () => {
+    let reads = 0;
+    const retained = event(1, "agent.toolCall.output", {
+      get output() {
+        reads += 1;
+        return "existing payload";
+      },
+    });
+    const current = boundBrowserSessionEventWindow([retained]);
+    reads = 0;
+    const next = appendBrowserSessionEventWindow(current, [event(2)]);
+    expect(reads).toBe(0);
+    expect(next.events[0]).toBe(retained);
+    expect(next.bytes).toBe(new TextEncoder().encode(JSON.stringify(next.events)).byteLength);
+    expect(current.events).toHaveLength(1);
+  });
+});
+
 describe("boundBrowserSessionEventWindow", () => {
+  test("retains both ends beyond the former count and byte limits", () => {
+    const events = Array.from({ length: 10_100 }, (_, index) =>
+      event(index + 1, "agent.toolCall.output", { output: "x".repeat(1024) }),
+    );
+    for (const direction of ["oldest", "newest"] as const) {
+      const window = boundBrowserSessionEventWindow(events, { direction });
+      expect(window.bytes).toBeGreaterThan(8 * 1024 * 1024);
+      expect(window.events).toHaveLength(events.length);
+      expect(window.events[0]).toBe(events[0]);
+      expect(window.events.at(-1)).toBe(events.at(-1));
+      expect(window.truncated).toBeFalse();
+    }
+  });
   test("preserves complete multibyte message and tool content above the old event limit", () => {
     const text = `START-${"界🙂 middle ".repeat(30_000)}-END`;
     const events = [
@@ -1963,13 +2022,13 @@ describe("boundBrowserSessionEventWindow", () => {
     const events = Array.from({ length: 3_000 }, (_, index) =>
       event(index + 1, "agent.message.completed", { text: "x".repeat(4_000) }),
     );
-    const window = boundBrowserSessionEventWindow(events);
+    const window = boundBrowserSessionEventWindow(events, { maxBytes: 8 * 1024 * 1024 });
 
     expect(window.truncated).toBeTrue();
     expect(window.events.length).toBeLessThan(events.length);
     expect(window.events.at(-1)?.sequence).toBe(3_000);
     expect(window.events[0]!.sequence).toBe(3_001 - window.events.length);
-    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_MAX_BYTES);
+    expect(window.bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
     expect(new TextEncoder().encode(JSON.stringify(window.events)).byteLength).toBe(window.bytes);
   });
 
@@ -1979,12 +2038,13 @@ describe("boundBrowserSessionEventWindow", () => {
     );
     const window = boundBrowserSessionEventWindow(events, {
       direction: "oldest",
+      maxBytes: 8 * 1024 * 1024,
     });
 
     expect(window.truncated).toBeTrue();
     expect(window.events.length).toBeLessThan(events.length);
     expect(window.events[0]?.sequence).toBe(1);
     expect(window.events.at(-1)?.sequence).toBe(window.events.length);
-    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_MAX_BYTES);
+    expect(window.bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
   });
 });

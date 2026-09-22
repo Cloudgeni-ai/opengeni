@@ -105,8 +105,8 @@ const FOREGROUND_COMPACT_CATCHUP_MAX_GROUPS = 16;
 const FOREGROUND_COMPACT_CATCHUP_MAX_BYTES = 512 * 1024;
 const EMPTY_EVENTS: SessionEvent[] = [];
 const encoder = new TextEncoder();
-export const SESSION_EVENT_BROWSER_MAX_BYTES = 8 * 1024 * 1024;
-export const SESSION_EVENT_BROWSER_MAX_COUNT = 10_000;
+export const SESSION_EVENT_BROWSER_MAX_BYTES = 160 * 1024 * 1024;
+export const SESSION_EVENT_BROWSER_MAX_COUNT = 200_000;
 export const SESSION_EVENT_BROWSER_PENDING_MAX_BYTES = 1024 * 1024;
 export const SESSION_EVENT_BROWSER_PENDING_MAX_COUNT = 256;
 
@@ -325,7 +325,7 @@ export function useSessionEvents(
         setSessionStatusProjection(status);
       }
       const current = eventWindowRef.current;
-      const next = boundBrowserSessionEventWindow([...current.events, ...batch]);
+      const next = appendBrowserSessionEventWindow(current, batch);
       const retained = {
         ...next,
         truncated: current.truncated || next.truncated,
@@ -366,7 +366,7 @@ export function useSessionEvents(
             const current = eventWindowRef.current;
             assertAppendOrder(current.events, plan.events);
             const status = observeSessionStatus(plan.events, sessionStatusRef);
-            const next = boundBrowserSessionEventWindow([...current.events, ...plan.events]);
+            const next = appendBrowserSessionEventWindow(current, plan.events);
             const retained = {
               ...next,
               truncated: current.truncated || next.truncated,
@@ -764,9 +764,7 @@ export function useSessionEvents(
       const status = observeSessionStatus(window.events, sessionStatusRef);
       const previousOldest = current.events[0]?.sequence ?? null;
       // Moving forward through history: keep the newest suffix of the merge.
-      const next = boundBrowserSessionEventWindow([...current.events, ...window.events], {
-        direction: "newest",
-      });
+      const next = appendBrowserSessionEventWindow(current, window.events);
       const retained = {
         ...next,
         truncated: current.truncated || next.truncated || window.hasNewer,
@@ -1046,6 +1044,33 @@ export function boundBrowserSessionEventWindow(
     events: selected,
     bytes,
     truncated: selected.length < safe.length,
+  };
+}
+
+/** @internal Append immutable events without serializing the retained history again. */
+export function appendBrowserSessionEventWindow(
+  current: BrowserSessionEventWindow,
+  batch: readonly SessionEvent[],
+  options: { maxBytes?: number; maxCount?: number } = {},
+): BrowserSessionEventWindow {
+  const maxBytes = Math.max(1024, options.maxBytes ?? SESSION_EVENT_BROWSER_MAX_BYTES);
+  const maxCount = Math.max(1, Math.floor(options.maxCount ?? SESSION_EVENT_BROWSER_MAX_COUNT));
+  const events = [...current.events, ...batch];
+  let bytes = current.bytes;
+  for (let index = 0; index < batch.length; index += 1) {
+    bytes += browserJsonBytes(batch[index]) + (current.events.length + index > 0 ? 1 : 0);
+  }
+  let start = 0;
+  // Preserve the newest event even when it alone exceeds the byte target,
+  // matching the full-window reducer and retaining exact cursor progress.
+  while (events.length - start > 1 && (bytes > maxBytes || events.length - start > maxCount)) {
+    bytes -= browserJsonBytes(events[start]) + 1;
+    start += 1;
+  }
+  return {
+    events: start === 0 ? events : events.slice(start),
+    bytes,
+    truncated: current.truncated || start > 0,
   };
 }
 

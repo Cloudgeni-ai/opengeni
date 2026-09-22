@@ -718,6 +718,52 @@ describe("recursive session control algebra", () => {
     ]);
   });
 
+  test("advancing a repaired workspace frontier preserves inherited pauses and resume overrides", async () => {
+    const value = await fixture();
+    const workspaceId = value.grant.workspaceId!;
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      mutateWorkspaceControlInTransaction(db, {
+        accountId: value.grant.accountId,
+        workspaceId,
+        actor: { type: "human", subjectId: value.grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        action: "pause",
+      }),
+    );
+    await control(value, value.child.id, "resume");
+    // Same cursor-only update as migration 0505; no pause revision is rewritten.
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .update(schema.workspaceInferenceControls)
+        .set({ revision: 6741 })
+        .where(eq(schema.workspaceInferenceControls.workspaceId, workspaceId)),
+    );
+    expect(
+      await withWorkspaceRls(client.db, workspaceId, (db) =>
+        evaluateSessionControl(db, workspaceId, value.root.id),
+      ),
+    ).toMatchObject({
+      state: "paused",
+      controlVersion: 6741,
+      primaryBlocker: { kind: "workspace", revision: 1 },
+    });
+    expect(
+      await withWorkspaceRls(client.db, workspaceId, (db) =>
+        evaluateSessionControl(db, workspaceId, value.child.id),
+      ),
+    ).toMatchObject({
+      state: "active",
+      controlVersion: 6741,
+      override: { rootSessionId: value.child.id, revision: 2 },
+    });
+    await control(value, value.root.id, "pause");
+    expect(
+      await withWorkspaceRls(client.db, workspaceId, (db) =>
+        evaluateSessionControl(db, workspaceId, value.child.id),
+      ),
+    ).toMatchObject({ state: "paused", controlVersion: 6742 });
+  });
+
   test("missing mandatory workspace control fails closed", async () => {
     const value = await fixture();
     await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
