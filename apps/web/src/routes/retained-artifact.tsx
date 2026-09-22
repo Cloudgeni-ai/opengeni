@@ -176,7 +176,12 @@ function RetainedArtifactDetail({
             </p>
           ) : null}
           <div className="min-h-48 rounded-lg bg-surface-2 p-4">
-            <RetainedFilePreview workspaceId={workspaceId} artifact={artifact} title={filename} />
+            <RetainedFilePreview
+              workspaceId={workspaceId}
+              artifact={artifact}
+              title={filename}
+              filename={loaded?.filename}
+            />
           </div>
         </>
       ) : null}

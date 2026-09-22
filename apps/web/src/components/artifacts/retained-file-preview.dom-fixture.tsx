@@ -15,10 +15,12 @@ let artifact: RetainedArtifactReference;
 let accessKeyVersion = 1;
 const client = {
   getRetainedArtifact: mock(async () => artifact),
-  createRetainedArtifactDownloadUrl: mock(async () => ({
-    url: "https://media.example/video.mp4",
-    expiresAt: "2099-01-01T00:00:00Z",
-  })),
+  createRetainedArtifactDownloadUrl: mock(
+    async (_workspaceId: string, _artifact: RetainedArtifactReference) => ({
+      url: "https://media.example/video.mp4",
+      expiresAt: "2099-01-01T00:00:00Z",
+    }),
+  ),
   createVideoArtifactPlaybackSource: mock(async () => ({
     url: "https://media.example/generated.mp4",
   })),
@@ -27,14 +29,17 @@ const client = {
     artifact,
   })),
 };
-mock.module("@/context", () => ({ useAppContext: () => ({ client, accessKeyVersion }) }));
+mock.module("@/context", () => ({
+  useAppContext: () => ({ client, accessKeyVersion }),
+}));
 mock.module("./pdf-file-preview", () => ({
   default: ({ title }: { title: string }) => {
     if (title === "Broken PDF") throw new Error("PDF renderer failed");
     return <span>{title} rendered PDF</span>;
   },
 }));
-const { InlineChatArtifact, RetainedFilePreview } = await import("./retained-file-preview");
+const { InlineChatArtifact, RetainedFilePreview, retainedPreviewKind } =
+  await import("./retained-file-preview");
 let root: Root;
 let container: HTMLDivElement;
 beforeEach(() => {
@@ -65,6 +70,36 @@ afterEach(async () => {
   container.remove();
 });
 afterAll(() => GlobalRegistrator.unregister());
+
+test("legacy media uses the saved filename without changing the download receipt", async () => {
+  artifact = { ...artifact, contentType: "application/octet-stream" };
+  await act(async () =>
+    root.render(
+      <RetainedFilePreview
+        workspaceId={workspaceId}
+        artifact={artifact}
+        title="Finished video"
+        filename="opengeni-embedded-agent.MP4"
+      />,
+    ),
+  );
+  expect(container.querySelector("video")?.getAttribute("src")).toBe(
+    "https://media.example/video.mp4",
+  );
+  expect(client.createRetainedArtifactDownloadUrl.mock.calls[0]?.[1]).toBe(artifact);
+  expect(artifact.contentType).toBe("application/octet-stream");
+  expect(client.downloadRetainedArtifact).not.toHaveBeenCalled();
+});
+
+test("filename fallback stays limited to generic media, not active documents or explicit types", () => {
+  expect(retainedPreviewKind("application/octet-stream", "full-recording.mp4")).toBe("video");
+  expect(retainedPreviewKind("application/octet-stream", "recording.wav")).toBe("audio");
+  for (const filename of ["source.zip", "page.html", "drawing.svg", "movie.mp4.exe"]) {
+    expect(retainedPreviewKind("application/octet-stream", filename)).toBeNull();
+  }
+  expect(retainedPreviewKind("application/octet-stream")).toBeNull();
+  expect(retainedPreviewKind("text/html", "movie.mp4")).toBeNull();
+});
 
 test("equivalent receipts preserve playback while authorization changes refresh the source", async () => {
   await act(async () =>
