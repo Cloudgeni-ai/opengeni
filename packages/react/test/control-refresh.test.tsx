@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { useMemo } from "react";
 import type { SessionEvent, WorkspaceControlEvent } from "@opengeni/sdk";
 import { OpenGeniContext, type OpenGeniContextValue } from "../src/session-context";
 import { useLastStartedTurnPolicy } from "../src/hooks/use-last-started-turn-policy";
@@ -34,14 +35,17 @@ test("control bursts do not refetch model metadata; admitted turns and reconcili
     return null;
   }
   const events: SessionEvent[] = [];
-  const render = (event: WorkspaceControlEvent | null, feed = events) => {
-    const value = { ...context, workspaceControlEvent: event };
+  function Harness({ event, feed }: { event: WorkspaceControlEvent | null; feed: SessionEvent[] }) {
+    const value = useMemo(() => ({ ...context, workspaceControlEvent: event }), [event]);
     return (
       <OpenGeniContext.Provider value={value}>
         <Header events={feed} />
       </OpenGeniContext.Provider>
     );
-  };
+  }
+  const render = (event: WorkspaceControlEvent | null, feed = events) => (
+    <Harness event={event} feed={feed} />
+  );
   const mounted = await renderComponent(render(null));
   try {
     await flush();
