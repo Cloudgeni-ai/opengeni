@@ -57,7 +57,7 @@ export const CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT = Math.floor(
 // 2026-07-09: 0.142.4 filtered every GPT-5.6 slug out of GET /models. Keep this
 // pinned to the latest stable Codex release whose bundled catalog and transport
 // contract have been reviewed here.
-export const CODEX_CLIENT_VERSION = "0.153.2";
+export const CODEX_CLIENT_VERSION = "0.156.0";
 
 // Public OpenGeni selector for native ChatGPT/Codex subscription WebRTC. This
 // remains stable for persisted sessions; the provider's remotely configured
