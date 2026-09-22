@@ -62,7 +62,10 @@ export function SessionCommandsPanel({
                     title="Expand command"
                   >
                     <ChevronRightIcon className="size-3 shrink-0 text-og-fg-subtle transition-transform group-open/command:rotate-90" />
-                    <span className="truncate">
+                    <span
+                      className="min-w-0 truncate"
+                      title={command.commandPreview || "Background command"}
+                    >
                       {command.commandPreview || "Background command"}
                     </span>
                   </summary>

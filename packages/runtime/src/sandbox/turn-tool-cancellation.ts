@@ -67,6 +67,8 @@ type ShellProcessIdentity = {
 
 type ActiveShellSession = {
   sessionId: number;
+  /** Original model command, before adding process-control shell wrappers. */
+  command?: string;
   markerPath: string | null;
   token: string | null;
   interactive: boolean;
@@ -97,7 +99,10 @@ type CommandCancellationSession = {
   /** Whether the provider locator remains controllable from another worker
    * process after this turn returns. */
   canAdoptRetainedProcessAsBackgroundCommand?(providerSessionId: number): boolean;
-  adoptRetainedProcessAsBackgroundCommand?(providerSessionId: number): Promise<void>;
+  adoptRetainedProcessAsBackgroundCommand?(
+    providerSessionId: number,
+    command?: string,
+  ): Promise<void>;
   retainedProcessIdentity?(providerSessionId: number): { id: string } | null;
   cancelSupervisedCommand?(providerSessionId: number, reason: "explicit_stop"): Promise<boolean>;
   writeStdinForProcessRead?(args: {
@@ -1232,6 +1237,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             if (sessionId !== null) {
               const state: ActiveShellSession = {
                 sessionId,
+                command: parsed.cmd,
                 markerPath: useRemoteOpCancellation ? null : markerPath,
                 token: useRemoteOpCancellation ? null : token,
                 interactive,
@@ -1481,7 +1487,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       return `${runningCommandBanner(state.sessionId, output)}\nThis process is turn-scoped; it will stop when this turn ends or is interrupted.\n`;
     }
     if (state.processSession?.adoptRetainedProcessAsBackgroundCommand) {
-      await state.processSession.adoptRetainedProcessAsBackgroundCommand(state.sessionId);
+      await state.processSession.adoptRetainedProcessAsBackgroundCommand(
+        state.sessionId,
+        state.command,
+      );
       this.shellSessions.delete(state.sessionId);
     }
     return runningCommandBanner(

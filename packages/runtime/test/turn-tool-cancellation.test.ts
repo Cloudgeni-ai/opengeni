@@ -181,8 +181,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const exec = functionTool("exec_command", async () => running(116, "ready\n"));
     const session = {
       hasRetainedProcess: (sessionId: number) => sessionId === 116,
-      adoptRetainedProcessAsBackgroundCommand: async (sessionId: number) => {
+      adoptRetainedProcessAsBackgroundCommand: async (sessionId: number, command?: string) => {
         expect(sessionId).toBe(116);
+        expect(command).toBe("long-task");
         adoptions += 1;
       },
     };
@@ -213,7 +214,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
           writeStdin: async () => (++reads === 1 ? running(117, "middle\n") : exited(0, "done\n")),
         },
       }),
-      adoptProcessAsBackgroundCommand: async () => {},
+      adoptProcessAsBackgroundCommand: async ({ command }) => {
+        expect(command).toBe("work");
+      },
       observeProcessTerminal: async () => {
         observations += 1;
       },
