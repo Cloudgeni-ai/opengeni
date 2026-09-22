@@ -203,6 +203,11 @@ Choose an active deployment default before retiring its old entry.
 `defaultModel` may name deployment membership or an enabled Codex/SuperGrok
 connected-subscription product. Omission retains schema-v1 compatibility by
 using the first `builtInModels` entry, but operators should set it explicitly.
+Provider-only deployments may set `builtInModels: []`; they must supply an
+explicit `defaultModel`. The default must belong to the catalog (or the preserved
+connected-subscription fallback), be active, and resolve through an enabled
+provider. No dummy built-in model is required. Runtime catalog preflight still
+rejects defaults that cannot execute.
 The strict document rejects keys, billing, pricing policy, enabled flags,
 bands, unknown note IDs, duplicate product IDs, and reserved provider IDs.
 Notes are at most 500 characters and cannot contain a newline or `|`.
