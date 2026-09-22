@@ -9,6 +9,11 @@ over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
 
 ## Turns
 
+Workspace control revisions never move backwards. Migration 0505 repairs heads
+behind retained control events by advancing only the revision, preserving pause
+state, timers and event history. Fresh browser streams start at that head; old
+pause/resume events must not replay as current UI invalidations on every load.
+
 Externally owned SDK history preserves retained messages across opaque compaction
 checkpoints in both provider input and returned history. The turn history sink
 checks the identities and order of its durable prefix before advancing its append

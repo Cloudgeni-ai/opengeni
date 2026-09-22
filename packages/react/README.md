@@ -681,6 +681,10 @@ state remains application-owned; durable draft and session state remain in
   callback return type. Custom loaders can use `createOlderHistoryLoadReceipt`
   and call `markCommitted` immediately before publishing their accepted older
   window.
+- Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
+  and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
+  Live appends reuse the retained window's byte total, measuring only incoming
+  and evicted events. History still pages when either retention limit is reached.
 - Newer history uses `hasNewer`, `loadingNewer`, and `loadNewer`. A failed
   `loadNewer()` preserves the retained events and cursors, exposes the original
   failure through `error`, and still rejects for the caller to handle. Pass
