@@ -7,7 +7,14 @@ import { InlineChatImage } from "./inline-chat-image";
 import { DeferredChatMedia } from "./deferred-chat-media";
 const PdfFilePreview = lazy(() => import("./pdf-file-preview"));
 
-export function retainedPreviewKind(contentType: string) {
+export function retainedPreviewKind(contentType: string, filename?: string) {
+  // Older sandbox publications predate media MIME classification. Use only the
+  // saved filename, never chat labels, and leave the integrity receipt unchanged.
+  if (contentType === "application/octet-stream" && filename) {
+    const extension = filename.split(".").pop()?.toLowerCase();
+    if (["mp4", "webm", "ogv"].includes(extension ?? "")) return "video";
+    if (["mp3", "m4a", "ogg", "wav", "flac"].includes(extension ?? "")) return "audio";
+  }
   if (isRetainedImageContentType(contentType)) return "image";
   if (["video/mp4", "video/webm", "video/ogg"].includes(contentType)) return "video";
   if (
@@ -25,6 +32,7 @@ type PreviewProps = {
   workspaceId: string;
   artifact: RetainedArtifactReference;
   title: string;
+  filename?: string;
 };
 
 export function RetainedFilePreview(props: PreviewProps) {
@@ -38,16 +46,23 @@ export function RetainedFilePreview(props: PreviewProps) {
   );
 }
 
-function RetainedFilePreviewBody({ workspaceId, artifact: initialArtifact, title }: PreviewProps) {
+function RetainedFilePreviewBody({
+  workspaceId,
+  artifact: initialArtifact,
+  title,
+  filename,
+}: PreviewProps) {
   // The parent remounts on receipt changes, not object allocation on a rerender.
   const [artifact] = useState(initialArtifact);
   const { client, accessKeyVersion } = useAppContext();
-  const kind = retainedPreviewKind(artifact.contentType);
+  const kind = retainedPreviewKind(artifact.contentType, filename);
   const [retry, setRetry] = useState(0);
   const [failed, setFailed] = useState(false);
-  const [source, setSource] = useState<{ key: string; client: typeof client; url: string } | null>(
-    null,
-  );
+  const [source, setSource] = useState<{
+    key: string;
+    client: typeof client;
+    url: string;
+  } | null>(null);
   const key = `${workspaceId}:${artifact.artifactId}:${artifact.sha256}:${accessKeyVersion}:${retry}`;
   useEffect(() => {
     setSource(null);
