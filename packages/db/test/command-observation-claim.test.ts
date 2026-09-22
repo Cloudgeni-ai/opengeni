@@ -32,7 +32,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture() {
+async function fixture(command = "printf output") {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -67,7 +67,7 @@ async function fixture() {
     insertConnectedMachineSessionBackgroundCommandInTransaction(db, {
       ...identity,
       ...provider,
-      command: "printf output",
+      command,
     }),
   );
   await settleConnectedMachineSessionBackgroundCommand(client.db, {
@@ -79,6 +79,21 @@ async function fixture() {
   });
   return { identity, sessionInput, grant };
 }
+
+test("command reads preserve exact text and safely bound unicode previews", async () => {
+  for (const command of ["printf 'two  spaces'\n\tprintf done", `printf '${"😀".repeat(300)}'`]) {
+    const { identity } = await fixture(command);
+    const stored = await getSessionBackgroundCommand(client.db, identity);
+    expect(stored?.commandText).toBe(command);
+    expect(stored!.commandPreview.length).toBeLessThanOrEqual(512);
+    if (command.length > 512) {
+      expect(stored!.commandPreview.endsWith("…")).toBe(true);
+      expect(stored!.commandPreview).not.toMatch(/[\uD800-\uDBFF]…$/);
+    } else {
+      expect(stored!.commandPreview).toBe(command);
+    }
+  }
+});
 
 test("terminal reads preserve notification and history delivered by the ordinary claim API", async () => {
   const { identity, grant } = await fixture();

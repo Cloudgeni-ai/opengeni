@@ -705,6 +705,39 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(retained).toBe(true);
   });
 
+  test("preserves the original command when an ambiguous launch is adopted by a later read", async () => {
+    const controller = createTurnToolCancellationController();
+    const command = "printf 'two  spaces\\n'\nbun run render --composition Intro";
+    const adopted: Array<string | undefined> = [];
+    const exec = functionTool("exec_command", async () => {
+      throw new RoutingMutationOutcomeUnknownError("execCommand", "promotion transaction lost", {
+        retainedProcess: {
+          id: "77777777-7777-4777-8777-777777777777",
+          providerSessionId: 34,
+        },
+      });
+    });
+    const session = {
+      hasRetainedProcess: (id: number) => id === 34,
+      writeStdinForProcessMutation: async () => running(34),
+      adoptRetainedProcessAsBackgroundCommand: async (_id: number, text?: string) => {
+        adopted.push(text);
+      },
+    };
+    const [wrappedExec, wrappedWrite] = controller.wrapTools(
+      [exec, functionTool("write_stdin", async () => running(34))],
+      session,
+    ) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+    await expect(
+      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: command, yield_time_ms: 0 })),
+    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    await wrappedWrite!.invoke(
+      runContext,
+      JSON.stringify({ session_id: 34, chars: "", yield_time_ms: 0 }),
+    );
+    expect(adopted).toEqual([command]);
+  });
+
   test("registers a durably promoted process even when stale authority rejects the exec output", async () => {
     const controller = createTurnToolCancellationController();
     let processAlive = true;

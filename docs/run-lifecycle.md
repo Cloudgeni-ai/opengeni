@@ -1699,6 +1699,11 @@ row before returning; that row freezes the physical control workspace,
 enrollment, connection instance, and op ID. The exact parent admission,
 process UUID, and provider locator or Connected Machine locator remain pinned
 across active-pointer movement.
+New background-command registrations retain the original command text separately
+from their 512-character preview. Clipped previews end in an ellipsis; the UI
+uses the complete text for hover and expansion. Existing rows without full text
+fall back to their saved preview. Managed exec recovery preserves the original
+command before any later read adopts the retained process.
 Both provider paths serialize session adoption with Steer, Pause, terminal
 Cancel, and session-tree deletion through the canonical workspace-control,
 workspace, session, turn, and exact-attempt fence. Managed retention and session
