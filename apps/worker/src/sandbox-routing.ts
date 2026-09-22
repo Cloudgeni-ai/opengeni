@@ -787,11 +787,15 @@ function adoptRetainedProcessAsBackgroundCommandForTurn(
   services: RoutingWiringServices,
   ids: RoutingWiringIds,
 ):
-  | ((input: { backend: ResolvedActiveBackend; process: RoutingRetainedProcess }) => Promise<void>)
+  | ((input: {
+      backend: ResolvedActiveBackend;
+      process: RoutingRetainedProcess;
+      command?: string | undefined;
+    }) => Promise<void>)
   | undefined {
   const fence = ids.workspaceMutationFence;
   if (!fence) return undefined;
-  return async ({ backend, process }) => {
+  return async ({ backend, process, command }) => {
     const durable = await getRetainedProcess(services.db, {
       workspaceId: ids.workspaceId,
       sessionId: ids.sessionId,
@@ -818,7 +822,7 @@ function adoptRetainedProcessAsBackgroundCommandForTurn(
       attemptId: fence.attemptId,
       processId: process.id,
       expected: retainedProcessSettlementIdentity(durable),
-      command: "execCommand",
+      command: command ?? "Background command",
     });
   };
 }

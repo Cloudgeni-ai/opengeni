@@ -295,6 +295,7 @@ export interface RoutingSandboxSessionDeps {
   adoptProcessAsBackgroundCommand?: (input: {
     backend: ResolvedActiveBackend;
     process: RoutingRetainedProcess;
+    command?: string | undefined;
   }) => Promise<void>;
   /** Called only when an operation against the default/home backend throws a
    * non-fence error. Wiring may classify definitive provider disappearance and
@@ -2125,7 +2126,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   /** Make a retained process session-owned before exposing its live locator.
    * Provider yield alone is not adoption: short commands can still finish and
    * return inline during the model-facing eager-wait window. */
-  async adoptRetainedProcessAsBackgroundCommand(providerSessionId: number): Promise<void> {
+  async adoptRetainedProcessAsBackgroundCommand(
+    providerSessionId: number,
+    command?: string,
+  ): Promise<void> {
     const record = this.retainedProcess(providerSessionId);
     if (!this.canAdoptRetainedProcessAsBackgroundCommand(providerSessionId)) {
       throw new RoutingUnsupportedError("backgroundCommandAdoption", record.backend.kind);
@@ -2142,6 +2146,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     record.backgroundAdoption ??= this.deps.adoptProcessAsBackgroundCommand({
       backend: record.backend,
       process: record.process,
+      command,
     });
     try {
       await record.backgroundAdoption;
