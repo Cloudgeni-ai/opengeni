@@ -67,12 +67,12 @@ to connect their own navigation and media surfaces.
 
 New MP4/WebM/OGV and MP3/M4A/OGG/WAV/FLAC sandbox publications carry media MIME
 types under a separate media identity namespace. Older binary-typed publications
-retain their original metadata and remain downloadable. The retained-file panel
-also previews these older audio/video files using their saved media filename;
+retain their original metadata and remain downloadable. The retained-file panel and inline chat
+also preview these older audio/video files using their saved media filename;
 it passes the original receipt to the authorized playback path unchanged.
-Inline previews still classify by retained metadata; republishing creates a
-correctly typed media artifact for those previews. Existing non-media publication
-identities and receipts are unchanged.
+Inline chat retrieves filename metadata only for generic binary files, checks
+workspace and artifact identity, and never infers media from the message label.
+Existing non-media publication identities and receipts are unchanged.
 
 Image classification follows the retained file's authoritative content type.
 This rolling change preserves the sandbox publisher's existing PNG/JPEG/WebP

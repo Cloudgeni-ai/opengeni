@@ -219,83 +219,85 @@ const baseComponents: Components = {
 const MARKDOWN_LINK_CLASS =
   "break-words font-medium text-og-accent-strong underline-offset-2 hover:underline";
 
-function markdownComponents(
-  onSandboxFile: MarkdownProps["onSandboxFile"],
-  artifactHref: MarkdownProps["artifactHref"],
-): Components {
-  return {
-    ...baseComponents,
-    p: ({ children, node, ...props }) => {
-      const containsArtifact = node?.children.some(
-        (child) =>
-          child.type === "element" &&
-          child.tagName === "img" &&
-          typeof child.properties.src === "string" &&
-          retainedImageId(child.properties.src),
-      );
-      const Tag = containsArtifact ? "div" : "p";
-      return (
-        <Tag className="my-2.5 leading-7 first:mt-0 last:mb-0" {...props}>
-          {children}
-        </Tag>
-      );
-    },
-    a: ({ children, href, ...props }) => {
-      const artifactId = href ? retainedImageId(href) : null;
-      if (artifactId) {
-        const destination = artifactHref?.(artifactId);
-        return destination ? (
-          <a
-            className={MARKDOWN_LINK_CLASS}
-            href={defaultUrlTransform(destination)}
-            target="_blank"
-            rel="noreferrer noopener"
-          >
-            {children}
-          </a>
-        ) : (
-          <span title="This artifact requires a workspace-aware host">
-            {children} (artifact unavailable)
-          </span>
-        );
-      }
-      const location = sandboxFileLocationFromHref(href);
-      if (location !== null) {
-        return (
-          <SandboxMarkdownLink location={location} onSandboxFile={onSandboxFile}>
-            {children}
-          </SandboxMarkdownLink>
-        );
-      }
-      if (isSandboxHref(href) || !href) {
-        return (
-          <span
-            className="break-words text-og-fg-subtle"
-            aria-disabled="true"
-            title={
-              isSandboxHref(href)
-                ? "This sandbox file reference is invalid"
-                : "This link is unavailable"
-            }
-          >
-            {children} (link unavailable)
-          </span>
-        );
-      }
-      return (
+// Keep renderer component types stable: rebuilding them remounts paragraphs,
+// destroys native selections, and resets embedded media on host updates.
+const MarkdownLinkContext = createContext<Pick<MarkdownProps, "onSandboxFile" | "artifactHref">>(
+  {},
+);
+
+const markdownComponents: Components = {
+  ...baseComponents,
+  p: ({ children, node, ...props }) => {
+    const containsArtifact = node?.children.some(
+      (child) =>
+        child.type === "element" &&
+        child.tagName === "img" &&
+        typeof child.properties.src === "string" &&
+        retainedImageId(child.properties.src),
+    );
+    const Tag = containsArtifact ? "div" : "p";
+    return (
+      <Tag className="my-2.5 leading-7 first:mt-0 last:mb-0" {...props}>
+        {children}
+      </Tag>
+    );
+  },
+  a: ({ children, href, ...props }) => {
+    const { onSandboxFile, artifactHref } = useContext(MarkdownLinkContext);
+    const artifactId = href ? retainedImageId(href) : null;
+    if (artifactId) {
+      const destination = artifactHref?.(artifactId);
+      return destination ? (
         <a
           className={MARKDOWN_LINK_CLASS}
+          href={defaultUrlTransform(destination)}
           target="_blank"
           rel="noreferrer noopener"
-          href={href}
-          {...props}
         >
           {children}
         </a>
+      ) : (
+        <span title="This artifact requires a workspace-aware host">
+          {children} (artifact unavailable)
+        </span>
       );
-    },
-  };
-}
+    }
+    const location = sandboxFileLocationFromHref(href);
+    if (location !== null) {
+      return (
+        <SandboxMarkdownLink location={location} onSandboxFile={onSandboxFile}>
+          {children}
+        </SandboxMarkdownLink>
+      );
+    }
+    if (isSandboxHref(href) || !href) {
+      return (
+        <span
+          className="break-words text-og-fg-subtle"
+          aria-disabled="true"
+          title={
+            isSandboxHref(href)
+              ? "This sandbox file reference is invalid"
+              : "This link is unavailable"
+          }
+        >
+          {children} (link unavailable)
+        </span>
+      );
+    }
+    return (
+      <a
+        className={MARKDOWN_LINK_CLASS}
+        target="_blank"
+        rel="noreferrer noopener"
+        href={href}
+        {...props}
+      >
+        {children}
+      </a>
+    );
+  },
+};
 
 function SandboxMarkdownLink({
   location,
@@ -679,8 +681,8 @@ function MarkdownImpl({
   // fences don't snap to final GFM one commit before the crystallize morph.
   // Reveal identity still tracks the true source (`children`).
   const parseText = streaming || revealActive ? softenStreamingMarkdown(children) : children;
-  const components = useMemo(
-    () => markdownComponents(onSandboxFile, artifactHref),
+  const linkContext = useMemo(
+    () => ({ onSandboxFile, artifactHref }),
     [onSandboxFile, artifactHref],
   );
 
@@ -697,27 +699,29 @@ function MarkdownImpl({
   // `min-w-0` lets the prose shrink inside flex parents (message bubbles) so
   // long links and code blocks wrap/scroll instead of forcing overflow.
   return (
-    <InteractiveContext.Provider value={interactiveContext}>
-      <TooltipProvider delayDuration={400}>
-        <div
-          ref={bodyRef}
-          className={cn(
-            "og-markdown-body min-w-0 break-words",
-            settling && "og-markdown-settle",
-            className,
-          )}
-        >
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            rehypePlugins={rehypePlugins}
-            components={components}
-            urlTransform={markdownUrlTransform}
+    <MarkdownLinkContext.Provider value={linkContext}>
+      <InteractiveContext.Provider value={interactiveContext}>
+        <TooltipProvider delayDuration={400}>
+          <div
+            ref={bodyRef}
+            className={cn(
+              "og-markdown-body min-w-0 break-words",
+              settling && "og-markdown-settle",
+              className,
+            )}
           >
-            {parseText}
-          </ReactMarkdown>
-        </div>
-      </TooltipProvider>
-    </InteractiveContext.Provider>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              rehypePlugins={rehypePlugins}
+              components={markdownComponents}
+              urlTransform={markdownUrlTransform}
+            >
+              {parseText}
+            </ReactMarkdown>
+          </div>
+        </TooltipProvider>
+      </InteractiveContext.Provider>
+    </MarkdownLinkContext.Provider>
   );
 }
 
