@@ -59,11 +59,16 @@ spec:
             # authoritative for protected provider/model overrides.
             - secretRef:
                 name: {{ include "opengeni.secretName" . }}
-          {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
+          {{- if or .Values.config.OPENGENI_DEPLOYMENT_REVISION .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
           env:
+            {{- include "opengeni.deploymentRevisionEnv" . | nindent 12 }}
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
           {{- else }}
           env: []
+          {{- end }}
+          {{- with .Values.api.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           {{- if .Values.api.probes.startup.enabled }}
           startupProbe:
@@ -81,6 +86,10 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      {{- with .Values.api.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if .Values.api.topologySpreadConstraints.enabled }}
       topologySpreadConstraints:
         {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "api" "values" .Values.api) | nindent 8 }}

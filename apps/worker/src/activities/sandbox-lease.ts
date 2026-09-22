@@ -13,14 +13,17 @@
 // harness and executes admitted drains concurrently. There is no per-session
 // timer, viewer activity, owner task queue, or provider-specific lifecycle path
 // in the normal drain state machine.
+import { warnDrainSnapshotFailure } from "../sandbox-snapshot-diagnostics";
+import { warnRetainedProcessProofFailure } from "../retained-process-diagnostics";
 
 import { createHash, randomUUID } from "node:crypto";
-import { retainedProviderCommandPersistence } from "@opengeni/db/retained-provider-commands";
+import { requestRetainedProcessDeadlineCancellation } from "@opengeni/db/retained-provider-commands";
 import type { ProviderCommandPersistence, ProviderCommandSession } from "@opengeni/runtime";
 import { Context } from "@temporalio/activity";
 import { OpLostReason, OpState, type OpStatus } from "@opengeni/agent-proto";
 import {
   accrueWarmSeconds,
+  retainedProviderCommandPersistence,
   adoptLegacyModalCheckpointArtifact,
   confirmDrainCold,
   appendSessionEventToSandboxGroup,
@@ -49,6 +52,7 @@ import {
   recordRetainedProcessReconciliationProof,
   replaceWorkspaceArchiveCaptureAfterProof,
   readLease,
+  readWorkspaceArchiveCapturePreflight,
   reapExpiredSessionListSnapshots,
   reapStaleLeaseHoldersGlobal,
   requestDueSandboxRotationsGlobal,
@@ -251,6 +255,7 @@ export type TerminateBoxFn = (
   capturePolicy?: ProviderWorkspaceCapturePolicy | null,
   diskBackedArchives?: boolean,
   releaseFailedCapture?: () => Promise<void>,
+  workspaceId?: string,
 ) => Promise<boolean | ProviderTerminationOutcome>;
 
 export type SweepModalOrphansFn = (
@@ -488,6 +493,7 @@ export function createSandboxLeaseActivities(
       capturePolicy,
       diskBackedArchives,
       releaseFailedCapture,
+      workspaceId,
     ) =>
       await terminateProviderBox(
         settings,
@@ -501,6 +507,7 @@ export function createSandboxLeaseActivities(
         capturePolicy,
         diskBackedArchives,
         releaseFailedCapture,
+        workspaceId,
       ));
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
@@ -1406,6 +1413,47 @@ async function reconcileTerminalRetainedProcesses(
     let process = claim.process;
     const expected = retainedProcessSettlementIdentity(process);
     let proof = retainedProcessReconciliationProof(process);
+    const processScope = {
+      accountId: process.accountId,
+      workspaceId: process.workspaceId,
+      sessionId: process.sessionId,
+      processId: process.id,
+    };
+    const storedCommandPersistence = retainedProviderCommandPersistence(
+      db,
+      processScope,
+      bus ? (events) => bus.publish(process.workspaceId, process.sessionId, events) : undefined,
+    );
+    const commandPersistence = {
+      ...storedCommandPersistence,
+      requestCancellation: async (reason: "provider_deadline" | "explicit_stop") => {
+        if (reason === "provider_deadline") {
+          await requestRetainedProcessDeadlineCancellation(db, processScope);
+          if (!(await storedCommandPersistence.cancellationRequested()))
+            throw new Error(
+              "Supervised deadline cancellation no longer owns its original rotating lease",
+            );
+        } else await storedCommandPersistence.requestCancellation(reason);
+      },
+    };
+    if (proof && process.providerBackend === "modal") {
+      try {
+        const command = await commandPersistence.load();
+        if (
+          command?.kind === "modal-router-v1" &&
+          command.supervision &&
+          (!(await commandPersistence.loadSupervisionReceipt()) ||
+            ![command.streams.stdout, command.streams.stderr].every(
+              (stream) => stream.eof && stream.exitCode === 0,
+            ))
+        )
+          proof = null;
+      } catch {
+        // An earlier terminal observation cannot make missing control/output
+        // proof unreachable. Reprobe the original binding; DB remains the gate.
+        proof = null;
+      }
+    }
     if (!proof) {
       let observation: RetainedProcessProbeResult | null = null;
 
@@ -1515,6 +1563,26 @@ async function reconcileTerminalRetainedProcesses(
           }
         } else {
           try {
+            const command = await commandPersistence.load();
+            const supervised = command?.kind === "modal-router-v1" && Boolean(command.supervision);
+            const supervisionMetric = (outcome: string) =>
+              observability.incrementCounter({
+                name: "opengeni_command_supervision_total",
+                help: "Native retained command supervision reconciliation outcomes.",
+                labels: { outcome },
+              });
+            if (
+              supervised &&
+              (lease!.rotationReason === "provider_deadline" ||
+                claim.ownerState === "background_stopping")
+            ) {
+              await commandPersistence.requestCancellation(
+                lease!.rotationReason === "provider_deadline"
+                  ? "provider_deadline"
+                  : "explicit_stop",
+              );
+              supervisionMetric("cancellation_intent");
+            }
             observation = await probe(
               settings,
               lease!,
@@ -1541,13 +1609,21 @@ async function reconcileTerminalRetainedProcesses(
                     .publish(process.workspaceId, process.sessionId, events)
                     .catch(() => undefined);
               },
-              retainedProviderCommandPersistence(db, {
-                accountId: process.accountId,
-                workspaceId: process.workspaceId,
-                sessionId: process.sessionId,
-                processId: process.id,
-              }),
+              commandPersistence,
             );
+            if (supervised) {
+              supervisionMetric(
+                (await commandPersistence.loadSupervisionReceipt())
+                  ? "proof_retained"
+                  : "proof_missing",
+              );
+              if (observation.status === "deferred")
+                supervisionMetric(
+                  observation.reason === "provider_running"
+                    ? "checkpoint_blocked"
+                    : "provider_failure",
+                );
+            }
           } catch (error) {
             observability.warn("sandbox reaper: retained-process provider probe failed", {
               processId: process.id,
@@ -1606,10 +1682,7 @@ async function reconcileTerminalRetainedProcesses(
         recordRetainedProcessReconciliation(observability, `proof_${proof.outcome}`);
       } catch (error) {
         recordRetainedProcessReconciliation(observability, "proof_checkpoint_failed");
-        observability.warn("sandbox reaper: retained-process proof checkpoint failed", {
-          processId: process.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
+        warnRetainedProcessProofFailure(observability, error, process);
         continue;
       }
     }
@@ -1813,7 +1886,8 @@ export async function probeRetainedProcessAtProvider(
     lease.leaseEpoch !== process.leaseEpoch ||
     lease.backend !== process.providerBackend ||
     lease.instanceId !== process.providerInstanceId ||
-    lease.resumeBackendId !== process.providerBackend ||
+    !lease.resumeBackendId ||
+    sandboxBackendForSdkBackendId(lease.resumeBackendId) !== process.providerBackend ||
     process.routeTargetId !== null
   ) {
     return { status: "deferred", reason: "identity_mismatch" };
@@ -1828,7 +1902,11 @@ export async function probeRetainedProcessAtProvider(
     return classifyRetainedProcessPollResult(pending.result, process.providerSessionId);
   }
   const envelopeBackend = (lease.resumeState as { backendId?: unknown }).backendId;
-  if (envelopeBackend !== undefined && envelopeBackend !== process.providerBackend) {
+  if (
+    envelopeBackend !== undefined &&
+    (typeof envelopeBackend !== "string" ||
+      sandboxBackendForSdkBackendId(envelopeBackend) !== process.providerBackend)
+  ) {
     return { status: "deferred", reason: "identity_mismatch" };
   }
   if (sandboxProviderInstanceIdFromEnvelope(lease.resumeState) !== process.providerInstanceId) {
@@ -1862,7 +1940,11 @@ export async function probeRetainedProcessAtProvider(
   } catch {
     return { status: "deferred", reason: "provider_error" };
   }
-  if (!client || client.backendId !== process.providerBackend || !client.resume) {
+  if (
+    !client ||
+    sandboxBackendForSdkBackendId(client.backendId) !== process.providerBackend ||
+    !client.resume
+  ) {
     return { status: "deferred", reason: "backend_unsupported" };
   }
   const envelopeSessionState =
@@ -1953,6 +2035,11 @@ export async function probeRetainedProcessAtProvider(
       return;
     }
     const page = session.getProviderCommandOutput?.(value);
+    if (page?.command.kind === "modal-router-v1" && typeof value === "string") {
+      if (!session.captureCommandOutput || !(await session.captureCommandOutput(value)))
+        throw new Error("Byte-offset output requires atomic capture before settlement");
+      return;
+    }
     if (page) {
       for (const chunk of page.chunks)
         if (chunk.text)
@@ -1965,10 +2052,17 @@ export async function probeRetainedProcessAtProvider(
 
   let result: unknown;
   try {
+    const supervisedCancelled =
+      mode === "cancel" || lease.rotationReason === "provider_deadline"
+        ? ((await session.cancelSupervisedCommand?.(
+            process.providerSessionId,
+            lease.rotationReason === "provider_deadline" ? "provider_deadline" : "explicit_stop",
+          )) ?? false)
+        : false;
     result = await withRetainedProcessProbeTimeout(
       session.writeStdin({
         sessionId: process.providerSessionId,
-        chars: mode === "cancel" ? "\u0003" : "",
+        chars: mode === "cancel" && !supervisedCancelled ? "\u0003" : "",
         yieldTimeMs: 1_000,
         maxOutputTokens: 2_000,
       }),
@@ -1997,7 +2091,10 @@ export async function probeRetainedProcessAtProvider(
   if (
     observation.status === "deferred" &&
     observation.reason === "provider_running" &&
-    lease.rotationRequestedAt !== null
+    lease.rotationRequestedAt !== null &&
+    !(await providerPersistence
+      ?.load()
+      .then((command) => command?.kind === "modal-router-v1" && command.supervision))
   ) {
     // A background PTY cannot outlive the finite provider box. Interrupt only
     // this exact durable provider session after rotation admission is fenced;
@@ -2824,6 +2921,24 @@ async function terminateDrainableBox(
   // lease draining for a later sweep (NEVER terminate a box whose files we
   // could not capture). A persist CAS miss means the box was re-armed and left
   // running, so the cold commit is skipped.
+  // A published capture retry skips persistence. Revalidate legacy containment
+  // even on that path: stale enrollment is not native-supervisor exit proof.
+  // Typed provider absence is independently fenced by the canonical loss commit.
+  if (
+    !providerMissingBeforeCapture &&
+    backend === "modal" &&
+    lease.instanceId &&
+    !(await readWorkspaceArchiveCapturePreflight(db, {
+      accountId,
+      workspaceId: row.workspaceId,
+      sandboxGroupId: row.sandboxGroupId,
+      expectedEpoch: row.leaseEpoch,
+      expectedInstanceId: lease.instanceId,
+      liveness: "draining",
+    }))
+  ) {
+    return false;
+  }
   const termination: ProviderTerminationOutcome | boolean = providerMissingBeforeCapture
     ? { terminated: true, providerMissingBeforeCapture: true }
     : await terminateBox(
@@ -2846,6 +2961,7 @@ async function terminateDrainableBox(
             expectedInstanceId: lease.instanceId,
           });
         },
+        row.workspaceId,
       );
   const terminated = typeof termination === "boolean" ? termination : termination.terminated;
   if (!terminated) {
@@ -2980,18 +3096,22 @@ export async function terminateProviderBox(
   claimedCapturePolicy?: ProviderWorkspaceCapturePolicy | null,
   diskBackedArchives = false,
   releaseFailedCapture?: () => Promise<void>,
+  workspaceId?: string,
 ): Promise<ProviderTerminationOutcome> {
   const durableBackendId = (lease.resumeBackendId ?? lease.backend) as string;
   const backend = sandboxBackendForSdkBackendId(durableBackendId) ?? durableBackendId;
   const logIdentity = providerDrainLogIdentity(lease, backend);
+  const warnCaptureFailure = (message: string, error: unknown): void =>
+    warnDrainSnapshotFailure(observability, message, error, {
+      sandboxGroupId: lease.sandboxGroupId,
+      leaseEpoch: lease.leaseEpoch,
+      ...(workspaceId ? { workspaceId } : {}),
+    });
   const releaseAfterCaptureFailure = async (): Promise<void> => {
     try {
       await releaseFailedCapture?.();
     } catch (error) {
-      observability.warn("sandbox reaper: failed capture claim release failed", {
-        ...logIdentity,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      warnCaptureFailure("sandbox reaper: failed capture claim release failed", error);
     }
   };
   // 'none' / no backend -> nothing to terminate.
@@ -3233,29 +3353,20 @@ export async function terminateProviderBox(
               },
             );
           } catch (error) {
-            observability.warn("sandbox reaper: late workspace capture publication failed", {
-              ...logIdentity,
-              error: error instanceof Error ? error.message : String(error),
-            });
+            warnCaptureFailure("sandbox reaper: late workspace capture publication failed", error);
           } finally {
             await disposeWorkspaceArchive(archive);
           }
         },
         observeLatePublicationFailure: (error) => {
-          observability.warn("sandbox reaper: late capture publication cleanup failed", {
-            ...logIdentity,
-            error: error instanceof Error ? error.message : String(error),
-          });
+          warnCaptureFailure("sandbox reaper: late capture publication cleanup failed", error);
         },
         observeLateFailure: (error) => {
           // Capture has now rejected and this timed-out path can never reach
           // provider teardown. Release only our unpublished claim so a waiting
           // turn can re-arm the intact live box; stale callbacks are DB-fenced.
           void releaseAfterCaptureFailure();
-          observability.warn("sandbox reaper: timed-out provider capture later failed", {
-            ...logIdentity,
-            error: error instanceof Error ? error.message : String(error),
-          });
+          warnCaptureFailure("sandbox reaper: timed-out provider capture later failed", error);
         },
       });
     }
@@ -3266,12 +3377,9 @@ export async function terminateProviderBox(
       });
       return { terminated: true, providerMissingBeforeCapture: true };
     }
-    observability.warn(
+    warnCaptureFailure(
       "sandbox reaper: persistWorkspace failed — leaving box draining (files NOT lost)",
-      {
-        ...logIdentity,
-        error: error instanceof Error ? error.message : String(error),
-      },
+      error,
     );
     // An unresolved timeout is not proof of capture failure: retain the fence
     // until its provider promise settles. A settled failure cannot enter the

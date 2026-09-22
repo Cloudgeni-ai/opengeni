@@ -5123,6 +5123,98 @@ describe("clean session control plane", () => {
     });
   });
 
+  test("paused provider recovery projects its quiesced receipt without an interruption row", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "provider recovery before pause");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
+    const predecessor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId, workflowRunId, dispatchId },
+    );
+    expect(predecessor).not.toBeNull();
+    expect(
+      await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: predecessor!.id,
+        triggerEventId: predecessor!.triggerEventId,
+        attemptId,
+        reason: "provider_unavailable",
+        detail: { code: "provider_unavailable", retryable: true, continueDelayMs: 2_000 },
+      }),
+    ).toMatchObject({ action: "recovering" });
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+    });
+    await controlSession(grant, session.id, "pause");
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const interruptions = await db
+        .select()
+        .from(schema.sessionAttemptInterruptions)
+        .where(eq(schema.sessionAttemptInterruptions.attemptId, attemptId));
+      expect(interruptions).toHaveLength(0);
+      await db
+        .update(schema.sessions)
+        .set({ status: "recovering" })
+        .where(eq(schema.sessions.id, session.id));
+    });
+    const beforeControl = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      evaluateSessionControl(db, grant.workspaceId!, session.id),
+    );
+    expect(beforeControl.state).toBe("paused");
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "cancellation-wait",
+      attemptId,
+    });
+    const input = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+      activitySettled: true,
+    };
+    const result = await reconcileSessionAttemptQuiescence(client.db, input);
+    expect(result.action).toBe("quiesced");
+    expect(result.events.filter((e) => e.type === "session.status.changed")).toHaveLength(1);
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "idle",
+      activeTurnId: predecessor!.id,
+    });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, predecessor!.id)).toMatchObject({
+      status: "recovering",
+      activeAttemptId: null,
+    });
+    const afterControl = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      evaluateSessionControl(db, grant.workspaceId!, session.id),
+    );
+    expect(afterControl.controlEtag).toBe(beforeControl.controlEtag);
+    expect(afterControl.state).toBe("paused");
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "idle",
+    });
+    expect(await reconcileSessionAttemptQuiescence(client.db, input)).toEqual({
+      action: "quiesced",
+      events: [],
+    });
+    expect(
+      await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId),
+    ).toBeNull();
+  });
+
   test("an already-quiesced paused recovery repairs its stale public projection", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "run until the parked projection is repaired");

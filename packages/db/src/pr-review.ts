@@ -1,6 +1,5 @@
 import {
   AutomationSessionTemplate,
-  OPENGENI_PR_REVIEW_PACK_ID,
   OPENGENI_PR_REVIEW_SESSION_ROLE,
   type PrReviewAppRegistration,
   type GitHubRepository,
@@ -43,8 +42,6 @@ export async function createPrReviewAppRegistration(
     webhookSecretEncrypted: string;
     webhookUsername: string | null;
     createdBySubjectId: string;
-    packInstallationId: string;
-    packConnectorId: string;
   },
 ): Promise<PrReviewAppRegistration> {
   return await withRlsContext(db, input, async (scopedDb) => {
@@ -64,8 +61,7 @@ export async function createPrReviewAppRegistration(
             webhookUsername: input.webhookUsername,
           },
           webhookSecretEncrypted: input.webhookSecretEncrypted,
-          packInstallationId: input.packInstallationId,
-          packConnectorId: input.packConnectorId,
+
           createdBySubjectId: input.createdBySubjectId,
         })
         .returning();
@@ -312,8 +308,7 @@ export async function createPrReviewRepositoryBinding(
     additionalInstructions: string | null;
     status: "active" | "disabled";
     createdBySubjectId: string;
-    packInstallationId: string;
-    packTemplateId: string;
+
     adapterId: string;
     eventTypes: string[];
     configuration: Record<string, unknown>;
@@ -357,8 +352,7 @@ export async function createPrReviewRepositoryBinding(
           sourceId: registration.sourceId,
           name: `Review ${input.repositoryFullName}`,
           status: input.status,
-          packInstallationId: input.packInstallationId,
-          packTemplateId: input.packTemplateId,
+
           createdBySubjectId: input.createdBySubjectId,
         })
         .returning();
@@ -401,10 +395,6 @@ export async function createPrReviewRepositoryBinding(
   });
 }
 
-/** Atomically converge one owner-authorized installation of the deployment
- * review App onto the Pack's ordinary source/trigger/binding model. Re-running
- * the browser flow repairs disabled rows, follows GitHub repository selection,
- * and removes shared-webhook routes for repositories no longer selected. */
 export async function syncManagedGitHubPrReviewInstallation(
   db: Database,
   input: {
@@ -422,9 +412,7 @@ export async function syncManagedGitHubPrReviewInstallation(
     webhookSecretEncrypted: string;
     repositories: GitHubRepository[];
     createdBySubjectId: string;
-    packInstallationId: string;
-    packConnectorId: string;
-    packTemplateId: string;
+
     adapterId: string;
     eventTypes: string[];
     configuration: Record<string, unknown>;
@@ -439,22 +427,6 @@ export async function syncManagedGitHubPrReviewInstallation(
     input,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const [packInstallation] = await tx
-          .select({ id: schema.packInstallations.id })
-          .from(schema.packInstallations)
-          .where(
-            and(
-              eq(schema.packInstallations.workspaceId, input.workspaceId),
-              eq(schema.packInstallations.id, input.packInstallationId),
-              eq(schema.packInstallations.packId, OPENGENI_PR_REVIEW_PACK_ID),
-              eq(schema.packInstallations.status, "active"),
-            ),
-          )
-          .limit(1)
-          .for("update");
-        if (!packInstallation) {
-          throw new PrReviewDispatchAuthorityError("OpenGeni Review Bot Pack is not active");
-        }
         const installationId = String(input.installationId);
         const [nonceReceipt] = await tx
           .insert(schema.prReviewManagedGithubAuthorityNonces)
@@ -507,8 +479,7 @@ export async function syncManagedGitHubPrReviewInstallation(
               configuration: nextSourceConfiguration,
               webhookSecretEncrypted: input.webhookSecretEncrypted,
               status: "active",
-              packInstallationId: input.packInstallationId,
-              packConnectorId: input.packConnectorId,
+
               version: sql`${schema.automationSources.version} + 1`,
               updatedAt: new Date(),
             })
@@ -559,8 +530,7 @@ export async function syncManagedGitHubPrReviewInstallation(
                 webhookUsername: null,
               },
               webhookSecretEncrypted: input.webhookSecretEncrypted,
-              packInstallationId: input.packInstallationId,
-              packConnectorId: input.packConnectorId,
+
               createdBySubjectId: input.createdBySubjectId,
             })
             .returning();
@@ -655,8 +625,7 @@ export async function syncManagedGitHubPrReviewInstallation(
                 sourceId: source.id,
                 name: `Review ${repository.fullName}`,
                 status: "active",
-                packInstallationId: input.packInstallationId,
-                packTemplateId: input.packTemplateId,
+
                 createdBySubjectId: input.createdBySubjectId,
               })
               .returning();
@@ -1079,10 +1048,6 @@ export async function resolvePrReviewGitCredential(
         runSessionId: schema.automationRuns.sessionId,
         triggerStatus: schema.automationTriggers.status,
         sourceStatus: schema.automationSources.status,
-        sourcePackInstallationId: schema.automationSources.packInstallationId,
-        sourcePackConnectorId: schema.automationSources.packConnectorId,
-        packInstallationId: schema.packInstallations.id,
-        packStatus: schema.packInstallations.status,
         bindingStatus: schema.prReviewRepositoryBindings.status,
         registrationStatus: schema.prReviewAppRegistrations.status,
       })
@@ -1116,13 +1081,6 @@ export async function resolvePrReviewGitCredential(
           eq(schema.prReviewAppRegistrations.sourceId, schema.automationRuns.sourceId),
         ),
       )
-      .innerJoin(
-        schema.packInstallations,
-        and(
-          eq(schema.packInstallations.workspaceId, schema.automationRuns.workspaceId),
-          eq(schema.packInstallations.id, schema.automationTriggers.packInstallationId),
-        ),
-      )
       .where(
         and(
           eq(schema.automationRuns.workspaceId, input.workspaceId),
@@ -1131,7 +1089,6 @@ export async function resolvePrReviewGitCredential(
           eq(schema.automationRuns.sessionId, input.sessionId),
           eq(schema.prReviewRepositoryBindings.id, bindingId),
           eq(schema.prReviewAppRegistrations.id, input.registrationId),
-          eq(schema.packInstallations.packId, OPENGENI_PR_REVIEW_PACK_ID),
         ),
       )
       .limit(1);
@@ -1141,9 +1098,6 @@ export async function resolvePrReviewGitCredential(
       execution.runSessionId !== input.sessionId ||
       execution.triggerStatus !== "active" ||
       execution.sourceStatus !== "active" ||
-      execution.sourcePackInstallationId !== execution.packInstallationId ||
-      execution.sourcePackConnectorId !== prReviewProviderPackConnectorId(input.provider) ||
-      execution.packStatus !== "active" ||
       execution.bindingStatus !== "active" ||
       execution.registrationStatus !== "active"
     ) {
@@ -1194,18 +1148,6 @@ export async function resolvePrReviewGitCredential(
           "PR Review credential is not authorized for this repository",
         );
     }
-    const [pack] = await scopedDb
-      .select({ status: schema.packInstallations.status })
-      .from(schema.packInstallations)
-      .where(
-        and(
-          eq(schema.packInstallations.workspaceId, input.workspaceId),
-          eq(schema.packInstallations.packId, OPENGENI_PR_REVIEW_PACK_ID),
-        ),
-      )
-      .limit(1);
-    if (pack?.status !== "active")
-      throw new PrReviewDispatchAuthorityError("OpenGeni Review Bot Pack is not active");
     return {
       credentialKind: registration.credentialKind as
         | "github_app"
@@ -1216,10 +1158,6 @@ export async function resolvePrReviewGitCredential(
       expiresAt: registration.accessTokenExpiresAt?.toISOString() ?? null,
     };
   });
-}
-
-function prReviewProviderPackConnectorId(provider: PrReviewProvider): string {
-  return provider === "azure_devops" ? "azure-devops" : provider;
 }
 
 function prReviewMetadataText(metadata: unknown, key: string): string | null {

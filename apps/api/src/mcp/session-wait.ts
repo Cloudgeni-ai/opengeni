@@ -164,6 +164,8 @@ export function sessionWaitSemanticClass(type: SessionEventType): SessionEventSe
 export type SessionWaitTarget = { sessionId: string; afterSequence: number };
 
 export type SessionWaitEventSummary = {
+  /** True only when every semantic result field survived all projections. */
+  contentComplete?: boolean;
   id: string;
   sequence: number;
   type: SessionEventType;
@@ -521,6 +523,20 @@ export function summarizeSessionWaitEvent(
   } else if (typeof compact.result === "string" && compact.result !== compact.text) {
     summary.result = clampSummaryString(compact.result, textChars);
   }
+  // Other wait summaries may omit actionable fields (e.g. human-input
+  // questions); absence of a truncation marker is not proof of full content.
+  summary.contentComplete =
+    ["turn.completed", "agent.message.completed"].includes(event.type) &&
+    !compact.truncation.truncated &&
+    text === compact.text &&
+    JSON.stringify(failure) === JSON.stringify(compact.failure) &&
+    (compact.output === null ||
+      compact.output === compact.text ||
+      JSON.stringify(compact.output) === JSON.stringify(summary.result)) &&
+    (compact.result === null ||
+      compact.result === undefined ||
+      compact.result === compact.text ||
+      JSON.stringify(summary.result) === JSON.stringify(compact.result));
   return summary;
 }
 
@@ -570,6 +586,7 @@ export function boundSessionWaitResult(
       ...target,
       events: target.events.map((event) => ({
         ...event,
+        contentComplete: false,
         text: event.text === null ? null : clampSummaryString(event.text, textChars),
         ...(typeof event.result === "string"
           ? { result: clampSummaryString(event.result, textChars) }

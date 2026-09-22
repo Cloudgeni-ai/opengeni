@@ -6,6 +6,7 @@ import {
   createDb,
   appendSessionEvents,
   createSession,
+  failSessionWorkBeforeAttemptClaim,
   grantWorkspaceAccess,
   removeWorkspaceMember,
   updateSessionTitle,
@@ -58,6 +59,21 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
   let browser: Browser;
   let apiBaseUrl: string;
   let webBaseUrl: string;
+  let bus: MemoryEventBus;
+
+  async function publishAnswer(workspaceId: string, sessionId: string, text: string) {
+    // The workflow is stubbed: settle the fixture explicitly, otherwise its
+    // queued status correctly takes precedence over the rail's unread label.
+    const events = await appendSessionEventsAndUpdateSession(
+      dbClient.db,
+      workspaceId,
+      sessionId,
+      [{ type: "agent.message.completed", payload: { text } }],
+      { status: "idle" },
+    );
+    await bus.publish(workspaceId, sessionId, events);
+    return events.at(-1)!.sequence;
+  }
 
   beforeAll(async () => {
     // Build before acquiring/migrating the real database and starting the API.
@@ -89,6 +105,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
     shared = acquired;
     dbClient = createDb(shared.appUrl);
+    bus = new MemoryEventBus();
     const app = createApp({
       // Exercise the normal configured-principal access path so independent
       // contexts can represent either the same member on another device or a
@@ -101,7 +118,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         delegationSecret: undefined,
       }),
       db: dbClient.db,
-      bus: new MemoryEventBus(),
+      bus,
       workflowClient,
     });
     api = Bun.serve({
@@ -263,6 +280,85 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await context.close();
     }
   }, 60_000);
+
+  test("attachment history sends session authority for metadata and signed image URLs", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const session = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Attachment history proof",
+      );
+      const fileId = crypto.randomUUID();
+      const seen: string[] = [];
+      const svg =
+        '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="teal"/></svg>';
+      await page.route("**/files/**", async (route) => {
+        const url = new URL(route.request().url());
+        seen.push(url.pathname + url.search);
+        if (url.searchParams.get("sessionId") !== session.id || !url.pathname.includes(fileId)) {
+          await route.fulfill({ status: 404, json: { message: "session authority missing" } });
+          return;
+        }
+        await route.fulfill({
+          json: url.pathname.endsWith("/download-url")
+            ? {
+                url: "data:image/svg+xml," + encodeURIComponent(svg),
+                expiresAt: new Date(Date.now() + 60000).toISOString(),
+              }
+            : {
+                id: fileId,
+                workspaceId,
+                scope: "personal",
+                status: "ready",
+                filename: "session-only.svg",
+                safeFilename: "session-only.svg",
+                contentType: "image/svg+xml",
+                sizeBytes: svg.length,
+                sha256: null,
+                bucket: "private",
+                objectKey: fileId,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              },
+        });
+      });
+      await appendSessionEvents(dbClient.db, workspaceId, session.id, [
+        {
+          type: "user.message",
+          payload: { text: "Shared attachment", resources: [{ kind: "file", fileId }] },
+        },
+      ]);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${session.id}`);
+      await page.getByRole("img", { name: "session-only.svg" }).waitFor();
+      expect(
+        await page
+          .getByRole("img", { name: "session-only.svg" })
+          .evaluate(
+            (image) =>
+              (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0,
+          ),
+      ).toBe(true);
+      expect(seen).toContain(
+        `/v1/workspaces/${workspaceId}/files/${fileId}?sessionId=${session.id}`,
+      );
+      expect(seen).toContain(
+        `/v1/workspaces/${workspaceId}/files/${fileId}/download-url?sessionId=${session.id}`,
+      );
+      expect(errors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 60000);
 
   test("keeps the selected session grouping after a page refresh", async () => {
     const context = await configuredContext(browser, {
@@ -641,6 +737,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         workspaceId,
         "Unread active chat",
       );
+      await publishAnswer(workspaceId, target.id, "Initial answer awaiting attention");
       const attentionPath = `/v1/workspaces/${workspaceId}/sessions/${target.id}/attention`;
       let acknowledgementAttempts = 0;
       const firstAcknowledgementRelease = new Promise<void>((resolve) => {
@@ -712,29 +809,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           new URL(response.url()).pathname === attentionPath,
         { timeout: ACKNOWLEDGEMENT_TIMEOUT_MS },
       );
-      const sendResponse = await page.evaluate(
-        async ({ browserApiBaseUrl, targetWorkspaceId, targetSessionId }) => {
-          const response = await fetch(
-            `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions/${targetSessionId}/events`,
-            {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                type: "user.message",
-                clientEventId: crypto.randomUUID(),
-                payload: { text: "Later output arrived while the chat stayed open" },
-              }),
-            },
-          );
-          return { status: response.status, body: await response.text() };
-        },
-        {
-          browserApiBaseUrl: apiBaseUrl,
-          targetWorkspaceId: workspaceId,
-          targetSessionId: target.id,
-        },
+      await publishAnswer(
+        workspaceId,
+        target.id,
+        "Later output arrived while the chat stayed open",
       );
-      expect(sendResponse).toEqual({ status: 202, body: expect.any(String) });
       const laterAcknowledgementResponse = await laterAcknowledgement;
       expect(laterAcknowledgementResponse.status()).toBe(200);
       expect(
@@ -751,6 +830,36 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
               .__activeSessionUnreadFlash,
         ),
       ).toBe(false);
+
+      // Once consumed, a closed chat must stay read through durable cleanup.
+      // Reload from the API so optimistic active-chat suppression cannot hide
+      // a server-side regression in the meaningful frontier.
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      const cleanup = await appendSessionEvents(dbClient.db, workspaceId, target.id, [
+        { type: "sandbox.box.terminated", payload: { reason: "fixture cleanup" } },
+        { type: "workspace.revision.captured", payload: {} },
+        { type: "turn.event.rejected_late", payload: {} },
+      ]);
+      await bus.publish(workspaceId, target.id, cleanup);
+      await page.reload();
+      await targetRow.waitFor();
+      expect(await targetRow.getAttribute("aria-label")).not.toContain("unread");
+      const afterCleanup = await listPageFromBrowser(page, apiBaseUrl, workspaceId, { limit: 50 });
+      expect(afterCleanup.sessions.find((session) => session.id === target.id)?.unread).toBe(false);
+
+      expect(new URL(page.url()).pathname).toBe(`/workspaces/${workspaceId}/sessions`);
+      expect(await targetRow.getAttribute("aria-current")).toBeNull();
+      await publishAnswer(workspaceId, target.id, "New unseen substantive answer");
+      const unseen = await listPageFromBrowser(page, apiBaseUrl, workspaceId, { limit: 50 });
+      expect(unseen.sessions.find((session) => session.id === target.id)?.unread).toBe(true);
+      await page.reload();
+      await targetRow.waitFor();
+      expect(new URL(page.url()).pathname).toBe(`/workspaces/${workspaceId}/sessions`);
+      await waitFor(
+        async () => (await targetRow.getAttribute("aria-label"))?.includes("unread") === true,
+      );
+      const afterAnswer = await listPageFromBrowser(page, apiBaseUrl, workspaceId, { limit: 50 });
+      expect(afterAnswer.sessions.find((session) => session.id === target.id)?.unread).toBe(true);
     } finally {
       releaseFirstAcknowledgement();
       await context.close();
@@ -774,6 +883,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           workspaceId,
           `Attention ${transition} fence`,
         );
+        await publishAnswer(workspaceId, target.id, "Initial answer awaiting attention");
         let nextWorkspaceId = workspaceId;
         if (transition === "workspace") {
           const response = await fetch(`${apiBaseUrl}/v1/workspaces`, {
@@ -822,19 +932,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
               response.ok() &&
               Number(response.request().postDataJSON().acknowledgedThroughSequence) > firstSequence,
           );
-          const message = await fetch(
-            `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}/events`,
-            {
-              method: "POST",
-              headers: { ...ownerHeaders, "content-type": "application/json" },
-              body: JSON.stringify({
-                type: "user.message",
-                clientEventId: crypto.randomUUID(),
-                payload: { text: "A newer visible frontier" },
-              }),
-            },
-          );
-          expect(message.status).toBe(202);
+          await publishAnswer(workspaceId, target.id, "A newer visible frontier");
           await newer;
         } else {
           const documentMarker = await page.evaluate(() => {
@@ -887,9 +985,42 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         workspaceId,
         "Rapid read second chat",
       );
+      const firstAnswerSequence = await publishAnswer(workspaceId, first.id, "First chat answer");
+      const secondAnswerSequence = await publishAnswer(
+        workspaceId,
+        second.id,
+        "Second chat answer",
+      );
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
-      await page.locator(`a[data-session-row="${first.id}"]`).waitFor();
-      await page.locator(`a[data-session-row="${second.id}"]`).waitFor();
+      await page.bringToFront();
+      for (const target of [first, second]) {
+        const row = page.locator(`a[data-session-row="${target.id}"]`);
+        await row.waitFor();
+        await waitFor(
+          async () => (await row.getAttribute("aria-label"))?.includes("unread") === true,
+        );
+      }
+      expect(await page.evaluate(() => document.hasFocus())).toBe(true);
+      const beforeSwitch = await listPageFromBrowser(page, apiBaseUrl, workspaceId, { limit: 50 });
+      for (const target of [first, second]) {
+        expect(beforeSwitch.sessions.find((session) => session.id === target.id)?.unread).toBe(
+          true,
+        );
+      }
+
+      // Arm both receipts before either click. Completion of the second write
+      // does not prove the independent first write committed; a reload must not
+      // race that still-in-flight request.
+      const acknowledgements = [first, second].map((target) =>
+        page.waitForResponse(
+          (response) =>
+            response.ok() &&
+            response.request().method() === "PUT" &&
+            new URL(response.url()).pathname ===
+              `/v1/workspaces/${workspaceId}/sessions/${target.id}/attention`,
+          { timeout: 10_000 },
+        ),
+      );
 
       // Exercise the real rail links inside the old 750 ms acknowledgement
       // window. Merely visiting the first chat must commit its read receipt;
@@ -904,14 +1035,29 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         { firstId: first.id, secondId: second.id },
       );
       await page.waitForURL(`**/sessions/${second.id}`);
-      await page.waitForResponse(
-        (response) =>
-          response.ok() &&
-          response.request().method() === "PUT" &&
-          new URL(response.url()).pathname ===
-            `/v1/workspaces/${workspaceId}/sessions/${second.id}/attention`,
-        { timeout: 10_000 },
-      );
+      const receipts = await Promise.all(acknowledgements);
+      for (const [index, receipt] of receipts.entries()) {
+        expect(receipt.request().postDataJSON().acknowledgedThroughSequence).toBeGreaterThanOrEqual(
+          [firstAnswerSequence, secondAnswerSequence][index]!,
+        );
+        expect((await receipt.json()).unread).toBe(false);
+      }
+      // The configured header is an external identity label, not the durable
+      // subject ID (configured auth namespaces it). Resolve the same browser
+      // principal that authored both receipts instead of guessing its DB key.
+      const accessResponse = await page.request.get(`${apiBaseUrl}/v1/access/me`);
+      expect(accessResponse.ok()).toBe(true);
+      const access = await accessResponse.json();
+      expect(access.subjectId).toBe("configured:sessionpin-owner");
+      const persisted = await shared.admin<{ acknowledgedSequence: number }[]>`
+        select acknowledged_sequence as "acknowledgedSequence"
+        from session_pins
+        where workspace_id = ${workspaceId} and session_id = ${first.id}
+          and subject_id = ${access.subjectId}
+      `;
+      expect(persisted).toHaveLength(1);
+      expect(typeof persisted[0]!.acknowledgedSequence).toBe("number");
+      expect(persisted[0]!.acknowledgedSequence).toBeGreaterThanOrEqual(firstAnswerSequence);
 
       await page.reload();
       const firstRow = page.locator(`a[data-session-row="${first.id}"]`);
@@ -2011,120 +2157,192 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 120_000);
 
-  test("continues a failed session through normal Send and opens the constrained model picker", async () => {
-    const context = await configuredContext(browser, {
-      viewport: { width: 1280, height: 800 },
-      extraHTTPHeaders: ownerHeaders,
-    });
-    const page = await context.newPage();
-    try {
-      await page.goto(webBaseUrl);
-      const workspaceId = await workspaceFromPage(page);
-      const owner = await createSessionThroughApi(
-        page,
-        apiBaseUrl,
-        workspaceId,
-        "Failure fixture owner",
-      );
-      const failed = await createTitledSession(dbClient.db, {
-        accountId: owner.accountId,
-        workspaceId,
-        initialMessage: "Failed session actions",
-        resources: [],
-        metadata: {},
-        model: "scripted-model",
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-        createdBy: { kind: "subject", subjectId: "sessionpin-owner" },
+  for (const responseLoss of ["before dispatch", "after commit"] as const) {
+    test(`retries with the selected model and no new user message when the response is lost ${responseLoss}`, async () => {
+      const context = await configuredContext(browser, {
+        viewport: { width: 1280, height: 800 },
+        extraHTTPHeaders: ownerHeaders,
       });
-      await appendSessionEventsAndUpdateSession(
-        dbClient.db,
-        workspaceId,
-        failed.id,
-        [
-          {
-            type: "session.status.changed",
-            payload: { status: "failed", code: "pre_claim_failure" },
+      const page = await context.newPage();
+      try {
+        await page.goto(webBaseUrl);
+        const workspaceId = await workspaceFromPage(page);
+        const failed = await createSessionThroughApi(
+          page,
+          apiBaseUrl,
+          workspaceId,
+          "Failed session actions",
+        );
+        const [identity] = await shared.admin<Array<{ workflowId: string }>>`
+        select temporal_workflow_id as "workflowId" from sessions
+        where workspace_id = ${workspaceId} and id = ${failed.id}`;
+        if (!identity?.workflowId) throw new Error("Fixture workflow identity missing");
+        const failure = await failSessionWorkBeforeAttemptClaim(dbClient.db, workspaceId, {
+          accountId: failed.accountId,
+          sessionId: failed.id,
+          workflowId: identity.workflowId,
+          trigger: { kind: "next" },
+          error: "Fixture model unavailable before execution",
+        });
+        expect(failure.action).toBe("failed");
+        expect(failure.turnId).toBeTruthy();
+        // Ordinary Retry supports this configured principal. Checkpoint consent
+        // does not: its managed-human restriction must not gate a no-compute route.
+        const recoveryUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${failed.id}/sandbox-recovery`;
+        expect((await context.request.get(recoveryUrl)).status()).toBe(403);
+        let recoveryReads = 0;
+        page.on("request", (request) => {
+          if (request.url() === recoveryUrl) recoveryReads++;
+        });
+        await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${failed.id}`);
+        const banner = page.getByTestId("failed-session-banner");
+        const chooseModel = page.getByRole("button", {
+          name: "Model and effort",
+          exact: true,
+        });
+        await chooseModel.waitFor();
+        await waitFor(async () => !(await chooseModel.isDisabled()));
+        await chooseModel.click();
+        await page.getByRole("dialog", { name: "Model and effort", exact: true }).waitFor();
+        await page.getByRole("textbox", { name: "Search models or providers" }).waitFor();
+        const selectedModel = "gpt-5.6-terra";
+        await page.getByTestId(`model-picker-choice-${selectedModel}`).click();
+        await page
+          .getByRole("dialog", { name: "Model and effort", exact: true })
+          .waitFor({ state: "detached" });
+        const retryButton = banner.getByRole("button", { name: "Retry", exact: true });
+        await waitFor(async () => !(await retryButton.isDisabled()));
+        expect(recoveryReads).toBe(0);
+        let submissions = 0;
+        const submittedBodies: Record<string, unknown>[] = [];
+        type RetryReceipt = {
+          outcome: "accepted" | "replayed";
+          turnId: string;
+          failureEventId: string;
+        };
+        let committedReceipt: RetryReceipt | null = null;
+        let committedTurnIds: string[] | null = null;
+        await page.route(
+          `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${failed.id}/retry`,
+          async (route) => {
+            submissions++;
+            submittedBodies.push(route.request().postDataJSON());
+            if (submissions === 1) {
+              if (responseLoss === "after commit") {
+                // The real API commits first. Only its response is lost; current
+                // reads and SSE remain real so the UI must reconcile the result.
+                const committed = await route.fetch();
+                expect(committed.ok()).toBe(true);
+                committedReceipt = (await committed.json()) as RetryReceipt;
+                committedTurnIds = (
+                  await shared.admin<Array<{ id: string }>>`
+                select id from session_turns
+                where workspace_id = ${workspaceId} and session_id = ${failed.id}
+                order by id`
+                ).map((row) => row.id);
+              }
+              await route.fulfill({
+                status: 503,
+                contentType: "application/json",
+                body: JSON.stringify({ error: "Fixture temporarily unavailable" }),
+              });
+            } else await route.continue();
           },
-        ],
-        { status: "failed" },
-      );
-      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${failed.id}`);
-      const banner = page.getByTestId("failed-session-banner");
-      const chooseModel = banner.getByRole("button", { name: "Choose another model", exact: true });
-      await chooseModel.waitFor();
-      await waitFor(async () => !(await chooseModel.isDisabled()));
-      await chooseModel.click();
-      await page.getByRole("dialog", { name: "Model and effort", exact: true }).waitFor();
-      await page.getByRole("textbox", { name: "Search models or providers" }).waitFor();
-      await page.keyboard.press("Escape");
-      const continueButton = banner.getByRole("button", { name: "Continue", exact: true });
-      await waitFor(async () => !(await continueButton.isDisabled()));
-      let submissions = 0;
-      await page.route(
-        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${failed.id}/composer-draft/submit`,
-        async (route) => {
-          submissions++;
-          if (submissions === 1)
-            await route.fulfill({
-              status: 503,
-              contentType: "application/json",
-              body: JSON.stringify({ error: "Fixture temporarily unavailable" }),
-            });
-          else await route.continue();
-        },
-      );
-      const submission = page.waitForResponse(
-        (response) =>
-          response.request().method() === "POST" &&
-          response.url().includes("/composer-draft/submit"),
-      );
-      await continueButton.click();
-      const receipt = await submission;
-      expect(receipt.status()).toBe(503);
-      const retry = page.getByRole("button", { name: "Retry", exact: true });
-      await retry.waitFor();
-      expect(
-        await banner.getByRole("button", { name: "Continue requested", exact: true }).isDisabled(),
-      ).toBe(true);
-      await page.setViewportSize({ width: 375, height: 812 });
-      await banner
-        .getByText("Retry or remove the unsent message below before continuing.")
-        .waitFor();
-      expect(await banner.getByRole("button", { name: "Continue", exact: true }).isDisabled()).toBe(
-        true,
-      );
-      const retryReceipt = page.waitForResponse(
-        (response) =>
-          response.request().method() === "POST" &&
-          response.url().includes("/composer-draft/submit"),
-      );
-      await retry.click();
-      expect((await retryReceipt).ok()).toBe(true);
-      expect(submissions).toBe(2);
-      const text = "Continue from the last failure. Check current progress before repeating work.";
-      await page.getByText(text, { exact: true }).waitFor();
-      const evidence = await page.evaluate(
-        async ({ apiBaseUrl: fixtureApiUrl, workspaceId: fixtureWorkspaceId, id }) => {
-          const response = await fetch(
-            `${fixtureApiUrl}/v1/workspaces/${fixtureWorkspaceId}/sessions/${id}/events`,
+        );
+        const submission = page.waitForResponse(
+          (response) =>
+            response.request().method() === "POST" &&
+            response.url().endsWith(`/sessions/${failed.id}/retry`),
+        );
+        await retryButton.click();
+        const receipt = await submission;
+        expect(receipt.status()).toBe(503);
+        let acceptedReceipt: RetryReceipt;
+        if (responseLoss === "before dispatch") {
+          await banner.getByRole("alert").waitFor();
+          expect(await banner.getByRole("alert").textContent()).toContain("Retry not confirmed");
+          const checkRetry = banner.getByRole("button", { name: "Check retry", exact: true });
+          await waitFor(async () => !(await checkRetry.isDisabled()));
+          expect(await chooseModel.isDisabled()).toBe(true);
+          expect(
+            await page.getByRole("button", { name: "Model and effort", exact: true }).isDisabled(),
+          ).toBe(true);
+          const retryReceipt = page.waitForResponse(
+            (response) =>
+              response.request().method() === "POST" &&
+              response.url().endsWith(`/sessions/${failed.id}/retry`),
           );
-          if (!response.ok) throw new Error(`events failed: ${response.status}`);
-          return await response.json();
-        },
-        { apiBaseUrl, workspaceId, id: failed.id },
-      );
-      expect(
-        evidence.filter(
-          (event: { type: string; payload: { text?: string } }) =>
-            event.type === "user.message" && event.payload.text === text,
-        ),
-      ).toHaveLength(1);
-    } finally {
-      await context.close();
-    }
-  }, 60_000);
+          await checkRetry.click();
+          const confirmed = await retryReceipt;
+          expect(confirmed.ok()).toBe(true);
+          acceptedReceipt = (await confirmed.json()) as RetryReceipt;
+          expect(acceptedReceipt.outcome).toBe("accepted");
+        } else {
+          // Successful read reconciliation removes the failed-session controls;
+          // it must not manufacture another retry just because the POST was lost.
+          await banner.waitFor({ state: "detached" });
+          expect(submissions).toBe(1);
+          expect(committedReceipt!.outcome).toBe("accepted");
+          // Replay the browser's exact operation through the real public API to
+          // prove the lost receipt is recoverable, not another accepted turn.
+          acceptedReceipt = (await page.evaluate(
+            async ({ url, input }) => {
+              const response = await fetch(url, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify(input),
+              });
+              if (!response.ok) throw new Error(`retry replay failed: ${response.status}`);
+              return await response.json();
+            },
+            {
+              url: `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${failed.id}/retry`,
+              input: submittedBodies[0]!,
+            },
+          )) as RetryReceipt;
+          expect(acceptedReceipt.outcome).toBe("replayed");
+          expect(acceptedReceipt.turnId).toBe(committedReceipt!.turnId);
+          expect(acceptedReceipt.failureEventId).toBe(committedReceipt!.failureEventId);
+          const currentTurnIds = (
+            await shared.admin<Array<{ id: string }>>`
+          select id from session_turns
+          where workspace_id = ${workspaceId} and session_id = ${failed.id}
+          order by id`
+          ).map((row) => row.id);
+          expect(currentTurnIds).toEqual(committedTurnIds!);
+        }
+        expect(submissions).toBe(2);
+        expect(submittedBodies[1]).toEqual(submittedBodies[0]);
+        expect(submittedBodies[0]).not.toHaveProperty("text");
+        expect(submittedBodies[0]?.model).toBe(selectedModel);
+        const [acceptedTurn] = await shared.admin<Array<{ model: string }>>`
+        select model from session_turns
+        where workspace_id = ${workspaceId} and session_id = ${failed.id}
+          and id = ${acceptedReceipt.turnId}`;
+        expect(acceptedTurn?.model).toBe(selectedModel);
+        const evidence = await page.evaluate(
+          async ({ apiBaseUrl: fixtureApiUrl, workspaceId: fixtureWorkspaceId, id }) => {
+            const response = await fetch(
+              `${fixtureApiUrl}/v1/workspaces/${fixtureWorkspaceId}/sessions/${id}/events`,
+            );
+            if (!response.ok) throw new Error(`events failed: ${response.status}`);
+            return await response.json();
+          },
+          { apiBaseUrl, workspaceId, id: failed.id },
+        );
+        const userMessages = evidence.filter(
+          (event: { type: string }) => event.type === "user.message",
+        );
+        expect(userMessages).toHaveLength(1);
+        expect(userMessages[0]?.payload.text).toBe("Failed session actions");
+        expect(
+          await page.getByText("Continue from the last failure", { exact: false }).count(),
+        ).toBe(0);
+      } finally {
+        await context.close();
+      }
+    }, 60_000);
+  }
 
   test("opens the exact child from pending and delivered results without claiming the failed parent completed", async () => {
     const context = await configuredContext(browser, {

@@ -4,6 +4,14 @@ Knowledge is the durable retrieval system from maintenance migration **0461**.
 It replaces agent Memory and the separate reviewed Knowledge authoring lane.
 Conversation history and temporary task notes keep their existing jobs.
 
+Knowledge is retrieval-only information, not the destination for persistent
+behavior. Requests such as "keep replies concise in future sessions" belong in
+workspace instructions or an applicable Skill, within the intended scope, rather
+than a Knowledge fact about a preference. The always-present CORE teaches this
+choice independently of existing governance. See
+[durable context write routing](company-brain-write-routing.md#behavior-is-not-a-knowledge-fact)
+for scope, mixed requests, and truthful save confirmations.
+
 ## Sources, records and storage
 
 Agents encounter information through chat attachments, user messages, connected

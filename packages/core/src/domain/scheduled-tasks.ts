@@ -84,7 +84,7 @@ import {
 import { prepareExternalLinkTaskAdmission } from "../application/external-link-work-admission";
 import { validateVariableSetAttachment } from "./environments";
 import {
-  freezePersonalConnectionDelegations,
+  freezeConnectionAccounts,
   personalConnectionDelegationSourceForGrant,
 } from "./personal-connection-delegations";
 import {
@@ -218,9 +218,6 @@ export async function createValidatedScheduledTask(input: {
   // scheduledTaskToolsProvided). Absent tools get the workspace's enabled
   // capability MCP servers, mirroring session creation.
   toolsProvided?: boolean;
-  // Set for pack-installation-inherited attachments that were already
-  // authorized with variable-sets:use when the pack was enabled.
-  variableSetPreauthorized?: boolean;
   sessionAuthorization?: SessionAuthorizationPort | null | undefined;
   authorizationSurface?: SessionAuthorizationSurface | undefined;
 }): Promise<ScheduledTask> {
@@ -240,8 +237,7 @@ export async function createValidatedScheduledTask(input: {
   }
   if (learningContext?.actor.kind === "human" && learning)
     learningContext.actor.settingsScopes = [learning.scope];
-  // API parsing fills this default, but pack installers and older internal
-  // callers can still invoke the shared validator with the pre-action shape.
+  // Internal callers can omit the action; agent turns are the default.
   const action = input.payload.action ?? ({ kind: "agent_turn" } as const);
   const knowledgeAction = input.payload.agentConfig.knowledgeSource ?? null;
   if (knowledgeAction) {
@@ -293,6 +289,7 @@ export async function createValidatedScheduledTask(input: {
       });
   }
   if (!knowledgeAction) {
+    agentConfig.connectionAccountsFrozen = true;
     await validateScheduledTaskMachineTarget({
       settings: input.settings,
       db: input.db,
@@ -307,7 +304,6 @@ export async function createValidatedScheduledTask(input: {
       input.grant,
       input.grant.workspaceId,
       input.payload.variableSetId,
-      { preauthorized: input.variableSetPreauthorized ?? false },
     );
   }
   // The rig is stored on the task and resolved to its ACTIVE version per fire
@@ -340,11 +336,12 @@ export async function createValidatedScheduledTask(input: {
     runtimeSettings && target
       ? settingsWithSessionMcpServerMetadata(runtimeSettings, target.mcpServers)
       : runtimeSettings;
-  const personalConnectionDelegations =
+  const acceptedConnections =
     knowledgeAction || !effectiveRuntimeSettings
-      ? []
-      : await freezePersonalConnectionDelegations({
+      ? { personalConnectionDelegations: [], mcpAccountBindings: [] }
+      : await freezeConnectionAccounts({
           db: input.db,
+          accountId: input.grant.accountId,
           workspaceId: input.grant.workspaceId,
           settings: effectiveRuntimeSettings,
           tools: await scheduledConnectionTools(
@@ -360,15 +357,24 @@ export async function createValidatedScheduledTask(input: {
           authoritySelections: input.payload.connectionAccounts,
           ...scheduledConnectionSurfaceEligibility(effectiveRuntimeSettings, target),
         });
-  if (personalConnectionDelegationSourceForGrant(input.grant).kind === "turn") {
-    agentConfig.connectionAccounts = personalConnectionDelegations
-      .filter(
-        (item) =>
-          !item.connectionType ||
-          item.connectionType === "mcp" ||
-          item.connectionType === "github_personal",
-      )
-      .map(({ serverId, connectionId }) => ({ serverId, connectionId }));
+  const { personalConnectionDelegations, mcpAccountBindings } = acceptedConnections;
+  if (!knowledgeAction) {
+    const boundRoutes = new Set((mcpAccountBindings ?? []).map((binding) => binding.serverId));
+    agentConfig.connectionAccounts = [
+      ...(mcpAccountBindings ?? []).map(({ canonicalServerId, connectionId }) => ({
+        serverId: canonicalServerId,
+        connectionId,
+      })),
+      ...personalConnectionDelegations
+        .filter(
+          (item) =>
+            !boundRoutes.has(item.serverId) &&
+            (!item.connectionType ||
+              item.connectionType === "mcp" ||
+              item.connectionType === "github_personal"),
+        )
+        .map(({ serverId, connectionId }) => ({ serverId, connectionId })),
+    ];
   }
   const creationInitiator = scheduledTaskInitiatorForGrant(input.grant);
   const captureLinkAuthority = prepareExternalLinkTaskAdmission(
@@ -742,7 +748,7 @@ export async function validateScheduledTaskTarget(input: {
   }
   if ((session.rigId ?? null) !== (input.rigId ?? null)) {
     throw new HTTPException(422, {
-      message: "target session rig does not match the scheduled task",
+      message: "target session sandbox environment does not match the scheduled task",
     });
   }
   if (
@@ -1166,8 +1172,9 @@ export async function validatedScheduledTaskUpdate(input: {
       rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
       agentConfig: nextAgentConfig,
     });
-    await freezePersonalConnectionDelegations({
+    const acceptedConnections = await freezeConnectionAccounts({
       db: input.db,
+      accountId: input.grant.accountId,
       workspaceId: input.grant.workspaceId,
       settings: nextTarget
         ? settingsWithSessionMcpServerMetadata(runtimeSettings, nextTarget.mcpServers)
@@ -1185,8 +1192,33 @@ export async function validatedScheduledTaskUpdate(input: {
         ? { kind: "subject", subjectId: ownerSubjectId, accountId: input.existing.accountId }
         : { kind: "none" },
       authoritySelections: nextAgentConfig.connectionAccounts ?? [],
+      authoritySelectionsFrozen:
+        input.payload.connectionAccounts === undefined &&
+        input.existing.agentConfig.connectionAccountsFrozen === true,
       ...scheduledConnectionSurfaceEligibility(runtimeSettings, nextTarget),
     });
+    const routeIds = new Set(
+      (acceptedConnections.mcpAccountBindings ?? []).map((binding) => binding.serverId),
+    );
+    nextAgentConfig.connectionAccounts = [
+      ...(acceptedConnections.mcpAccountBindings ?? []).map(
+        ({ canonicalServerId, connectionId }) => ({
+          serverId: canonicalServerId,
+          connectionId,
+        }),
+      ),
+      ...acceptedConnections.personalConnectionDelegations
+        .filter(
+          (item) =>
+            !routeIds.has(item.serverId) &&
+            (!item.connectionType ||
+              item.connectionType === "mcp" ||
+              item.connectionType === "github_personal"),
+        )
+        .map(({ serverId, connectionId }) => ({ serverId, connectionId })),
+    ];
+    nextAgentConfig.connectionAccountsFrozen = true;
+    update.agentConfig = nextAgentConfig;
   }
   if (
     !materialExecutionChange &&
@@ -1616,7 +1648,7 @@ async function validateScheduledTaskAgentConfig(input: {
   // A task whose creator did not choose tools gets the workspace's exact
   // session defaults (or the deployment compatibility default), exactly like
   // a session created without a tools key. Scheduled runs are sessions too;
-  // "no MCP servers at all" was a trap every pack/template instantiation path
+
   // kept falling into (a maintenance task that cannot reach its workspace's
   // notebook MCP cannot do its job).
   const tools =

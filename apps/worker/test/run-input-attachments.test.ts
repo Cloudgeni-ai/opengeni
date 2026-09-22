@@ -1,5 +1,9 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { MODEL_ATTACHMENT_REFS_FIELD, type FileAsset } from "@opengeni/contracts";
+import {
+  MODEL_ATTACHMENT_CATALOG_MARKER,
+  MODEL_ATTACHMENT_REFS_FIELD,
+  type FileAsset,
+} from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { prepareRunInput, type AgentSegmentInput, type OpenGeniRuntime } from "@opengeni/runtime";
@@ -11,12 +15,52 @@ import {
   createModelHistoryAttachmentProjector,
   modelAttachmentContentForFiles,
   turnInput,
+  withCurrentUserAttachmentRefs,
 } from "../src/activities/run-input";
 
 const user = (content: string) => ({ type: "message", role: "user", content });
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 const ACCOUNT_ID = "00000000-0000-4000-8000-000000000000";
 const SUBJECT_ID = "user:attachment-authority";
+
+describe("attachment refs after compaction", () => {
+  const current = { kind: "file" as const, fileId: "00000000-0000-4000-8000-000000000081" };
+  const archived = { kind: "file" as const, fileId: "00000000-0000-4000-8000-000000000082" };
+  const catalog = () => ({
+    ...user("[OpenGeni retained attachment references]"),
+    [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
+    [MODEL_ATTACHMENT_REFS_FIELD]: [archived],
+  });
+
+  test("current attachment does not mutate a later catalog and replay stays identical", async () => {
+    const history = [
+      { ...user("Inspect this file"), [MODEL_ATTACHMENT_REFS_FIELD]: [current] },
+      catalog(),
+      { type: "compaction", encrypted_content: "opaque" },
+    ];
+    const seeded = withCurrentUserAttachmentRefs(history, [current]);
+    expect(seeded).toBe(history);
+    const project = createModelHistoryAttachmentProjector({ supportsImageInput: true });
+    expect(await project(seeded)).toEqual(
+      await project(withCurrentUserAttachmentRefs(history, [])),
+    );
+    expect(history[1]).toEqual(catalog());
+  });
+
+  test("archived attachment stays in its catalog without moving onto another user message", () => {
+    const history = [catalog(), user("Continue")];
+    expect(withCurrentUserAttachmentRefs(history, [archived])).toBe(history);
+  });
+
+  test("legacy unstamped message receives missing refs without rewriting the catalog", () => {
+    const history = [user("Inspect this file"), catalog()];
+    const seeded = withCurrentUserAttachmentRefs(history, [current]);
+    expect(seeded[0]?.[MODEL_ATTACHMENT_REFS_FIELD]).toEqual([current]);
+    expect(seeded[1]).toBe(history[1]!);
+    expect(history[0]).toEqual(user("Inspect this file"));
+    expect(withCurrentUserAttachmentRefs([catalog()], [current])).toEqual([catalog()]);
+  });
+});
 
 const file = (
   id: string,
@@ -518,8 +562,8 @@ describe("turnInput attachment projection", () => {
               {
                 type: "input_text",
                 text:
-                  `[Attachment: diagram.png; fileId=${image.id}; type=image/png; bytes=5; ` +
-                  `path=.opengeni/files/${image.id}/diagram.png. If the local path is absent, ` +
+                  `[Attachment: fileId=${image.id}; mountDirectory=.opengeni/files/${image.id}. ` +
+                  `Use the existing file there, or ` +
                   "call files__files_get_download_url with this fileId and download it with the shell.]",
               },
               { type: "input_image", image: "data:image/png;base64,aW1hZ2U=" },
@@ -605,7 +649,7 @@ describe("turnInput attachment projection", () => {
             {
               type: "input_text",
               text:
-                `[Earlier attachment: fileId=${image.id}; ` +
+                `[Attachment: fileId=${image.id}; ` +
                 `mountDirectory=.opengeni/files/${image.id}. Use the existing file there, or ` +
                 "call files__files_get_download_url with this fileId and download it with the shell.]",
             },
@@ -871,4 +915,21 @@ test("oversized retained images fail before blob reads without rewriting history
     expect(JSON.stringify(history)).toBe(original);
   }
   expect(reads).toBe(0);
+});
+
+test("attachment receipts stay identical when metadata resolves, disappears, or is renamed", async () => {
+  const asset = file("00000000-0000-4000-8000-000000000099", "application/pdf", 3, "a.pdf");
+  const history = [
+    { ...user("inspect"), [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: asset.id }] },
+  ];
+  const project = (files: FileAsset[]) =>
+    createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      undefined,
+      async () => files,
+    )(history);
+  const first = await project([asset]);
+  expect(await project([])).toEqual(first);
+  expect(await project([{ ...asset, safeFilename: "renamed.pdf", sizeBytes: 30 }])).toEqual(first);
+  expect(await project([asset])).toEqual(first);
 });

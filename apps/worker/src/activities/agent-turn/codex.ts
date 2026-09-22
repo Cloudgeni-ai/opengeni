@@ -61,6 +61,7 @@ export async function refreshCappedCodexUsageRows(
     signalCodexCapacityWorkflow?: ActivityServices["signalCodexCapacityWorkflow"] | undefined;
     wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
   },
+  acceptedTurnId?: string,
 ): Promise<
   Array<
     Pick<
@@ -82,10 +83,13 @@ export async function refreshCappedCodexUsageRows(
     return accounts;
   }
   await refreshCodexUsageAndRepairCapacityWaiters(
-    stale.map((account) => () => fetchCodexUsageForAccount(db, settings, workspaceId, account.id)),
+    stale.map(
+      (account) => () =>
+        fetchCodexUsageForAccount(db, settings, workspaceId, account.id, undefined, acceptedTurnId),
+    ),
     () => signalPendingCodexCapacityWakeTargets({ db, ...capacitySignals }, workspaceId),
   );
-  return listCodexAccountStatuses(db, workspaceId).catch(() => accounts);
+  return listCodexAccountStatuses(db, workspaceId, acceptedTurnId).catch(() => accounts);
 }
 
 /**

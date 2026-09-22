@@ -1,14 +1,89 @@
 import { expect, test } from "bun:test";
+import AxeBuilder from "@axe-core/playwright";
 import { createHash } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import { chromium, type Browser, type Page, type Request } from "playwright";
 import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
+import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics";
 
 const engine = process.env.OPENGENI_ACCOUNT_BROWSER_ENGINE ?? "chromium";
 if (engine !== "chromium") {
   throw new Error("Chromium request-authority regression must run in the Chromium accounts lane");
 }
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+
+test("account axe scope diagnostics preserve failures and bound content-free evidence", async () => {
+  const browser = await chromium.launch(
+    process.env.OPENGENI_BROWSER_BIN ? { executablePath: process.env.OPENGENI_BROWSER_BIN } : {},
+  );
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 320, height: 780 },
+      hasTouch: true,
+      isMobile: true,
+    });
+    await page.setContent(
+      '<div data-slot="dropdown-menu-content" data-state="open"><button>synthetic-sensitive-account</button></div>',
+    );
+    const result = await withAccountMenuAxeDiagnostics(page, async () => "unchanged result");
+    expect(result).toBe("unchanged result");
+
+    let failure: unknown;
+    try {
+      await withAccountMenuAxeDiagnostics(page, async () => {
+        await page.evaluate(() => {
+          for (let index = 0; index < 40; index += 1) window.dispatchEvent(new Event("blur"));
+          document.querySelector('[data-slot="dropdown-menu-content"]')!.remove();
+        });
+        return await new AxeBuilder({ page })
+          .include('[data-slot="dropdown-menu-content"]')
+          .analyze();
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    const error = failure as Error;
+    expect(String(error.cause)).toContain("No elements found for include in page Context");
+    expect(error.message).not.toContain("synthetic-sensitive-account");
+    const evidence = JSON.parse(error.message.replace("account menu axe scope evidence: ", ""));
+    expect(evidence.samples).toHaveLength(24);
+    expect(evidence.droppedSamples).toBeGreaterThan(0);
+    expect(evidence.samples[0].menuCount).toBe(1);
+    expect(evidence.samples.at(-1).event).toBe("stop");
+    expect(evidence.samples.at(-1).menuCount).toBe(0);
+    expect(
+      evidence.samples.every((sample: Record<string, unknown>) =>
+        Object.keys(sample).every((key) =>
+          [
+            "event",
+            "elapsedMs",
+            "menuCount",
+            "openMenuCount",
+            "openDrawerCount",
+            "documentFocused",
+            "focusInsideMenu",
+            "pathnameChanged",
+          ].includes(key),
+        ),
+      ),
+    ).toBe(true);
+
+    const original = new Error("original scan failure");
+    try {
+      await withAccountMenuAxeDiagnostics(page, async () => {
+        await page.goto("about:blank");
+        throw original;
+      });
+      throw new Error("diagnostics swallowed a failure");
+    } catch (navigationFailure) {
+      expect((navigationFailure as Error).cause).toBe(original);
+      expect((navigationFailure as Error).message).toContain('"observationUnavailable":true');
+    }
+  } finally {
+    await browser.close();
+  }
+}, 30_000);
 
 test.each(["firefox", "webkit"])(
   "the Chromium observer leaves %s routing untouched",

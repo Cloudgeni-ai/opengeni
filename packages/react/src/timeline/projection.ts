@@ -1,5 +1,6 @@
 import {
   parseMediaGenerationResult,
+  parseToolDisplayMetadata,
   type HumanInputAnswer,
   type HumanInputQuestion,
   type HumanInputResponse,
@@ -610,6 +611,7 @@ export function buildTimeline(
 
       case "agent.toolCall.created": {
         const name = typeof payload.name === "string" ? payload.name : "tool";
+        const display = parseToolDisplayMetadata(payload.display);
         const callId = typeof payload.id === "string" ? payload.id : null;
         const args = payload.arguments ?? null;
         closeStreamingTail();
@@ -651,6 +653,7 @@ export function buildTimeline(
               (item): item is ToolCallItem => item.kind === "tool-call" && item.callId === callId,
             );
           if (existing) {
+            if (display) existing.display = display;
             if (args != null) {
               existing.arguments = args;
             }
@@ -667,6 +670,7 @@ export function buildTimeline(
           turnId,
           callId,
           name,
+          ...(display ? { display } : {}),
           arguments: args,
           output: undefined,
           truncation: null,
@@ -1034,6 +1038,13 @@ export function buildTimeline(
           id: event.id,
           turnId,
           serverId: typeof payload.serverId === "string" ? payload.serverId : null,
+          canonicalServerId:
+            typeof payload.canonicalServerId === "string" ? payload.canonicalServerId : null,
+          connectionSubjectScope:
+            payload.connectionSubjectScope === "subject" ||
+            payload.connectionSubjectScope === "workspace"
+              ? payload.connectionSubjectScope
+              : null,
           source: capability
             ? "capability"
             : event.type === "tool.auth_needed"
@@ -2592,7 +2603,7 @@ function capabilityAuthorizationRequest(
   if (
     typeof record.id !== "string" ||
     typeof record.name !== "string" ||
-    !["pack", "mcp", "api", "skill", "plugin"].includes(String(kind)) ||
+    !["mcp", "api", "skill", "plugin"].includes(String(kind)) ||
     !["built_in", "library", "configured", "public_registry", "registry", "manual"].includes(
       String(source),
     ) ||

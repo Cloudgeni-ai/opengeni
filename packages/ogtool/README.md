@@ -1,5 +1,21 @@
 # `@opengeni/ogtool`
 
+Managed sandboxes receive the CLI and ESM client from the exact worker release,
+independently of their baked image. Per-command `PATH` selects the delivered CLI;
+`OPENGENI_CODEMODE_CLIENT_MODULE` selects the matching module for persistent Bun
+programs:
+
+```ts
+const { tools, openGeni } = await import(process.env.OPENGENI_CODEMODE_CLIENT_MODULE!);
+```
+
+Do not bypass these selections with `/usr/local/bin/ogtool` or an image-baked
+`@opengeni/codemode` import. The immutable client directory is content-addressed;
+transfer and reuse verify every byte. Missing build assets or unavailable file
+ingress fail setup with an actionable error, never by accepting a different
+catalog digest, installing `latest`, or replacing a warm sandbox. Catalog and
+operation requests still use the same attempt bearer and public journal.
+
 `ogtool` is the bundled command-line wrapper for one exact OpenGeni execution attempt's Codemode
 surface. It uses the same `@opengeni/codemode` client and frozen tool catalog as Bun programs;
 it does not rediscover or proxy MCP servers. Stock OpenGeni sandbox images include this exact

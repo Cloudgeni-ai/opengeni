@@ -27,6 +27,36 @@ import { TimelineRow } from "../src/components/message-timeline";
 
 registerDom();
 
+test("account-qualified native and Codemode calls render persisted labels after replay", async () => {
+  for (const origin of ["native", "codemode"]) {
+    const name = "a".repeat(64);
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("agent.toolCall.created", {
+            id: `call-${origin}`,
+            name,
+            origin,
+            arguments: {},
+            display: {
+              toolName: "search_documents",
+              title: "Search documents",
+              accountLabel: "Documents — Workspace: Team inbox",
+            },
+          }),
+          timelineEvent("agent.toolCall.output", { id: `call-${origin}`, output: "done" }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain(
+      "Search documents — Documents — Workspace: Team inbox",
+    );
+    expect(r.container.textContent).not.toContain(name);
+    await r.unmount();
+  }
+});
+
 let timelineSequence = 0;
 
 function timelineEvent(
@@ -3028,7 +3058,9 @@ describe("StartupPhaseRow", () => {
 
     const text = r.container.textContent ?? "";
     expect(text).toContain("Model request dispatched");
-    expect(text).toContain("Includes overlapping sandbox, rig, repository, and runtime setup");
+    expect(text).toContain(
+      "Includes overlapping sandbox startup, custom environment setup, repository preparation, and runtime setup",
+    );
     expect(text).toContain("27.5s");
 
     await r.unmount();

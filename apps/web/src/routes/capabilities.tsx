@@ -12,29 +12,14 @@ import { capabilityStateChip } from "@/lib/capabilities";
 import { CatalogHeader, CatalogActionContext } from "@/components/capabilities/catalog-header";
 import { InstalledStrip } from "@/components/capabilities/installed-strip";
 import { performCapabilityAction } from "@/components/capabilities/perform-capability-action";
-import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
-// Plugins: the workspace integrations marketplace. A single scrollable
-// page with exactly three sections: Integrations, Connectors, and Bundles.
-// Integrations (Slack, GitHub, Google
-// Drive, Jira and Confluence, Outlook Mail/Calendar/Contacts, OneDrive) are
-// built and run by OpenGeni and render through one row and one detail sheet
-// each; a provider with several accounts (Outlook, extra Drive accounts)
-// still gets exactly one row, with every account listed in its sheet's
-// Connected accounts block. Connectors are MCP servers from the catalog plus
-// workspace-defined Custom APIs: a curated Featured strip, then a large
-// kind filters, an "Enabled" strip the user manages daily, a Custom
-// APIs list, and a logo tile grid over the full catalog (1,000+ items,
-// rendered in explicit 48-item windows). Credentialed MCP servers connect through the
-// connections spine (OAuth redirect or an API-key form) in a right-hand detail
-// sheet, never by hand-editing enable headers. Bundles are Skills, Plugins,
-// and Packs: a named collection of tools and instructions rather than a live
-// connection, so they get their own section and one uniform
-// row (see `bundles-section.tsx`) instead of three unheaded blocks. Nothing
-// with kind skill, plugin, or pack ever reaches the Connectors Enabled/Browse
-// projections.
-import { usePacks, useVariableSets } from "@opengeni/react";
+
+// Capabilities has one overview and dedicated Connections, Skills, and Plugins
+// tabs. Connections group provider accounts and use the normal connection
+// authorization flow. Imported Skills and Plugins retain their own lifecycle
+// controls; they are not projected into the connector catalog.
+
 import { PlugIcon, PlusIcon } from "lucide-react";
-import { useNavigate } from "@tanstack/react-router";
+
 import { CapabilitiesLegacyRedirect } from "@/routes/capabilities-legacy-redirect";
 import {
   Fragment,
@@ -53,10 +38,7 @@ import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
 import { BundlesSection } from "@/components/capabilities/bundles-section";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { SkillsPanel } from "./skills-panel";
-import {
-  skillReleaseMessage,
-  skillInstallationMessage,
-} from "@/components/capabilities/skill-release-message";
+import { skillReleaseMessage } from "@/components/capabilities/skill-release-message";
 import { PluginSearch } from "@/components/capabilities/capability-catalog-sections";
 import { capabilityLogoSource } from "@/components/capabilities/capability-logo-source";
 import {
@@ -104,6 +86,7 @@ import {
   isMissingCredentialsError,
   normalizeProviderDomain,
   oauthConnectionRef,
+  catalogConnectionAccountSelection,
   oauthConnectionOwnership,
   oauthResumeAction,
   registryResultsForQuery,
@@ -139,11 +122,8 @@ import type {
   AccessContext,
   ApiIntegrationInstallationSummary,
   CapabilityCatalogItem,
-  CapabilityPack,
   ConnectionMetadata,
   ConnectionOwnership,
-  PackInstallationPreview,
-  PackUninstallPreview,
   SkillUninstallPreview,
 } from "@/types";
 
@@ -156,27 +136,9 @@ export function canManageApiIntegrations(
   return hasWorkspacePermission(accessContext, workspaceId, "capabilities:manage");
 }
 
-/**
- * Whether the `?section=packs` deep link should scroll the Bundles section into
- * view on this render.
- *
- * It must wait for the catalog: on first commit Browse is a skeleton, and
- * resolving a 1000+ item catalog then inserts thousands of pixels above the
- * Bundles section, leaving a reader who followed the link stranded in the
- * first Browse window. It must also fire exactly once, so a later
- * loading/settled cycle (a refresh) never yanks the page back.
- */
-export function shouldScrollToDeepLinkedBundles(
-  initialSection: "packs" | "skills" | undefined,
-  loading: boolean,
-  alreadyScrolled: boolean,
-): boolean {
-  return initialSection === "packs" && !loading && !alreadyScrolled;
-}
-
 type CapabilitiesRouteProps = {
   workspaceId: string;
-  initialSection?: "packs" | "skills";
+  initialSection?: "skills";
   slackLinkToken?: string;
   legacyRedirect?: boolean;
 };
@@ -191,7 +153,7 @@ export function CapabilitiesRoute(props: CapabilitiesRouteProps) {
 
 function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: CapabilitiesRouteProps) {
   const context = useAppContext();
-  const navigate = useNavigate();
+
   const client = context.client;
   const onRuntimeChanged = useCallback(
     () => void context.refreshWorkspaceMcpServers(workspaceId),
@@ -220,12 +182,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const [busyId, setBusyId] = useState<string | null>(null);
 
   // Connectors-only discovery: the chips offer exactly the kinds that grid can
-  // show. `?section=packs` no longer selects a kind filter - Packs are Bundles
+
   // now, so it scrolls that section into view instead.
   const [filter] = useState<CapabilityFilter>("all");
-  const [activeTab, setActiveTab] = useState(
-    initialSection === "packs" ? "plugins" : initialSection === "skills" ? "skills" : "all",
-  );
+  const [activeTab, setActiveTab] = useState(initialSection === "skills" ? "skills" : "all");
   const [query, setQuery] = useState("");
   const hasQuery = query.trim().length > 0;
   const searchingAll = activeTab === "all";
@@ -235,7 +195,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // Detail/connect sheet. We store the id (+ registry flag + a snapshot for
   // registry items not yet in the catalog), NOT the item object: the rendered
   // item is derived from the LIVE `items` list by id, so any mutation + refresh
-  // (strip disable, pack disable, background reload) re-derives the sheet instead
+
   // of leaving it on a stale snapshot that could re-enable what was just disabled.
   const [selected, setSelected] = useState<SheetSelection | null>(null);
   const sheetOpenerRef = useRef<HTMLElement | null>(null);
@@ -243,7 +203,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // closing it returns focus to that row instead of dropping it on the body.
   const integrationOpenerRef = useRef<HTMLElement | null>(null);
   const capabilityFocusFallbackRef = useRef<HTMLDivElement | null>(null);
-  // `/workspaces/:id/packs` redirects here with `?section=packs`. Packs are
+
   // Bundles now, so that deep link scrolls the Bundles section into view
   // instead of selecting a kind filter the Connectors grid no longer offers.
   const bundlesRef = useRef<HTMLDivElement | null>(null);
@@ -251,7 +211,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const [canonicalSkills, setCanonicalSkills] = useState<SkillSummary[]>([]);
   const openSkillRef = useRef<((id: string) => void) | null>(null);
   const importSkillRef = useRef<(() => void) | null>(null);
-  const bundlesScrolled = useRef(false);
+
   const catalogToolbar = useMemo(
     () => ({
       target: catalogActionTarget,
@@ -303,12 +263,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const [registryResults, setRegistryResults] = useState<CapabilityCatalogItem[]>([]);
   const [registrySearched, setRegistrySearched] = useState<string | null>(null);
 
-  const packs = usePacks({ workspaceId });
-  const rigs = useWorkspaceRigs({ workspaceId });
-  const variableSets = useVariableSets({ workspaceId });
-
   // The Connectors surface owns exactly MCP servers and API connectors. Skills,
-  // Plugins, and Packs are Bundles: they are scoped out here (not merely
+
   // filtered by the chips) so no Enabled, Browse, or search result can ever
   // contain one, and so the chip counts describe what this grid can show.
   const connectorItems = useMemo(() => items.filter(isConnectorCatalogItem), [items]);
@@ -657,15 +613,9 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     return () => observer.disconnect();
   }, [activeTab, searchingAll, visibleCount, remainingServices.length]);
 
-  // Honour the `?section=packs` deep link exactly once, after the catalog has
   // settled. Scrolling on first commit lands in the wrong place: Browse is
   // still a skeleton then, and resolving and rendering the first client-side
   // 48-item window inserts the Browse grid above the Bundles section afterwards.
-  useEffect(() => {
-    if (!shouldScrollToDeepLinkedBundles(initialSection, loading, bundlesScrolled.current)) return;
-    bundlesScrolled.current = true;
-    bundlesRef.current?.scrollIntoView({ block: "start" });
-  }, [initialSection, loading]);
 
   // Close the sheet if a live-bound selection vanished from the catalog after a
   // refresh (deleted/unregistered elsewhere) - never leave a ghost open. A
@@ -946,7 +896,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         description:
           skillReleaseMessage(result.skillReleases) ??
           (result.status === "retained_by_other_owners"
-            ? "Another Plugin or Pack still owns this Skill, so it remains available."
+            ? "Another Plugin still owns this Skill, so it remains available."
             : "The Skill is no longer active in this workspace."),
       });
       setSkillRemoval(null);
@@ -1186,7 +1136,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       const resolvedOwnership =
         ownership ?? (returnedConnection?.subjectId === null ? "workspace" : "personal");
       await client.enableCapability(workspaceId, item!.id, {
-        connectionRef: oauthConnectionRef(resolvedOwnership, connectionId!, refDomain),
+        connectionRef: oauthConnectionRef(
+          resolvedOwnership,
+          connectionId!,
+          refDomain,
+          catalogConnectionAccountSelection(item!),
+        ),
       });
       await refresh();
       onRuntimeChanged();
@@ -1276,146 +1231,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       setRegistryBusy(false);
     }
   }
-
-  // --- Packs actions ---------------------------------------------------------
-  async function registerPackManifest(manifestDraft: string): Promise<boolean> {
-    let manifest: unknown;
-    try {
-      manifest = JSON.parse(manifestDraft);
-    } catch {
-      toast.error("Manifest must be valid JSON");
-      return false;
-    }
-    try {
-      const registered = await client.registerPack(
-        workspaceId,
-        manifest as Parameters<typeof client.registerPack>[1],
-      );
-      await Promise.all([packs.refresh(), refresh()]);
-      toast.success(`Registered ${registered.pack.name} v${registered.pack.version}`);
-      return true;
-    } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to register pack");
-      toast.error(copy.title, { description: copy.description });
-      return false;
-    }
-  }
-
-  async function previewPackInstallation(
-    pack: CapabilityPack,
-    selection: { rigId?: string; variableSetId?: string },
-  ): Promise<PackInstallationPreview | null> {
-    setBusyId(`pack:${pack.id}`);
-    try {
-      return await client.previewPackInstallation(workspaceId, pack.id, selection);
-    } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to review pack installation");
-      toast.error(copy.title, { description: copy.description });
-      return null;
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function installPack(
-    pack: CapabilityPack,
-    preview: PackInstallationPreview,
-    selection: { rigId?: string; variableSetId?: string },
-    idempotencyKey: string,
-  ): Promise<boolean> {
-    setBusyId(`pack:${pack.id}`);
-    try {
-      const installed = await client.installPack(workspaceId, pack.id, {
-        expectedManifestDigest: preview.manifestDigest,
-        idempotencyKey,
-        ...selection,
-        ...(preview.installationVersion !== null
-          ? { expectedInstallationVersion: preview.installationVersion }
-          : {}),
-      });
-      await Promise.all([packs.refresh(), refresh()]);
-      onRuntimeChanged();
-      toast.success(
-        preview.action === "install"
-          ? `Installed ${pack.name}`
-          : preview.action === "update"
-            ? `Updated ${pack.name}`
-            : `Repaired ${pack.name}`,
-        {
-          description: skillInstallationMessage(
-            installed.skillWrites,
-            installed.skillReleases,
-            installed.skillPublications,
-          ),
-        },
-      );
-      return true;
-    } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to install pack");
-      toast.error(copy.title, { description: copy.description });
-      return false;
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function previewPackUninstall(pack: CapabilityPack): Promise<PackUninstallPreview | null> {
-    setBusyId(`pack:${pack.id}`);
-    try {
-      return await client.previewPackUninstall(workspaceId, pack.id);
-    } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to review pack uninstall");
-      toast.error(copy.title, { description: copy.description });
-      return null;
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function uninstallPack(
-    pack: CapabilityPack,
-    preview: PackUninstallPreview,
-    idempotencyKey: string,
-  ): Promise<boolean> {
-    if (preview.installationVersion === null) return false;
-    setBusyId(`pack:${pack.id}`);
-    try {
-      const result = await client.uninstallPack(workspaceId, pack.id, {
-        expectedInstallationVersion: preview.installationVersion,
-        idempotencyKey,
-      });
-      await Promise.all([packs.refresh(), refresh()]);
-      onRuntimeChanged();
-      toast.success(`Uninstalled ${pack.name}`, {
-        description: skillReleaseMessage(result.skillReleases),
-      });
-      return true;
-    } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to uninstall pack");
-      toast.error(copy.title, { description: copy.description });
-      return false;
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  async function unregisterPack(pack: CapabilityPack): Promise<boolean> {
-    setBusyId(`pack:${pack.id}`);
-    try {
-      await client.deletePack(workspaceId, pack.id);
-      await Promise.all([packs.refresh(), refresh()]);
-      toast.success(`Unregistered ${pack.name}`);
-      return true;
-    } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to unregister pack");
-      toast.error(copy.title, { description: copy.description });
-      return false;
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  const packBusyId = busyId?.startsWith("pack:") ? busyId.slice("pack:".length) : null;
 
   return (
     // The app shell (RailShell) hands each route a fixed-height overflow-hidden
@@ -1739,40 +1554,13 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                   logoUrl={logoUrl}
                   busyCatalogId={busyId}
                   onOpenCatalogItem={(item) => openItem(item, false, true)}
-                  packs={packs}
-                  variableSets={variableSets.variableSets.map((variableSet) => ({
-                    id: variableSet.id,
-                    name: variableSet.name,
-                  }))}
-                  rigs={rigs.rigs.map((rig) => ({
-                    id: rig.id,
-                    name: rig.name,
-                    image: rig.activeVersion?.image ?? null,
-                    available: rig.activeVersion !== null,
-                    verified: rig.activeVersionHealth?.checkHealth === "passing",
-                  }))}
-                  busyPackId={packBusyId}
-                  onRegisterPack={registerPackManifest}
-                  onPreviewPackInstall={previewPackInstallation}
-                  onInstallPack={installPack}
-                  onPreviewPackUninstall={previewPackUninstall}
-                  onUninstallPack={uninstallPack}
-                  onUnregisterPack={unregisterPack}
-                  onStartPackSession={(skillCapabilityId) => {
-                    void navigate({
-                      to: "/workspaces/$workspaceId/sessions",
-                      params: { workspaceId },
-                      search: { skillCapabilityId },
-                    });
-                  }}
                   onChanged={async () => {
                     setSkillsRevision((value) => value + 1);
                     await refresh();
                     onRuntimeChanged();
                   }}
                 />
-                {activeTab === "plugins" &&
-                packs.installationFor("pr-review")?.status === "active" ? (
+                {activeTab === "plugins" ? (
                   <div className="mt-6">
                     <PrReviewSetupCard
                       client={client}
@@ -1842,7 +1630,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           if (!open) setSkillRemoval(null);
         }}
         title={skillRemoval ? `Remove Skill “${skillRemoval.item.name}”?` : "Remove Skill?"}
-        description="This removes only the direct workspace installation. Plugin and Pack ownership is preserved, and no Connection or credential is deleted."
+        description="This removes only the direct workspace installation. Skills used by Plugins are kept. Connections and credentials are unchanged."
         confirmLabel="Remove Skill"
         cancelAutoFocus
         onConfirm={removeSelectedSkill}

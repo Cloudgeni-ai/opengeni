@@ -257,6 +257,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  "packages/db/src/index.ts#blockSessionWorkBeforeAttemptClaim": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/index.ts#recoverSessionDispatch": { inserts: 2, contract: "canonical" },
   "packages/db/src/index.ts#addSessionSystemUpdateWithSourceMutation": {
     // pending event, producer-side supersession event, goal.resumed
@@ -293,6 +297,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
   },
   "packages/db/src/session-control.ts#mutateSessionControlInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/session-retry.ts#retryFailedSessionInTransaction": {
     inserts: 1,
     contract: "canonical",
   },
@@ -406,6 +414,9 @@ const expectedOutboxWriters: Record<
 
 const expectedFailedChildOutboxCallers = [
   "applySessionTurnSettlement",
+  // arm owns the canonical child-lifecycle prefix (including parent session)
+  // before atomically emitting a false-capacity-recovery terminal boundary.
+  "armCodexCapacityWait",
   "failSessionWorkBeforeAttemptClaim",
   "recoverSessionDispatch",
   "settleCodexCredentialFailover",

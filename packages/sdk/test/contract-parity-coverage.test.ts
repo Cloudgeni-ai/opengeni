@@ -7,7 +7,6 @@ import {
   CapabilityCatalogItem as ContractCapabilityCatalogItem,
   CapabilityInstallation as ContractCapabilityInstallation,
   CapabilityKind as ContractCapabilityKind,
-  CapabilityPack as ContractCapabilityPack,
   CapabilitySource as ContractCapabilitySource,
   CreateApiKeyRequest as ContractCreateApiKeyRequest,
   CreateOrganizationApiKeyRequest as ContractCreateOrganizationApiKeyRequest,
@@ -27,7 +26,6 @@ import {
   DocumentSearchResponse as ContractDocumentSearchResponse,
   DocumentStatus as ContractDocumentStatus,
   EnableCapabilityRequest as ContractEnableCapabilityRequest,
-  EnablePackRequest as ContractEnablePackRequest,
   FileAsset as ContractFileAsset,
   FileStatus as ContractFileStatus,
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES as CONTRACT_RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
@@ -49,11 +47,8 @@ import {
   GitHubRepositoryScope as ContractGitHubRepositoryScope,
   UpdateGitHubActionPolicyRequest as ContractUpdateGitHubActionPolicyRequest,
   ListManagedOrganizationMembershipsResponse as ContractListManagedOrganizationMembershipsResponse,
-  PackInstallation as ContractPackInstallation,
-  PackInstallationStatus as ContractPackInstallationStatus,
   Permission as ContractPermission,
   ProductAccessMode as ContractProductAccessMode,
-  RegisterCapabilityPackRequest as ContractRegisterCapabilityPackRequest,
   ScheduledTaskRun as ContractScheduledTaskRun,
   ScheduledTaskRunStatus as ContractScheduledTaskRunStatus,
   ScheduledTaskTriggerType as ContractScheduledTaskTriggerType,
@@ -71,7 +66,6 @@ import {
   UsageEventType as ContractUsageEventType,
   Workspace as ContractWorkspace,
   WorkspaceEnvironment as ContractWorkspaceEnvironment,
-  WorkspaceRegisteredPack as ContractWorkspaceRegisteredPack,
 } from "@opengeni/contracts";
 import type { z } from "zod";
 import {
@@ -88,7 +82,6 @@ import type {
   CapabilityCatalogItem,
   CapabilityInstallation,
   CapabilityKind,
-  CapabilityPack,
   CapabilitySource,
   CreateApiKeyRequest,
   CreateOrganizationApiKeyRequest,
@@ -109,7 +102,6 @@ import type {
   DocumentSearchResponse,
   DocumentStatus,
   EnableCapabilityRequest,
-  EnablePackRequest,
   FileAsset,
   FileStatus,
   RetainedArtifactMetadata,
@@ -128,10 +120,7 @@ import type {
   GitHubRepositoryScope,
   UpdateGitHubActionPolicyRequest,
   ListManagedOrganizationMembershipsResponse,
-  PackInstallation,
-  PackInstallationStatus,
   ProductAccessMode,
-  RegisterCapabilityPackRequest,
   ScheduledTaskRun,
   ScheduledTaskRunStatus,
   ScheduledTaskTriggerType,
@@ -147,7 +136,6 @@ import type {
   UsageEvent,
   Workspace,
   WorkspaceEnvironment,
-  WorkspaceRegisteredPack,
 } from "../src/types";
 
 // Parity pins for the full-coverage SDK types, in the same style as
@@ -228,7 +216,7 @@ describe("SDK / contracts parity (full coverage)", () => {
     const unavailableReasons: readonly RetainedOutputUnavailableReason[] =
       ContractRetainedOutputUnavailableReason.options;
     const documentStatuses: readonly DocumentStatus[] = ContractDocumentStatus.options;
-    const packStatuses: readonly PackInstallationStatus[] = ContractPackInstallationStatus.options;
+
     const capabilityKinds: readonly CapabilityKind[] = ContractCapabilityKind.options;
     const capabilitySources: readonly CapabilitySource[] = ContractCapabilitySource.options;
     expect(accessModes).toEqual(ContractProductAccessMode.options);
@@ -242,7 +230,7 @@ describe("SDK / contracts parity (full coverage)", () => {
     expect(RETAINED_OUTPUT_DEFAULT_PAGE_BYTES).toBe(CONTRACT_RETAINED_OUTPUT_DEFAULT_PAGE_BYTES);
     expect(RETAINED_OUTPUT_MAX_PAGE_BYTES).toBe(CONTRACT_RETAINED_OUTPUT_MAX_PAGE_BYTES);
     expect(documentStatuses).toEqual(ContractDocumentStatus.options);
-    expect(packStatuses).toEqual(ContractPackInstallationStatus.options);
+
     expect(capabilityKinds).toEqual(ContractCapabilityKind.options);
     expect(capabilitySources).toEqual(ContractCapabilitySource.options);
   });
@@ -288,13 +276,7 @@ describe("SDK / contracts parity (full coverage)", () => {
     const acceptContractSearchResponse = (
       value: DocumentSearchResponse,
     ): z.infer<typeof ContractDocumentSearchResponse> => value;
-    const acceptPack = (value: z.infer<typeof ContractCapabilityPack>): CapabilityPack => value;
-    const acceptRegisteredPack = (
-      value: z.infer<typeof ContractWorkspaceRegisteredPack>,
-    ): WorkspaceRegisteredPack => value;
-    const acceptPackInstallation = (
-      value: z.infer<typeof ContractPackInstallation>,
-    ): PackInstallation => value;
+
     const acceptCatalogItem = (
       value: z.infer<typeof ContractCapabilityCatalogItem>,
     ): CapabilityCatalogItem => value;
@@ -328,9 +310,7 @@ describe("SDK / contracts parity (full coverage)", () => {
       acceptContractSearchResult,
       acceptSearchResponse,
       acceptContractSearchResponse,
-      acceptPack,
-      acceptRegisteredPack,
-      acceptPackInstallation,
+
       acceptCatalogItem,
       acceptCapabilityInstallation,
       acceptRepository,
@@ -386,12 +366,7 @@ describe("SDK / contracts parity (full coverage)", () => {
     const acceptCreateBase = (
       value: CreateDocumentBaseRequest,
     ): z.input<typeof ContractCreateDocumentBaseRequest> => value;
-    const acceptRegisterPack = (
-      value: RegisterCapabilityPackRequest,
-    ): z.input<typeof ContractRegisterCapabilityPackRequest> => value;
-    const acceptEnablePack = (
-      value: EnablePackRequest,
-    ): z.input<typeof ContractEnablePackRequest> => value;
+
     const acceptCreateCapability = (
       value: CreateCapabilityCatalogItemRequest,
     ): z.input<typeof ContractCreateCapabilityCatalogItemRequest> => value;
@@ -418,8 +393,7 @@ describe("SDK / contracts parity (full coverage)", () => {
       acceptSetVariable,
       acceptBeginUpload,
       acceptCreateBase,
-      acceptRegisterPack,
-      acceptEnablePack,
+
       acceptCreateCapability,
       acceptEnableCapability,
       acceptAppManifest,
@@ -441,31 +415,6 @@ describe("SDK / contracts parity (full coverage)", () => {
       variables: [{ name: "EXAMPLE_TOKEN", value: "example-value" }],
     };
     expect(ContractCreateWorkspaceEnvironmentRequest.safeParse(environment).success).toBe(true);
-
-    const manifest: RegisterCapabilityPackRequest = {
-      id: "acme-devops",
-      name: "Acme DevOps",
-      description: "Acme's autonomous DevOps pack",
-      role: "devops",
-      category: "infrastructure",
-      version: "1.0.0",
-      sandboxImage:
-        "ghcr.io/acme/devops@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      sandboxProviderImages: {
-        modal: { imageId: "im-1234567890123456789012" },
-      },
-      skills: [
-        {
-          files: [
-            {
-              path: "SKILL.md",
-              content: "---\nname: runbooks\ndescription: Operational runbooks\n---\n# Runbooks",
-            },
-          ],
-        },
-      ],
-    };
-    expect(ContractRegisterCapabilityPackRequest.safeParse(manifest).success).toBe(true);
 
     const goalUpdate: UpdateSessionGoalRequest = { status: "paused", rationale: "manual review" };
     expect(ContractUpdateSessionGoalRequest.safeParse(goalUpdate).success).toBe(true);

@@ -1,6 +1,5 @@
 import { retainedImageId } from "@opengeni/react";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
-import { ConnectionAccountPicker } from "@/components/capabilities/connection-account-picker";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
 import {
   attachSessionCapability,
@@ -13,6 +12,15 @@ import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
+import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
+import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { needsSandboxRecoveryCheck } from "@/lib/sandbox-failure";
+import {
+  admissionRecheckControl,
+  admissionControlNeedsRefresh,
+  recheckSessionAdmission,
+  SessionAdmissionNotice,
+} from "@/components/session/session-admission-notice";
 import {
   connectorSelectionUpdate,
   followWorkspaceConnectorPolicy,
@@ -105,6 +113,7 @@ import {
   normalizeProviderDomain,
   oauthConnectionOwnership,
   oauthConnectionRef,
+  catalogConnectionAccountSelection,
 } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
@@ -171,9 +180,9 @@ import type {
 } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
-const InlineChatImage = lazy(() =>
-  import("@/components/artifacts/inline-chat-image").then((module) => ({
-    default: module.InlineChatImage,
+const InlineChatArtifact = lazy(() =>
+  import("@/components/artifacts/retained-file-preview").then((module) => ({
+    default: module.InlineChatArtifact,
   })),
 );
 const ChatInteractiveBlock = lazy(() =>
@@ -192,8 +201,6 @@ const SessionCapabilityCard = lazy(async () => ({
     .SessionCapabilityCard,
 }));
 
-const FAILURE_CONTINUATION_MESSAGE =
-  "Continue from the last failure. Check current progress before repeating work.";
 const NativeConnectSetup = lazy(() =>
   import("@/components/capabilities/native-connect-setup").then((module) => ({
     default: module.NativeConnectSetup,
@@ -721,7 +728,12 @@ export function SessionRoute({
         throw new Error("The authorized capability could not be resolved from the live catalog.");
       }
       await capabilityClient.enableCapability(workspaceId, item.id, {
-        connectionRef: oauthConnectionRef(ownership, connectionId, providerDomain),
+        connectionRef: oauthConnectionRef(
+          ownership,
+          connectionId,
+          providerDomain,
+          catalogConnectionAccountSelection(item),
+        ),
       });
       await refreshCapabilityCatalog(workspaceId);
       const connected = (await capabilityClient.listCapabilities(workspaceId)).items.find(
@@ -1023,6 +1035,7 @@ export function SessionRoute({
     <SessionChatPane
       key={session.id}
       session={session}
+      admissionSessionControl={sessionSeed?.effectiveControl ?? session.effectiveControl}
       events={events}
       timeline={timeline}
       searchTarget={searchTarget}
@@ -1423,6 +1436,8 @@ function useSessionEditableArtifactSummaries(input: {
 
 function SessionChatPane(props: {
   session: Session;
+  /** Keep the raw detail snapshot: the general route projection prefers queue control. */
+  admissionSessionControl: Session["effectiveControl"];
   events: SessionEvent[];
   timeline: TimelineItem[];
   searchTarget: SessionSearchRoute;
@@ -1532,24 +1547,6 @@ function SessionChatPane(props: {
     () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
     [context.client, props.session.workspaceId],
   );
-  const failureFallback = props.failure ? (
-    <div
-      role="alert"
-      className="mx-auto my-2 w-full max-w-3xl rounded-lg border border-status-failed/30 bg-status-failed/10 p-3 text-sm text-status-failed"
-    >
-      <p>
-        {props.creditExhausted
-          ? "This workspace is out of OpenGeni credits."
-          : "This session failed."}{" "}
-        {props.failure.reason ?? "No failure detail was recorded."}
-      </p>
-      <p className="mt-1 text-xs text-fg-muted">
-        {props.creditExhausted
-          ? "The conversation is preserved. Add organization credits or choose another available model below."
-          : "The conversation is preserved. You can keep working in the composer below."}
-      </p>
-    </div>
-  ) : null;
   const terminal = isTerminalSessionStatus(props.session.status);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
@@ -1708,14 +1705,29 @@ function SessionChatPane(props: {
     () => selectableSessionMcpServers.map((server) => server.id),
     [selectableSessionMcpServers],
   );
+  const policyToolIds = useMemo(
+    () => sessionPolicyPickerIds(props.session, selectableToolIds, context.workspaceDefaultToolIds),
+    [context.workspaceDefaultToolIds, props.session, selectableToolIds],
+  );
+  const [durableToolSelection, setDurableToolSelection] = useState<SessionToolSelection>(() => ({
+    mcpServerIds: new Set(policyToolIds),
+    firstPartyToolIds: new Set(props.session.firstPartyMcpTools),
+  }));
+  const [durableToolsSnapshot, setDurableToolsSnapshot] = useState(props.session);
+  const durableToolsSaveInFlight = useRef(false);
+  const [durableToolsHydrated, setDurableToolsHydrated] = useState(false);
+  const durableToolsSessionId = useRef(props.session.id);
+  const [durableToolsSaving, setDurableToolsSaving] = useState(false);
+  const [durableToolsError, setDurableToolsError] = useState<string | null>(null);
+  const [connectorCustomizingOverride, setConnectorCustomizingOverride] = useState<boolean | null>(
+    null,
+  );
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
       id: props.session.id,
       workspaceId: props.session.workspaceId,
-      selectedIds:
-        props.session.effectiveToolPolicy?.selectedIds ??
-        props.session.tools.map((tool) => tool.id),
+      selectedIds: [...durableToolSelection.mcpServerIds],
     },
     context.workspaceCapabilityCatalog,
   );
@@ -1755,23 +1767,6 @@ function SessionChatPane(props: {
       props.session.tenancy?.authorityEpoch,
       afterConnectionSetup,
     ],
-  );
-  const policyToolIds = useMemo(
-    () => sessionPolicyPickerIds(props.session, selectableToolIds, context.workspaceDefaultToolIds),
-    [context.workspaceDefaultToolIds, props.session, selectableToolIds],
-  );
-  const [durableToolSelection, setDurableToolSelection] = useState<SessionToolSelection>(() => ({
-    mcpServerIds: new Set(policyToolIds),
-    firstPartyToolIds: new Set(props.session.firstPartyMcpTools),
-  }));
-  const [durableToolsSnapshot, setDurableToolsSnapshot] = useState(props.session);
-  const durableToolsSaveInFlight = useRef(false);
-  const [durableToolsHydrated, setDurableToolsHydrated] = useState(false);
-  const durableToolsSessionId = useRef(props.session.id);
-  const [durableToolsSaving, setDurableToolsSaving] = useState(false);
-  const [durableToolsError, setDurableToolsError] = useState<string | null>(null);
-  const [connectorCustomizingOverride, setConnectorCustomizingOverride] = useState<boolean | null>(
-    null,
   );
   const navigate = useNavigate();
   const launch = props.launch ?? EMPTY_COMPOSER_LAUNCH;
@@ -1976,6 +1971,9 @@ function SessionChatPane(props: {
       personalDecision:
         personalAttachment.requiresDecision || connectionAccounts.requiresAccountChoice,
       personalLoading:
+        durableToolsSaving ||
+        durableToolsSaveInFlight.current ||
+        !durableToolsHydrated ||
         personalAttachment.loading ||
         personalAttachment.refreshing ||
         connectionAccounts.loading ||
@@ -2051,11 +2049,44 @@ function SessionChatPane(props: {
       : null;
   });
   const composerPolicy = composer.policy;
+  const [retryOperation, setRetryOperation] = useState<FailedSessionRetryInput | null>(null);
+  const pendingRetryInput =
+    retryOperation?.failureEventId === props.failure?.failureEventId ? retryOperation : null;
+  // A failure before a logical turn exists cannot preserve an original intent.
+  // Prefer detail evidence; paged timeline absence is not positive eligibility.
+  const retryHasRetainedTurn = Boolean(
+    props.session.failureDiagnostics?.eventId === props.failure?.failureEventId
+      ? props.session.failureDiagnostics?.turnId
+      : props.events.find((event) => event.id === props.failure?.failureEventId)?.turnId,
+  );
+  const retryFailedSession = useMemo(
+    () =>
+      createFailedSessionRetry(
+        (input) => context.client.retrySession(props.session.workspaceId, props.session.id, input),
+        setRetryOperation,
+      ),
+    [context.client, props.session.workspaceId, props.session.id],
+  );
   const composerDraftLoading = composer.draftLoading;
   const setComposerModel = composer.setModel;
   const setComposerReasoningEffort = composer.setReasoningEffort;
   const setComposerLatencyMode = composer.setLatencyMode;
   const hasComposerPolicy = composerPolicy !== null;
+  const modelPickerDisabled =
+    composer.sending || composer.draftLoading || !hasComposerPolicy || Boolean(pendingRetryInput);
+  const canChooseRecoveryModel = !modelPickerDisabled;
+  const failureFallback = props.failure ? (
+    <div role="alert" className="mx-auto my-2 w-full max-w-3xl px-4 text-sm text-fg-muted sm:px-6">
+      {
+        failedSessionCopy(
+          props.failure,
+          props.creditExhausted && !props.failure.structuralSandboxFailure,
+          Boolean(composerPolicy && composerPolicy.model !== props.session.model),
+          canChooseRecoveryModel && !props.failure.structuralSandboxFailure,
+        ).reason
+      }
+    </div>
+  ) : null;
   const model = composerPolicy?.model ?? props.session.model;
   const reasoningEffort = composerPolicy?.reasoningEffort ?? props.session.reasoningEffort;
   const latencyMode = composerPolicy?.latencyMode ?? props.session.latencyMode;
@@ -2171,6 +2202,17 @@ function SessionChatPane(props: {
     retryOptimisticMessage,
   ]);
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
+  const admissionControl = admissionRecheckControl(
+    props.admissionSessionControl,
+    props.queue.effectiveControl,
+    composer.effectiveControl,
+  );
+  const admissionRefreshRequired = admissionControlNeedsRefresh(
+    admissionControl,
+    props.admissionSessionControl,
+    props.queue.effectiveControl,
+    composer.effectiveControl,
+  );
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     props.session.status,
     (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
@@ -2279,18 +2321,16 @@ function SessionChatPane(props: {
       const artifactId = retainedImageId(image.src);
       return artifactId ? (
         <Suspense fallback={<span role="status">Loading image…</span>}>
-          <InlineChatImage
+          <InlineChatArtifact
             key={props.session.workspaceId + ":" + artifactId}
             workspaceId={props.session.workspaceId}
             artifactId={artifactId}
             alt={image.alt}
-            showArtifactLink
-            fromSession={props.session.id}
           />
         </Suspense>
       ) : null;
     },
-    [props.session.workspaceId, props.session.id],
+    [props.session.workspaceId],
   );
   const renderInteractiveBlock = useCallback(
     (block: { kind: "html" | "site"; content: string }) => (
@@ -2310,6 +2350,7 @@ function SessionChatPane(props: {
       if (item.kind === "user-message") {
         return (
           <UserMessageBody
+            sessionId={props.session.id}
             workspaceId={props.session.workspaceId}
             item={item}
             searchTarget={renderContext.searchTarget}
@@ -2319,6 +2360,7 @@ function SessionChatPane(props: {
       return (
         <div data-testid="assistant-markdown">
           <MarkdownText
+            artifactHref={(id) => `/workspaces/${props.session.workspaceId}/artifacts/files/${id}`}
             text={text}
             searchTarget={renderContext.searchTarget}
             streaming={item.kind === "agent-message" && item.streaming}
@@ -2329,8 +2371,100 @@ function SessionChatPane(props: {
         </div>
       );
     },
-    [props.onOpenSandboxFile, props.session.workspaceId, renderInteractiveBlock, renderImage],
+    [
+      props.onOpenSandboxFile,
+      props.session.id,
+      props.session.workspaceId,
+      renderInteractiveBlock,
+      renderImage,
+    ],
   );
+
+  const failureRecovery =
+    !props.hasNewer &&
+    props.failure &&
+    (props.session.status === "failed" ||
+      (props.creditExhausted && props.session.status === "idle")) ? (
+      <FailureRecoveryBoundary key={props.session.id} fallback={failureFallback}>
+        <Suspense fallback={failureFallback}>
+          <LazyFailedSessionBanner
+            key={props.session.id}
+            failure={props.failure}
+            canChooseModel={canChooseRecoveryModel}
+            modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
+            creditExhausted={props.creditExhausted}
+            workspaceId={props.session.workspaceId}
+            canBuyCredits={
+              context.clientConfig.billingMode === "stripe" &&
+              Boolean(workspaceAccountId) &&
+              hasAccountPermission(
+                context.accessContext,
+                workspaceAccountId ?? "",
+                "billing:manage",
+              )
+            }
+            canConnectModel={hasWorkspacePermission(
+              context.accessContext,
+              props.session.workspaceId,
+              "connections:write",
+            )}
+            sandboxRecovery={
+              needsSandboxRecoveryCheck(props.session, props.failure.structuralSandboxFailure)
+                ? {
+                    client: context.client,
+                    workspaceId: props.session.workspaceId,
+                    sessionId: props.session.id,
+                    canControl: workspacePermissions.includes("sessions:control"),
+                  }
+                : undefined
+            }
+            actions={{
+              failureId: props.failure.failureEventId,
+              retryInput: pendingRetryInput,
+              composerBlocker: composerSendBlocker(),
+              onRetry: async () => {
+                if (
+                  composer.hasDraftContent() ||
+                  composerSendBlocker() ||
+                  !props.failure?.failureEventId ||
+                  !retryHasRetainedTurn ||
+                  !composerPolicy ||
+                  !workspacePermissions.includes("sessions:control") ||
+                  admissionControl.state === "paused"
+                )
+                  return false;
+                try {
+                  return await retryFailedSession(props.failure.failureEventId, composerPolicy);
+                } finally {
+                  await Promise.allSettled([props.onReloadSession(), props.queue.refresh()]);
+                }
+              },
+              retryBlocker: !workspacePermissions.includes("sessions:control")
+                ? "permission"
+                : admissionControl.state === "paused"
+                  ? "paused"
+                  : composer.hasDraftContent()
+                    ? "draft"
+                    : failedOptimisticMessageCount > 0
+                      ? "unsent"
+                      : (optimisticMessages ?? []).some(
+                            (message) => !acceptedClientEventIds.has(message.clientEventId),
+                          )
+                        ? "delivery"
+                        : props.session.activeTurnId !== null || props.queue.queue.length > 0
+                          ? "queued"
+                          : composer.sending ||
+                              composer.draftLoading ||
+                              !hasComposerPolicy ||
+                              !retryHasRetainedTurn ||
+                              !props.failure.failureEventId
+                            ? "loading"
+                            : null,
+            }}
+          />
+        </Suspense>
+      </FailureRecoveryBoundary>
+    ) : null;
 
   return createElement(
     LightboxProvider,
@@ -2377,63 +2511,6 @@ function SessionChatPane(props: {
       ) : null}
       {
         <>
-          {/* Credit death also surfaces on an IDLE session: a budget_exhausted
-              turn completes "cleanly", so waiting for status === "failed" would
-              hide the one banner that explains why nothing works anymore. It
-              hides again while a turn is actually running (someone topped up
-              and is trying), so the recovery turn isn't shadowed by it. */}
-          {props.failure &&
-          (props.session.status === "failed" ||
-            (props.creditExhausted && props.session.status === "idle")) ? (
-            <FailureRecoveryBoundary key={props.session.id} fallback={failureFallback}>
-              <Suspense fallback={failureFallback}>
-                <LazyFailedSessionBanner
-                  key={props.session.id}
-                  failure={props.failure}
-                  creditExhausted={props.creditExhausted}
-                  workspaceId={props.session.workspaceId}
-                  canBuyCredits={
-                    context.clientConfig.billingMode === "stripe" &&
-                    Boolean(workspaceAccountId) &&
-                    hasAccountPermission(
-                      context.accessContext,
-                      workspaceAccountId ?? "",
-                      "billing:manage",
-                    )
-                  }
-                  canConnectModel={hasWorkspacePermission(
-                    context.accessContext,
-                    props.session.workspaceId,
-                    "connections:write",
-                  )}
-                  actions={{
-                    failureId: props.failure.failureEventId,
-                    composerBlocker: composerSendBlocker(),
-                    repositoryError: repositories.error,
-                    onContinue: () =>
-                      composer.hasDraftContent()
-                        ? Promise.resolve(false)
-                        : composer.send(FAILURE_CONTINUATION_MESSAGE),
-                    continuationBlocker: composer.hasDraftContent()
-                      ? "draft"
-                      : failedOptimisticMessageCount > 0
-                        ? "unsent"
-                        : (optimisticMessages ?? []).some(
-                              (message) => !acceptedClientEventIds.has(message.clientEventId),
-                            )
-                          ? "delivery"
-                          : props.session.activeTurnId !== null || props.queue.queue.length > 0
-                            ? "queued"
-                            : composer.sending || composer.draftLoading || !hasComposerPolicy
-                              ? "loading"
-                              : null,
-                    onChooseModel: () => setModelPickerSession(props.session.id),
-                    modelDisabled: composer.sending || composer.draftLoading || !hasComposerPolicy,
-                  }}
-                />
-              </Suspense>
-            </FailureRecoveryBoundary>
-          ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <KnowledgeActivityProvider
               onInspect={props.onMemoryClick}
@@ -2450,6 +2527,29 @@ function SessionChatPane(props: {
               }
             >
               <MessageTimeline
+                trailingState={
+                  <>
+                    {/* Recovery follows the failed request, only in the latest history window.
+                        Credit exhaustion also surfaces on idle sessions. */}
+                    {failureRecovery}
+                    {props.humanInput.requests.length > 0 &&
+                    props.session.status === "requires_action" ? (
+                      <div className="pb-1" data-human-input-timeline-surface="">
+                        <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
+                          <HumanInputSurface
+                            loadSkillReview={loadSkillReview}
+                            requests={props.humanInput.requests}
+                            respondingRequestId={props.humanInput.respondingRequestId}
+                            error={props.humanInput.mutationError?.message}
+                            onSubmit={(requestId, response) =>
+                              props.humanInput.respond(requestId, response).then(() => undefined)
+                            }
+                          />
+                        </Suspense>
+                      </div>
+                    ) : null}
+                  </>
+                }
                 turnSummary={{ rolling: true }}
                 key={props.session.id}
                 className="h-full"
@@ -2482,26 +2582,10 @@ function SessionChatPane(props: {
                   await props.onJumpToStart();
                 }}
                 onJumpToLatest={props.onJumpToLatest}
-                trailingState={
-                  props.humanInput.requests.length > 0 &&
-                  props.session.status === "requires_action" ? (
-                    <div className="pb-1" data-human-input-timeline-surface="">
-                      <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
-                        <HumanInputSurface
-                          loadSkillReview={loadSkillReview}
-                          requests={props.humanInput.requests}
-                          respondingRequestId={props.humanInput.respondingRequestId}
-                          error={props.humanInput.mutationError?.message}
-                          onSubmit={(requestId, response) =>
-                            props.humanInput.respond(requestId, response).then(() => undefined)
-                          }
-                        />
-                      </Suspense>
-                    </div>
-                  ) : undefined
-                }
                 emptyState={
-                  props.queue.stoppingPreviousAttempt ? (
+                  // Clear view hides history, not the retained failure or retry operation.
+                  failureRecovery ??
+                  (props.queue.stoppingPreviousAttempt ? (
                     <EmptyState
                       className="min-h-[24rem]"
                       icon={
@@ -2538,7 +2622,7 @@ function SessionChatPane(props: {
                       title={timelineEmptyStateCopy.title}
                       description={timelineEmptyStateCopy.description}
                     />
-                  )
+                  ))
                 }
               />
             </KnowledgeActivityProvider>
@@ -2620,6 +2704,26 @@ function SessionChatPane(props: {
           and agents as one dock. Hides entirely when there are no signals. */}
       <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
+          <SessionAdmissionNotice
+            key={`${props.session.workspaceId}:${props.session.id}`}
+            session={props.session}
+            canControl={workspacePermissions.includes("sessions:control")}
+            paused={admissionControl.state === "paused"}
+            refreshRequired={admissionRefreshRequired}
+            busy={composer.resuming || composer.pausing || composer.sending || props.queue.mutating}
+            onRecheck={() =>
+              recheckSessionAdmission({
+                control: admissionControl,
+                refreshOnly: admissionRefreshRequired,
+                resume: (control) =>
+                  context.client.resumeSession(props.session.workspaceId, props.session.id, {
+                    clientEventId: crypto.randomUUID(),
+                    expectedControlEtag: control.controlEtag,
+                  }),
+                refresh: [props.onReloadSession, props.queue.refresh],
+              })
+            }
+          />
           <SessionChrome
             sessionStatus={props.session.status}
             onOpenSession={props.onOpenSession}
@@ -2651,24 +2755,6 @@ function SessionChatPane(props: {
 
       <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
-          <ConnectionAccountPicker
-            groups={connectionAccounts.accountGroups}
-            choices={connectionAccounts.accountChoices}
-            onChoose={connectionAccounts.selectAccount}
-            disabled={terminal || composer.sending}
-          />
-          {connectionAccounts.error ? (
-            <p role="alert" className="mb-2 text-xs text-fg-muted">
-              Personal connection access could not be checked.{" "}
-              <button
-                type="button"
-                className="text-brand underline"
-                onClick={() => void connectionAccounts.refresh()}
-              >
-                Retry
-              </button>
-            </p>
-          ) : null}
           <PersonalResourceAttachmentSurface
             controller={personalAttachment}
             disabled={terminal || composer.sending}
@@ -2694,6 +2780,18 @@ function SessionChatPane(props: {
             controlsLeading={
               <>
                 <ComposerMobilePlus
+                  connectorActions={{
+                    accountControls: {
+                      groups: connectionAccounts.availableAccountGroups,
+                      choices: connectionAccounts.accountChoices,
+                      onChoose: connectionAccounts.selectAccount,
+                      loading: connectionAccounts.loading,
+                      error: connectionAccounts.error,
+                      onRefresh: () => void connectionAccounts.refresh(),
+                      disabled:
+                        terminal || composer.sending || durableToolsSaving || !durableToolsHydrated,
+                    },
+                  }}
                   chatSettings={{
                     workspaceId: props.session.workspaceId,
                     sessionId: props.session.id,
@@ -2719,6 +2817,7 @@ function SessionChatPane(props: {
                   onConnectorCustomizingChange={(next) => {
                     setConnectorCustomizingOverride(next);
                     if (next) return;
+                    connectionAccounts.resetEmptyChoices();
                     void applyDurableToolPolicy(
                       followWorkspaceConnectorPolicy(durableToolsSnapshot),
                     );
@@ -2790,11 +2889,7 @@ function SessionChatPane(props: {
                   ? // "Send a message to revive" is a dead end without credits —
                     // the reply turn dies the same budget death.
                     "Out of OpenGeni credits — add credits to continue."
-                  : props.session.status === "failed"
-                    ? props.failure?.safetyRefusal
-                      ? "The model provider blocked the previous request."
-                      : "This session failed — send a message to revive it."
-                    : "Send a follow-up…"
+                  : "Send a follow-up…"
             }
             controls={
               <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
@@ -2802,13 +2897,13 @@ function SessionChatPane(props: {
                   hasImageAttachments={attachments.attachments.some(
                     (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
                   )}
-                  open={modelPickerSession === props.session.id}
+                  open={modelPickerSession === props.session.id && !pendingRetryInput}
                   onOpenChange={(open) => setModelPickerSession(open ? props.session.id : null)}
                   rows={modelCatalog.rows}
                   model={model}
                   effort={reasoningEffort}
                   latencyMode={latencyMode}
-                  disabled={composer.sending || composer.draftLoading || !hasComposerPolicy}
+                  disabled={modelPickerDisabled}
                   loading={modelCatalog.loading || composer.draftLoading}
                   error={modelCatalog.error ?? composerPolicyError}
                   sessionKey={props.session.id}

@@ -110,8 +110,10 @@ describe("provider-neutral operational instructions", () => {
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
       "prefer the connection-bound native client even if an older `ogtool` is installed",
     );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("OPENGENI_CODEMODE_NATIVE_CLIENT");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("OPENGENI_CODEMODE_CLIENT_MODULE");
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
-      "OPENGENI_CODEMODE_NATIVE_CLIENT",
+      "do not import the older image-baked package",
     );
   });
 

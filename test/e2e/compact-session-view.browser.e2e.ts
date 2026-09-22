@@ -319,7 +319,7 @@ describe("compact session view on the live local workspace route (API fixture)",
       if (path.endsWith("/model-catalog") || path.endsWith("/models")) return json({ models: [] });
       if (path.endsWith("/capabilities")) return json({ items: [], installations: [] });
       if (path.endsWith("/skills")) return json({ skills: [] });
-      if (path.endsWith("/packs")) return json({ packs: [], installations: [] });
+
       if (path.endsWith("/connections")) return json({ connections: [] });
       if (path.endsWith("/integrations")) return json({ integrations: [] });
       if (path.endsWith("/connection-authorities")) return json({ authorities: [] });
@@ -681,8 +681,42 @@ describe("compact session view on the live local workspace route (API fixture)",
       expect(await matchingChildren.count()).toBe(55);
       expect(await rail.locator("a[data-session-row]").count()).toBe(continuationFirst ? 111 : 56);
       archiveFixture.failReads = false;
-      await openSearch("Missing");
-      await settleRead();
+      const commitMissingSearch = async (edit: () => Promise<unknown>) => {
+        // networkidle can already be satisfied while the query debounce has
+        // not fired. Wait for this query's two reads, then its committed UI.
+        const [titleResponse, messageResponse] = await Promise.all([
+          page.waitForResponse((response) => {
+            const url = new URL(response.url());
+            return (
+              url.pathname === `/v1/workspaces/${workspaceId}/sessions` &&
+              url.searchParams.get("search") === "Missing"
+            );
+          }),
+          page.waitForResponse((response) => {
+            const url = new URL(response.url());
+            return (
+              url.pathname === `/v1/workspaces/${workspaceId}/session-message-search` &&
+              url.searchParams.get("query") === "Missing" &&
+              url.searchParams.get("groupBy") === "session"
+            );
+          }),
+          edit(),
+        ]);
+        expect(titleResponse.status()).toBe(200);
+        expect(messageResponse.status()).toBe(200);
+        expect((await titleResponse.json()).sessions).toHaveLength(0);
+        expect((await messageResponse.json()).matches).toHaveLength(0);
+        await dialog
+          .getByRole("status")
+          .filter({ hasText: /^Showing results for/ })
+          .waitFor({ state: "hidden" });
+        await dialog
+          .getByText("No matching sessions. Try a shorter phrase or different words.", {
+            exact: true,
+          })
+          .waitFor();
+      };
+      await commitMissingSearch(() => openSearch("Missing"));
       expect(await results.count()).toBe(0);
       expect(await matchingChildren.count()).toBe(55);
       // A child-only response for the previous dialog query must not populate
@@ -692,7 +726,9 @@ describe("compact session view on the live local workspace route (API fixture)",
       archiveFixture.searchStarted = false;
       await dialog.getByRole("searchbox").fill("Needle");
       await waitFor(() => archiveFixture?.searchStarted === true);
-      await dialog.getByRole("searchbox").fill("Missing");
+      // Release the obsolete read only after Missing commits. During its
+      // debounce, Needle is still the active query and may legitimately render.
+      await commitMissingSearch(() => dialog.getByRole("searchbox").fill("Missing"));
       oldSearch.resolve();
       await settleRead();
       expect(await results.count()).toBe(0);

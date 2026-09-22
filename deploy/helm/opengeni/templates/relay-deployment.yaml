@@ -52,6 +52,7 @@ spec:
             - name: wss
               containerPort: {{ .Values.relay.containerPort }}
           env:
+            {{- include "opengeni.deploymentRevisionEnv" . | nindent 12 }}
             # The wss listener bind. The container port is the single source of truth.
             - name: OPENGENI_RELAY_BIND
               value: {{ printf "0.0.0.0:%d" (int .Values.relay.containerPort) | quote }}

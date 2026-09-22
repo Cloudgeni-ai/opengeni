@@ -8,6 +8,7 @@ import type {
   TimelineAnnotationSource,
   ToolAuthNeededPayload,
   ToolRef,
+  ToolDisplayMetadata,
 } from "@opengeni/sdk";
 
 /* ----------------------------------------------------------------------------
@@ -129,6 +130,7 @@ export type ToolCallItem = {
   turnId: string | null;
   callId: string | null;
   name: string;
+  display?: ToolDisplayMetadata;
   arguments: unknown;
   output: unknown;
   truncation?: ToolCallTruncation | null;
@@ -451,6 +453,9 @@ export type AuthNeededItem = {
   turnId: string | null;
   /** The runtime surface that requested recovery, when the event is an MCP auth signal. */
   serverId: string | null;
+  /** Explicit recovery identity; never inferred from an opaque execution alias. */
+  canonicalServerId?: string | null;
+  connectionSubjectScope?: "workspace" | "subject" | null;
   /** Durable event family that produced this notice. */
   source?: "tool" | "credential" | "capability" | undefined;
   /** The connection's registrable domain, e.g. "linear.app". */

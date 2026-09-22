@@ -36,8 +36,13 @@ export type McpServerOption = {
   name: string;
   logoSrc?: string | null;
   detail?: string;
-  connectionStatus?: "ready" | "reconnect" | "unavailable" | "unknown";
+  connectionStatus?: "ready" | "connect" | "reconnect" | "unavailable" | "unknown";
 };
+
+/** Composer connector menus omit builtins managed by workspace tool settings. */
+export function isComposerConnector(server: Pick<McpServerOption, "id">): boolean {
+  return !["opengeni", "files", "docs"].includes(server.id);
+}
 
 const NON_SELECTABLE_SESSION_MCP_SERVER_IDS = new Set(["opengeni"]);
 

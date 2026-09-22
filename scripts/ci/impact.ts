@@ -256,6 +256,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/react",
     "@opengeni/testing",
   ],
+  "test/e2e/connector-accounts.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/testing",
+  ],
   "test/e2e/compact-session-view.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/queue-surface.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/user-message-disclosure.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
@@ -331,8 +336,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/browser-account-request-observation.browser.e2e.ts": [],
+  "test/e2e/managed-actor-response.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/browser-account-read-diagnostics.test.ts": [],
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/appearance.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/signed-out-page.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/capability-catalog.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/plugin-discovery.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/plugin-removal.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
@@ -363,6 +371,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/session-lazy-panels.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/failed-session-recovery.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
     "@opengeni/sdk",
@@ -412,6 +426,14 @@ for (const path of TEMPORAL_WORKFLOW_INTEGRATION_TESTS) {
 }
 
 const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {
+  "test/e2e/browser-account-read-diagnostics.ts": [
+    "test/e2e/browser-accounts-acceptance.e2e.ts",
+    "test/e2e/browser-account-read-diagnostics.test.ts",
+  ],
+  "test/e2e/browser-account-axe-diagnostics.ts": [
+    "test/e2e/browser-accounts-acceptance.e2e.ts",
+    "test/e2e/browser-account-request-observation.browser.e2e.ts",
+  ],
   "test/e2e/browser-account-request-observation.ts": [
     "test/e2e/browser-accounts-acceptance.e2e.ts",
     "test/e2e/browser-account-request-observation.browser.e2e.ts",

@@ -1,3 +1,4 @@
+import { readSessionAttachmentFiles } from "@opengeni/core";
 import { ZodError } from "zod";
 import {
   CompleteFileUploadResponse,
@@ -405,15 +406,28 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
+  const readRequestedFile = async (
+    c: Context,
+    grant: Awaited<ReturnType<typeof requireAccessGrant>>,
+  ) => {
+    const fileId = c.req.param("fileId") ?? "";
+    const sessionId = c.req.query("sessionId");
+    if (sessionId) {
+      if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(sessionId)) return null;
+      return (await readSessionAttachmentFiles(deps, grant, sessionId, [fileId]))[0] ?? null;
+    }
+    return requireFileForSubject(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      fileId,
+    }).catch(() => null);
+  };
+
   app.get("/v1/workspaces/:workspaceId/files/:fileId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
-    const file = await requireFileForSubject(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      fileId: c.req.param("fileId"),
-    }).catch(() => null);
+    const file = await readRequestedFile(c, grant).catch(() => null);
     if (!file) {
       throw new HTTPException(404, { message: "file not found" });
     }
@@ -589,12 +603,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "object storage is not configured",
       });
     }
-    const file = await requireFileForSubject(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      fileId: c.req.param("fileId"),
-    }).catch(() => null);
+    const file = await readRequestedFile(c, grant).catch(() => null);
     if (!file) {
       throw new HTTPException(404, { message: "file not found" });
     }

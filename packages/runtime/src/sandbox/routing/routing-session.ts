@@ -28,8 +28,12 @@
 // `@opengeni/db`.
 
 import type { ExposedPortEndpoint } from "../stream-port";
+import { isDeepStrictEqual } from "node:util";
 import {
   withProviderCommandHandle,
+  withCommandSupervisionReady,
+  withSupervisedLaunchReservation,
+  ProviderCommandStartRejectedError,
   type ProviderCommandPersistence,
   type ProviderCommandSession,
 } from "../provider-command-session";
@@ -177,6 +181,7 @@ export type RoutingRetainedProcessTerminalProof =
 
 export interface RoutingSandboxSessionDeps {
   providerCommandHandle?: (admission: unknown) => number | undefined;
+  providerSupervisionReady?: () => Promise<boolean>;
   providerCommandPersistence?: (process: RoutingRetainedProcess) => ProviderCommandPersistence;
   /**
    * The DEFAULT backend resolved at construction time (the same shape `resolve()`
@@ -216,6 +221,8 @@ export interface RoutingSandboxSessionDeps {
    * diagnostic only: callback failures are isolated and can never change the
    * provider result or durable mutation-settlement ordering. */
   onOperation?: RoutingSandboxOperationObserver;
+  /** Capture gates are not physical provider calls; observe every wait separately. */
+  onCaptureWait?: RoutingSandboxCaptureWaitObserver;
   /** Observe the first complete routed operation and only the subphases that
    * actually ran. Child durations are exclusive; capture waits are removed
    * from their enclosing admission/provider spans. */
@@ -302,6 +309,15 @@ export interface RoutingSandboxSessionDeps {
   }) => Promise<DefaultBackendLossResult | null>;
 }
 
+function eligibleForSupervision(args: unknown): boolean {
+  return Boolean(
+    args &&
+    typeof args === "object" &&
+    !(args as { tty?: boolean }).tty &&
+    !(args as { runAs?: string }).runAs,
+  );
+}
+
 export type RoutingSandboxOperationObservation = {
   backend: string;
   op: string;
@@ -313,6 +329,14 @@ export type RoutingSandboxOperationObservation = {
 export type RoutingSandboxOperationObserver = (
   observation: RoutingSandboxOperationObservation,
 ) => void;
+
+export type RoutingSandboxCaptureWaitObserver = (observation: {
+  backend: string;
+  op: string;
+  outcome: "ok" | "failed";
+  durationMs: number;
+  captureWaitStage: "admission" | "provider";
+}) => void;
 
 export type RoutingSandboxPhaseOutcome = "completed" | "failed";
 
@@ -716,6 +740,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   private cachedEpoch: number | undefined;
   private cachedSandboxId: string | null | undefined;
   private cached: ResolvedActiveBackend | undefined;
+  private readonly homeResolutions = new Map<number, Promise<ResolvedActiveBackend>>();
   // The last-resolved backend, exposed via the `state` getter (a method-free read
   // of the active backend's `state`). Updated on every resolve.
   private lastResolved: ResolvedActiveBackend | undefined;
@@ -813,6 +838,23 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     ) {
       return this.cached;
     }
+    // Home repair may prepare the release client before publishing a handle.
+    // Concurrent first operations must join that preparation, including its
+    // failure, instead of each resuming/preparing the replacement independently.
+    // Explicit machine routes retain their existing resolution behavior.
+    if (pointer.activeSandboxId !== null) return await this.resolvePointer(pointer);
+    const pending = this.homeResolutions.get(pointer.activeEpoch);
+    if (pending) return await pending;
+    const resolution = this.resolvePointer(pointer);
+    this.homeResolutions.set(pointer.activeEpoch, resolution);
+    try {
+      return await resolution;
+    } finally {
+      this.homeResolutions.delete(pointer.activeEpoch);
+    }
+  }
+
+  private async resolvePointer(pointer: ActivePointer): Promise<ResolvedActiveBackend> {
     const fromEpoch = this.cachedEpoch ?? pointer.activeEpoch;
     const resolved = await this.deps.resolveActiveBackend(pointer);
     // Re-entrancy guard: a resolver that returns THIS proxy as the active backend
@@ -1252,6 +1294,24 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const record = this.retainedProcess(providerSessionId);
+    if (
+      !modelVisible &&
+      args &&
+      typeof args === "object" &&
+      (args as { chars?: unknown }).chars === "\u0003" &&
+      record.process.providerCommand?.kind === "modal-router-v1" &&
+      record.process.providerCommand.supervision
+    ) {
+      await this.ensureParentPromotion(record);
+      if (
+        !(await record.backend.session.cancelSupervisedCommand?.(
+          providerSessionId,
+          "explicit_stop",
+        ))
+      )
+        throw new Error("Supervised command cancellation is unavailable");
+      args = { ...args, chars: "" };
+    }
     await this.captureRetainedOutput(record);
     const priorTerminal = await this.flushPendingProcessMutation(record);
     if (priorTerminal !== null) {
@@ -1285,6 +1345,31 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     result?: unknown,
   ): Promise<void> {
     if (!this.deps.captureProcessOutput) return;
+    // Router byte-offset pages atomically append output and advance the exact
+    // expected cursor. Never send these through the legacy append-then-ack path.
+    const atomicReceipt =
+      record.pendingProviderReceipt ?? (typeof result === "string" ? result : undefined);
+    if (
+      atomicReceipt &&
+      record.backend.session.captureCommandOutput &&
+      record.backend.session.getProviderCommandOutput?.(atomicReceipt)?.command.kind ===
+        "modal-router-v1"
+    ) {
+      record.pendingProviderReceipt = atomicReceipt;
+      try {
+        if (await record.backend.session.captureCommandOutput(atomicReceipt)) {
+          delete record.pendingProviderReceipt;
+          return;
+        }
+      } catch (error) {
+        throw new RoutingMutationOutcomeUnknownError(
+          "captureProcessOutput",
+          "Provider output atomic capture remains pending; the provider operation was not replayed",
+          { cause: error, retainedProcess: record.process },
+        );
+      }
+      delete record.pendingProviderReceipt;
+    }
     const providerPage = record.backend.session.getProviderCommandOutput?.(result);
     const structured =
       result && typeof result === "object"
@@ -1372,17 +1457,30 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     op: string,
     mutatesWorkspace: boolean,
     fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
+    supervisionEligible = false,
   ): Promise<T> {
     const firstOperationObserver = this.deps.onFirstOperation;
     if (this.firstOperationClaimed || !firstOperationObserver) {
-      return await this.dispatchWithRetries(op, mutatesWorkspace, fn);
+      return await this.dispatchWithRetries(
+        op,
+        mutatesWorkspace,
+        fn,
+        undefined,
+        supervisionEligible,
+      );
     }
     this.firstOperationClaimed = true;
     const startedAt = performance.now();
     const timing: RoutingSandboxFirstOperationTiming = { phases: {} };
     let outcome: RoutingSandboxPhaseOutcome = "failed";
     try {
-      const result = await this.dispatchWithRetries(op, mutatesWorkspace, fn, timing);
+      const result = await this.dispatchWithRetries(
+        op,
+        mutatesWorkspace,
+        fn,
+        timing,
+        supervisionEligible,
+      );
       outcome = "completed";
       return result;
     } finally {
@@ -1399,11 +1497,34 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     }
   }
 
+  /** Classify loss on the copied backend, including read-only preflight. This
+   * path never admits work or retries the failed operation on a new route. */
+  private async throwProviderError(
+    op: string,
+    backend: ResolvedActiveBackend,
+    error: unknown,
+  ): Promise<never> {
+    if (!isFenceError(error) && backend.sandboxId === null && this.deps.onDefaultBackendError) {
+      const loss = await this.deps.onDefaultBackendError({
+        op,
+        error,
+        kind: backend.kind,
+        backend,
+      });
+      if (loss) {
+        this.invalidate(backend);
+        throw new RoutingBackendRecoveryRequiredError(op, loss.leaseEpoch, loss.recovery);
+      }
+    }
+    throw error;
+  }
+
   private async dispatchWithRetries<T>(
     op: string,
     mutatesWorkspace: boolean,
     fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
     firstOperationTiming?: RoutingSandboxFirstOperationTiming,
+    supervisionEligible = false,
   ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
@@ -1425,7 +1546,35 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       // Admission failures are NOT provider fence errors and must never enter
       // the retry/rebind loop. If this exact route cannot advance its durable
       // mutation generation, fail before the provider sees the operation.
+      const supervisionReady =
+        supervisionEligible &&
+        backend.kind === "modal" &&
+        ((await this.deps.providerSupervisionReady?.()) ?? false);
+      let verifiedSupervision: { sandboxId: string; taskId: string } | undefined;
+      if (supervisionReady) {
+        if (
+          !backend.session.verifyCommandSupervisionCapability ||
+          !this.deps.afterMutation ||
+          !this.deps.providerCommandPersistence
+        )
+          throw new Error(
+            "Supervised command requires exact-instance verification and durable reservation wiring",
+          );
+        try {
+          verifiedSupervision = await backend.session.verifyCommandSupervisionCapability();
+        } catch (error) {
+          // A missing helper is merely an incompatible instance. Only the
+          // existing sandbox-scoped classifier may retire a missing provider.
+          return await this.throwProviderError(op, backend, error);
+        }
+        if (
+          backend.providerInstanceId &&
+          verifiedSupervision.sandboxId !== backend.providerInstanceId
+        )
+          throw new Error("Supervision capability does not match the admitted provider instance");
+      }
       let admission: unknown;
+      let reservedProcess: RoutingRetainedProcess | undefined;
       if (mutatesWorkspace && this.deps.beforeMutation) {
         const admissionStartedAt = performance.now();
         let admissionWaitMs = 0;
@@ -1434,19 +1583,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           admission = await this.deps.beforeMutation({
             op,
             backend,
-            ...(firstOperationTiming
-              ? {
-                  onCaptureWait: (observation: RoutingSandboxWaitObservation) => {
-                    admissionWaitMs += Math.max(0, observation.durationMs);
-                    recordFirstOperationPhase(
-                      firstOperationTiming,
-                      "snapshotWait",
-                      observation.durationMs,
-                      observation.outcome,
-                    );
-                  },
-                }
-              : {}),
+            onCaptureWait: (observation: RoutingSandboxWaitObservation) => {
+              admissionWaitMs += Math.max(0, observation.durationMs);
+              recordFirstOperationPhase(
+                firstOperationTiming,
+                "snapshotWait",
+                observation.durationMs,
+                observation.outcome,
+              );
+              this.observeCaptureWait(op, backend, "admission", observation);
+            },
           });
           admissionOutcome = "completed";
         } finally {
@@ -1469,19 +1615,64 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             backend,
             () =>
               withProviderCommandHandle(this.deps.providerCommandHandle?.(admission), () =>
-                fn(backend.session, backend),
+                withCommandSupervisionReady(supervisionReady, () =>
+                  withSupervisedLaunchReservation(
+                    {
+                      reserve: async (command) => {
+                        const handle = this.deps.providerCommandHandle?.(admission);
+                        if (!supervisionReady || !handle || reservedProcess || !command.supervision)
+                          throw new Error("Invalid supervised launch reservation");
+                        if (
+                          command.sandboxId !== verifiedSupervision?.sandboxId ||
+                          command.taskId !== verifiedSupervision.taskId
+                        )
+                          throw new Error(
+                            "Modal task changed after supervision capability verification",
+                          );
+                        const process = {
+                          id: crypto.randomUUID(),
+                          providerSessionId: handle,
+                          providerCommand: command,
+                        };
+                        reservedProcess = process;
+                        const reservationResult = await this.deps.afterMutation!({
+                          op,
+                          backend,
+                          admission,
+                          outcome: "resolved",
+                          retainedProcess: process,
+                        });
+                        // Even a durable-but-authority-rejected reservation must
+                        // never dispatch user work. Its exact row remains recoverable.
+                        if (reservationResult)
+                          throw new RoutingMutationOutcomeUnknownError(
+                            op,
+                            "Supervised launch reservation lost authority before dispatch",
+                            { retainedProcess: process },
+                          );
+                        const persisted =
+                          await this.deps.providerCommandPersistence!(process).load();
+                        if (!persisted || !isDeepStrictEqual(persisted, command))
+                          throw new Error(
+                            "Supervised launch reservation did not retain the exact invocation",
+                          );
+                        this.registerRetainedProcess(process, backend).durable = true;
+                      },
+                    },
+                    () => fn(backend.session, backend),
+                  ),
+                ),
               ),
-            firstOperationTiming
-              ? (observation) => {
-                  providerWaitMs += Math.max(0, observation.durationMs);
-                  recordFirstOperationPhase(
-                    firstOperationTiming,
-                    "snapshotWait",
-                    observation.durationMs,
-                    observation.outcome,
-                  );
-                }
-              : undefined,
+            (observation) => {
+              providerWaitMs += Math.max(0, observation.durationMs);
+              recordFirstOperationPhase(
+                firstOperationTiming,
+                "snapshotWait",
+                observation.durationMs,
+                observation.outcome,
+              );
+              this.observeCaptureWait(op, backend, "provider", observation);
+            },
           );
           providerOutcome = "completed";
         } finally {
@@ -1493,6 +1684,34 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           );
         }
       } catch (error) {
+        if (reservedProcess) {
+          if (
+            error instanceof ProviderCommandStartRejectedError &&
+            reservedProcess.providerCommand?.kind === "modal-router-v1"
+          ) {
+            const persistence = this.deps.providerCommandPersistence?.(reservedProcess);
+            if (persistence?.rejectSupervisedLaunch) {
+              try {
+                await persistence.rejectSupervisedLaunch(reservedProcess.providerCommand);
+              } catch (cause) {
+                throw new RoutingMutationOutcomeUnknownError(
+                  op,
+                  "Never-started provider rejection could not settle its exact reservation",
+                  { cause, retainedProcess: reservedProcess },
+                );
+              }
+              this.retainedProcesses.delete(reservedProcess.providerSessionId);
+              throw error;
+            }
+          }
+          // A retained pre-dispatch identity is never erased or converted into
+          // ordinary rejected-admission settlement. Reconciliation owns it.
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            "Reserved supervised launch did not return; exact invocation retained and not replayed",
+            { cause: error, retainedProcess: reservedProcess },
+          );
+        }
         const partialMutation = error instanceof ChannelAPartialMutationError;
         if (mutatesWorkspace && this.deps.afterMutation) {
           const settlementStartedAt = performance.now();
@@ -1531,23 +1750,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           );
         }
         if (!isFenceError(error)) {
-          if (backend.sandboxId === null && this.deps.onDefaultBackendError) {
-            const loss = await this.deps.onDefaultBackendError({
-              op,
-              error,
-              kind: backend.kind,
-              backend,
-            });
-            if (loss) {
-              // Never replay an operation after provider disappearance. Even a
-              // read may race a route change, and a mutation's provider outcome
-              // is ambiguous. The next independently-admitted call observes the
-              // advanced epoch and elected recovery state.
-              this.invalidate(backend);
-              throw new RoutingBackendRecoveryRequiredError(op, loss.leaseEpoch, loss.recovery);
-            }
-          }
-          throw error;
+          return await this.throwProviderError(op, backend, error);
         }
         this.invalidate(backend);
         if (mutatesWorkspace) {
@@ -1572,18 +1775,21 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       const providerCommand =
         yieldedSessionId === null ? null : backend.session.getProviderCommand?.(yieldedSessionId);
       const retainedProcess =
-        yieldedSessionId === null
+        reservedProcess ??
+        (yieldedSessionId === null
           ? undefined
           : {
               id: crypto.randomUUID(),
               providerSessionId: yieldedSessionId,
               ...(providerCommand ? { providerCommand } : {}),
-            };
+            });
       const retainedRecord = retainedProcess
-        ? this.registerRetainedProcess(retainedProcess, backend)
+        ? reservedProcess
+          ? this.retainedProcess(reservedProcess.providerSessionId)
+          : this.registerRetainedProcess(retainedProcess, backend)
         : null;
 
-      if (mutatesWorkspace && this.deps.afterMutation) {
+      if (mutatesWorkspace && this.deps.afterMutation && !reservedProcess) {
         const settlement: PendingParentPromotion = {
           op,
           backend,
@@ -1648,6 +1854,17 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       // let process-aware methods use the copied backend identity.
       if (retainedRecord) {
         await this.captureRetainedOutput(retainedRecord, result);
+        try {
+          await backend.session.releaseSupervisedCommand?.(
+            retainedRecord.process.providerSessionId,
+          );
+        } catch (cause) {
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            "Supervisor release is unresolved after durable retention; the exact command remains tracked and was not replayed",
+            { cause, retainedProcess: retainedRecord.process },
+          );
+        }
         return result;
       }
 
@@ -1688,6 +1905,25 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     // Exhausted retries against a relentless swap-storm: surface the fence so the
     // caller (turn) backs off — never loop forever.
     throw lastError ?? new Error(`routing op "${op}" exhausted fence retries`);
+  }
+
+  private observeCaptureWait(
+    op: string,
+    backend: ResolvedActiveBackend,
+    captureWaitStage: "admission" | "provider",
+    observation: RoutingSandboxWaitObservation,
+  ): void {
+    try {
+      this.deps.onCaptureWait?.({
+        backend: backend.kind,
+        op,
+        outcome: observation.outcome === "completed" ? "ok" : "failed",
+        durationMs: observation.durationMs,
+        captureWaitStage,
+      });
+    } catch {
+      // Capture admission and provider execution never depend on telemetry.
+    }
   }
 
   private async invokeProviderOperation<T>(
@@ -1758,30 +1994,40 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   // degrades via the natural fallback or RoutingUnsupportedError.
 
   async exec(args: unknown): Promise<unknown> {
-    return this.dispatch("exec", true, async (s) => {
-      if (s.exec) {
-        return s.exec(args);
-      }
-      // Some backends (selfhosted) only expose exec; others only execCommand.
-      if (s.execCommand) {
-        return structuredExecResultFromBanner(await s.execCommand(args));
-      }
-      throw new RoutingUnsupportedError("exec", this.cached?.kind ?? "unknown");
-    });
+    return this.dispatch(
+      "exec",
+      true,
+      async (s) => {
+        if (s.exec) {
+          return s.exec(args);
+        }
+        // Some backends (selfhosted) only expose exec; others only execCommand.
+        if (s.execCommand) {
+          return structuredExecResultFromBanner(await s.execCommand(args));
+        }
+        throw new RoutingUnsupportedError("exec", this.cached?.kind ?? "unknown");
+      },
+      eligibleForSupervision(args),
+    );
   }
 
   async execCommand(args: unknown): Promise<string> {
     try {
-      return await this.dispatch("execCommand", true, async (s) => {
-        if (s.execCommand) {
-          return s.execCommand(args);
-        }
-        if (s.exec) {
-          const r = (await s.exec(args)) as { stdout?: string; output?: string };
-          return r.stdout ?? r.output ?? "";
-        }
-        throw new RoutingUnsupportedError("execCommand", this.cached?.kind ?? "unknown");
-      });
+      return await this.dispatch(
+        "execCommand",
+        true,
+        async (s) => {
+          if (s.execCommand) {
+            return s.execCommand(args);
+          }
+          if (s.exec) {
+            const r = (await s.exec(args)) as { stdout?: string; output?: string };
+            return r.stdout ?? r.output ?? "";
+          }
+          throw new RoutingUnsupportedError("execCommand", this.cached?.kind ?? "unknown");
+        },
+        eligibleForSupervision(args),
+      );
     } catch (error) {
       // Render a terminal selfhosted fault as the tool's result (four fields, correct
       // verdict) instead of letting the SDK mislabel it "Please try again".
@@ -1861,7 +2107,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       await this.writeStdinForProcessControl({
         sessionId: record.process.providerSessionId,
         chars: "",
-        yieldTimeMs: 1,
+        // A near-zero provider long-poll can expire before even an already
+        // completed command's terminal batch is delivered. Use the ordinary
+        // bounded command-read window; never infer completion from silence.
+        yieldTimeMs: 250,
       });
       return true;
     }
@@ -1929,6 +2178,23 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     return await this.dispatchProcessControl(args);
   }
 
+  async cancelSupervisedCommand(
+    providerSessionId: number,
+    reason: "provider_deadline" | "explicit_stop",
+  ): Promise<boolean> {
+    const record = this.retainedProcesses.get(providerSessionId);
+    if (
+      !record ||
+      record.process.providerCommand?.kind !== "modal-router-v1" ||
+      !record.process.providerCommand.supervision
+    )
+      return false;
+    await this.ensureParentPromotion(record);
+    if (!record.backend.session.cancelSupervisedCommand)
+      throw new Error("Supervised command control is unavailable");
+    return await record.backend.session.cancelSupervisedCommand(providerSessionId, reason);
+  }
+
   /** Empty-input eager reads belong to the model's foreground wait, while
    * cancellation/drain reads use the non-observing control method above. */
   async writeStdinForProcessRead(args: unknown): Promise<string> {
@@ -1947,6 +2213,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const exactProviderSessionId = positiveProviderSessionId(providerSessionId);
     if (exactProviderSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const record = this.retainedProcess(exactProviderSessionId);
+    if (
+      record.process.providerCommand?.kind === "modal-router-v1" &&
+      record.process.providerCommand.supervision
+    )
+      throw new Error(
+        "Legacy process helpers are unavailable for a supervised command; use its native control protocol",
+      );
     const priorTerminal = await this.flushPendingProcessMutation(record);
     if (priorTerminal !== null) return priorTerminal;
     if (record.pendingTerminal) {

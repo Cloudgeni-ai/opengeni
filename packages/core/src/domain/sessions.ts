@@ -1,4 +1,12 @@
+import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
+import {
+  getSessionEvent,
+  getSessionRetryReceiptInTransaction,
+  retryFailedSessionInTransaction,
+  SessionRetryConflictError,
+} from "@opengeni/db";
+import type { SessionRetryRequest, SessionRetryResponse } from "@opengeni/contracts";
 import { saveAgentLearningSettings } from "@opengeni/db";
 import { withSessionRlsActorContext } from "@opengeni/db";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
@@ -44,6 +52,7 @@ import {
   type GoalSpec,
   type FirstPartyMcpToolName,
   type McpPersonalConnectionDelegation,
+  type McpConnectionAccountBinding,
   type McpConnectionAccountSelection,
   type Permission,
   type PersonalResourceAttachmentIntent,
@@ -60,6 +69,7 @@ import {
   type SessionMcpCredentialUpdateInput,
   type SessionMcpServerInput,
   type SessionMcpServerMetadata,
+  type SessionMcpApprovalPolicyTarget,
   type SubmittedTimelineAnnotation,
   type TimelineAnnotation,
   type UpdateSessionMcpApprovalPolicyResponse,
@@ -90,6 +100,8 @@ import {
   listDistinctVariableSetSelectionsInGroup,
   listDistinctRigVersionIdsInGroup,
   listInstalledPortableSkills,
+  listEnabledMcpCapabilityServers,
+  requireApprovalWithFloor,
   getSandbox,
   getSession,
   getInitializedSessionCreateReplay,
@@ -172,7 +184,7 @@ import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateSubmittedTimelineAnnotations } from "./timeline-annotations";
 import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
 import {
-  freezePersonalConnectionDelegations,
+  freezeConnectionAccounts,
   personalConnectionDelegationSourceForGrant,
 } from "./personal-connection-delegations";
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
@@ -847,8 +859,10 @@ export async function createAndStartSessionWithOutcome(input: {
   // Encrypted DB rows plus matching safe metadata for create-time per-session
   // MCP servers. Metadata is the only shape emitted in events/responses.
   mcpServers?: CreateSessionMcpServerInput[];
+  mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy>;
   sessionMcpServers?: SessionMcpServerMetadata[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
   // The manager session spawning this worker (a worker-signed sessionId claim
@@ -1069,7 +1083,9 @@ export async function createAndStartSessionWithOutcome(input: {
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
+      mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
       personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+      mcpAccountBindings: input.mcpAccountBindings ?? null,
       initialPersonalResourceAttachmentIntent:
         input.initialPersonalResourceAttachmentIntent ?? null,
       ...(input.xaiProviderAccountAuthoritySnapshot
@@ -1163,7 +1179,9 @@ export async function createAndStartSessionWithOutcome(input: {
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
+      mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
       personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+      mcpAccountBindings: input.mcpAccountBindings ?? null,
       initialPersonalResourceAttachmentIntent:
         input.initialPersonalResourceAttachmentIntent ?? null,
       ...(input.xaiProviderAccountAuthoritySnapshot
@@ -1559,6 +1577,7 @@ type PostUserMessageTurnInput = {
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  mcpAccountBindings?: McpConnectionAccountBinding[] | null;
 
   captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
@@ -1767,6 +1786,7 @@ export async function postUserMessageTurn(
                 ? { recordAgentRunUsage: input.recordAgentRunUsage }
                 : {}),
               personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+              mcpAccountBindings: input.mcpAccountBindings ?? null,
 
               ...(input.captureTurnAuthority
                 ? { captureTurnAuthority: input.captureTurnAuthority }
@@ -1989,6 +2009,116 @@ async function resolveWorkspaceModelBoundarySettings(
       ...(retainedProductModelId !== undefined ? { retainedProductModelId } : {}),
     })
   ).settings;
+}
+
+/** Explicit recovery, never a new prompt or a Pause/Resume command. */
+export async function retryFailedSession(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  workspaceId: string,
+  sessionId: string,
+  request: SessionRetryRequest,
+): Promise<SessionRetryResponse> {
+  requirePermission(grant, "sessions:control");
+  await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.control",
+    surface: "core",
+  });
+  const replay = await withWorkspaceSubjectSessionActivityRls(
+    deps.db,
+    workspaceId,
+    grant.subjectId,
+    async (db) =>
+      await getSessionRetryReceiptInTransaction(db, {
+        workspaceId,
+        sessionId,
+        subjectId: grant.subjectId,
+        request,
+      }),
+  );
+  if (replay) return replay;
+  const session = await requireSession(deps.db, workspaceId, sessionId);
+  const failure = await getSessionEvent(deps.db, workspaceId, request.failureEventId);
+  if (!failure || failure.sessionId !== sessionId)
+    throw new SessionRetryConflictError("RETRY_STALE_FAILURE", "The failure event is unavailable");
+  const turn = failure?.turnId ? await getSessionTurn(deps.db, workspaceId, failure.turnId) : null;
+  const retainedModel = turn?.model ?? session.model;
+  const settings = await resolveWorkspaceModelBoundarySettings(
+    deps,
+    grant,
+    workspaceId,
+    [request.model ?? retainedModel],
+    retainedModel,
+  );
+  const model = canonicalConfiguredModel(settings, request.model ?? retainedModel)!;
+  try {
+    assertSessionAllowsProductModel(session, model);
+  } catch (error) {
+    if (error instanceof CodexCompactionV2ProviderLockedError)
+      throw new HTTPException(422, { message: error.message, cause: error });
+    throw error;
+  }
+  await assertWorkspaceModelPolicyAllows(deps.db, settings, workspaceId, model);
+  const executionPolicy = resolveTurnExecutionPolicyV1(settings, {
+    modelId: model,
+    requestedModelId: request.model ?? null,
+    modelSource: request.model === undefined ? "session" : "explicit",
+    reasoningEffort: request.reasoningEffort ?? turn?.reasoningEffort ?? session.reasoningEffort,
+    reasoningSource: request.reasoningEffort === undefined ? "session" : "explicit",
+    latencyMode: request.latencyMode ?? turn?.latencyMode ?? session.latencyMode,
+    latencyModeSource: request.latencyMode === undefined ? "session" : "explicit",
+  });
+  await requireLimit(deps, {
+    accountId: grant.accountId,
+    workspaceId,
+    action: "agent_run:create",
+    quantity: 1,
+    model,
+  });
+  const result = await runIdempotentPersistenceTransaction(
+    {
+      stage: "session.retry",
+      eventTypes: ["turn.recovery.requested", "session.status.changed"],
+      maxAttempts: 3,
+    },
+    async () =>
+      await withWorkspaceSubjectSessionActivityRls(
+        deps.db,
+        workspaceId,
+        grant.subjectId,
+        async (db) =>
+          await retryFailedSessionInTransaction(db, {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+            request,
+            executionPolicy,
+          }),
+      ),
+  );
+  // Fanout and workflow dispatch are reconstructible after the durable commit.
+  // Never report an admitted retry as failed because one notification is down.
+  void Promise.all([
+    deps.workflowClient.requestSessionWorkflowWakeDispatch(),
+    (async () => {
+      const events = await Promise.all(
+        result.eventIds.map((id) => getSessionEvent(deps.db, workspaceId, id)),
+      );
+      await publishDurableSessionEvents(
+        deps.bus,
+        workspaceId,
+        sessionId,
+        events.filter((event): event is SessionEvent => event !== null),
+      );
+    })(),
+  ]).catch(() => {
+    console.warn("[sessions] retry notification failed; durable recovery remains", {
+      errorCode: "session_retry_notification_failed",
+    });
+  });
+  return { outcome: result.outcome, turnId: result.turnId, failureEventId: result.failureEventId };
 }
 
 async function withSessionCreateUsageRecording(input: {
@@ -2344,6 +2474,23 @@ async function createSessionForRequestInFileScope(
     capabilityRuntimeSettings,
     sessionMcpServers.runtimeServers,
   );
+  const requestedMcpPolicies =
+    payload.mcpApprovalPolicies ?? parentSession?.mcpApprovalPolicies ?? {};
+  const mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy> = {};
+  if (Object.keys(requestedMcpPolicies).length > 0) {
+    requirePermission(grant, "sessions:control");
+    const inheritedServers = await listEnabledMcpCapabilityServers(db, workspaceId);
+    for (const [id, policy] of Object.entries(requestedMcpPolicies)) {
+      const inherited = inheritedServers.find((server) => server.id === id);
+      if (!inherited || sessionMcpServers.runtimeServers.some((server) => server.id === id)) {
+        throw new HTTPException(422, {
+          message: `MCP approval policy must name an enabled inherited capability: ${id}`,
+        });
+      }
+      mcpApprovalPolicies[id] =
+        requireApprovalWithFloor(policy, inherited.approvalFloor, true) ?? false;
+    }
+  }
   const resources = normalizeResources(
     hasOwnProperty(rawPayload, "resources")
       ? payload.resources
@@ -2478,20 +2625,20 @@ async function createSessionForRequestInFileScope(
       message: "object storage is not configured",
     });
   }
+  const attachmentOwnerContext = authorization
+    ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
+    : grant.principalKind === "agent_attempt"
+      ? await fileOwnerContextForAgent({ db }, grant, "sessions:create")
+      : undefined;
+  const attachmentOwner =
+    attachmentOwnerContext?.privateFileOwnerSubjectId === grant.subjectId ? grant.subjectId : null;
   await validateFileResources(
     db,
     grant.accountId,
     workspaceId,
     personalResourceSubjectId ?? grant.subjectId,
     resources,
-    (authorization || grant.principalKind === "agent_attempt") &&
-      (effectiveVisibility === "user_private" ||
-        sessionScope.memoryScope === "user" ||
-        workspace.kind === "personal")
-      ? authorization
-        ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
-        : await fileOwnerContextForAgent({ db }, grant, "sessions:create")
-      : undefined,
+    attachmentOwnerContext,
   );
   // Every selected Variable Set is independently authorized. Scope does not
   // affect precedence: explicit order is low-to-high and later sets win name
@@ -2523,7 +2670,7 @@ async function createSessionForRequestInFileScope(
       if (payload.rigId) {
         throw new HTTPException(422, {
           message: rig
-            ? `rig ${payload.rigId} has no active version to bind`
+            ? `sandbox environment ${payload.rigId} has no active version to bind`
             : `unknown rigId: ${payload.rigId}`,
         });
       }
@@ -2743,8 +2890,9 @@ async function createSessionForRequestInFileScope(
   const atlassianEnabled =
     firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
     (!firstPartyMcpPermissions?.length || firstPartyMcpPermissions.includes("connections:read"));
-  const personalConnectionDelegations = await freezePersonalConnectionDelegations({
+  const { personalConnectionDelegations, mcpAccountBindings } = await freezeConnectionAccounts({
     db,
+    accountId: grant.accountId,
     workspaceId,
     settings: runtimeSettings,
     tools,
@@ -2875,7 +3023,7 @@ async function createSessionForRequestInFileScope(
         throw new HTTPException(422, {
           message: variableSetMismatch
             ? "sandbox:'shared' requires the same variableSet / same environment as the creator's box (the box variable set/environment is fixed at creation); omit sandbox or pass 'new' when attaching a different variableSet/environment."
-            : "sandbox:'shared' requires the same rig as the creator's box (the box's rig setup is fixed at creation); omit sandbox or pass 'new' when binding a different rig.",
+            : "sandbox:'shared' requires the same sandbox environment as the creator's box (setup is fixed at creation); omit sandbox or pass 'new' when selecting a different sandbox environment.",
         });
       }
       // Inherited default: deterministic separation on the genuine shared-state
@@ -2938,7 +3086,7 @@ async function createSessionForRequestInFileScope(
         )
       ) {
         throw new HTTPException(422, {
-          message: `sandbox group ${sandboxChoice.groupId} runs a different rig (the box's rig setup is fixed at creation); create with the group's rig or omit sandbox for an own box.`,
+          message: `sandbox group ${sandboxChoice.groupId} uses a different sandbox environment (setup is fixed at creation); select the group's sandbox environment or omit sandbox for a separate box.`,
         });
       }
     }
@@ -3132,7 +3280,7 @@ async function createSessionForRequestInFileScope(
       metadata: creationMetadata ?? {},
       ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
 
-      ...(captureLinkedAuthority
+      ...(payload.startMode !== "realtime"
         ? {
             captureInitialTurnAuthority: async (
               tx: Database,
@@ -3140,6 +3288,15 @@ async function createSessionForRequestInFileScope(
               turnId: string,
             ) => {
               await captureLinkedAuthority?.(tx, sessionId, turnId);
+              if (attachmentOwner)
+                await acceptSessionFileAttachments(tx, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  sessionId,
+                  turnId,
+                  subjectId: attachmentOwner,
+                  resources,
+                });
             },
           }
         : {}),
@@ -3168,8 +3325,10 @@ async function createSessionForRequestInFileScope(
       firstPartyMcpPermissions,
       firstPartyMcpTools,
       mcpServers: sessionMcpServers.dbServers,
+      mcpApprovalPolicies,
       sessionMcpServers: sessionMcpServers.metadata,
       personalConnectionDelegations,
+      mcpAccountBindings,
       initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
       workspaceCustomModel: isWorkspaceCustomModelId(settings, model),
       retainWorkspaceCustomModel: parentSession !== null && model === inheritedModel,
@@ -3532,21 +3691,18 @@ async function acceptSessionUserMessageInFileScope(
         message: "object storage is not configured",
       });
     }
+    const attachmentOwnerContext = input.authorization
+      ? await fileOwnerContextForAccess({ db }, input.authorization, "sessions:control")
+      : grant.principalKind === "agent_attempt"
+        ? await fileOwnerContextForAgent({ db }, grant, "sessions:control")
+        : undefined;
     await validateFileResources(
       db,
       grant.accountId,
       workspaceId,
       grant.subjectId,
       requestedResources,
-      (input.authorization || grant.principalKind === "agent_attempt") &&
-        ((await getSessionAuthorityProjection(db, workspaceId, sessionId))?.visibility ===
-          "user_private" ||
-          existingSession.memoryScope === "user" ||
-          (await requireWorkspace(db, workspaceId)).kind === "personal")
-        ? input.authorization
-          ? await fileOwnerContextForAccess({ db }, input.authorization, "sessions:control")
-          : await fileOwnerContextForAgent({ db }, grant, "sessions:control")
-        : undefined,
+      attachmentOwnerContext,
     );
     await validateGitHubRepositorySelection(db, workspaceId, [
       ...existingSession.resources,
@@ -3581,8 +3737,9 @@ async function acceptSessionUserMessageInFileScope(
       ),
       existingSession.mcpServers,
     );
-    const personalConnectionDelegations = await freezePersonalConnectionDelegations({
+    const { personalConnectionDelegations, mcpAccountBindings } = await freezeConnectionAccounts({
       db,
+      accountId: grant.accountId,
       workspaceId,
       settings: runtimeSettings,
       tools: existingSession.tools,
@@ -3624,12 +3781,12 @@ async function acceptSessionUserMessageInFileScope(
         turnExecutionPolicy,
         mcpCredentialUpdates,
         personalConnectionDelegations,
+        mcpAccountBindings,
 
         ...(captureLinkedAuthority
           ? {
-              captureTurnAuthority: async (tx: Database, turnId: string) => {
-                await captureLinkedAuthority?.(tx, sessionId, turnId);
-              },
+              captureTurnAuthority: (tx: Database, turnId: string) =>
+                captureLinkedAuthority(tx, sessionId, turnId),
             }
           : {}),
         ...(input.personalResourceAttachment
@@ -3793,7 +3950,7 @@ export async function updateSessionMcpApprovalPolicy(
   });
   requirePermission(grant, "sessions:control");
 
-  const outcome: { server?: SessionMcpServerMetadata } = {};
+  const outcome: { server?: SessionMcpApprovalPolicyTarget } = {};
   const events = await appendSessionEventsWithLockedSessionUpdate(
     deps.db,
     grant.workspaceId,

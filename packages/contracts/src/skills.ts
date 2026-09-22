@@ -38,9 +38,17 @@ export type SkillSaveInput = SkillWriteContext & {
   reason: string;
 };
 export type SkillRevisionInput = SkillWriteContext & {
+  removalOperationId?: string | undefined;
   operationId: string;
   skillId: string;
   revisionId: string;
+  expectedRevisionId: string | null;
+  expectedScopeVersion: number;
+  reason: string;
+};
+export type SkillRemoveInput = SkillWriteContext & {
+  operationId: string;
+  skillId: string;
   expectedRevisionId: string | null;
   expectedScopeVersion: number;
   reason: string;
@@ -51,6 +59,7 @@ export type SkillInstallInput = SkillWriteContext & {
   reason: string;
 };
 export const SkillReviewReference = z.object({
+  removalOperationId: z.uuid().optional(),
   sourceOperationId: z.uuid(),
   skillId: z.uuid(),
   revisionId: z.uuid(),
@@ -59,18 +68,22 @@ export const SkillReviewReference = z.object({
 });
 export type SkillReviewReference = z.infer<typeof SkillReviewReference>;
 export function skillReviewHumanInput(skillReview: SkillReviewReference) {
+  const removing = Boolean(skillReview.removalOperationId);
   return {
     questions: [
       {
         id: `skill:${skillReview.revisionId}`,
         kind: "single_select" as const,
-        label: "Save this Skill?",
-        prompt: "Save this exact Skill revision for this workspace?",
-        helpText:
-          "Review the complete files before saving. Saving activates this revision immediately.",
+        label: removing ? "Permanently delete this Skill?" : "Save this Skill?",
+        prompt: removing
+          ? "Permanently delete this Skill and all its stored revisions?"
+          : "Save this exact Skill revision for this workspace?",
+        helpText: removing
+          ? "This cannot be undone. All stored Skill revisions will be deleted; conversations remain unchanged."
+          : "Review the complete files before saving. Saving activates this revision immediately.",
         options: [
-          { id: "save", label: "Save" },
-          { id: "skip", label: "Don't save" },
+          { id: "save", label: removing ? "Permanently delete" : "Save" },
+          { id: "skip", label: removing ? "Keep Skill" : "Don't save" },
         ],
         required: true,
         allowOther: false,
@@ -80,6 +93,7 @@ export function skillReviewHumanInput(skillReview: SkillReviewReference) {
   };
 }
 export const SkillWriteReceipt = z.object({
+  removed: z.boolean().optional(),
   operationId: z.uuid(),
   skillId: z.uuid(),
   revisionId: z.uuid(),
@@ -104,6 +118,7 @@ export const SkillSourceReleaseReceipt = z.object({
 });
 export type SkillSourceReleaseReceipt = z.infer<typeof SkillSourceReleaseReceipt>;
 export type SkillRecord = {
+  removalOperationId?: string | null;
   activationMode: "workspace_managed" | "session_selected";
   pendingRevisionIds: string[];
   id: string;

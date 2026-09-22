@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
-  addSessionSystemUpdate,
+  submitHumanPromptInTransaction,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
@@ -77,27 +77,29 @@ async function fixture() {
     exitCode: 0,
     reason: "process exited",
   });
-  return { identity, sessionInput };
+  return { identity, sessionInput, grant };
 }
 
 test("terminal reads preserve notification and history delivered by the ordinary claim API", async () => {
-  const { identity } = await fixture();
+  const { identity, grant } = await fixture();
   // The terminal notice rides eligible new input; it does not itself wake idle.
-  await addSessionSystemUpdate(client.db, {
-    accountId: identity.accountId,
-    workspaceId: identity.workspaceId,
-    sessionId: identity.sessionId,
-    kind: "agent_message",
-    classification: "info",
-    sourceId: crypto.randomUUID(),
-    dedupeKey: crypto.randomUUID(),
-    summary: "Inspect the command result",
-    payload: {
-      type: "agent_message",
-      text: "Inspect the command result",
-      operationId: crypto.randomUUID(),
-    },
-  });
+  await withWorkspaceSessionActivityRls(client.db, identity.workspaceId, (db) =>
+    db.transaction((tx) =>
+      submitHumanPromptInTransaction(tx as unknown as typeof db, {
+        accountId: identity.accountId,
+        workspaceId: identity.workspaceId,
+        sessionId: identity.sessionId,
+        subjectId: grant.subjectId,
+        actor: { type: "human", subjectId: grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "Inspect the command result",
+        resources: [],
+        source: "user",
+        reasoningEffortFallback: "medium",
+      }),
+    ),
+  );
   const claim = await claimSessionWorkForAttempt(client.db, identity.workspaceId, {
     sessionId: identity.sessionId,
     workflowId: `session-${identity.sessionId}`,

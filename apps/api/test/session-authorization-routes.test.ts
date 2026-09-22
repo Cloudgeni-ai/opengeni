@@ -1315,6 +1315,9 @@ describe("embedding host session authorization routes", () => {
 
     expect((await app.request(`${base}/${value.child.id}`, { headers })).status).toBe(200);
     expect((await app.request(`${base}/${value.hidden.id}`, { headers })).status).toBe(404);
+    expect(
+      (await app.request(`${base}/${value.hidden.id}/codex-accounts`, { headers })).status,
+    ).toBe(404);
     expect(decisions).toContainEqual({
       sessionId: value.child.id,
       rootSessionId: value.root.id,

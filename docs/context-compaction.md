@@ -6,7 +6,7 @@ OpenGeni freezes a per-session compaction mode at create time
 | Mode | When | Mechanism |
 | --- | --- | --- |
 | `portable` | All non-Codex sessions; existing sessions (backfill); new Codex sessions when the workspace sets `codexCompactionDefault: "portable"` | Durable plaintext checkpoint (Codex CLI local path). Free mid-session provider switching. |
-| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` on `remote_v2` builds the agent first so that prefix matches (portable `/compact` still skips prepareTools/sandbox). Retained cleartext keeps recent user/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
+| `remote_v2` | New Codex sessions by default (`codexCompactionDefault` absent or `"remote_v2"`) | Codex remote compaction v2 (wire `compaction_trigger` → opaque `{ type: "compaction", encrypted_content }`). On a valid compaction item, install and recompute usage — same as Codex CLI (no local “must shrink / must differ” gate). The compact request **must** reuse the ordinary turn prompt-cache prefix: model-visible tool schemas + the exact agent `instructions` + active history + `compaction_trigger` (CLI `base_instructions` / `model_visible_specs` parity). Empty instructions are rejected. Operator `/compact` on `remote_v2` goes through normal sandbox and lazy-tool request preparation, stopping before ordinary inference (portable `/compact` still skips prepareTools/sandbox). Retained cleartext keeps recent user/developer messages **including images** within the 64k budget. The Agents SDK rejects a bare trigger item, so OpenGeni emits `{ type: "unknown", providerData: { type: "compaction_trigger" } }` through `CompactionResponsesModel` and the Codex fetch normalizer restores the wire shape. Session is **Codex-only** for its lifetime (HTTP + worker admission). |
 
 There is no off switch, compatibility ladder, ordinary-turn history trim, or
 deterministic non-model fallback. A `remote_v2` session never silently falls
@@ -25,6 +25,8 @@ The implementation lives in:
 
 - `packages/runtime/src/context-compaction.ts`: thresholds, portable rebuild,
   remote v2 retain/rebuild helpers, and the typed compaction signal.
+- `packages/runtime/src/prepared-compaction-request.ts`: retains the actual prepared request prefix at the model dispatch boundary. Pre-turn/operator and mid-turn compaction stop there before ordinary inference; no prefix is rebuilt from the original Agent. A missing prepared request fails closed. Compaction preserves all prepared model settings and replaces only input plus the per-call cancellation signal.
+- `apps/worker/src/activities/run-input.ts`: operator compaction loads canonical history through ordinary input preparation without a synthetic message or required update batch.
 - `packages/runtime/src/index.ts`: portable summarizer + `requestRemoteCompactionV2`.
 - `apps/worker/src/activities/context-compaction.ts`: mode branch, summarizer
   bounded remote overflow retry, remote fail-closed path, fenced durable replacement.
@@ -395,3 +397,36 @@ for the final acknowledgement. It never reads or modifies a customer session.
 Omit `--durable` for provider-only verification;
 the receipt distinguishes the two modes. Locally authored assertion messages
 are visible; arbitrary provider errors and SDK causes remain content-free.
+
+### Cache-preserving compaction requests
+
+Remote v2 compaction carries the ordinary agent’s effective reasoning effort and
+summary setting, alongside its exact instructions and tool schemas. Omitting the
+reasoning configuration can change provider-side instructions before the long
+history is summarized. Durable turn-scoped operational notices remain at their
+original positions in the compaction input. The resulting summarized history is
+still a deliberate new prefix.
+
+### Reasoning effort updates (opt-in)
+
+`OPENGENI_REASONING_CONFIGURATION_UPDATES_ENABLED` defaults to false pending
+live Codex backend verification. For GPT-6 Astra on the built-in OpenAI/Codex
+Responses routes, accepted effort changes become durable `configuration_update`
+items before the accepted turn input. The first enabled turn establishes the
+request-level baseline; later changes keep that baseline. Existing sessions may
+incur one baseline transition when enabled. Unsupported models, providers and
+reasoning efforts retain the existing request-level behavior.
+
+The exact attempt fence protects insertion and retries do not duplicate updates.
+Private baseline metadata stays in canonical history, outside SDK-visible items;
+only protocol fields pass through the SDK unknown-item adapter. Updates are
+removed from model input on unsupported routes. Adjacent updates are coalesced
+in the provider projection because the API rejects consecutive updates.
+
+Explicit compaction retains the actual summary landmark and stores a fresh
+configuration item after it, carrying the selected effort and original baseline.
+Portable replacement fingerprints include this trailing item. Do not combine
+these updates with provider automatic compaction/truncation or `/responses/compact`.
+Our remote-v2 path uses an explicit `compaction_trigger` on `/responses`.
+The response's effort field reports the baseline, not the selected update;
+accepted turn policy remains the source of the user's selected effort.

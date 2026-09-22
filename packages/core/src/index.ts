@@ -1,4 +1,6 @@
+export { readSessionAttachmentFiles } from "./domain/session-file-access";
 export * from "./domain/skills";
+export * from "./domain/mcp-account-bindings";
 export * from "./domain/organization-integration-catalog";
 export * from "./domain/knowledge";
 export * from "./domain/knowledge-search";
@@ -77,7 +79,7 @@ export * from "./session-authorization";
 export * from "./billing/limits";
 
 // Domain layer — the off-HTTP V2 surface (createSessionForRequest,
-// postUserMessageTurn, createAndStartSession, capability/pack/environment/
+
 // scheduled-task/workspace-member logic, …).
 export * from "./domain/capabilities";
 export * from "./domain/native-mcp-connection-admission";
@@ -86,10 +88,9 @@ export * from "./domain/skill-search";
 export * from "./domain/github-skill-source";
 export * from "./domain/environments";
 export * from "./rigs";
-export * from "./domain/packs";
 export * from "./domain/automations";
 export * from "./domain/pr-review";
-export * from "./domain/product-integration-pack";
+
 export * from "./domain/personal-connection-delegations";
 export * from "./domain/resources";
 export * from "./domain/github-repository-bindings";
@@ -115,6 +116,7 @@ export * from "./application/new-session-drafts";
 export * from "./application/composer-submit";
 export * from "./application/session-commands";
 export * from "./application/session-tenancy";
+export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";
 export * from "./application/api-integration-servers";
 

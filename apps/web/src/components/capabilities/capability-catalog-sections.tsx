@@ -17,11 +17,6 @@ import type { ListViewState } from "@/lib/load-state";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem } from "@/types";
 
-/**
- * The kinds the Connectors grid can actually show. Skills, Plugins, and Packs
- * are Bundles and live in their own section, so offering
- * them here would only ever produce an empty grid.
- */
 export const CAPABILITY_FILTERS: readonly CapabilityFilter[] = ["all", "mcp", "api"];
 
 export function CapabilityDiscoveryControls({
@@ -87,12 +82,6 @@ export function PluginSearch({
   );
 }
 
-/**
- * The enabled Connectors strip. Its input is already scoped to `mcp`/`api`
- * items (`isConnectorCatalogItem`), so no Skill, Plugin, or Pack reaches it:
- * Bundles have their own section, with their own authority rules and their own
- * remove affordance.
- */
 export function EnabledCapabilitiesSection({
   items,
   busyId,

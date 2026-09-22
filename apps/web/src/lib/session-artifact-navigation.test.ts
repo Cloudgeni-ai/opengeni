@@ -16,6 +16,24 @@ const documentPath = `/workspaces/${workspace}/artifacts/editable/${documentId}`
 const filePath = `/workspaces/${workspace}/artifacts/files/${fileId}`;
 
 describe("session artifact navigation", () => {
+  test("opens retained references and permits only validated return context", () => {
+    expect(sessionArtifactFromHref(`artifact:${fileId}`, origin, workspace)).toEqual({
+      id: fileId,
+      editable: false,
+      kind: "file",
+    });
+    expect(
+      sessionArtifactFromHref(`${filePath}?fromSession=${workspace}`, origin, workspace),
+    ).toEqual({ id: fileId, editable: false, kind: "file" });
+    for (const suffix of [
+      "?fromSession=https://evil.example",
+      `?fromSession=${workspace}&fromSession=${workspace}`,
+      `?fromSession=${workspace}&version=2`,
+    ]) {
+      expect(sessionArtifactFromHref(filePath + suffix, origin, workspace)).toBeNull();
+    }
+    expect(sessionArtifactFromHref("artifact:bad", origin, workspace)).toBeNull();
+  });
   test("recognizes canonical relative and absolute Site and editor links", () => {
     for (const href of [sitePath, `${origin}${sitePath}`]) {
       expect(sessionArtifactFromHref(href, origin, workspace)).toEqual({

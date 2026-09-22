@@ -22,9 +22,17 @@ import {
   FileResourceRef,
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_REFS_FIELD,
+  latestSkillCatalogContext,
+  readSkillCatalogContext,
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
+
+import {
+  latestReasoningConfiguration,
+  reasoningConfigurationItem,
+  readReasoningConfiguration,
+} from "@opengeni/codex";
 
 export type CompactionItem = Record<string, unknown>;
 
@@ -1622,10 +1630,13 @@ export function buildCompactionReplacementHistory(
     }
     remaining -= textTokens + nonTextTokens;
   }
-  const history = retainedReversed.reverse();
+  const currentCatalog = latestSkillCatalogContext(items);
+  const history = [...(currentCatalog ? [currentCatalog] : []), ...retainedReversed.reverse()];
   const attachmentCatalog = buildAttachmentCatalogItem(items, history);
   if (attachmentCatalog) history.push(attachmentCatalog);
   history.push(buildSummaryItem(summaryBody));
+  const reasoning = latestReasoningConfiguration(items);
+  if (reasoning) history.push(reasoningConfigurationItem(reasoning));
   return history;
 }
 
@@ -1669,6 +1680,7 @@ export function buildRemoteV2ReplacementHistory(
   let remaining = REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET;
   for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
     const item = items[index]!;
+    if (readSkillCatalogContext(item) !== null) continue;
     if (!isRetainedRemoteV2Message(item)) continue;
     const textTokens = estimateTextTokens(messageText(item));
     const chargeTokens = Math.max(1, retainedItemTokens(item));
@@ -1683,7 +1695,8 @@ export function buildRemoteV2ReplacementHistory(
     remaining = 0;
     break;
   }
-  const history = retainedReversed.reverse();
+  const currentCatalog = latestSkillCatalogContext(items);
+  const history = [...(currentCatalog ? [currentCatalog] : []), ...retainedReversed.reverse()];
   const attachmentCatalog = buildAttachmentCatalogItem(items, history);
   if (attachmentCatalog) history.push(attachmentCatalog);
   history.push({
@@ -1691,6 +1704,8 @@ export function buildRemoteV2ReplacementHistory(
     encrypted_content: compactionItem.encrypted_content,
     ...(typeof compactionItem.summary === "string" ? { summary: compactionItem.summary } : {}),
   });
+  const reasoning = latestReasoningConfiguration(items);
+  if (reasoning) history.push(reasoningConfigurationItem(reasoning));
   return history;
 }
 
@@ -1800,7 +1815,9 @@ export function latestCompactionReplacementFingerprint(
 ): string | null {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     if (isCompactionSummary(items[index])) {
-      return compactionReplacementFingerprint(items.slice(0, index + 1));
+      const end =
+        items[index + 1] && readReasoningConfiguration(items[index + 1]!) ? index + 2 : index + 1;
+      return compactionReplacementFingerprint(items.slice(0, end));
     }
   }
   return null;

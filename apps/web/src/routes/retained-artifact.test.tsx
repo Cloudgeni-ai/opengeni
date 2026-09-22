@@ -13,6 +13,11 @@ import { createRoot } from "react-dom/client";
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const missingUuid = "22222222-2222-4222-8222-222222222222";
 let artifactId = "does-not-exist";
+let artifactKind = "generated_image";
+const playback = mock(async () => ({ url: "https://media.example/video.mp4" }));
+const genericDownload = mock(async () => {
+  throw new Error("Wrong download API");
+});
 let loadError: Error | null = new OpenGeniApiError(
   404,
   JSON.stringify({ error: { message: "artifact not found" } }),
@@ -22,13 +27,15 @@ let loadError: Error | null = new OpenGeniApiError(
 const context = {
   accessKeyVersion: 0,
   client: {
+    createVideoArtifactPlaybackSource: playback,
+    downloadRetainedArtifact: genericDownload,
     getRetainedArtifact: async () => {
       if (loadError) throw loadError;
       return {
         available: true,
         artifactId,
-        kind: "generated_image",
-        contentType: "image/png",
+        kind: artifactKind,
+        contentType: artifactKind === "generated_video" ? "video/mp4" : "image/png",
       };
     },
     getFile: async () => null,
@@ -94,6 +101,33 @@ test("malformed retained-file ids show unavailable copy and All artifacts", asyn
     expect(link?.getAttribute("href")).toBe(`/workspaces/${workspaceId}/artifacts`);
   } finally {
     await rendered.unmount();
+  }
+});
+
+test("generated video opens the browser player without generic byte download", async () => {
+  artifactId = missingUuid;
+  artifactKind = "generated_video";
+  loadError = null;
+  playback.mockClear();
+  genericDownload.mockClear();
+  const originalClick = HTMLAnchorElement.prototype.click;
+  const opened: string[] = [];
+  HTMLAnchorElement.prototype.click = function () {
+    opened.push(this.href);
+  };
+  const rendered = await renderRoute();
+  try {
+    const button = [...rendered.container.querySelectorAll("button")].find(
+      (item) => item.textContent === "Open video",
+    );
+    expect(button).toBeDefined();
+    await act(async () => button!.click());
+    expect(opened).toEqual(["https://media.example/video.mp4"]);
+    expect(genericDownload).not.toHaveBeenCalled();
+  } finally {
+    await rendered.unmount();
+    HTMLAnchorElement.prototype.click = originalClick;
+    artifactKind = "generated_image";
   }
 });
 

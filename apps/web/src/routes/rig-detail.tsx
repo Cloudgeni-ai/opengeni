@@ -83,7 +83,7 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
       <Shell workspaceId={workspaceId}>
         <div className="mt-6">
           <LoadErrorState
-            title="Couldn't load this rig"
+            title="Couldn't load this sandbox environment"
             error={rig.error}
             onRetry={() => void refreshAll()}
           />
@@ -126,7 +126,7 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
                 const result = await rig.update(patch);
                 if (result) {
                   setEditing(false);
-                  toast.success("Rig updated");
+                  toast.success("Sandbox Environment updated");
                 }
                 return result;
               }}
@@ -147,7 +147,7 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
                 )}
                 {isDefaultRig ? (
                   <MetaChip
-                    title="Workspace default — new sessions use this rig unless another is picked"
+                    title="Workspace default — new sessions use this sandbox environment unless another is picked"
                     className="border-brand/30 text-brand"
                   >
                     <span className="inline-flex items-center gap-1">
@@ -181,7 +181,7 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
                 if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
                   toast.success(
                     isDefaultRig
-                      ? "Cleared the workspace default rig"
+                      ? "Cleared the workspace default sandbox environment"
                       : `“${current.name}” is now the workspace default`,
                   );
                 }
@@ -208,7 +208,7 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
               type="button"
               variant="ghost"
               size="icon-sm"
-              aria-label="Delete rig"
+              aria-label="Delete sandbox environment"
               className="hover:text-status-failed"
               disabled={rig.mutating}
               onClick={() => setConfirmDelete(true)}
@@ -336,13 +336,13 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
       <ConfirmDialog
         open={confirmDelete}
         onOpenChange={setConfirmDelete}
-        title={`Delete rig “${current.name}”?`}
+        title={`Delete sandbox environment “${current.name}”?`}
         description="Its versions and change history are removed. Sessions already running keep the version they materialized. This can't be undone."
-        confirmLabel="Delete rig"
+        confirmLabel="Delete sandbox environment"
         onConfirm={async () => {
           const removed = await rig.remove();
           if (removed) {
-            toast.success("Rig deleted");
+            toast.success("Sandbox Environment deleted");
             void navigate({ to: "/workspaces/$workspaceId/rigs", params: { workspaceId } });
           }
           return removed;
@@ -361,7 +361,7 @@ function Shell({ workspaceId, children }: { workspaceId: string; children: React
         className="inline-flex w-fit items-center gap-1.5 text-xs font-medium text-fg-muted transition-colors hover:text-fg"
       >
         <ArrowLeftIcon className="size-3.5" />
-        Rigs
+        Sandbox Environments
       </Link>
       {children}
     </ContentPage>
@@ -387,7 +387,7 @@ function RenameForm({
         <Input
           value={name}
           onChange={(event) => setName(event.target.value)}
-          aria-label="Rig name"
+          aria-label="Sandbox Environment name"
           className="h-9"
           autoFocus
         />
@@ -395,7 +395,7 @@ function RenameForm({
           value={description}
           onChange={(event) => setDescription(event.target.value)}
           placeholder="Description"
-          aria-label="Rig description"
+          aria-label="Sandbox Environment description"
           className="h-9"
         />
       </div>

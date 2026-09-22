@@ -158,7 +158,6 @@ import {
   SandboxSiblingWarmingTimeoutError,
   sandboxLeaseHolderIdForAttempt,
 } from "../src/sandbox-resume";
-import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 import { attachPendingUpdatesBeforePreparingModelInput } from "../src/activities/agent-turn/stream-attempt";
 
@@ -2948,27 +2947,6 @@ describe("turn-start pointer reconcile classification (issue #341 invariant B)",
 });
 
 describe("turn-time Modal private-registry warm", () => {
-  test("warms the pack-resolved Modal image ref before sandbox creation", async () => {
-    const packImage = "acr.example.com/cloudgeni/f4c-gecko@sha256:abc";
-    const runSettings = settingsWithPackSandboxImage(
-      testSettings({
-        sandboxBackend: "modal",
-        modalImageRef: undefined,
-        modalImageRegistrySecret: "acr-credentials-gecko",
-      }),
-      packImage,
-    );
-    const ensureRegistryImage = mock(async (_settings: Settings) => undefined);
-
-    await ensureTurnModalRegistryImage(runSettings, "modal", ensureRegistryImage);
-
-    expect(ensureRegistryImage).toHaveBeenCalledTimes(1);
-    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRef).toBe(packImage);
-    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRegistrySecret).toBe(
-      "acr-credentials-gecko",
-    );
-  });
-
   test("keeps non-modal or public-image turns on the no-op path", async () => {
     const ensureRegistryImage = mock(async (_settings: Settings) => undefined);
     await ensureTurnModalRegistryImage(
@@ -3324,10 +3302,6 @@ describe("lazy sandbox provisioner single-flight", () => {
       "Independent workspace reads after the personal-resource fence",
       authorize,
     );
-    const packRead = governanceSource.indexOf(
-      "resolveWorkspacePackRuntime(db, input.workspaceId)",
-      overlappedReads,
-    );
     const rigRead = governanceSource.indexOf(
       "await materializeRigVersionForAttempt(db",
       overlappedReads,
@@ -3347,8 +3321,7 @@ describe("lazy sandbox provisioner single-flight", () => {
     const gitAssert = credentialsSource.indexOf("assertGitHubResourcesRemainAuthorized(");
     expect(authorize).toBeGreaterThan(0);
     expect(overlappedReads).toBeGreaterThan(authorize);
-    expect(packRead).toBeGreaterThan(overlappedReads);
-    expect(rigRead).toBeGreaterThan(packRead);
+    expect(rigRead).toBeGreaterThan(overlappedReads);
     expect(policyRead).toBeGreaterThan(rigRead);
     expect(governanceCall).toBeGreaterThan(-1);
     expect(credentialsCall).toBeGreaterThan(governanceCall);
@@ -5367,7 +5340,15 @@ describe("transient provider error classifier", () => {
       database: { constraint: "session_turn_attempts_pkey" },
     });
     expect(preClaimAdmissionFailure(constraint)).toMatchObject({
-      details: [{ disposition: "retryable", code: "db_failure" }],
+      details: [
+        {
+          disposition: "blocked",
+          code: "db_failure",
+          sqlState: "23505",
+          reason: "database_claim_rejected",
+          retryPolicy: "explicit_recheck",
+        },
+      ],
     });
     const authorizationGuard = new SessionEventPersistenceError({
       code: "db_failure",
@@ -5380,8 +5361,41 @@ describe("transient provider error classifier", () => {
       database: {},
     });
     expect(preClaimAdmissionFailure(authorizationGuard)).toMatchObject({
-      details: [{ disposition: "retryable", code: "db_failure" }],
+      details: [
+        {
+          disposition: "blocked",
+          code: "db_failure",
+          sqlState: "42501",
+          reason: "database_claim_rejected",
+          retryPolicy: "explicit_recheck",
+        },
+      ],
     });
+    for (const [sqlState, reason] of [
+      ["P0002", "database_claim_rejected"],
+      ["OG001", "initiator_membership_required"],
+      ["OG002", "personal_resource_grant_required"],
+    ] as const) {
+      const failure = new SessionEventPersistenceError({ ...authorizationGuard.details, sqlState });
+      expect(preClaimAdmissionFailure(failure)).toMatchObject({
+        details: [{ disposition: "blocked", reason, sqlState }],
+      });
+      const unrelated = new SessionEventPersistenceError({
+        ...failure.details,
+        stage: "other_stage",
+      });
+      expect(preClaimAdmissionFailure(unrelated)).toMatchObject({
+        details: [{ disposition: "retryable", code: "db_failure" }],
+      });
+      expect(
+        preClaimAdmissionFailure(
+          new SessionEventPersistenceError({
+            ...failure.details,
+            retryOutcome: "exhausted",
+          }),
+        ),
+      ).toMatchObject({ details: [{ disposition: "retryable", code: "db_failure" }] });
+    }
     expect(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))).toMatchObject({
       type: "OpenGeniPreClaimFailure",
       nonRetryable: true,

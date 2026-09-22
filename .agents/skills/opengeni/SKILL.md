@@ -54,12 +54,20 @@ Then open the smallest source files that answer the question:
   fabricated sessions. See `docs/remote-mcp-credentials.md` for cutover status.
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
 - Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn/`.
-- Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/packs.md` and `docs/capabilities.md` (capability packs / MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
+- Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/capabilities.md` (Plugins, Skills, and the MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
 - Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
+- Startup telemetry: `apps/worker/src/observability-metrics.ts` separates blocking
+  preparation from background MCP work. Phase durations can overlap; use durable
+  milestones for elapsed startup latency. Runtime stream initialization is not
+  the provider wire-dispatch milestone. See `docs/run-lifecycle.md`.
 - Runtime/sandbox/tools: `packages/runtime/src/index.ts` is the public agent-loop facade;
+  retained Modal command observation uses the versioned task-router byte-offset
+  boundary in `sandbox/providers/modal-command-control.ts`; output and cursor
+  capture is atomic in `packages/db/src/retained-provider-commands.ts`. Never
+  reinterpret a legacy batch locator or infer exit from missing output.
   `skill-catalog.ts` renders Skill descriptors into the turn-attempt instruction
   layer; the worker's `skill-read.ts` exposes eager text reads and `skill-checkout.ts`
   exposes on-demand filesystem copies. Repository Skill discovery is independent.
@@ -141,8 +149,10 @@ Keep these concepts straight while working:
 - **Turn**: one queued/running unit of agent work inside a session, run as one non-retryable Temporal activity (`runAgentTurn`). Follow-ups, goal continuations, and scheduled task firings become turns. Inside a turn the SDK makes as many model/tool calls as the work needs; run length is bounded by symptoms (no-progress, budget), not by counts or clocks. A graceful worker shutdown preempts an in-flight turn (checkpoint, requeue, resume on a healthy worker) instead of failing the session. See `docs/run-lifecycle.md`.
 - **Sandbox rotation wait**: a recovering turn fenced by an active managed-sandbox rotation parks on its exact sandbox group and lease epoch. Every authoritative rotation-ending or epoch-advancing transaction durably wakes that waiter; the workflow does not repeatedly reserve turn-worker slots while the same transition remains pending.
 - **Goal**: optional durable per-session objective that flips "stop" into an explicit act — while active, the session workflow synthesizes continuation turns until the agent calls `goal_complete`/`goal_pause` or a user interrupts. The mechanism behind long-running autonomous runs. See `docs/goals.md`.
+- **Admission block**: a non-transient preclaim persistence rejection parks accepted work without failing or consuming it. Inspect `sessions.admission_block`, the worker classifier and `docs/run-lifecycle.md`; authorized Resume or new Send/Steer explicitly rechecks, never grants missing authority. Operational DB failures retain timed recovery.
+- **Control observation**: unavailable scoped reads are not deletion or idle truth; exact still-owned attempts are not successor admission. Versioned observers wait on signals/bounded control timers, retain outbox obligations, and inspect exact Temporal identity without replacing physical-writer proof. See `docs/run-lifecycle.md` before changing these paths.
 - **Session memory (three stores, three jobs)**: `session_history_items` is exact accepted conversation truth fed to the model (default read path); `agent_run_states` is the serialized RunState blob, used only to resume a turn paused for a human approval; `session_events` is the exact append-only human-audit timeline for accepted payloads and is never fed back to the model. Protocol/size projections are deterministic and must not classify or rewrite content. Sandbox recovery state lives separately in `sandbox_session_envelopes`. See `docs/run-lifecycle.md`.
-- **Variable Set**: named organization-, workspace-, or organization-user-owned collection of authenticated-encrypted secret env vars, attached to a session/scheduled-task/pack and injected into the sandbox at run time. Attachment and runtime use require independent `variable-sets:attach` and `variable-sets:use` authority; exact plaintext access is a separate explicit permissioned operation with metadata-only audit. Never expose values through unrelated list/detail projections. See `docs/variable-sets.md`.
+- **Variable Set**: named organization-, workspace-, or organization-user-owned collection of authenticated-encrypted secret env vars, attached to a session/scheduled-task and injected into the sandbox at run time. Attachment and runtime use require independent `variable-sets:attach` and `variable-sets:use` authority; exact plaintext access is a separate explicit permissioned operation with metadata-only audit. Never expose values through unrelated list/detail projections. See `docs/variable-sets.md`.
 - **Event log**: append-only session timeline with per-session sequence numbers. It supports replay, SSE reconnect, UI timeline projection, and auditing.
 - **SSE/NATS split**: Postgres is replay/source of truth. NATS is live fanout. If live events are missed, API should backfill from Postgres by sequence.
 - **Temporal**: orchestration, signals, timers, schedules, and worker dispatch. Token streams/tool output should not be pushed through workflow history unless the code intentionally changes that design.
@@ -153,7 +163,7 @@ Keep these concepts straight while working:
 - **Tools**: currently MCP-first. Tool refs select configured MCP servers. Built-ins are defaults, not limits.
 - **Object storage**: stores uploaded bytes. Database stores metadata/object keys. Sandbox file access is normally via manifest/mount/injection based on current runtime code.
 - **Scheduled task**: persisted schedule plus agent config that dispatches one or more session turns through Temporal scheduling.
-- **Automation**: an authenticated external event accepted by a source and matched by an immutable trigger revision into one deduplicated logical run. Temporal dispatches an ordinary session; provider-specific review or incident features are adapters and Packs over this substrate.
+- **Automation**: an authenticated external event accepted by a source and matched by an immutable trigger revision into one deduplicated logical run. Temporal dispatches an ordinary session; provider-specific review or incident features are adapters over this substrate.
 - **Knowledge**: canonical source content, findings and groups in Postgres, with original files in object storage and rebuildable search indexes. First-party `knowledge_*` tools use accepted Agent learning policy: Automatic publishes, Review first stages a nonblocking revision, and Off disables agent writes. Search defaults to published records; explicit `view: "needs_review"` lets agents inspect and update pending entries and collections without approving them. Pending content is unapproved context, never behavioral authority. Reuse IDs/current versions instead of duplicating proposals on each scheduled run. Connected-source schedules run ordinary agents with frozen source selections; source fetching is an attempt-bound tool. Conversation history and temporary task notes remain separate. See `docs/knowledge.md`.
 
 ## Source Discovery Workflow
@@ -184,7 +194,7 @@ Before editing, identify which layer owns the behavior:
 - Sandbox resources: resource validation, manifest building, object storage, sandbox environment.
 - MCP tools: config parsing, runtime tool preparation, API MCP servers.
 - Scheduling: scheduled task contracts/routes/core domain helpers, Temporal schedule mapping, dispatch activity.
-- Event-triggered automation: automation contracts/routes/core adapter registry, FORCE-RLS source/event/run state, bounded Temporal dispatch, and the provider adapter or Pack layered above it.
+- Event-triggered automation: automation contracts/routes/core adapter registry, FORCE-RLS source/event/run state, bounded Temporal dispatch, and the provider adapter layered above it.
 - UI: `apps/web` API helpers/types/components.
 
 For pull-request delivery, preserve immutable candidates across a moving base:
@@ -289,6 +299,10 @@ be read without sandbox staging via `loadNativeToolSkillArtifacts`; do not infer
 embedding selection controls or Connected Machine visibility from that helper.
 `packages/contracts/src/skill-metadata.ts` owns the shared YAML interpretation.
 Every active Skill's name and description come from `SKILL.md` frontmatter;
+Permanent agent removal uses `skill_remove` through the same Learning/authority
+lifecycle as saves. Inspect `0488_permanent_skill_removal.sql` and the Skill
+lifecycle tests before changing deletion: approval binds an explicit removal
+operation, revisions are physically deleted, and conversations remain unchanged.
 database/catalog metadata is a derived projection, never a second edit surface.
 Preserve valid YAML bytes and historical revisions. Legacy conversion and
 activation guards belong to the maintenance cutover, not a permanent fallback.
@@ -299,6 +313,13 @@ For tools and MCP work, distinguish:
 - First-party MCP servers exposed by the API.
 - Built-in SDK sandbox capabilities for shell/files, and OpenGeni's separate Skill catalog and reader.
 - Tools available inside the sandbox image, such as CLIs.
+
+Managed Codemode clients are release-owned, not image-version-owned. Inspect
+`packages/runtime/src/sandbox/codemode-client.ts` and the runtime/process build
+scripts for the bundled CLI/ESM asset. Warm managed boxes receive verified,
+content-addressed clients during setup; per-exec PATH and
+`OPENGENI_CODEMODE_CLIENT_MODULE` select the release without changing the manifest.
+Do not repair stale clients by weakening catalog integrity or choosing npm latest.
 
 Find current MCP behavior in config parsing, tool validation, runtime `prepareTools`, and API MCP server builders. Treat first-party document/file/scheduled-task tools as swappable defaults. If a user wants enterprise search, repo tools, web tools, or custom systems, point OpenGeni at a different MCP server if current config supports it.
 

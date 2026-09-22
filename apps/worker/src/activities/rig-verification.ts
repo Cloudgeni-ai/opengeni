@@ -60,7 +60,6 @@ import {
 import type { Context } from "@temporalio/activity";
 import type { ControlActivityServices } from "./types";
 import { rigProviderImageSourceImage } from "./sandbox-images";
-import { resolveWorkspacePackRuntime, type WorkspacePackRuntime } from "./packs";
 import { currentActivityContext } from "./streaming";
 
 type RigSetupHook = typeof import("@opengeni/runtime").runRigSetupHook;
@@ -175,7 +174,7 @@ const RIG_VERIFICATION_HEARTBEAT_MIN_INTERVAL_MS = 250;
 // lease-holder fiction or manual recovery.
 export const RIG_VERIFICATION_OWNER_TTL_MS = 20 * 60_000;
 export const RIG_VERIFICATION_OWNERS_DISABLED_MESSAGE =
-  "Rig verification lease ownership is disabled; refusing to create an unowned verifier sandbox";
+  "Sandbox Environment verification lease ownership is disabled; refusing to create an unowned verifier sandbox";
 const RIG_VERIFICATION_HOLDER_TOUCH_INTERVAL_MS = 10_000;
 const RIG_VERIFICATION_RELEASE_GRACE_MS = 1;
 
@@ -187,7 +186,7 @@ export class RigVerificationActivityDeadlineError extends Error {
     readonly cleanupReserveMs: number,
   ) {
     super(
-      `Rig verification activity-local deadline reached with ${cleanupReserveMs}ms reserved for cleanup before the ${startToCloseTimeoutMs}ms Temporal start-to-close timeout`,
+      `Sandbox Environment verification activity-local deadline reached with ${cleanupReserveMs}ms reserved for cleanup before the ${startToCloseTimeoutMs}ms Temporal start-to-close timeout`,
     );
   }
 }
@@ -223,7 +222,9 @@ export function createRigVerificationActivityLifecycle(
   const temporalSignal = context?.cancellationSignal;
   const forwardTemporalCancellation = (): void => {
     if (!controller.signal.aborted) {
-      controller.abort(temporalSignal?.reason ?? new Error("Rig verification cancelled"));
+      controller.abort(
+        temporalSignal?.reason ?? new Error("Sandbox Environment verification cancelled"),
+      );
     }
   };
   if (temporalSignal?.aborted) {
@@ -308,7 +309,7 @@ export function createRigVerificationActivityLifecycle(
 }
 
 function abortReason(signal: AbortSignal): unknown {
-  return signal.reason ?? new Error("Rig verification cancelled");
+  return signal.reason ?? new Error("Sandbox Environment verification cancelled");
 }
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -433,7 +434,9 @@ export class RigVerificationLeaseUnavailableError extends Error {
     readonly sandboxGroupId: string,
     readonly role: "attached" | "blocked" | "rearmed" | "fenced",
   ) {
-    super(`Rig verification requires a new clean sandbox, but lease ${sandboxGroupId} was ${role}`);
+    super(
+      `Sandbox Environment verification requires a new clean sandbox, but lease ${sandboxGroupId} was ${role}`,
+    );
   }
 }
 
@@ -490,7 +493,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
   let establishmentPromise: Promise<EstablishedSandboxSession> | null = null;
 
   const warnCleanupTimeout = (operation: string, instanceId: string | null): void => {
-    input.observability.warn("rig verifier: ownership cleanup timed out", {
+    input.observability.warn("sandbox environment verifier: ownership cleanup timed out", {
       holderId,
       instanceId,
       operation,
@@ -504,7 +507,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     instanceId: string | null,
     error: unknown,
   ): void => {
-    input.observability.warn("rig verifier: ownership cleanup failed", {
+    input.observability.warn("sandbox environment verifier: ownership cleanup failed", {
       holderId,
       instanceId,
       operation,
@@ -643,11 +646,14 @@ export async function runWithOwnedRigVerificationSandbox<T>(
               );
             } catch (error) {
               if (!signal.aborted) {
-                input.observability.warn("rig verifier: Modal ownership tag failed", {
-                  holderId,
-                  instanceId: created.instanceId,
-                  error: error instanceof Error ? error.message : String(error),
-                });
+                input.observability.warn(
+                  "sandbox environment verifier: Modal ownership tag failed",
+                  {
+                    holderId,
+                    instanceId: created.instanceId,
+                    error: error instanceof Error ? error.message : String(error),
+                  },
+                );
               }
             }
           }
@@ -913,10 +919,12 @@ function rigProviderImageContentMarker(
   markerRoot = "/var/opengeni",
 ): { marker: string; normalizedRoot: string } {
   if (!/^sha256:[0-9a-f]{64}$/u.test(contentHash)) {
-    throw new Error("Rig provider image content marker requires a canonical SHA-256 value");
+    throw new Error(
+      "Sandbox Environment provider image content marker requires a canonical SHA-256 value",
+    );
   }
   if (!/^\/[A-Za-z0-9._/-]+$/u.test(markerRoot)) {
-    throw new Error("Rig provider image marker root must be a safe absolute path");
+    throw new Error("Sandbox Environment provider image marker root must be a safe absolute path");
   }
   const normalizedRoot = markerRoot.replace(/\/+$/u, "") || "/";
   const marker = `${normalizedRoot === "/" ? "" : normalizedRoot}/rig-setup-content-${contentHash.slice("sha256:".length)}.done`;
@@ -978,7 +986,9 @@ export async function verifyRigProviderImageColdBoot(
         runContext.commandRunner,
       );
       if (markerResult.exitCode !== 0) {
-        throw new Error("built provider image is missing its exact rig-content marker");
+        throw new Error(
+          "built provider image is missing its exact sandbox environment-content marker",
+        );
       }
       for (const check of rigPlatformChecksForSettings(input.settings)) {
         const result = await runCommand(
@@ -1083,7 +1093,7 @@ export async function buildVerifiedRigProviderImage(input: {
         error: {
           code: "provider_image_content_conflict",
           message:
-            "this exact rig version already records a provider image for different effective content; mint and verify a new version",
+            "this exact sandbox environment version already records a provider image for different effective content; mint and verify a new version",
           retryable: false,
         },
       };
@@ -1276,13 +1286,10 @@ export async function buildVerifiedRigProviderImage(input: {
 
 export function settingsForRigVerification(
   settings: ControlActivityServices["settings"],
-  packRuntime: WorkspacePackRuntime,
   rigImage: string | null,
 ): ControlActivityServices["settings"] {
   // Rig verification must prove setup and provider-image materialization on
-  // the deployment-owned platform base. Legacy Pack and historical Rig image
-  // values are intentionally ignored here.
-  void packRuntime;
+  // the deployment-owned platform base. Historical Rig image values are ignored.
   void rigImage;
   return settings;
 }
@@ -1294,18 +1301,18 @@ async function loadChangeTarget(
 ): Promise<{ rig: Rig; baseVersion: RigVersion; change: RigChange }> {
   const change = await getRigChange(db, workspaceId, changeId);
   if (!change) {
-    throw new Error(`Rig change not found: ${changeId}`);
+    throw new Error(`Sandbox Environment change not found: ${changeId}`);
   }
   const rig = await getRig(db, workspaceId, change.rigId);
   if (!rig) {
-    throw new Error(`Rig not found for change: ${change.rigId}`);
+    throw new Error(`Sandbox Environment not found for change: ${change.rigId}`);
   }
   if (!change.baseVersionId) {
-    throw new Error(`Rig change ${change.id} has no base version`);
+    throw new Error(`Sandbox Environment change ${change.id} has no base version`);
   }
   const baseVersion = await getRigVersionById(db, workspaceId, change.baseVersionId);
   if (!baseVersion || baseVersion.rigId !== rig.id) {
-    throw new Error(`Base rig version not found: ${change.baseVersionId}`);
+    throw new Error(`Base sandbox environment version not found: ${change.baseVersionId}`);
   }
   return { rig, baseVersion, change };
 }
@@ -1317,11 +1324,11 @@ async function loadVersionTarget(
 ): Promise<{ rig: Rig; version: RigVersion }> {
   const version = await getRigVersionById(db, workspaceId, versionId);
   if (!version) {
-    throw new Error(`Rig version not found: ${versionId}`);
+    throw new Error(`Sandbox Environment version not found: ${versionId}`);
   }
   const rig = await getRig(db, workspaceId, version.rigId);
   if (!rig) {
-    throw new Error(`Rig not found for version: ${version.rigId}`);
+    throw new Error(`Sandbox Environment not found for version: ${version.rigId}`);
   }
   return { rig, version };
 }
@@ -1373,12 +1380,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
             change,
             candidateVersion,
           );
-          const packRuntime = await resolveWorkspacePackRuntime(db, input.workspaceId);
-          const runSettings = settingsForRigVerification(
-            settings,
-            packRuntime,
-            candidateVersion.image,
-          );
+          const runSettings = settingsForRigVerification(settings, candidateVersion.image);
           const providerImageContentHash = rigProviderImageContentHash({
             backend: runSettings.sandboxBackend,
             sourceImage: rigProviderImageSourceImage(runSettings, runSettings.sandboxBackend),
@@ -1452,7 +1454,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
               );
               if (markerResult.exitCode !== 0) {
                 throw new Error(
-                  `Failed to seal rig provider image content marker: ${markerResult.output.slice(-2000)}`,
+                  `Failed to seal sandbox environment provider image content marker: ${markerResult.output.slice(-2000)}`,
                 );
               }
               const platformCheckResults = await runRigChecks(
@@ -1572,8 +1574,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           metadata: { versionId: version.id },
         });
         try {
-          const packRuntime = await resolveWorkspacePackRuntime(db, input.workspaceId);
-          const runSettings = settingsForRigVerification(settings, packRuntime, version.image);
+          const runSettings = settingsForRigVerification(settings, version.image);
           const providerImageContentHash = rigProviderImageContentHash({
             backend: runSettings.sandboxBackend,
             sourceImage: rigProviderImageSourceImage(runSettings, runSettings.sandboxBackend),
@@ -1615,7 +1616,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
               );
               if (markerResult.exitCode !== 0) {
                 throw new Error(
-                  `Failed to seal rig provider image content marker: ${markerResult.output.slice(-2000)}`,
+                  `Failed to seal sandbox environment provider image content marker: ${markerResult.output.slice(-2000)}`,
                 );
               }
               const platformCheckResults = await runRigChecks(

@@ -3,8 +3,6 @@ import {
   StoredAutomationAcceptedExecution,
   AutomationNormalizedEvent,
   StoredAutomationSessionTemplate,
-  StoredCapabilityPack,
-  stableJson,
   type AutomationRun,
   type AutomationSource,
   type AutomationTrigger,
@@ -13,7 +11,7 @@ import {
   type UpdateAutomationSourceRequest,
   type UpdateAutomationTriggerRequest,
 } from "@opengeni/contracts";
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { withWorkspaceRls } from "./database";
 import * as schema from "./schema";
@@ -85,10 +83,11 @@ export async function createAutomationSource(
     createdBySubjectId: string;
     request: CreateAutomationSourceRequest;
     webhookSecretEncrypted: string;
-    packInstallationId?: string | null;
-    packConnectorId?: string | null;
   },
 ): Promise<AutomationSource> {
+  if (input.request.adapterId === "source-control.pull-request.v1") {
+    throw new Error("PR Review automations require the PR Review setup API");
+  }
   return await withWorkspaceRls(
     db,
     input.workspaceId,
@@ -103,8 +102,7 @@ export async function createAutomationSource(
             adapterId: input.request.adapterId,
             configuration: input.request.configuration,
             webhookSecretEncrypted: input.webhookSecretEncrypted,
-            packInstallationId: input.packInstallationId ?? null,
-            packConnectorId: input.packConnectorId ?? null,
+
             createdBySubjectId: input.createdBySubjectId,
           })
           .returning();
@@ -208,7 +206,7 @@ export async function updateAutomationSource(
         and(
           eq(schema.automationSources.workspaceId, input.workspaceId),
           eq(schema.automationSources.id, input.sourceId),
-          isNull(schema.automationSources.packInstallationId),
+          ne(schema.automationSources.adapterId, "source-control.pull-request.v1"),
         ),
       )
       .returning();
@@ -238,7 +236,6 @@ export async function createAutomationTrigger(
             id: schema.automationSources.id,
             adapterId: schema.automationSources.adapterId,
             status: schema.automationSources.status,
-            packInstallationId: schema.automationSources.packInstallationId,
           })
           .from(schema.automationSources)
           .where(
@@ -254,44 +251,10 @@ export async function createAutomationTrigger(
         if (source.adapterId !== input.adapterId) {
           throw new Error("Automation source and trigger adapter do not match");
         }
-        if (source.packInstallationId !== input.request.packInstallationId) {
-          throw new Error("Automation source and trigger Pack ownership do not match");
+        if (source.adapterId === "source-control.pull-request.v1") {
+          throw new Error("PR Review automations require the PR Review setup API");
         }
-        if (input.request.packInstallationId) {
-          const [installation] = await tx
-            .select({
-              status: schema.packInstallations.status,
-              manifestSnapshot: schema.packInstallations.manifestSnapshot,
-            })
-            .from(schema.packInstallations)
-            .where(
-              and(
-                eq(schema.packInstallations.workspaceId, input.workspaceId),
-                eq(schema.packInstallations.id, input.request.packInstallationId),
-              ),
-            )
-            .limit(1);
-          const manifest = installation?.manifestSnapshot
-            ? StoredCapabilityPack.safeParse(installation.manifestSnapshot)
-            : null;
-          if (!installation || installation.status !== "active" || !manifest?.success) {
-            throw new Error("Automation Pack installation is not active");
-          }
-          const template = manifest.data.automationTemplates?.find(
-            (candidate) => candidate.id === input.request.packTemplateId,
-          );
-          if (!template || template.adapterId !== input.adapterId) {
-            throw new Error("Automation Pack template does not match the source adapter");
-          }
-          if (
-            stableJson([...new Set(input.request.eventTypes)].sort()) !==
-              stableJson([...new Set(template.eventTypes)].sort()) ||
-            stableJson(input.request.configuration) !== stableJson(template.configuration) ||
-            stableJson(input.request.sessionTemplate) !== stableJson(template.sessionTemplate)
-          ) {
-            throw new Error("Automation Pack trigger must use its frozen manifest template");
-          }
-        }
+
         await input.beforeCreateCommit?.(tx);
         const [head] = await tx
           .insert(schema.automationTriggers)
@@ -301,8 +264,7 @@ export async function createAutomationTrigger(
             sourceId: input.request.sourceId,
             name: input.request.name,
             status: input.request.status,
-            packInstallationId: input.request.packInstallationId,
-            packTemplateId: input.request.packTemplateId,
+
             createdBySubjectId: input.createdBySubjectId,
           })
           .returning();
@@ -476,14 +438,13 @@ export async function updateAutomationTrigger(
           .for("update")
           .limit(1);
         if (!existing) return null;
+        if (existing.revision.adapterId === "source-control.pull-request.v1") {
+          throw new Error("PR Review automations require the PR Review setup API");
+        }
         if (existing.head.currentRevision !== input.request.expectedRevision) {
           throw new AutomationRevisionConflictError();
         }
-        if (existing.head.packInstallationId) {
-          throw new Error(
-            "Pack-owned automation triggers must be managed through their Pack setup API",
-          );
-        }
+
         await input.beforeUpdateCommit?.(tx);
         const revisionNumber = existing.head.currentRevision + 1;
         const [head] = await tx
@@ -739,7 +700,6 @@ export async function assertAutomationRunAuthorityInTransaction(
       sourceVersion: schema.automationSources.version,
       triggerStatus: schema.automationTriggers.status,
       currentRevision: schema.automationTriggers.currentRevision,
-      packInstallationId: schema.automationTriggers.packInstallationId,
     })
     .from(schema.automationRuns)
     .innerJoin(
@@ -775,21 +735,7 @@ export async function assertAutomationRunAuthorityInTransaction(
   if (row.currentRevision !== input.triggerRevision) {
     throw new AutomationAuthorityRevokedError("Automation trigger changed before dispatch");
   }
-  if (row.packInstallationId) {
-    const [installation] = await db
-      .select({ status: schema.packInstallations.status })
-      .from(schema.packInstallations)
-      .where(
-        and(
-          eq(schema.packInstallations.workspaceId, input.workspaceId),
-          eq(schema.packInstallations.id, row.packInstallationId),
-        ),
-      )
-      .limit(1);
-    if (!installation || installation.status !== "active") {
-      throw new AutomationAuthorityRevokedError("Automation Pack is no longer active");
-    }
-  }
+
   await db
     .update(schema.automationRuns)
     .set({
@@ -838,8 +784,7 @@ function mapSource(row: SourceRow): AutomationSource {
     configuration: row.configuration,
     status: row.status as AutomationSource["status"],
     version: row.version,
-    packInstallationId: row.packInstallationId,
-    packConnectorId: row.packConnectorId,
+
     hasWebhookSecret: Boolean(row.webhookSecretEncrypted),
     webhookPath: `/v1/webhooks/automations/${row.endpointId}`,
     createdBySubjectId: row.createdBySubjectId,
@@ -866,8 +811,7 @@ function mapTrigger(
     sessionTemplate: StoredAutomationSessionTemplate.parse(revision.sessionTemplate),
     status: head.status as AutomationTrigger["status"],
     revision: revisionNumber,
-    packInstallationId: head.packInstallationId,
-    packTemplateId: head.packTemplateId,
+
     createdBySubjectId: head.createdBySubjectId,
     createdAt: head.createdAt.toISOString(),
     updatedAt: head.updatedAt.toISOString(),

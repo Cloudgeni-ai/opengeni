@@ -339,7 +339,7 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
         rigId: rigB.rigId,
         sandbox: "shared",
       }),
-    ).rejects.toThrow(/same rig/);
+    ).rejects.toThrow(/same sandbox environment/);
   }, 60_000);
 
   test("INHERITED default with a different rig falls back to an own box (different group)", async () => {
@@ -384,7 +384,7 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
         rigId: rigB.rigId,
         sandbox: { groupId: a.sandboxGroupId },
       }),
-    ).rejects.toThrow(/different rig/);
+    ).rejects.toThrow(/different sandbox environment/);
   }, 60_000);
 
   test("EXPLICIT shared join rejects a legacy MIXED-rig group deterministically", async () => {
@@ -421,7 +421,7 @@ describe("M3 rig binding: rig-aware shared-sandbox gate", () => {
         rigId: rigA.rigId,
         sandbox: "shared",
       }),
-    ).rejects.toThrow(/same rig/);
+    ).rejects.toThrow(/same sandbox environment/);
   }, 60_000);
 
   test("rig-less sessions still share (null rig on both sides is compatible)", async () => {

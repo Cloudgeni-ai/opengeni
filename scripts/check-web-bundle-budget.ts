@@ -133,7 +133,7 @@ const budgets = {
   // Advance only those two aggregate envelopes to their next whole KiB; every
   // initial, per-file, file-count, lazy-chunk, and CSS cap stays fixed.
   // Generic event automations add the shared SDK contracts that let ordinary
-  // session surfaces carry Pack-owned trigger metadata. The pre-migration Bun 1.3.14
+  // session surfaces carry automation trigger metadata. The pre-migration Bun 1.3.14
   // production graph measures 2,121,826 raw / 588,620 gzip bytes. Advance only
   // the raw aggregate to its next whole-KiB envelope; gzip, file-count, initial,
   // per-file, lazy-chunk, and CSS caps remain unchanged.
@@ -466,11 +466,18 @@ const effectiveBudgets = {
   // Keep whole-KiB headroom; the preview runtime remains outside this graph.
   directSessionRaw: Math.max(
     budgets.directSessionRaw,
+    // Artifact link resolution and host message-presentation plumbing: 2,445,478
+    // raw / 691,865 gzip on Bun 1.4 macOS/arm64. Media/PDF viewers remain lazy.
+    wholeKibEnvelope(2_445_478, 1.5 * kib),
     // Main d08dbb6029: 2,374,813 raw / 666,576 gzip, 34 files. The merged
     // Knowledge graph adds receipts, review navigation and learning controls:
     // 2,439,754 raw / 684,860 gzip, 39 files (Bun 1.4, macOS/arm64).
     // Preserve the established platform/configuration variance allowance.
     wholeKibEnvelope(2_439_754, 1.5 * kib),
+    // Unified connection discovery plus native OAuth recovery metadata measures
+    // 2,442,346 raw / 689,953 gzip across 34 files in Linux/x64 browser CI.
+    // Keep the existing headroom policy; compressed and unrelated caps stay fixed.
+    wholeKibEnvelope(2_442_346, 1.5 * kib),
     wholeKibEnvelope(2_354_899),
     wholeKibEnvelope(2_326_478),
     wholeKibEnvelope(2_333_912),

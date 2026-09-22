@@ -95,7 +95,6 @@ import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
-import { ConnectionAccountPicker } from "@/components/capabilities/connection-account-picker";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
@@ -601,6 +600,7 @@ function SessionsIndexRouteContent({
   const [connectorCustomizing, setConnectorCustomizing] = useState(false);
   const [connectorExclusions, setConnectorExclusions] = useState<string[]>([]);
   const followWorkspaceConnectors = () => {
+    connectionAccounts.resetEmptyChoices();
     setConnectorCustomizing(false);
     setToolSelectionExplicit(false);
     setConnectorExclusions([]);
@@ -609,7 +609,9 @@ function SessionsIndexRouteContent({
     );
   };
   const changeConnectorSelection = (selection: SessionToolSelection) => {
-    if (!connectorCustomizing) return;
+    // Choosing accounts is also an explicit connector customization. Apply it
+    // in this event, rather than waiting for the header switch to re-render.
+    if (!connectorCustomizing) setConnectorCustomizing(true);
     if (
       !toolSelectionExplicit &&
       addsConnectorOutsideDefaults(
@@ -1416,20 +1418,6 @@ function SessionsIndexRouteContent({
         ) : null}
 
         <div ref={composerRegionRef} className="mt-8 [&_textarea]:min-h-[calc(2lh+1rem)]">
-          <ConnectionAccountPicker
-            groups={connectionAccounts.accountGroups}
-            choices={connectionAccounts.accountChoices}
-            onChoose={connectionAccounts.selectAccount}
-            disabled={busy || newSessionDraft.loading}
-          />
-          {connectionAccounts.error ? (
-            <p role="alert" className="mb-2 text-sm text-fg-muted">
-              {connectionAccounts.error}{" "}
-              <Button variant="ghost" onClick={() => void connectionAccounts.refresh()}>
-                Retry
-              </Button>
-            </p>
-          ) : null}
           <ConsoleComposer
             workspaceId={workspaceId}
             composer={createComposer}
@@ -1440,6 +1428,17 @@ function SessionsIndexRouteContent({
             placeholder="Describe a task for the agent…"
             controlsLeading={
               <ComposerMobilePlus
+                connectorActions={{
+                  accountControls: {
+                    groups: connectionAccounts.availableAccountGroups,
+                    choices: connectionAccounts.accountChoices,
+                    onChoose: connectionAccounts.selectAccount,
+                    loading: connectionAccounts.loading,
+                    error: connectionAccounts.error,
+                    onRefresh: () => void connectionAccounts.refresh(),
+                    disabled: busy || newSessionDraft.loading,
+                  },
+                }}
                 menuSide="bottom"
                 draftChatSettings={{
                   workspaceId,
@@ -1577,6 +1576,33 @@ function SessionsIndexRouteContent({
               />
             }
           />
+
+          {connectionAccounts.loading ||
+          connectionAccounts.error ||
+          connectionAccounts.accountChoiceMessage ? (
+            <div role={connectionAccounts.loading ? "status" : "alert"} className="mt-3">
+              <Notice
+                tone={connectionAccounts.loading ? "muted" : "waiting"}
+                action={
+                  connectionAccounts.error ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void connectionAccounts.refresh()}
+                    >
+                      Retry
+                    </Button>
+                  ) : undefined
+                }
+              >
+                {connectionAccounts.loading
+                  ? "Checking connected accounts…"
+                  : connectionAccounts.error
+                    ? "Couldn't check connected accounts. Retry to send your message."
+                    : connectionAccounts.accountChoiceMessage}
+              </Notice>
+            </div>
+          ) : null}
 
           <SessionVisibilityPicker
             id="new-session"
@@ -2478,7 +2504,7 @@ function ManagedSandboxFields(props: {
           <Notice
             tone="failed"
             className="p-2.5 text-xs"
-            title="Couldn’t verify the selected Variable Set or Rig"
+            title="Couldn’t verify the selected Variable Set or Sandbox Environment"
             action={
               <Button
                 type="button"
@@ -2503,7 +2529,7 @@ function ManagedSandboxFields(props: {
         <div className="flex items-center justify-between gap-3 px-3 py-2">
           <Label className="flex shrink-0 items-center gap-1.5 text-xs">
             <ServerCogIcon className="size-3 shrink-0 text-fg-subtle" />
-            Rig
+            Sandbox Environment
           </Label>
           <Select
             value={draft.rigId}

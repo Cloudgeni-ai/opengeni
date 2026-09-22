@@ -9,9 +9,9 @@ const setupStatus: Record<ConnectAttempt["state"], string> = {
   provider_wait: "Waiting for authorization",
   account_selection: "Choose an account",
   resource_selection: "Choose resources",
-  preview: "Review available operations",
-  installing: "Installing selected operations…",
-  connected_but_incomplete: "Account connected — finish setup",
+  preview: "Choose tools",
+  installing: "Adding selected tools…",
+  connected_but_incomplete: "Choose which tools to add",
   complete: "Connection ready",
   cancelled: "Setup cancelled",
   expired: "Setup expired",
@@ -160,7 +160,7 @@ function ScopedSetup({
       {(localError || view.error || attempt.error) && (
         <p role="alert">
           {attempt.error?.code === "source_changed"
-            ? "The integration source changed. Review the new operations before installing."
+            ? "The integration source changed. Review the updated tools before adding them."
             : "Connection setup could not continue. Refresh its status before trying again."}
         </p>
       )}
@@ -178,7 +178,7 @@ function ScopedSetup({
                 className="og-connect-setup-primary"
                 onClick={() => invoke(() => view.advance({ type: "retry" }, crypto.randomUUID()))}
               >
-                Review integration operations
+                Choose tools
               </button>
             )}
             {action.type === "credentials" &&
@@ -247,7 +247,7 @@ function ScopedSetup({
             )}
             {action.type === "preview" && (
               <>
-                <p>Select the operations to install.</p>
+                <p>Choose the tools agents can use with this account.</p>
                 {action.operations.map((operation) => (
                   <label key={operation.id}>
                     <input type="checkbox" name="operation" value={operation.id} />
@@ -264,7 +264,7 @@ function ScopedSetup({
                 className="og-connect-setup-primary"
                 disabled={action.type === "select_resources" && Boolean(action.cursor)}
               >
-                {action.type === "preview" ? "Install selected operations" : "Continue"}
+                {action.type === "preview" ? "Add selected tools" : "Continue"}
               </button>
             )}
             {action.type === "authorize" && (

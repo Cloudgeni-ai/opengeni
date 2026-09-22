@@ -20,6 +20,17 @@ import { FIRST_PARTY_TOOL_AUTHORIZATION } from "../apps/api/src/mcp/first-party-
 const repo = join(import.meta.dir, "..");
 const SESSION_ROUTES = "apps/api/src/routes/sessions.ts";
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
+test("checkpoint preview and consent are session-control surfaces, not agent recovery tools", () => {
+  for (const method of ["GET", "POST"]) {
+    expect(
+      sessionAuthorizationOperationForHttp(
+        method,
+        `/v1/workspaces/${SESSION_ID}/sessions/${SESSION_ID}/sandbox-recovery`,
+        SESSION_ID,
+      ),
+    ).toBe("session.control");
+  }
+});
 const ROUTE_PATTERN = /app\.(get|post|put|patch|delete)\(\s*"([^"]+)"/gu;
 
 /**
@@ -166,6 +177,9 @@ describe("agent-access scope stays enforced at every session entry point", () =>
     );
     const routes = sessionRoutes(source);
     expect(routes.length).toBeGreaterThan(60);
+    expect(
+      routes.some((route) => route.method === "GET" && route.path.endsWith("/codex-accounts")),
+    ).toBe(true);
     for (const route of routes) {
       expect(
         route.index,

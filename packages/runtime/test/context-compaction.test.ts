@@ -1611,7 +1611,14 @@ describe("Codex remote compaction v2 helpers", () => {
       requestRemoteCompactionV2(testSettings(), [user("hi")], {
         client,
         model: "gpt-5.6-sol",
-        systemInstructions: "   ",
+        preparedRequest: {
+          systemInstructions: "   ",
+          modelSettings: {},
+          tools: [],
+          outputType: "text",
+          handoffs: [],
+          tracing: false,
+        },
       }),
     ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
   });
@@ -1634,7 +1641,14 @@ describe("Codex remote compaction v2 helpers", () => {
     await requestRemoteCompactionV2(testSettings(), [user("hi")], {
       client,
       model: "gpt-5.6-sol",
-      systemInstructions: padded,
+      preparedRequest: {
+        systemInstructions: padded,
+        modelSettings: {},
+        tools: [],
+        outputType: "text",
+        handoffs: [],
+        tracing: false,
+      },
     });
     // Ordinary turns keep leading/trailing whitespace via normalizeInstructions;
     // compact must not `.trim()` the payload or the cache prefix diverges.
@@ -1678,4 +1692,35 @@ test("remote compaction reserves image tokens while truncating retained text", (
   const content = retained[0]!.content as Array<Record<string, unknown>>;
   expect(content).toContainEqual(image);
   expect(estimateTextTokens(content[0]!.text as string) + 10000).toBeLessThanOrEqual(64000);
+});
+
+test("remote compaction preserves explicitly selected reasoning instructions on the wire", async () => {
+  let body: any;
+  const client = {
+    responses: {
+      create: async (request: any) => {
+        body = request;
+        return {
+          id: "compact_test",
+          status: "completed",
+          output: [{ type: "compaction", encrypted_content: "blob" }],
+        };
+      },
+    },
+  } as unknown as OpenAI;
+  for (const effort of ["low", "medium", "high"] as const) {
+    await requestRemoteCompactionV2(testSettings(), [user("hi")], {
+      client,
+      model: "gpt-5.6-sol",
+      preparedRequest: {
+        systemInstructions: "stable",
+        modelSettings: { reasoning: { effort, summary: "detailed" } },
+        tools: [],
+        outputType: "text",
+        handoffs: [],
+        tracing: false,
+      },
+    });
+    expect(body.reasoning).toEqual({ effort, summary: "detailed" });
+  }
 });

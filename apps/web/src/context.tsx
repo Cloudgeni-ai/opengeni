@@ -179,6 +179,12 @@ const ManagedAuthPanel = lazy(() =>
   })),
 );
 
+const SignedOutPage = lazy(() =>
+  import("@/components/signed-out-page").then((module) => ({
+    default: module.SignedOutPage,
+  })),
+);
+
 const BrowserAccountsRuntime = lazy(() =>
   import("@/components/browser-accounts-runtime").then((module) => ({
     default: module.BrowserAccountsRuntime,
@@ -1361,7 +1367,7 @@ export function RootRouteComponent() {
       setWorkspaces((current) => upsertWorkspace(current, update.value));
       return update.value;
     } catch (error) {
-      toast.error("Failed to update the workspace default rig", {
+      toast.error("Failed to update the workspace default sandbox environment", {
         description: error instanceof Error ? error.message : String(error),
       });
       return null;
@@ -2777,32 +2783,36 @@ export function RootRouteComponent() {
     <LoadingPanel label="Checking session" />
   ) : managedAuthRequired && !authSession ? (
     <Suspense fallback={<LoadingPanel label="Loading sign in" />}>
-      {browserAccountsEnabled ? (
-        <BrowserAccountsSignedOutPanel
-          invitation={organizationInvitationContinuation}
-          emptySetRegistrationPanel={
-            clientConfig?.managedAuthSessionSetMode === "broker" ||
-            clientConfig?.managedAuthSessionSetMode === "dual" ? (
-              <ManagedAuthPanel
-                initialMode="signup"
-                allowedModes={["signup"]}
-                presentation="embedded"
-                onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
-                emailVerificationRequired={managedEmailVerificationRequired}
-              />
-            ) : undefined
-          }
-        />
-      ) : (
-        <ManagedAuthPanel
-          invitation={organizationInvitationContinuation}
-          onDismissInvitation={clearOrganizationInvitationContinuation}
-          onSubmit={handleManagedAuth}
-          emailVerificationRequired={managedEmailVerificationRequired}
-          socialProviders={managedSocialProviders}
-          onSocialSubmit={handleManagedSocialAuth}
-        />
-      )}
+      <SignedOutPage>
+        {browserAccountsEnabled ? (
+          <BrowserAccountsSignedOutPanel
+            presentation="embedded"
+            invitation={organizationInvitationContinuation}
+            emptySetRegistrationPanel={
+              clientConfig?.managedAuthSessionSetMode === "broker" ||
+              clientConfig?.managedAuthSessionSetMode === "dual" ? (
+                <ManagedAuthPanel
+                  initialMode="signup"
+                  allowedModes={["signup"]}
+                  presentation="embedded"
+                  onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
+                  emailVerificationRequired={managedEmailVerificationRequired}
+                />
+              ) : undefined
+            }
+          />
+        ) : (
+          <ManagedAuthPanel
+            presentation="embedded"
+            invitation={organizationInvitationContinuation}
+            onDismissInvitation={clearOrganizationInvitationContinuation}
+            onSubmit={handleManagedAuth}
+            emailVerificationRequired={managedEmailVerificationRequired}
+            socialProviders={managedSocialProviders}
+            onSocialSubmit={handleManagedSocialAuth}
+          />
+        )}
+      </SignedOutPage>
     </Suspense>
   ) : /^\/settings\/security\/?$/.test(pathname) &&
     managedAuthRequired &&

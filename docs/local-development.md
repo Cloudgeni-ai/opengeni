@@ -25,6 +25,9 @@ artifact services, Connected Machines relay, and web app. With
 `OPENGENI_DEV_BACKEND=auto` (the default), it uses Docker when the daemon is
 reachable and otherwise starts PostgreSQL, NATS, Temporal, and MinIO as native
 processes. Set the backend explicitly to `docker` or `native` when required.
+An invocation's `OPENGENI_DEV_BACKEND` takes precedence over `.env`; when unset,
+the file's setting remains effective. An explicit `docker` request fails if the
+daemon is unavailable instead of silently starting native infrastructure.
 
 The development web server forwards `/v1` requests to `VITE_API_BASE_URL`
 (the API port selected by the launcher), matching production ingress routing.
@@ -176,14 +179,12 @@ using the Docker backend.
 For Modal runs, configure the Modal sandbox variables in `.env.example`. Private
 registry images use `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET`; the global
 `OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot and remains the logical base
-image identity for every Rig. Optional `OPENGENI_MODAL_SANDBOX_CPU` and
+image identity for every Sandbox Environment. Optional `OPENGENI_MODAL_SANDBOX_CPU` and
 `OPENGENI_MODAL_SANDBOX_MEMORY_MIB` values reserve physical CPU cores and MiB of
 memory for every new box and remain stable through resume and replacement.
-A verified Rig provider image may accelerate physical cold create,
-but never replaces that logical lease identity. V2 capability Packs select a Rig
-for setup/check composition and cannot require an explicit sandbox image while
-Rig image overrides are disabled. Rig-less pre-v2 Pack rows retain their
-historical turn-time image warmup only for rollback compatibility. The registry
+A verified Sandbox Environment provider image may accelerate physical cold create,
+but never replaces that logical lease identity. Explicit Sandbox Environment image overrides
+are disabled. The registry
 Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
 `OPENGENI_MODAL_TOKEN_SECRET` client, so embedded hosts do not need to also set
 standard `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` env vars or provide a

@@ -67,6 +67,98 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
 }
 
 describe("OpenGeniClient", () => {
+  test("checkpoint recovery preview is read-only and explicit consent sends one exact request, never a Retry", async () => {
+    const projection = {
+      version: 1 as const,
+      status: "eligible" as const,
+      reason: null,
+      checkpoint: null,
+      operationId: null,
+    };
+    const request = {
+      operationId: crypto.randomUUID(),
+      acceptHistoricalCheckpoint: true as const,
+      selection: {
+        version: 1 as const,
+        sessionId: SESSION_ID,
+        sandboxGroupId: crypto.randomUUID(),
+        leaseId: crypto.randomUUID(),
+        routeEpoch: 1,
+        authorityEpoch: 2,
+        leaseEpoch: 3,
+        workspaceGeneration: 44,
+        archiveGeneration: 10,
+        artifactId: crypto.randomUUID(),
+        revision: "wa2:exact",
+        capturedAt: "2026-09-16T06:24:07.000Z",
+      },
+    };
+    const { client, requests } = makeClient((r) =>
+      jsonResponse(
+        r.method === "GET"
+          ? projection
+          : {
+              outcome: "accepted",
+              operationId: request.operationId,
+              recovery: { ...projection, status: "consent_accepted" },
+            },
+      ),
+    );
+    expect(await client.getSandboxRecovery(WORKSPACE_ID, SESSION_ID)).toEqual(projection);
+    expect((await client.recoverSandbox(WORKSPACE_ID, SESSION_ID, request)).recovery.status).toBe(
+      "consent_accepted",
+    );
+    expect(requests.map((r) => r.method)).toEqual(["GET", "POST"]);
+    expect(requests.every((r) => r.url.endsWith(`/sessions/${SESSION_ID}/sandbox-recovery`))).toBe(
+      true,
+    );
+    expect(JSON.parse(requests[1]!.body!)).toEqual(request);
+  });
+
+  test("listSessionCodexAccounts uses the session-authorized projection without a caller-selected source", async () => {
+    const response = {
+      accounts: [],
+      currentAccount: null,
+      currentSelection: null,
+      pinnedAccountId: null,
+      lastAccountId: null,
+      activeAccountId: null,
+      settings: {
+        rotationEnabled: false,
+        rotationStrategy: "sharded" as const,
+        activeCredentialId: null,
+      },
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    expect(await client.listSessionCodexAccounts(WORKSPACE_ID, SESSION_ID)).toEqual(response);
+    expect(requests[0]!.method).toBe("GET");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/codex-accounts`,
+    );
+  });
+  test("retrySession preserves the exact failure and selected policy without a message", async () => {
+    const request = {
+      clientEventId: crypto.randomUUID(),
+      failureEventId: crypto.randomUUID(),
+      model: "selected-model",
+      reasoningEffort: "high" as const,
+      latencyMode: "fast" as const,
+    };
+    const response = {
+      outcome: "accepted" as const,
+      turnId: crypto.randomUUID(),
+      failureEventId: request.failureEventId,
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    expect(await client.retrySession(WORKSPACE_ID, SESSION_ID, request)).toEqual(response);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("POST");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/retry`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual(request);
+    expect(requests[0]!.body).not.toContain('"text"');
+  });
   test("session pages require affirmative sort and archive acknowledgments", async () => {
     for (const response of [
       [],

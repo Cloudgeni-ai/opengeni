@@ -38,7 +38,11 @@ export async function attachSessionCapability(
       );
     // A workspace may choose a restricted default instead of all enabled servers.
     // Preserve that exact selection if this connection needs an explicit addition.
-    existing = policy.selectedIds.map((id) => ({ kind: "mcp" as const, id }));
+    // selectedIds contains only explicit additions, and is normally empty for
+    // automatic selection. Compare against the resolved defaults instead.
+    existing = policy.effectiveIds
+      .filter((id) => !policy.mandatoryIds.includes(id))
+      .map((id) => ({ kind: "mcp" as const, id }));
   }
   const additions = tools.filter(
     (tool) => !existing.some((current) => current.kind === tool.kind && current.id === tool.id),

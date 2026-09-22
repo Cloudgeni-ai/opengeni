@@ -236,8 +236,6 @@ export type {
   UseRigChangesOptions,
   UseRigChangesResult,
 } from "./hooks/use-rigs";
-export { usePacks } from "./hooks/use-packs";
-export type { UsePacksOptions, UsePacksResult } from "./hooks/use-packs";
 export { useWorkspaces } from "./hooks/use-workspaces";
 export type { UseWorkspacesOptions, UseWorkspacesResult } from "./hooks/use-workspaces";
 export { useBillingUsage } from "./hooks/use-billing-usage";

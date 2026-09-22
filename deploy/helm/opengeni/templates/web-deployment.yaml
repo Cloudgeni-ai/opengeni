@@ -52,13 +52,16 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "opengeni.fullname" . }}-config
-          {{- if or .Values.web.demoApiBaseUrl .Values.api.enabled }}
+          {{- if or .Values.config.OPENGENI_DEPLOYMENT_REVISION .Values.web.demoApiBaseUrl .Values.api.enabled }}
           env:
+            {{- include "opengeni.deploymentRevisionEnv" . | nindent 12 }}
+            {{- if or .Values.web.demoApiBaseUrl .Values.api.enabled }}
             - name: OPENGENI_DEMO_API_URL
               value: {{ default (printf "http://%s-api:%d" (include "opengeni.fullname" .) (.Values.api.service.port | int)) .Values.web.demoApiBaseUrl | quote }}
             {{- if .Values.web.demoApiCredentialsSecret }}
             - name: OPENGENI_DEMO_CREDENTIALS_DIR
               value: /var/run/secrets/opengeni-demo
+            {{- end }}
             {{- end }}
           {{- else }}
           env: []

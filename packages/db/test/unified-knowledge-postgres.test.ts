@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   prepareKnowledgeFile,
   updateScheduledTaskForApi,
@@ -23,6 +24,7 @@ import {
   listFilesForSubject,
   nestedPostgresSqlState,
   withSessionRlsActorContext,
+  withRlsContext,
 } from "../src";
 import { applySkillLifecycle } from "../src/skills";
 import { createTaskNote, archiveTaskNote } from "../src/task-notes";
@@ -836,6 +838,55 @@ describe("unified Knowledge storage", () => {
     expect(third.nextCursor).toBeNull();
     expect((await listFilesForSubject(client.db, { ...input, scope: "personal" })).files).toEqual(
       [],
+    );
+  });
+
+  test("null-human service reads retain shared attachments without borrowing private authority", async () => {
+    const f = await fixture();
+    const sharedId = crypto.randomUUID();
+    const privateId = crypto.randomUUID();
+    for (const [id, owners] of [
+      [sharedId, null],
+      [privateId, [f.subjectId]],
+    ] as const) {
+      await shared!
+        .admin`INSERT INTO files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,bucket,object_key,private_owner_subject_ids)
+        VALUES(${id},${f.accountId},${f.workspaceId},'ready','Image.png','Image.png','image/png',1,'test',${id},${owners ? [...owners] : null})`;
+    }
+    await withSessionRlsActorContext(
+      { subjectId: "service:agent-turn", privateFileOwnerSubjectId: f.subjectId },
+      () =>
+        withRlsContext(client.db, f, async (tx) => {
+          const files = await getFilesForSubject(tx, {
+            accountId: f.accountId,
+            workspaceId: f.workspaceId,
+            subjectId: null,
+            fileIds: [sharedId, privateId],
+          });
+          expect(files.map((file) => file.id)).toEqual([sharedId]);
+          const [scope] = await tx.execute<{ subject: string; owner: string }>(sql`
+          select current_setting('opengeni.subject_id', true) as subject,
+                 current_setting('opengeni.private_file_owner', true) as owner`);
+          expect(scope?.subject).toBe("service:agent-turn");
+          expect(scope?.owner).toBe(f.subjectId);
+          let failure: unknown;
+          try {
+            await getFilesForSubject(tx, {
+              accountId: f.accountId,
+              workspaceId: f.workspaceId,
+              subjectId: null,
+              fileIds: ["not-a-uuid"],
+            });
+          } catch (error) {
+            failure = error;
+          }
+          expect(nestedPostgresSqlState(failure)).toBe("22P02");
+          const [afterFailure] = await tx.execute<{ subject: string; owner: string }>(sql`
+          select current_setting('opengeni.subject_id', true) as subject,
+                 current_setting('opengeni.private_file_owner', true) as owner`);
+          expect(afterFailure?.subject).toBe("service:agent-turn");
+          expect(afterFailure?.owner).toBe(f.subjectId);
+        }),
     );
   });
 

@@ -9,6 +9,8 @@ import {
   bootstrapWorkspace,
   createAutomationSource,
   createAutomationTrigger,
+  createPrReviewAppRegistration,
+  createPrReviewRepositoryBinding,
   createWorkspaceGatewayCustomModel,
   createDb,
   deleteWorkspaceGatewayCustomModel,
@@ -116,8 +118,6 @@ beforeAll(async () => {
       parameters: {},
       sessionTemplate,
       status: "active",
-      packInstallationId: null,
-      packTemplateId: null,
     },
   });
   triggerId = trigger.id;
@@ -176,24 +176,24 @@ describe("automation route authorization", () => {
     expect(response.status).toBe(403);
   });
 
-  test("rejects Pack ownership through the generic trigger create route", async () => {
+  test("rejects PR Review authority through the generic source create route", async () => {
     const response = await app.request(
-      `http://test/v1/workspaces/${workspaceId}/automations/triggers`,
+      `http://test/v1/workspaces/${workspaceId}/automations/sources`,
       {
         method: "POST",
         headers: {
-          authorization: await authorization(["workspace:read", "workspace:admin"]),
+          authorization: await authorization([
+            "workspace:read",
+            "workspace:admin",
+            "secrets:write",
+          ]),
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          sourceId,
-          name: "Claimed Pack trigger",
-          eventTypes: ["authorization.event"],
+          name: "Claimed PR Review source",
+          adapterId: "source-control.pull-request.v1",
+          webhookSecret: "test-webhook-secret",
           configuration: {},
-          parameters: {},
-          sessionTemplate,
-          packInstallationId: "11111111-1111-4111-8111-111111111111",
-          packTemplateId: "review",
         }),
       },
     );
@@ -228,8 +228,6 @@ describe("automation route authorization", () => {
           model: `workspace-gateway/${upstreamModelId}`,
         },
         status: "active",
-        packInstallationId: null,
-        packTemplateId: null,
       },
     });
     await deleteWorkspaceGatewayCustomModel(client.db, {
@@ -268,24 +266,22 @@ describe("automation route authorization", () => {
 
   test("checks the adapter-rendered model before accepting a PR-review event", async () => {
     triggeredRuns.length = 0;
-    const registrationId = crypto.randomUUID();
-    const source = await createAutomationSource(client.db, {
+    const registration = await createPrReviewAppRegistration(client.db, {
       accountId,
       workspaceId,
       createdBySubjectId: subjectId,
       webhookSecretEncrypted: "test-ciphertext",
-      request: {
-        name: "PR review rendered-model source",
-        adapterId: "source-control.pull-request.v1",
-        webhookSecret: "never-stored",
-        configuration: {
-          provider: "github",
-          providerBaseUrl: "https://github.com",
-          registrationId,
-          webhookUsername: null,
-        },
-      },
+      name: "PR review rendered-model source",
+      provider: "github",
+      providerBaseUrl: "https://github.com",
+      appId: "12345",
+      credentialKind: "github_app",
+      credentialEncrypted: "fixture-private-key",
+      accessTokenExpiresAt: null,
+      webhookAuthKind: "hmac_sha256",
+      webhookUsername: null,
     });
+    const source = { id: registration.sourceId, adapterId: "source-control.pull-request.v1" };
     const upstreamModelId = `fixture/pr-review-retired-${crypto.randomUUID()}`;
     const productModelId = `workspace-gateway/${upstreamModelId}`;
     const model = await createWorkspaceGatewayCustomModel(client.db, {
@@ -297,37 +293,28 @@ describe("automation route authorization", () => {
       createdBySubjectId: subjectId,
     });
     if (!model) throw new Error("custom model create unexpectedly conflicted");
-    await createAutomationTrigger(client.db, {
+    await createPrReviewRepositoryBinding(client.db, {
       accountId,
       workspaceId,
       createdBySubjectId: subjectId,
       adapterId: source.adapterId,
-      request: {
-        sourceId: source.id,
-        name: "PR review rendered-model trigger",
-        eventTypes: ["pull_request.review_requested"],
-        configuration: {},
-        parameters: {
-          registrationId,
-          repositoryBindingId: crypto.randomUUID(),
-          provider: "github",
-          repositoryUri: "https://github.com/example/repository.git",
-          repositoryFullName: "example/repository",
-          providerRepositoryId: "101",
-          installationId: "202",
-          projectId: null,
-          model: productModelId,
-          additionalInstructions: null,
-        },
-        sessionTemplate: {
-          ...sessionTemplate,
-          instructions: "Follow the PR-review instructions.",
-          policyRole: "pull_request_review",
-        },
-        status: "active",
-        packInstallationId: null,
-        packTemplateId: null,
+      registrationId: registration.id,
+      eventTypes: ["pull_request.review_requested"],
+      configuration: {},
+      provider: "github",
+      repositoryUri: "https://github.com/example/repository.git",
+      repositoryFullName: "example/repository",
+      providerRepositoryId: "101",
+      installationId: "202",
+      projectId: null,
+      model: productModelId,
+      additionalInstructions: null,
+      sessionTemplate: {
+        ...sessionTemplate,
+        instructions: "Follow the PR-review instructions.",
+        policyRole: "pull_request_review",
       },
+      status: "active",
     });
     await deleteWorkspaceGatewayCustomModel(client.db, {
       accountId,

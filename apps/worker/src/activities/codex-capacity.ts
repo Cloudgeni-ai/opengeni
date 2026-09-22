@@ -1,4 +1,5 @@
 import {
+  connectionModelAllowed,
   armCodexCapacityWait,
   fetchCodexUsageForAccount,
   getCodexCapacityWaitForSession,
@@ -90,8 +91,15 @@ export async function signalPendingCodexCapacityWakeTargets(
 
 export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnostic = never>(
   context: CodexCapacitySelectionContext<TPolicyScope, TUnavailableDiagnostic>,
+  now = new Date(),
 ): ReturnType<Parameters<typeof reconcileCodexCapacityWaitDb>[2]> {
-  const now = new Date();
+  context = {
+    ...context,
+    accounts: context.accounts.filter(
+      (account) =>
+        !context.modelId || connectionModelAllowed(account.allowedModelIds, context.modelId),
+    ),
+  };
   const selected = selectCodexCredentialLeaseForTurn({
     context,
     sessionId: context.sessionId,
@@ -114,8 +122,12 @@ export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnost
       credentialId: selected.credentialId,
       diagnostic: {
         connectedCount: context.accounts.length,
-        eligibleCount: context.accounts.filter((account) => isCodexCredentialEligible(account, now))
-          .length,
+        eligibleCount: context.accounts.filter(
+          (account) =>
+            (account.id === selected.credentialId ||
+              !context.failedCredentialIds?.includes(account.id)) &&
+            isCodexCredentialEligible(account, now),
+        ).length,
       },
     };
   }
@@ -134,8 +146,7 @@ export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnost
       account.status === "active" &&
       account.allocatorEnabled &&
       account.exhaustedKind === "quota" &&
-      account.exhaustedUntil !== null &&
-      account.exhaustedUntil > now,
+      account.exhaustedUntil !== null,
   );
   const policyAccount = capacityAccounts[0] ?? null;
   const mutationOnlyStatusBlock =
@@ -162,7 +173,7 @@ export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnost
     kind: "unavailable",
     earliestResetAt: authoritativeReset,
     resetKind:
-      selected.decision.kind === "none" ||
+      (selected.decision.kind === "none" && !hasReconcilableQuotaCooldown && !authoritativeReset) ||
       selected.decision.kind === "allocatorDisabled" ||
       mutationOnlyStatusBlock
         ? "mutation_only"
@@ -191,6 +202,16 @@ export async function armAndReconcileCodexCapacityWait(
   options: { onArmed?: () => void } = {},
 ) {
   const armed = await armCodexCapacityWait(services.db, input);
+  if (armed.action === "stopped") {
+    options.onArmed?.();
+    await publishDurableSessionEvents(
+      services.bus,
+      input.workspaceId,
+      input.sessionId,
+      armed.events,
+    );
+    return armed;
+  }
   if (armed.action !== "waiting") return armed;
 
   options.onArmed?.();
@@ -219,8 +240,9 @@ export async function armAndReconcileCodexCapacityWait(
 async function refreshCapacityMetadata(
   services: ControlActivityServices,
   workspaceId: string,
+  turnId: string,
 ): Promise<void> {
-  const accounts = await listCodexAccountStatuses(services.db, workspaceId).catch(() => []);
+  const accounts = await listCodexAccountStatuses(services.db, workspaceId, turnId).catch(() => []);
   const now = new Date();
   const stale = accounts.filter(
     (account) =>
@@ -231,7 +253,14 @@ async function refreshCapacityMetadata(
   await refreshCodexUsageAndRepairCapacityWaiters(
     stale.map(
       (account) => () =>
-        fetchCodexUsageForAccount(services.db, services.settings, workspaceId, account.id),
+        fetchCodexUsageForAccount(
+          services.db,
+          services.settings,
+          workspaceId,
+          account.id,
+          undefined,
+          turnId,
+        ),
     ),
     () => signalPendingCodexCapacityWakeTargets(services, workspaceId),
   );
@@ -338,7 +367,7 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
     if (boundedRefreshAttempted) {
       // This is a bounded secret-safe control-plane quota refresh. It creates no
       // turn, model call, user message, schedule, or entitlement action.
-      await refreshCapacityMetadata(resolved, input.workspaceId);
+      await refreshCapacityMetadata(resolved, input.workspaceId, current.blockedTurnId);
     }
     const result = await reconcileCodexCapacityWaitDb(
       resolved.db,

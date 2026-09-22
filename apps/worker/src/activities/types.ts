@@ -7,7 +7,11 @@ import type {
   ScheduledTaskTriggerType,
   TurnInitiator,
 } from "@opengeni/contracts";
-import type { Database, SessionWorkflowWakeDeliveryResult } from "@opengeni/db";
+import type {
+  Database,
+  SessionWorkflowWakeDeliveryResult,
+  SessionAdmissionFence,
+} from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -252,6 +256,7 @@ export type FailSessionAttemptInput = {
    * committed claim discovered by the control lane can recover the exact
    * attempt instead of terminally failing it. */
   preClaimFailure?: PreClaimFailureDetail;
+  admissionFence?: SessionAdmissionFence;
   /** Added in v4. A claimed attempt that lost operational database access
    * before turn-start completion carries its exact immutable turn identity so
    * the DB-only control lane can recover it instead of terminally failing it. */
@@ -263,17 +268,24 @@ export type FailSessionAttemptInput = {
 };
 
 export type FailSessionAttemptResult =
+  | { action: "blocked" }
   | { action: "failed" }
   | { action: "recovering" }
   | { action: "unclaimed" }
   | { action: "terminal" }
   | { action: "stale" };
 
-export type PreClaimFailureDisposition = "retryable" | "permanent";
+export type PreClaimFailureDisposition = "retryable" | "permanent" | "blocked";
 
 export type PreClaimFailureDetail = {
   disposition: PreClaimFailureDisposition;
   code: "db_deadlock" | "db_serialization_failure" | "db_failure" | "claim_invariant";
+  sqlState?: string | null;
+  reason?:
+    | "database_claim_rejected"
+    | "initiator_membership_required"
+    | "personal_resource_grant_required";
+  retryPolicy?: "explicit_recheck";
 };
 
 export const PRE_CLAIM_FAILURE_TYPE = "OpenGeniPreClaimFailure";
@@ -344,6 +356,9 @@ export type RecoverEscapedMcpTimeoutResult = {
 export type PeekSessionWorkInput = {
   workspaceId: string;
   sessionId: string;
+  includeAdmissionFence?: boolean;
+  /** Versioned workflow observer opt-in, never a caller authorization grant. */
+  observerAccountId?: string;
 };
 
 export type SettleSessionInputWaitInput = {

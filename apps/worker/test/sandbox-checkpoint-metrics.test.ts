@@ -8,6 +8,7 @@ import {
   recordSandboxInventoryProjectionFailure,
   recordSandboxInventoryProjectionSuccess,
   recordSandboxRotationBacklogGauges,
+  runtimeMetricsHooksForObservability,
 } from "../src/observability-metrics";
 
 function workerObservability() {
@@ -15,6 +16,24 @@ function workerObservability() {
 }
 
 describe("sandbox checkpoint and deadline metrics", () => {
+  test("physical capture timing uses bounded backend and outcome labels", async () => {
+    const observability = workerObservability();
+    const hooks = runtimeMetricsHooksForObservability(observability);
+    hooks.onWorkspaceCapture?.({ backend: "modal", outcome: "completed", durationSeconds: 60 });
+    hooks.onWorkspaceCapture?.({
+      backend: "private-provider",
+      outcome: "failed",
+      durationSeconds: 2,
+    });
+    hooks.onWorkspaceCapture?.({ backend: "modal", outcome: "completed", durationSeconds: NaN });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toContain("opengeni_workspace_capture_duration_seconds");
+    expect(metrics).toContain('backend="unknown"');
+    expect(metrics).toContain('outcome="failed"');
+    expect(metrics).not.toContain("private-provider");
+    expect(metrics).not.toContain("NaN");
+    await observability.flush();
+  });
   test("publishes every bounded lifecycle/backlog series, including zeroes", async () => {
     const observability = workerObservability();
     recordSandboxCheckpointArtifactGauges(observability, {

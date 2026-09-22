@@ -4,6 +4,7 @@ import { ConnectSetup, type ConnectSetupProps } from "./connect-setup";
 import { useConnect } from "./hooks/use-connect";
 import type { OpenGeniClient } from "@opengeni/sdk";
 import { useState } from "react";
+import { connectionServicePresentation } from "./connection-service-presentation";
 import { ConnectionDiscovery } from "./connection-discovery";
 
 export type ConnectPanelProps = ConnectSetupProps & {
@@ -39,6 +40,9 @@ export function ConnectPanel({
   // competing new acquisition. Unmounting observers never cancels controller work.
   const activeSetup =
     attempt !== null && !["complete", "cancelled", "expired"].includes(attempt.state);
+  const serviceName = attempt
+    ? connectionServicePresentation({ id: attempt.providerId, label: "" }).name
+    : "";
   return (
     <div className={["og-connect", className].filter(Boolean).join(" ")}>
       {title !== null && <h2>{title}</h2>}
@@ -48,26 +52,20 @@ export function ConnectPanel({
           controller={setup.controller}
           returnUrl={returnUrl}
           client={client}
+          onDisconnected={() => setInventoryRevision((value) => value + 1)}
         />
       )}
       {!activeSetup &&
         (client && presentation === "catalog" ? (
           <>
             <ConnectionDiscovery
+              key={inventoryRevision}
+              controller={showProviderConnections ? setup.controller : undefined}
               client={client}
               workspaceId={setup.controller.workspaceId}
               returnUrl={returnUrl}
               onConfigured={() => setInventoryRevision((value) => value + 1)}
             />
-            {showProviderConnections && (
-              <ConnectChooser
-                compact
-                providerOnly
-                presentation="catalog"
-                controller={setup.controller}
-                returnUrl={returnUrl}
-              />
-            )}
             {showCustomConnections && (
               <details className="og-connect-secondary">
                 <summary>Custom connection</summary>
@@ -87,7 +85,15 @@ export function ConnectPanel({
             returnUrl={returnUrl}
           />
         ))}
-      {activeSetup && <ConnectSetup {...setup} />}
+      {activeSetup && (
+        <ConnectSetup
+          {...setup}
+          authorizeLabel={
+            setup.authorizeLabel ??
+            (serviceName ? `Continue to ${serviceName}` : "Authorize connection")
+          }
+        />
+      )}
     </div>
   );
 }

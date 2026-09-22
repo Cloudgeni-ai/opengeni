@@ -8,6 +8,24 @@ Knowledge is the shared system for information agents retain and retrieve. It
 replaces the former Memory system and separate reviewed Knowledge lane. Personal
 and workspace Knowledge use the same structure and tools, with different access.
 
+## Remembering facts versus behavior
+
+Knowledge keeps information the agent can search when needed. A request to
+"keep replies concise in future sessions" instead changes how the agent should
+behave. It belongs in **workspace instructions** for a short always-on rule, or
+an applicable **Skill** for a context-specific or personal preference, not a
+Knowledge fact saying that you prefer concise replies.
+
+Active workspace instructions are included in applicable prompts. Skills have
+short descriptions in the prompt index; their full instructions are read when
+relevant. Personal preferences must keep their intended scope rather than
+silently becoming rules for everyone in a shared workspace. If the appropriate
+destination is unavailable, the agent should explain that limitation.
+
+Each destination still follows its Agent learning setting. The agent should tell
+you whether the instruction or Skill is active, awaiting review, or not saved.
+Saving Knowledge does not guarantee that a behavior will apply in future chats.
+
 ## Files, sources and findings
 
 Uploading a file in a chat keeps the original available to that conversation.

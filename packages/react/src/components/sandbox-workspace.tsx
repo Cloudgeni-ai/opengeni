@@ -119,19 +119,6 @@ function sourceDrivenDefaultTab(
   return null;
 }
 
-function captureDegradedMessage(reason: string): string {
-  switch (reason) {
-    case "repository_discovery_timed_out":
-      return "Workspace capture is incomplete because repository discovery timed out. Live files remain authoritative.";
-    case "repository_discovery_result_limit_exceeded":
-      return "Workspace capture is incomplete because the repository limit was exceeded. Live files remain authoritative.";
-    case "repository_read_unavailable":
-      return "Workspace capture is incomplete because repository changes could not be read. Live files remain authoritative.";
-    default:
-      return "Workspace capture is incomplete because repository discovery failed. Live files remain authoritative.";
-  }
-}
-
 function WorkbenchSurfaceLoading({ name }: { name: "Browser" | "Desktop" }) {
   return (
     <CenteredState
@@ -555,23 +542,6 @@ export function useSandboxWorkspaceTabs(
     if (advertised.length > 0) return advertised;
     return captureState.capture?.repos.map((repo) => repo.root) ?? [];
   }, [capabilities?.Git.repos, captureState.capture]);
-  const notifiedCaptureDegradedReason = useRef<{
-    sessionId: string;
-    reason: string | null;
-  }>({
-    sessionId,
-    reason: null,
-  });
-  if (notifiedCaptureDegradedReason.current.sessionId !== sessionId) {
-    notifiedCaptureDegradedReason.current = { sessionId, reason: null };
-  }
-  useEffect(() => {
-    const reason = captureState.degradedReason;
-    if (!reason || notifiedCaptureDegradedReason.current.reason === reason) return;
-    notifiedCaptureDegradedReason.current = { sessionId, reason };
-    onNotify?.({ kind: "error", message: captureDegradedMessage(reason) });
-  }, [sessionId, captureState.degradedReason, onNotify]);
-
   const files = useSandboxFiles(sessionId, {
     events,
     // No passive Channel-A reads while cold, even after a conclusive capture
@@ -743,6 +713,7 @@ export function useSandboxWorkspaceTabs(
             comparison={changesComparison}
             onComparisonChange={setChangesComparison}
             captureAvailable={captureAvailable}
+            captureDegraded={captureState.degradedReason !== null}
             captureRevision={captureState.revision}
             capturePending={capturePending}
             liveWorkspaceExpected={liveWorkspaceExpected}
@@ -928,6 +899,7 @@ export function useSandboxWorkspaceTabs(
     browserEnabled,
     desktopEnabled,
     captureAvailable,
+    captureState.degradedReason,
     dirtyCount,
     warmTerminal,
     requestedFilePath,
@@ -1354,6 +1326,7 @@ function ChangesTabContent({
   git,
   comparison,
   captureAvailable,
+  captureDegraded,
   captureRevision,
   capturePending,
   liveWorkspaceExpected,
@@ -1367,6 +1340,7 @@ function ChangesTabContent({
   git: UseSandboxGitResult;
   comparison: SandboxGitComparison;
   captureAvailable: boolean;
+  captureDegraded: boolean;
   captureRevision: number | null;
   capturePending: boolean;
   liveWorkspaceExpected: boolean;
@@ -1460,6 +1434,8 @@ function ChangesTabContent({
   }
 
   if (!liveWorkspaceExpected && (comparison !== "working" || !captureAvailable)) {
+    // Staged changes are live-only; a failed saved preview is not their blocker.
+    const previewUnavailable = captureDegraded && !captureAvailable && comparison !== "staged";
     return (
       <CenteredState
         icon={
@@ -1468,22 +1444,30 @@ function ChangesTabContent({
               className="size-5 animate-spin motion-reduce:animate-none"
               aria-hidden
             />
+          ) : previewUnavailable ? (
+            <TriangleAlertIcon className="size-5" aria-hidden />
           ) : (
             <CpuIcon className="size-5" aria-hidden />
           )
         }
       >
         <p className="text-og-sm font-medium text-og-fg">
-          {workspaceWaking ? "Waking workspace" : "Workspace is resting"}
+          {workspaceWaking
+            ? "Waking workspace"
+            : previewUnavailable
+              ? "Saved changes preview is unavailable"
+              : "Workspace is resting"}
         </p>
         <p className="text-og-sm leading-5 text-og-fg-subtle">
           {workspaceWaking
             ? "Connecting to the live working tree…"
-            : comparison === "branch"
-              ? "Wake the sandbox to compare this branch with the remote default branch."
-              : comparison === "staged"
-                ? "Wake the sandbox to inspect staged changes."
-                : "No captured revision is available yet. Wake the sandbox to inspect uncommitted changes."}
+            : previewUnavailable
+              ? "Open the live workspace to view current changes."
+              : comparison === "branch"
+                ? "Wake the sandbox to compare this branch with the remote default branch."
+                : comparison === "staged"
+                  ? "Wake the sandbox to inspect staged changes."
+                  : "No captured revision is available yet. Wake the sandbox to inspect uncommitted changes."}
         </p>
         {!workspaceWaking ? (
           <DockActionButton onClick={onWake}>

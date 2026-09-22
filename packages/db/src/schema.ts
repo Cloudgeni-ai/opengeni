@@ -1,5 +1,8 @@
+import type { StoredSessionAdmissionBlock } from "./session-admission-block";
+import { meaningfulSessionEventSql } from "./session-meaningful-events";
 import type {
   SandboxProviderCommand,
+  CommandSupervisionReceipt,
   AutomationAcceptedExecution,
   AutomationSessionTemplate,
   AttemptToolCatalog,
@@ -7,6 +10,7 @@ import type {
   DraftTimelineAnnotation,
   FirstPartyMcpToolName,
   McpPersonalConnectionDelegation,
+  McpConnectionAccountBinding,
   PersonalResourceAttachmentIntent,
   PersonalResourceAttachmentSummary,
   Permission,
@@ -4425,6 +4429,7 @@ export const sessions = pgTable(
     // NULL and use the bounded metadata.role compatibility fallback at the
     // attempt-snapshot boundary.
     policyRole: text("policy_role"),
+    admissionBlock: jsonb("admission_block").$type<StoredSessionAdmissionBlock>(),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
@@ -4447,6 +4452,8 @@ export const sessions = pgTable(
       .notNull()
       .default("workspace_shared"),
     authorityEpoch: integer("authority_epoch").notNull().default(1),
+    // Old accepted epochs remain valid across sharing, never across revocation.
+    executionAuthorityEpoch: integer("execution_authority_epoch").notNull().default(1),
     // Agent-access scope (migration 0427). Declares how far a live attempt on
     // this session may reach across the workspace and how far peers may reach
     // into it. 'workspace' is the pre-0426 behaviour; 'user' limits reach to
@@ -4545,6 +4552,9 @@ export const sessions = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    initialMcpAccountBindings: jsonb("initial_mcp_account_bindings").$type<
+      McpConnectionAccountBinding[] | null
+    >(),
     // Initial accepted-work staging only. The initializer consumes this inside
     // the same transaction that inserts the first logical turn and grant
     // snapshots; runtime never authorizes from the session field.
@@ -4562,6 +4572,10 @@ export const sessions = pgTable(
     toolPolicy: jsonb("tool_policy").$type<SessionToolPolicy>().notNull(),
     // Optimistic-concurrency fence for durable session tool-policy writes.
     toolPolicyVersion: integer("tool_policy_version").notNull().default(1),
+    mcpApprovalPolicies: jsonb("mcp_approval_policies")
+      .$type<Record<string, SessionMcpApprovalPolicy>>()
+      .notNull()
+      .default({}),
     // The manager session that spawned this one via session_create. Set only
     // when the creating grant carried a worker-signed sessionId claim (a session
     // spawning a worker); null for direct API creates and scheduled-task runs.
@@ -5366,10 +5380,12 @@ export const sessionPins = pgTable(
     pinned: boolean("pinned").notNull().default(true),
     pinnedAt: timestamp("pinned_at", { withTimezone: true }).defaultNow(),
     version: integer("version").notNull().default(1),
-    // A session is unread for this subject whenever its durable event sequence
-    // has advanced beyond this explicit acknowledgment fence. Merely opening a
-    // route never changes the fence.
+    // Compare the meaningful event frontier, not the raw durable cursor.
+    // Merely opening a route never changes this per-subject fence.
     acknowledgedSequence: integer("acknowledged_sequence").notNull().default(0),
+    // A replay at/before this raw event position cannot consume explicit intent.
+    // A genuinely newer proven read, or an explicit mark-read, removes it.
+    manuallyUnreadThrough: integer("manually_unread_through"),
     activelyWorking: boolean("actively_working").notNull().default(false),
     attentionVersion: integer("attention_version").notNull().default(0),
     archived: boolean("archived").notNull().default(false),
@@ -6761,6 +6777,7 @@ export const sessionTurns = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
     // Credential-free public summary of a turn-bound personal Variable
     // Set/Rig attachment. Exact resource and grant identity lives only in the
     // immutable accepted-work snapshot tables.
@@ -8165,6 +8182,7 @@ export const sessionSystemUpdates = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
     xaiProviderAccountAuthoritySnapshot: jsonb("xai_provider_account_authority_snapshot")
       .$type<XaiProviderAccountAuthoritySnapshotV1>()
       .notNull()
@@ -8264,6 +8282,7 @@ export const sessionSystemUpdateOutbox = pgTable(
       .$type<McpPersonalConnectionDelegation[]>()
       .notNull()
       .default([]),
+    mcpAccountBindings: jsonb("mcp_account_bindings").$type<McpConnectionAccountBinding[] | null>(),
     xaiProviderAccountAuthoritySnapshot: jsonb("xai_provider_account_authority_snapshot")
       .$type<XaiProviderAccountAuthoritySnapshotV1>()
       .notNull()
@@ -8808,6 +8827,9 @@ export const sessionEvents = pgTable(
       table.type,
       table.sequence,
     ),
+    meaningfulAttention: index("session_events_meaningful_attention_idx")
+      .on(table.workspaceId, table.sessionId, table.sequence)
+      .where(meaningfulSessionEventSql("session_events")),
     workspaceTurnType: index("session_events_workspace_turn_type_idx")
       .on(table.workspaceId, table.turnId, table.type)
       .where(sql`${table.turnId} is not null`),
@@ -9311,6 +9333,7 @@ export const sandboxLeases = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     sandboxGroupId: uuid("sandbox_group_id").notNull(),
+    publicRecovery: jsonb("public_recovery").$type<Record<string, unknown>>(),
 
     unobservableCommandDrainIds: uuid("unobservable_command_drain_ids").array(),
     unobservableCommandCheckedAt: timestamp("unobservable_command_checked_at", {
@@ -9388,6 +9411,11 @@ export const sandboxLeases = pgTable(
     // can recover immediately without pretending it resumes one provider RPC.
     archiveCaptureTakeoverSafe: boolean("archive_capture_takeover_safe").notNull().default(false),
     archiveCaptureAttempt: integer("archive_capture_attempt"),
+    // Periodic capture cadence survives a failed claim's release and worker
+    // restarts. This is not evidence that a recovery archive was published.
+    archiveCaptureLastAttemptAt: timestamp("archive_capture_last_attempt_at", {
+      withTimezone: true,
+    }),
     archiveCaptureGeneration: integer("archive_capture_generation"),
     archiveCaptureStartedAt: timestamp("archive_capture_started_at", {
       withTimezone: true,
@@ -9900,6 +9928,13 @@ export const sandboxRetainedProcesses = pgTable(
     routeEpoch: integer("route_epoch").notNull(),
     providerSessionId: integer("provider_session_id").notNull(),
     providerCommand: jsonb("provider_command").$type<SandboxProviderCommand>(),
+    supervisionRetentionXid: customType<{ data: string }>({ dataType: () => "xid8" })(
+      "supervision_retention_xid",
+    ).default(sql`pg_current_xact_id()`),
+    supervisionReceipt: jsonb("supervision_receipt").$type<CommandSupervisionReceipt>(),
+    supervisionOutputCaptured: boolean("supervision_output_captured").notNull().default(false),
+    cancellationRequestedAt: timestamp("cancellation_requested_at", { withTimezone: true }),
+    cancellationReason: text("cancellation_reason"),
     providerCommandInputIndex: bigint("provider_command_input_index", { mode: "number" })
       .notNull()
       .default(0),
@@ -9999,7 +10034,7 @@ export const sandboxRetainedProcesses = pgTable(
       sql`${table.providerCommand} IS NULL OR ((
         ${table.providerBackend} = 'modal'
         AND jsonb_typeof(${table.providerCommand}) = 'object'
-        AND ${table.providerCommand}->>'kind' = 'modal-control-v1'
+        AND ${table.providerCommand}->>'kind' IN ('modal-control-v1', 'modal-router-v1')
         AND ${table.providerCommand}->>'sandboxId' = ${table.providerInstanceId}
         AND length(${table.providerCommand}->>'taskId') > 0
         AND length(${table.providerCommand}->>'execId') > 0
@@ -12227,80 +12262,6 @@ export const auditEvents = pgTable(
   }),
 );
 
-export const packInstallations = pgTable(
-  "pack_installations",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    packId: text("pack_id").notNull(),
-    status: text("status").notNull().default("active"),
-    version: integer("version").notNull().default(1),
-    manifestSnapshot: jsonb("manifest_snapshot").$type<Record<string, unknown>>(),
-    manifestDigest: text("manifest_digest"),
-    selectedRigId: uuid("selected_rig_id").references(() => rigs.id, {
-      onDelete: "set null",
-    }),
-    installedBySubjectId: text("installed_by_subject_id"),
-    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
-    enabledAt: timestamp("enabled_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    workspaceIdentity: uniqueIndex("pack_installations_workspace_id_uq").on(
-      table.workspaceId,
-      table.id,
-    ),
-    workspacePack: uniqueIndex("pack_installations_workspace_pack_idx").on(
-      table.workspaceId,
-      table.packId,
-    ),
-    status: index("pack_installations_workspace_status_idx").on(table.workspaceId, table.status),
-    selectedRig: index("pack_installations_workspace_rig_idx")
-      .on(table.workspaceId, table.selectedRigId)
-      .where(sql`${table.selectedRigId} is not null`),
-  }),
-);
-
-export const packInstallationComponents = pgTable(
-  "pack_installation_components",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    packInstallationId: uuid("pack_installation_id")
-      .notNull()
-      .references(() => packInstallations.id, { onDelete: "cascade" }),
-    componentKey: text("component_key").notNull(),
-    kind: text("kind").notNull(),
-    capabilityId: text("capability_id").notNull(),
-    resolvedId: text("resolved_id").notNull(),
-    digest: text("digest").notNull(),
-    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    installationKey: uniqueIndex("pack_installation_components_pack_key_uq").on(
-      table.packInstallationId,
-      table.componentKey,
-    ),
-    workspaceCapability: index("pack_installation_components_workspace_capability_idx").on(
-      table.workspaceId,
-      table.kind,
-      table.capabilityId,
-    ),
-  }),
-);
-
 export const automationSources = pgTable(
   "automation_sources",
   {
@@ -12318,8 +12279,7 @@ export const automationSources = pgTable(
     webhookSecretEncrypted: text("webhook_secret_encrypted").notNull(),
     status: text("status").notNull().default("active"),
     version: integer("version").notNull().default(1),
-    packInstallationId: uuid("pack_installation_id"),
-    packConnectorId: text("pack_connector_id"),
+
     createdBySubjectId: text("created_by_subject_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -12341,20 +12301,12 @@ export const automationSources = pgTable(
         and octet_length(${table.name}) between 1 and 512
         and octet_length(${table.adapterId}) between 1 and 128
         and octet_length(${table.createdBySubjectId}) between 1 and 4096
-        and jsonb_typeof(${table.configuration}) = 'object'
-        and ((${table.packInstallationId} is null and ${table.packConnectorId} is null)
-          or (${table.packInstallationId} is not null
-            and octet_length(${table.packConnectorId}) between 1 and 128))`,
+        and jsonb_typeof(${table.configuration}) = 'object'`,
     ),
     workspaceAccount: foreignKey({
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
       name: "automation_sources_workspace_account_fk",
-    }).onDelete("cascade"),
-    packInstallation: foreignKey({
-      columns: [table.workspaceId, table.packInstallationId],
-      foreignColumns: [packInstallations.workspaceId, packInstallations.id],
-      name: "automation_sources_pack_installation_fk",
     }).onDelete("cascade"),
   }),
 );
@@ -12401,8 +12353,7 @@ export const automationTriggers = pgTable(
     name: text("name").notNull(),
     status: text("status").notNull().default("active"),
     currentRevision: integer("current_revision").notNull().default(1),
-    packInstallationId: uuid("pack_installation_id"),
-    packTemplateId: text("pack_template_id"),
+
     createdBySubjectId: text("created_by_subject_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -12426,11 +12377,7 @@ export const automationTriggers = pgTable(
       foreignColumns: [automationSources.workspaceId, automationSources.id],
       name: "automation_triggers_source_fk",
     }).onDelete("cascade"),
-    packInstallation: foreignKey({
-      columns: [table.workspaceId, table.packInstallationId],
-      foreignColumns: [packInstallations.workspaceId, packInstallations.id],
-      name: "automation_triggers_pack_installation_fk",
-    }).onDelete("cascade"),
+
     workspaceAccount: foreignKey({
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
@@ -12441,9 +12388,7 @@ export const automationTriggers = pgTable(
       sql`${table.status} in ('active', 'paused', 'disabled')
         and ${table.currentRevision} > 0
         and octet_length(${table.name}) between 1 and 512
-        and octet_length(${table.createdBySubjectId}) between 1 and 4096
-        and ((${table.packInstallationId} is null and ${table.packTemplateId} is null)
-          or (${table.packInstallationId} is not null and octet_length(${table.packTemplateId}) between 1 and 128))`,
+        and octet_length(${table.createdBySubjectId}) between 1 and 4096`,
     ),
   }),
 );
@@ -12670,29 +12615,6 @@ export const automationRunEventLinks = pgTable(
       foreignColumns: [workspaces.id, workspaces.accountId],
       name: "automation_run_event_links_workspace_account_fk",
     }).onDelete("cascade"),
-  }),
-);
-
-export const workspacePacks = pgTable(
-  "workspace_packs",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
-    packId: text("pack_id").notNull(),
-    manifest: jsonb("manifest").$type<Record<string, unknown>>().notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    workspacePack: uniqueIndex("workspace_packs_workspace_pack_idx").on(
-      table.workspaceId,
-      table.packId,
-    ),
   }),
 );
 

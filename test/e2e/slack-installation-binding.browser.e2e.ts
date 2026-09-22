@@ -235,9 +235,7 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
       return json({ error: { message: "blocked fixture should not be called" } }, 500);
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/social/connections`) return json([]);
-    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({ packs: [], installations: [] });
-    }
+
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {

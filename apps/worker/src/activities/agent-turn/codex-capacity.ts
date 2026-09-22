@@ -173,10 +173,17 @@ export async function selectCodexTurnCapacity(
         );
       if (leased.decision.kind === "allCapped") {
         // Bounded self-heal of stale usage cache, then ONE new atomic selection.
-        await refreshCappedCodexUsageRows(db, settings, input.workspaceId, leased.accounts, {
-          signalCodexCapacityWorkflow,
-          wakeSessionWorkflow,
-        });
+        await refreshCappedCodexUsageRows(
+          db,
+          settings,
+          input.workspaceId,
+          leased.accounts,
+          {
+            signalCodexCapacityWorkflow,
+            wakeSessionWorkflow,
+          },
+          turn.id,
+        );
         leaseAcquisitionStartedAtMs = performance.now();
         leased = await acquireCodexCredentialLease(
           db,
@@ -466,6 +473,11 @@ export async function selectCodexTurnCapacity(
             },
           },
         );
+        if (evaluated.action === "stopped") {
+          control.turnMetricOutcome = "failed";
+          control.activityStatus = evaluated.sessionStatus === "queued" ? "idle" : "failed";
+          return { exit: claimedResult({ status: control.activityStatus }) };
+        }
         if (evaluated.action === "resumed") {
           control.turnMetricOutcome = "recovering";
           control.activityStatus = "recovering";
@@ -583,6 +595,11 @@ export async function selectCodexTurnCapacity(
             },
           },
         );
+        if (evaluated.action === "stopped") {
+          control.turnMetricOutcome = "failed";
+          control.activityStatus = evaluated.sessionStatus === "queued" ? "idle" : "failed";
+          return { exit: claimedResult({ status: control.activityStatus }) };
+        }
         if (evaluated.action === "resumed") {
           control.turnMetricOutcome = "recovering";
           control.activityStatus = "recovering";
@@ -682,6 +699,11 @@ export async function selectCodexTurnCapacity(
             failurePayload,
           },
         );
+        if (evaluated.action === "stopped") {
+          control.turnMetricOutcome = "failed";
+          control.activityStatus = evaluated.sessionStatus === "queued" ? "idle" : "failed";
+          return { exit: claimedResult({ status: control.activityStatus }) };
+        }
         if (evaluated.action === "resumed") {
           control.turnMetricOutcome = "recovering";
           control.activityStatus = "recovering";

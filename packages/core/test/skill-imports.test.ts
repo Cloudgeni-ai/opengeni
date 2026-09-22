@@ -1,4 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import {
+  SKILL_MAX_FILES,
+  SKILL_MAX_FILE_BYTES,
+  SkillArtifactDefinition,
+  SkillImportPreview,
+} from "@opengeni/contracts";
 
 import {
   parseSkillSource,
@@ -31,6 +37,33 @@ function sourceClient(
 }
 
 describe("remote Skill source resolution", () => {
+  test("imports and validates a complete folder beyond all previous storage caps", async () => {
+    const files = [
+      { path: "SKILL.md", content: skillMarkdown },
+      ...Array.from({ length: 136 }, (_, index) => ({
+        path: `rules/${index}.json`,
+        content: "x".repeat(index < 4 ? 333134 : 1),
+      })),
+    ];
+    const contents = Object.fromEntries(files.map((file, index) => [String(index), file.content]));
+    const client = sourceClient(
+      files.map((file, index) => ({
+        path: `release/${file.path}`,
+        type: "blob",
+        mode: "100644",
+        sha: String(index),
+        size: file.content.length,
+      })),
+      contents,
+    );
+    const resolved = await resolveSkillImport(
+      "https://github.com/acme/skills/tree/main/release",
+      client,
+    );
+    expect(resolved.files).toHaveLength(137);
+    expect(SkillImportPreview.parse(resolved.preview).totalBytes).toBeGreaterThan(1048576);
+    expect(SkillArtifactDefinition.parse({ files: resolved.files }).files).toHaveLength(137);
+  });
   test("parses skills.sh and exact GitHub folder URLs without accepting other hosts", () => {
     expect(parseSkillSource("https://skills.sh/acme/agent-skills/release-operator")).toMatchObject({
       source: "skills_sh",
@@ -245,7 +278,7 @@ describe("remote Skill source resolution", () => {
   test("bounds candidate scanning before reading blobs", async () => {
     let reads = 0;
     const client = sourceClient(
-      Array.from({ length: 129 }, (_, index) => ({
+      Array.from({ length: SKILL_MAX_FILES + 1 }, (_, index) => ({
         path: `skill-${index}/SKILL.md`,
         type: "blob",
         mode: "100644",
@@ -274,7 +307,7 @@ describe("remote Skill source resolution", () => {
     await expect(
       resolveSkillImport("https://skills.sh/acme/skills/release-operator", {
         ...client,
-        readBlob: async () => new Uint8Array(256 * 1024 + 1),
+        readBlob: async () => new Uint8Array(SKILL_MAX_FILE_BYTES + 1),
       }),
     ).rejects.toThrow("metadata is too large");
   });
@@ -341,7 +374,7 @@ describe("remote Skill source resolution", () => {
       })),
       {},
     );
-    const metadata = new TextEncoder().encode(`${skillMarkdown}${" ".repeat(200 * 1024)}`);
+    const metadata = new TextEncoder().encode(`${skillMarkdown}${" ".repeat(1600 * 1024)}`);
     await expect(
       resolveSkillImport("https://skills.sh/acme/skills/release-operator", {
         ...client,

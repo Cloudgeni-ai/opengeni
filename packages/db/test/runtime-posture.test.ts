@@ -735,6 +735,18 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0492 adds a database-authored, runtime-readable source receipt.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_ONLY_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 0482 removes the three full-DML, FORCE-RLS Pack tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? -3
+            : 0) +
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_READ_ONLY_TABLES ||
           tables === RUNTIME_DML_TABLES
@@ -760,7 +772,15 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2;
+      const tableCount = (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1;
+      for (const removed of [
+        "workspace_packs",
+        "pack_installations",
+        "pack_installation_components",
+      ]) {
+        expect(FORCE_RLS_TABLES as readonly string[]).not.toContain(removed);
+        expect(RUNTIME_TABLE_PRIVILEGES[removed]).toBeUndefined();
+      }
       for (const table of [
         "organization_integration_policies",
         "organization_integration_policy_operations",
@@ -2146,6 +2166,43 @@ describe("runtime database posture evaluator", () => {
       routine.owner = "another_owner";
       expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
         `MCP operation internal routine ${name} owner does not match ledger owner`,
+      );
+    }
+  });
+
+  test("accepted MCP account binding helpers remain owner-only and use their exact execution modes", () => {
+    for (const name of [
+      "validate_mcp_account_bindings(jsonb, jsonb)",
+      "fence_mcp_account_bindings()",
+    ]) {
+      const posture = safePosture();
+      const routine = {
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: name === "fence_mcp_account_bindings()",
+      };
+      posture.privateRoutines.push(routine);
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+      routine.execute = true;
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `runtime or PUBLIC has forbidden EXECUTE on MCP account binding internal routine ${name}`,
+      );
+      routine.execute = false;
+      routine.publicExecute = true;
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `runtime or PUBLIC has forbidden EXECUTE on MCP account binding internal routine ${name}`,
+      );
+      routine.publicExecute = false;
+      routine.owner = "another_owner";
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `MCP account binding internal routine ${name} owner does not match turn owner`,
+      );
+      routine.owner = "opengeni_migrator";
+      routine.securityDefiner = !routine.securityDefiner;
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        `MCP account binding internal routine ${name} has unsafe execution mode`,
       );
     }
   });

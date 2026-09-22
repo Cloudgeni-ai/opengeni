@@ -108,6 +108,7 @@ async function freezeRequest(
     optionalText?: boolean;
     queueEditPrompt?: boolean;
     initialUpdate?: boolean;
+    skillReview?: null;
   } = {},
 ) {
   const { grant, session } = await createFixture();
@@ -167,6 +168,7 @@ async function freezeRequest(
           ],
           required: true,
           allowOther: false,
+          ...(options.skillReview === null ? { skillReview: null } : {}),
         },
       ];
   const expiresAt = options.expiresAt ?? null;
@@ -234,6 +236,42 @@ async function freezeRequest(
 }
 
 describe("durable structured human input", () => {
+  test.each([
+    [undefined, false],
+    [undefined, true],
+    [null, false],
+    [null, true],
+  ] as const)(
+    "ordinary response accepts skillReview=%s with canonicalHumanSession=%s",
+    async (skillReview, canonicalHumanSession) => {
+      const fixture = await freezeRequest(skillReview === null ? { skillReview } : {});
+      const request = await getSessionHumanInputRequest(
+        client.db,
+        fixture.grant.workspaceId!,
+        fixture.session.id,
+        fixture.requestId,
+      );
+      expect(request?.questions[0]?.skillReview).toBe(skillReview);
+      const accepted = await acceptSessionHumanInputResponse(client.db, {
+        accountId: fixture.grant.accountId,
+        workspaceId: fixture.grant.workspaceId!,
+        sessionId: fixture.session.id,
+        requestId: fixture.requestId,
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "environment", values: ["staging"] }],
+        },
+        respondedBy: fixture.grant.subjectId,
+        canonicalHumanSession,
+      });
+      expect(accepted.action).toBe("accepted");
+      const [stored] = await shared.admin`
+        select status, skill_review_human_authorized
+        from session_human_input_requests where id=${fixture.requestId}`;
+      expect(stored).toMatchObject({ status: "answered", skill_review_human_authorized: false });
+    },
+  );
+
   test("atomically freezes, survives a workflow restart, validates, and resumes the same turn", async () => {
     const expiresAt = new Date(Date.now() + 60_000);
     const fixture = await freezeRequest({ expiresAt });

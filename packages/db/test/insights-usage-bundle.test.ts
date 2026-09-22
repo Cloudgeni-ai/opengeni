@@ -357,9 +357,10 @@ describe("Workspace Insights usage bundle", () => {
       (total, statement) => total + (statement.match(new RegExp(source, "g"))?.length ?? 0),
       0,
     );
-    const bundleQueries = bundledStatements.filter((statement) => statement.includes(source));
+    const projection = "visible_workspace_insights_usage_projection";
+    const bundleQueries = bundledStatements.filter((statement) => statement.includes(projection));
     const bundledInvocations = bundleQueries.reduce(
-      (total, statement) => total + (statement.match(new RegExp(source, "g"))?.length ?? 0),
+      (total, statement) => total + (statement.match(new RegExp(projection, "g"))?.length ?? 0),
       0,
     );
     expect(legacyInvocations).toBe(9);

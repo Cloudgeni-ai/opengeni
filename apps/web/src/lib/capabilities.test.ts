@@ -29,6 +29,7 @@ import {
   normalizeProviderDomain,
   oauthConnectionOwnership,
   oauthConnectionRef,
+  catalogConnectionAccountSelection,
   oauthResumeAction,
   preferredSocialConnection,
   registryResultsForQuery,
@@ -193,7 +194,7 @@ describe("human labels", () => {
   test("kind labels never leak enum slugs", () => {
     expect(capabilityKindLabel("mcp")).toBe("MCP server");
     expect(capabilityKindLabel("api")).toBe("API");
-    expect(capabilityKindLabel("pack")).toBe("Pack");
+    expect(capabilityKindLabel("plugin")).toBe("Plugin");
     expect(
       capabilityItemKindLabel(item({ kind: "api", surfaceType: "provider_integration" })),
     ).toBe("Integration");
@@ -989,6 +990,64 @@ describe("subjectOAuthConnectionRef", () => {
 });
 
 describe("OAuth ownership helpers", () => {
+  test("reconnect preserves exact pins and existing explicit selector mode", () => {
+    expect(catalogConnectionAccountSelection({ enabled: false, connectionRef: null })).toBe(
+      "all_eligible",
+    );
+    expect(
+      catalogConnectionAccountSelection({
+        enabled: true,
+        connectionRef: { providerDomain: "slack.com", kind: "oauth2", connectionId: "pinned" },
+      }),
+    ).toBeUndefined();
+    expect(
+      catalogConnectionAccountSelection({
+        enabled: true,
+        connectionRef: {
+          providerDomain: "slack.com",
+          kind: "oauth2",
+          accountSelection: "all_eligible",
+        },
+      }),
+    ).toBe("all_eligible");
+  });
+  test("selector health reflects a connected eligible account, not a missing seed pin", () => {
+    const selector = item({
+      enabled: true,
+      connectionRef: {
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        accountSelection: "all_eligible",
+      },
+    });
+    const shared = connection({
+      id: "shared",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      subjectId: null,
+    });
+    expect(connectionHealth(selector, [shared], true)).toEqual({
+      state: "connected",
+      connection: shared,
+    });
+    expect(connectionHealth(selector, [], true)).toEqual({ state: "attention", connection: null });
+  });
+  test("new catalog connection selectors explicitly allow both ownership scopes without a seed pin", () => {
+    for (const ownership of ["workspace", "personal"] as const) {
+      expect(oauthConnectionRef(ownership, "seed", "slack.com", "all_eligible")).toEqual({
+        providerDomain: "slack.com",
+        kind: "oauth2",
+        subjectScope: ownership === "personal" ? "subject" : "workspace",
+        accountSelection: "all_eligible",
+      });
+      expect(apiKeyConnectionRef(ownership, "seed", "api.test", "all_eligible")).toEqual({
+        providerDomain: "api.test",
+        kind: "api_key",
+        subjectScope: ownership === "personal" ? "subject" : "workspace",
+        accountSelection: "all_eligible",
+      });
+    }
+  });
   test("workspace refs pin the exact shared row while personal refs hide the private UUID", () => {
     expect(oauthConnectionRef("workspace", "workspace-conn", "linear.app")).toEqual({
       connectionId: "workspace-conn",

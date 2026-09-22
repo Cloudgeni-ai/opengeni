@@ -17,6 +17,7 @@ import {
 } from "../src/sandbox/routing/routing-session";
 import { createSandboxClientForBackend } from "../src/index";
 import { testSettings } from "@opengeni/testing";
+import { markPendingCommandSupervised } from "../src/sandbox/provider-command-session";
 
 const runContext = {} as never;
 
@@ -1061,6 +1062,56 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(cancellationCommands[0]).toContain(".cancelled");
     expect(cancellationCommands[0]).toContain("command kill -TERM");
     expect(cancellationCommands[0]).toContain("command kill -KILL");
+  });
+
+  test("native pending launch cancellation waits for its retained handoff without numeric helpers", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let resolveStart!: (value: string) => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const pending = new Promise<string>((resolve) => {
+      resolveStart = resolve;
+    });
+    let invocations = 0;
+    let retained = true;
+    let nativeCancels = 0;
+    const exec = functionTool("exec_command", async () => {
+      invocations++;
+      markPendingCommandSupervised();
+      entered();
+      return pending;
+    });
+    const [wrapped] = controller.wrapTools([exec], {
+      supportsPty: () => true,
+      hasRetainedProcess: () => retained,
+      cancelPendingExecCommand: async () => {
+        resolveStart(running(411));
+      },
+      cancelSupervisedCommand: async () => {
+        nativeCancels++;
+        return true;
+      },
+      writeStdinForProcessControl: async () => {
+        retained = false;
+        return exited(137);
+      },
+      execCommandForProcessControl: async () => {
+        throw new Error("numeric helper forbidden");
+      },
+    }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+    const invocation = wrapped!
+      .invoke(runContext, JSON.stringify({ cmd: "sleep 60", tty: false, yield_time_ms: 0 }))
+      .catch((error) => error);
+    await started;
+    abort.abort(new Error("stopped"));
+    await controller.waitForQuiescence();
+    await invocation;
+    expect(invocations).toBe(1);
+    expect(nativeCancels).toBe(1);
+    expect(retained).toBe(false);
   });
 
   test("abort also cancels a cleanup exec that stalls before provider yield", async () => {

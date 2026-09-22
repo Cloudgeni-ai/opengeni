@@ -492,7 +492,7 @@ function lockBudgetFor(options: WorkspaceControlLockOptions): WorkspaceControlLo
 }
 
 /** Run one lock-acquiring statement under the remaining budget. */
-async function boundedLockStep<T>(
+export async function boundedLockStep<T>(
   db: Database,
   workspaceId: string,
   budget: WorkspaceControlLockBudget | null,
@@ -989,11 +989,15 @@ export function sessionAuthoritySnapshotMatchesSession(
   session: Pick<
     typeof schema.sessions.$inferSelect,
     "authorityEpoch" | "visibility" | "ownerOrganizationMembershipId"
-  >,
+  > & { executionAuthorityEpoch?: number },
 ): boolean {
   return (
-    snapshot.authorityEpoch === session.authorityEpoch &&
-    snapshot.authorityVisibility === session.visibility &&
+    snapshot.authorityEpoch >= (session.executionAuthorityEpoch ?? session.authorityEpoch) &&
+    snapshot.authorityEpoch <= session.authorityEpoch &&
+    (snapshot.authorityVisibility === session.visibility ||
+      (snapshot.authorityVisibility === "user_private" &&
+        session.visibility === "workspace_shared" &&
+        snapshot.authorityEpoch < session.authorityEpoch)) &&
     snapshot.authorityOwnerOrganizationMembershipId ===
       (session.ownerOrganizationMembershipId ?? null)
   );
@@ -2805,10 +2809,12 @@ async function insertChildOutboxRowInTransaction(
   }
   let personalConnectionDelegations: (typeof schema.sessionTurns.$inferSelect)["personalConnectionDelegations"] =
     [];
+  let mcpAccountBindings: (typeof schema.sessionTurns.$inferSelect)["mcpAccountBindings"] = null;
   if (input.childSession.parentTurnId) {
     const [parentTurn] = await db
       .select({
         delegations: schema.sessionTurns.personalConnectionDelegations,
+        mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
       })
       .from(schema.sessionTurns)
       .where(
@@ -2820,6 +2826,7 @@ async function insertChildOutboxRowInTransaction(
       )
       .limit(1);
     if (parentTurn) {
+      mcpAccountBindings = parentTurn.mcpAccountBindings;
       const parsed = McpPersonalConnectionDelegations.safeParse(parentTurn.delegations);
       if (!parsed.success) {
         throw new SessionControlInvariantError(
@@ -2856,6 +2863,7 @@ async function insertChildOutboxRowInTransaction(
               ...(input.lineage ?? {}),
             },
             personalConnectionDelegations,
+            mcpAccountBindings,
           },
           "summary",
           "summaryCodecVersion",
@@ -3518,7 +3526,8 @@ export async function mutateSessionControlInTransaction(
             sessionId: input.sessionId,
             directPauseRevision,
           }))
-        : before.state === "paused" ||
+        : targetSession.admissionBlock != null ||
+          before.state === "paused" ||
           (await continuableWakeRepairNeeded(db, {
             workspaceId: input.workspaceId,
             rootSessionId: input.sessionId,
@@ -3603,6 +3612,7 @@ export async function mutateSessionControlInTransaction(
       input.action === "pause" || input.action === "cancel"
         ? {
             directControlState: "paused",
+            ...(input.action === "cancel" ? { admissionBlock: null } : {}),
             directPauseRevision: revision,
             controlVersion: revision,
             directControlReason: input.reason ?? null,
@@ -3615,6 +3625,12 @@ export async function mutateSessionControlInTransaction(
           }
         : {
             directControlState: "active",
+            ...(targetSession.admissionBlock
+              ? {
+                  admissionBlock: null,
+                  status: targetSession.admissionBlock.previousStatus,
+                }
+              : {}),
             directPauseRevision: null,
             subtreeRunOverrideRevision: revision,
             controlVersion: revision,

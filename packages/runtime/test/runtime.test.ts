@@ -49,6 +49,8 @@ import {
   azureOpenAIDefaultQuery,
   buildAgentCapabilities,
   buildOpenGeniAgent,
+  restoreInterruptedRunState,
+  withMcpToolDisplayMetadata,
   HUMAN_INPUT_TOOL_NAME,
   buildManifest,
   compactMcpResultCustomDataRunState,
@@ -2435,6 +2437,9 @@ describe("runtime event normalization", () => {
 
     async function connectorPolicyFixture(input: {
       connectorDecision: "allow" | "ask" | "block";
+      serverId?: string;
+      accountLabel?: string;
+      lazyToolTransport?: "codex_native" | "generic_dispatch";
       legacyApproval?: boolean;
       withoutConnection?: boolean;
       begin?: ConnectorActionPolicyHooks["begin"];
@@ -2443,7 +2448,7 @@ describe("runtime event normalization", () => {
     }) {
       const mcp = startTestMcpServer();
       const baseConfig = {
-        id: input.withoutConnection ? "remote" : "docs",
+        id: input.serverId ?? (input.withoutConnection ? "remote" : "docs"),
         name: "Document Search",
         url: mcp.url,
         cacheToolsList: false,
@@ -2480,6 +2485,8 @@ describe("runtime event normalization", () => {
       };
       const settings = testSettings({
         sandboxBackend: input.sandboxBackend ?? "none",
+        codexToolSearchEnabled: true,
+        lazyToolSearchEnabled: true,
         mcpServers: [
           {
             ...baseConfig,
@@ -2494,32 +2501,69 @@ describe("runtime event normalization", () => {
           },
         ],
       });
-      const prepared = await prepareAgentTools(
-        settings,
-        [{ kind: "mcp", id: input.withoutConnection ? "remote" : "docs" }],
-        {
-          accountId: "11111111-1111-4111-8111-111111111111",
-          workspaceId: "22222222-2222-4222-8222-222222222222",
-          sessionId: "33333333-3333-4333-8333-333333333333",
-          turnId: "44444444-4444-4444-8444-444444444444",
-          attemptId: "55555555-5555-4555-8555-555555555555",
-          executionGeneration: 1,
-          credentialSubjectId: "subject-a",
-          resolveCredential: async () => ({
-            status: "ok",
-            connectionId: "connection-1",
-            headers: { authorization: "Bearer connector-token" },
-          }),
-          connectorActionPolicy: hooks,
-        },
-      );
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: baseConfig.id }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        credentialSubjectId: "subject-a",
+        mcpAccountLabels: input.accountLabel
+          ? new Map([[baseConfig.id, input.accountLabel]])
+          : undefined,
+        deferNonEagerUntilToolDemand: input.lazyToolTransport !== undefined,
+        resolveCredential: async () => ({
+          status: "ok",
+          connectionId: "connection-1",
+          headers: { authorization: "Bearer connector-token" },
+        }),
+        connectorActionPolicy: hooks,
+      });
       const agent = buildOpenGeniAgent(settings, [], {
+        lazyToolTransport: input.lazyToolTransport,
+        toolPreparationReady: prepared.ready,
         mcpServers: prepared.mcpServers,
         resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
         connectorActionPolicy: hooks,
       });
-      return { agent, calls, mcp, prepared };
+      return { agent, calls, mcp, prepared, settings };
     }
+
+    test.each([undefined, "codex_native", "generic_dispatch"] as const)(
+      "account-qualified connector Ask pauses before executing a model call (%s)",
+      async (lazyToolTransport) => {
+        const serverId = `account-${"a".repeat(64)}`;
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          serverId,
+          lazyToolTransport,
+        });
+        try {
+          const name = prefixedMcpToolName(serverId, "search_documents");
+          const model = new ScriptedModel([
+            { output: [scriptedFunctionCall(name, { query: "example" }, "account-model-call")] },
+          ]);
+          const result = await runAgentStream(
+            fixture.agent.clone({ model }),
+            "Search documents",
+            fixture.settings,
+          );
+          for await (const _event of result.toStream()) {
+            // Drain the model call through the actual approval interruption.
+          }
+          await result.completed;
+          expect(result.interruptions).toHaveLength(1);
+          expect(fixture.calls).toContain("prepare:account-model-call:example");
+          expect(fixture.mcp.calls).toHaveLength(0);
+          const restored = await restoreInterruptedRunState(fixture.agent, result.state.toString());
+          expect(restored.getInterruptions()).toHaveLength(1);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      },
+    );
 
     test("explicit false approval survives rebuilding a connection-backed agent and its clone", async () => {
       for (const connectorDecision of ["allow", "ask", "block"] as const) {
@@ -2556,6 +2600,90 @@ describe("runtime event normalization", () => {
             fixture.mcp.close();
           }
         }
+      }
+    });
+
+    test.each([undefined, "codex_native", "generic_dispatch"] as const)(
+      "legacy hash-named approval state resolves only its exact authorized account (%s)",
+      async (lazyToolTransport) => {
+        const serverId = `account-${"a".repeat(64)}`;
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          serverId,
+          lazyToolTransport,
+        });
+        const other = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          serverId: `account-${"b".repeat(64)}`,
+          lazyToolTransport,
+        });
+        try {
+          const legacy = createHash("sha256")
+            .update(JSON.stringify([serverId, "search_documents"]))
+            .digest("hex");
+          const model = new ScriptedModel([
+            { output: [scriptedFunctionCall(legacy, { query: "example" }, "legacy-call")] },
+          ]);
+          const result = await runAgentStream(
+            fixture.agent.clone({ model }),
+            "Search documents",
+            fixture.settings,
+          );
+          for await (const _event of result.toStream()) {
+            /* drain to approval */
+          }
+          await result.completed;
+          expect(result.interruptions).toHaveLength(1);
+          expect(fixture.mcp.calls).toHaveLength(0);
+          const restored = await restoreInterruptedRunState(fixture.agent, result.state.toString());
+          expect(restored.getInterruptions()).toHaveLength(1);
+          await expect(
+            restoreInterruptedRunState(other.agent, result.state.toString()),
+          ).rejects.toThrow();
+          expect(other.mcp.calls).toHaveLength(0);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+          await other.prepared.close();
+          other.mcp.close();
+        }
+      },
+    );
+
+    test("prepared account display facts enrich event copies without changing catalog authority", async () => {
+      const serverId = `account-${"a".repeat(64)}`;
+      const accountLabel = "Documents — Personal: alice@example.test";
+      const fixture = await connectorPolicyFixture({
+        connectorDecision: "ask",
+        serverId,
+        accountLabel,
+      });
+      try {
+        const name = prefixedMcpToolName(serverId, "search_documents");
+        const requestsBefore = fixture.mcp.requests.length;
+        const call = { id: "display-call", name, arguments: { query: "example" } };
+        const display = { toolName: "search_documents", accountLabel };
+        expect(withMcpToolDisplayMetadata(fixture.prepared.mcpServers, call)).toMatchObject({
+          ...call,
+          display,
+        });
+        expect(call).not.toHaveProperty("display");
+        expect(
+          withMcpToolDisplayMetadata(fixture.prepared.mcpServers, {
+            rawItem: { name, callId: "display-call" },
+          }),
+        ).toMatchObject({ display });
+        expect(
+          fixture.prepared.attemptToolCatalog?.entries.find((entry) => entry.modelName === name),
+        ).toMatchObject({ identity: { serverId, toolName: "search_documents" } });
+        expect(
+          fixture.prepared.attemptToolCatalog?.entries.find((entry) => entry.modelName === name),
+        ).not.toHaveProperty("accountLabel");
+        expect(fixture.mcp.requests.length).toBe(requestsBefore);
+        expect(fixture.mcp.calls).toHaveLength(0);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
       }
     });
 
@@ -4012,7 +4140,7 @@ describe("runtime event normalization", () => {
     expect(JSON.stringify(second.input)).toContain("Keep this direction across tool calls.");
   });
 
-  test("delivers platform recovery context as ephemeral system input", async () => {
+  test("delivers platform recovery context as durable turn-scoped system input", async () => {
     const prepared = await prepareRunInput(
       buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
       {
@@ -4024,7 +4152,7 @@ describe("runtime event normalization", () => {
       {
         type: "message",
         role: "system",
-        content: "Continue the same inference after recovery.",
+        content: expect.stringContaining("Continue the same inference after recovery."),
       },
     ]);
     expect(JSON.stringify(prepared.input)).not.toContain("opengeni_internal_resume");
@@ -4290,7 +4418,7 @@ describe("runtime event normalization", () => {
   // weakening the absent-memory/per-session no-op assertions below.
   const HISTORICAL_DEFAULT_INSTRUCTIONS = [
     "You are an OpenGeni workspace agent.",
-    "Follow the user's task and any enabled pack or skill instructions for the current role.",
+    "Follow the user's task and the applicable Skill instructions for the current role.",
     "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
     "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
     "File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.",
@@ -4301,6 +4429,8 @@ describe("runtime event normalization", () => {
     "Treat code-changing work as GitOps work: create a focused branch/commit/PR when git provider credentials are available; otherwise report exact commands and blockers.",
     "Return concise, factual summaries with files changed, commands run, and remaining blockers.",
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; resume a paused goal with opengeni__goal_resume regardless of who paused it or why; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
+    'Choose durable storage by purpose, including requests to "remember this" or keep something "for future sessions". Knowledge is retrieval-only information, not standing behavior. Use instruction_policy_get then instruction_policy_save for short always-on workspace rules, such as "Keep replies concise; expand when asked." Use Skills for reusable procedures and context-specific or personal behavioral preferences; make the Skill description state when it applies so the prompt index can guide skill_read. Do not save behavioral preferences as Knowledge by rephrasing them as facts like "the user prefers concise replies". Preserve the intended scope: do not turn a personal preference into a workspace-wide rule; use an authorized personal Skill when appropriate, or explain the unavailable scope. Split mixed requests into a short rule and detailed Skill steps without duplicating them in Knowledge.',
+    "Before changing workspace instructions, read the current instruction and exact baseline, preserve unrelated rules, append new rules, and use only a localized exact anchored edit for updates or removals. Agents cannot replace the complete instruction; whole-policy rewrites belong in the manual workspace editor. Do not bypass a destination's Agent learning setting, review, scope, limits, or unavailable tools by saving to another destination. Report the actual destination and receipt: active, pending review, or not saved. Do not promise future behavior from a Knowledge save.",
     "Use knowledge_search and knowledge_get when retained information is relevant. For questions about what the workspace knows, ground the answer in authorized Knowledge and attached sources. Missing internal facts remain unknown; do not infer a person's role or cite unrelated public search results as evidence. Keep any relevant external research clearly separate from workspace records. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save only when they help a plausible future task. Do not retain routine approvals, acknowledgments, temporary task instructions, status chatter or raw screenshots merely because they occurred. Before saving, use knowledge_prepare_save when available to fetch the authorized collection map with descriptions and parent IDs plus related published and pending entries; otherwise search both views and browse collections. Skip unchanged duplicates, improve the existing entry when appropriate, and create a new entry only for distinct useful information. Read the current entry before correcting it and preserve uncertainty, conflicting evidence and existing relationships. When a user supplies or confirms a durable fact, use knowledge_retain_message to retain the actual message and cite its returned entryId/revisionId in the finding evidence. Preserve existing source evidence and relationships when correcting an entry; do not replace them with empty arrays merely because the user confirmed a new value. Explicit confirmation can supersede a conflicting pending proposal, but explain that outcome to the user. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files for the conversation without automatically publishing OCR or source text into Knowledge. Inspect an image visually in the current task; save only a useful supported observation, requirement or incident when warranted. Use knowledge_retain_file purpose=evidence only when a selected finding needs the original as supporting evidence, or purpose=reference when deliberately retaining a reusable source document. Supporting sources remain accessible through evidence links and explicit includeEvidence searches, but do not fill ordinary Knowledge discovery. An upload alone is not a reason to save Knowledge. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
   ].join(" ");
   const defaultSkillIndex = [
@@ -4309,6 +4439,7 @@ describe("runtime event normalization", () => {
     "Management tools are lazy and available through tool search.",
     "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
     '- {"id":"native-tool:document-parsing","name":"document-parsing","description":"Extract readable Markdown from local Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files using the preinstalled AnyDoc runtime."}',
+    `- ${JSON.stringify(composeRuntimeSkills([]).index.find((entry) => entry.name === "opengeni-client"))}`,
     '- {"id":"native-tool:opengeni-help","name":"opengeni-help","description":"Answer questions about OpenGeni setup, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application\'s AI provider. No installation is needed for this bundled guide."}',
     '- {"id":"native-tool:opengeni-visualize","name":"opengeni-visualize","description":"Create visualizations and interactive tools directly in conversation. Proactively use to show how something works; explore \'what happens when\', \'what changes\', or \'help me understand\'; compare or inspect; create simulations, maps, charts, graphs, and mockups. Use standard tools for static scientific figures."}',
   ].join("\n");
@@ -6326,6 +6457,20 @@ describe("runtime event normalization", () => {
     expect(prefixedMcpToolName("files", "files_get_download_url")).toBe(
       "files__files_get_download_url",
     );
+  });
+
+  test("account-qualified model aliases retain a readable tool leaf within provider limits", () => {
+    const first = `account-${"a".repeat(64)}`;
+    const second = `account-${"b".repeat(64)}`;
+    const name = prefixedMcpToolName(first, "search_documents");
+    expect(name).toEndWith("__search_documents");
+    expect(name.length).toBeLessThanOrEqual(64);
+    expect(name).toMatch(/^[A-Za-z0-9_]+$/);
+    expect(name).not.toBe(prefixedMcpToolName(second, "search_documents"));
+    expect(prefixedMcpToolName(first, "a.b")).not.toBe(prefixedMcpToolName(first, "a-b"));
+    const long = "search_" + "documents_".repeat(20);
+    expect(prefixedMcpToolName(first, long).length).toBeLessThanOrEqual(64);
+    expect(prefixedMcpToolName(first, long)).not.toBe(prefixedMcpToolName(first, long + "other"));
   });
 
   test("PrefixedMcpServer preserves the complete legacy callTool result and callToolResult", async () => {
@@ -8503,7 +8648,9 @@ describe("runtime event normalization", () => {
     );
     try {
       const tools = await prepared.mcpServers[0]!.listTools();
-      expect(tools.map((tool) => tool.name)).toContain("cap-secure__search_documents");
+      expect(tools.map((tool) => tool.name)).toContain(
+        prefixedMcpToolName("cap-secure", "search_documents"),
+      );
       const result = await prepared.mcpServers[0]!.callTool("cap-secure__search_documents", {
         query: "headers",
       });
@@ -8552,7 +8699,9 @@ describe("runtime event normalization", () => {
     );
     try {
       const tools = await prepared.mcpServers[0]!.listTools();
-      expect(tools.map((tool) => tool.name)).toContain("cap-broker__search_documents");
+      expect(tools.map((tool) => tool.name)).toContain(
+        prefixedMcpToolName("cap-broker", "search_documents"),
+      );
       const result = await prepared.mcpServers[0]!.callTool("cap-broker__search_documents", {
         query: "broker",
       });
@@ -8614,7 +8763,9 @@ describe("runtime event normalization", () => {
     );
     try {
       const tools = await prepared.mcpServers[0]!.listTools();
-      expect(tools.map((tool) => tool.name)).toContain("cap-refresh__search_documents");
+      expect(tools.map((tool) => tool.name)).toContain(
+        prefixedMcpToolName("cap-refresh", "search_documents"),
+      );
       expect(resolved.some((input) => input.forceRefresh === true)).toBe(true);
       expect(providerAuthorizations).toBe(mcp.requests.length);
     } finally {
@@ -8724,6 +8875,9 @@ describe("runtime event normalization", () => {
       },
     );
     try {
+      // Model dispatch always follows catalog discovery; opaque bounded names
+      // retain their reverse identity in that frozen catalog.
+      await prepared.mcpServers[0]!.listTools();
       const setupAuthorizations = providerAuthorizations;
       const result = await prepared.mcpServers[0]!.callToolResult!(
         "cap-uncertain__search_documents",
@@ -9760,6 +9914,7 @@ describe("runtime event normalization", () => {
       },
     ];
     const settings = testSettings({ sandboxBackend: "none", mcpServers: configs });
+    const measurements: { phase: string; execution: string }[] = [];
     const prepared = await prepareAgentTools(
       settings,
       [
@@ -9769,6 +9924,9 @@ describe("runtime event normalization", () => {
       ],
       {
         deferNonEagerUntilToolDemand: true,
+        onPreparationPhase: (measurement) => {
+          measurements.push(measurement);
+        },
         localMcpServers: [
           { id: "eager", server: eager },
           { id: "strict", server: strict },
@@ -9778,6 +9936,9 @@ describe("runtime event normalization", () => {
     );
     try {
       expect(prepared.ready).toBeDefined();
+      expect(measurements.some((measurement) => measurement.execution === "background")).toBe(
+        false,
+      );
       const agent = buildOpenGeniAgent(settings, [], {
         mcpServers: prepared.mcpServers,
       });
@@ -9787,6 +9948,18 @@ describe("runtime event normalization", () => {
 
       releaseOptional();
       const complete = await prepared.ready!;
+      expect(measurements).toContainEqual(
+        expect.objectContaining({ phase: "required_connect", execution: "blocking" }),
+      );
+      expect(measurements).toContainEqual(
+        expect.objectContaining({ phase: "required_connect", execution: "background" }),
+      );
+      expect(measurements).toContainEqual(
+        expect.objectContaining({ phase: "optional_connect", execution: "background" }),
+      );
+      expect(measurements).toContainEqual(
+        expect.objectContaining({ phase: "attempt_catalog_build", execution: "background" }),
+      );
       expect((await agent.getMcpTools(new RunContext())).map((tool) => tool.name).sort()).toEqual([
         "eager__lookup",
         "optional__lookup",
@@ -11556,6 +11729,7 @@ describe("runtime Skill activation", () => {
     const index = composition.index;
     expect(index.map((entry) => ({ id: entry.id, name: entry.name }))).toEqual([
       { id: "native-tool:document-parsing", name: "document-parsing" },
+      { id: "native-tool:opengeni-client", name: "opengeni-client" },
       { id: "native-tool:opengeni-help", name: "opengeni-help" },
       { id: "native-tool:opengeni-visualize", name: "opengeni-visualize" },
     ]);
@@ -11762,8 +11936,8 @@ describe("runtime Skill activation", () => {
     ]);
   });
 
-  test("pack skills join the explicit skill index", () => {
-    const composition = composeRuntimeSkills([packActivation(infraSkill)]);
+  test("session Skills join the explicit skill index", () => {
+    const composition = composeRuntimeSkills([sessionActivation(infraSkill)]);
     const artifact = composition.artifacts.find((entry) => entry.name === "infra-ops");
     expect(artifact?.files.find((file) => file.path === "SKILL.md")?.content).toContain(
       "# Infra ops",
@@ -11779,22 +11953,22 @@ describe("runtime Skill activation", () => {
     expect(infra?.id).toBeDefined();
   });
 
-  test("an explicit pack description cannot override SKILL.md frontmatter", () => {
+  test("an explicit session description cannot override SKILL.md frontmatter", () => {
     expect(() =>
       composeRuntimeSkills([
-        packActivation({ ...infraSkill, description: "Explicit description." }),
+        sessionActivation({ ...infraSkill, description: "Explicit description." }),
       ]),
     ).toThrow("must match SKILL.md frontmatter");
   });
 
-  test("a Pack may explicitly contribute Checkov like any other Skill", () => {
+  test("a session may explicitly select Checkov like any other Skill", () => {
     const composition = composeRuntimeSkills([
-      packActivation({
+      sessionActivation({
         name: "checkov",
         files: [
           {
             path: "SKILL.md",
-            content: "---\nname: checkov\ndescription: Pack-provided checkov.\n---\n",
+            content: "---\nname: checkov\ndescription: Session-selected checkov.\n---\n",
           },
         ],
       }),
@@ -11803,27 +11977,27 @@ describe("runtime Skill activation", () => {
     const index = composition.index;
     const checkovEntries = index.filter((entry) => entry.name === "checkov");
     expect(checkovEntries).toHaveLength(1);
-    expect(checkovEntries[0]?.description).toBe("Pack-provided checkov.");
+    expect(checkovEntries[0]?.description).toBe("Session-selected checkov.");
   });
 
-  test("a Pack owner wins only when it owns the identical installed artifact", () => {
+  test("a session selection deduplicates an identical installed artifact", () => {
     const loaded = loadSkillLibrarySkill("azure-verified-modules");
     const artifact = runtimeArtifact(loaded.skill);
     const composition = composeRuntimeSkills([
       installedActivation(loaded),
       {
-        source: "pack",
-        id: `pack:solution:${artifact.name}`,
+        source: "session",
+        id: `session:solution:${artifact.name}`,
         artifact,
-        reason: "owned by solution Pack",
+        reason: "selected for solution session",
       },
     ]);
     const entries = composition.index.filter((entry) => entry.name === loaded.skill.name);
     expect(entries).toHaveLength(1);
     expect(composition.selections).toContainEqual(
       expect.objectContaining({
-        id: `pack:solution:${artifact.name}`,
-        source: "pack",
+        id: `session:solution:${artifact.name}`,
+        source: "session",
         contentSha256: loaded.entry.contentSha256,
       }),
     );
@@ -11834,13 +12008,13 @@ describe("runtime Skill activation", () => {
     expect(() =>
       composeRuntimeSkills([
         installedActivation(loaded),
-        packActivation({
+        sessionActivation({
           name: loaded.skill.name,
-          description: "Divergent Pack override.",
+          description: "Divergent session override.",
           files: [
             {
               path: "SKILL.md",
-              content: `---\nname: ${loaded.skill.name}\ndescription: Divergent Pack override.\n---\n# Divergent Pack override\n`,
+              content: `---\nname: ${loaded.skill.name}\ndescription: Divergent session override.\n---\n# Divergent session override\n`,
             },
           ],
         }),
@@ -11851,7 +12025,7 @@ describe("runtime Skill activation", () => {
   test("rejects unsafe activated Skill content instead of mounting it", () => {
     expect(() =>
       composeRuntimeSkills([
-        packActivation({
+        sessionActivation({
           name: "bad",
           files: [
             { path: "SKILL.md", content: "x" },
@@ -11862,7 +12036,7 @@ describe("runtime Skill activation", () => {
     ).toThrow("Invalid Skill file path");
     expect(() =>
       composeRuntimeSkills([
-        packActivation({
+        sessionActivation({
           name: "no-entry",
           files: [{ path: "references/only.md", content: "x" }],
         }),
@@ -11870,13 +12044,13 @@ describe("runtime Skill activation", () => {
     ).toThrow("missing a top-level SKILL.md");
     expect(() =>
       composeRuntimeSkills([
-        packActivation({
+        sessionActivation({
           name: "dup",
           files: [
             { path: "SKILL.md", content: "---\nname: dup\ndescription: Duplicate fixture\n---\na" },
           ],
         }),
-        packActivation({
+        sessionActivation({
           name: "dup",
           files: [
             { path: "SKILL.md", content: "---\nname: dup\ndescription: Duplicate fixture\n---\nb" },
@@ -11886,7 +12060,7 @@ describe("runtime Skill activation", () => {
     ).toThrow('Conflicting Skill definitions for "dup"');
     expect(() =>
       composeRuntimeSkills([
-        packActivation({
+        sessionActivation({
           name: "bad/name",
           files: [{ path: "SKILL.md", content: "x" }],
         }),
@@ -11896,7 +12070,7 @@ describe("runtime Skill activation", () => {
 
   test("buildOpenGeniAgent keeps configured activations without SDK load_skill", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
-      skillActivations: [packActivation(infraSkill)],
+      skillActivations: [sessionActivation(infraSkill)],
     });
     expect(
       ((agent as any).capabilities as Array<{ type?: string }>).some(
@@ -11913,7 +12087,7 @@ describe("runtime Skill activation", () => {
   });
 
   test("capability construction does not emit load_skill", () => {
-    const capabilities = buildAgentCapabilities(testSettings(), [packActivation(infraSkill)], {
+    const capabilities = buildAgentCapabilities(testSettings(), [sessionActivation(infraSkill)], {
       editableArtifactToolsAvailable: true,
       videoGenerationAvailable: true,
     });
@@ -11921,7 +12095,7 @@ describe("runtime Skill activation", () => {
       (capabilities as Array<{ type?: string }>).some((capability) => capability.type === "skills"),
     ).toBe(false);
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
-      skillActivations: [packActivation(infraSkill)],
+      skillActivations: [sessionActivation(infraSkill)],
     });
     const toolNames = ((agent as { tools?: Array<{ name?: string }> }).tools ?? []).map(
       (tool) => tool.name,
@@ -11929,7 +12103,7 @@ describe("runtime Skill activation", () => {
     expect(toolNames).not.toContain("load_skill");
     expect(toolNames).toContain("skill_read");
     expect(
-      composeRuntimeSkills([packActivation(infraSkill)]).index.map((entry) => entry.name),
+      composeRuntimeSkills([sessionActivation(infraSkill)]).index.map((entry) => entry.name),
     ).toContain("infra-ops");
   });
 
@@ -11947,7 +12121,7 @@ describe("runtime Skill activation", () => {
         "opengeni-sites",
       ]),
     );
-    const configured = composeRuntimeSkills([packActivation(infraSkill)]);
+    const configured = composeRuntimeSkills([sessionActivation(infraSkill)]);
     expect(configured.configuredDescriptors).toEqual([
       expect.objectContaining({
         name: "infra-ops",
@@ -11969,7 +12143,7 @@ describe("runtime Skill activation", () => {
         ...(sandboxBackend === "selfhosted"
           ? { activeSandboxBackend: sandboxBackend, sandboxWorkspaceRoot: "/srv/agent" }
           : {}),
-        skillActivations: [packActivation(infraSkill)],
+        skillActivations: [sessionActivation(infraSkill)],
       });
       const inspection = persistentAgentInstructionInspectionFor(agent);
       expect(inspection.layers.find((layer) => layer.id === "skill_catalog")?.content).toContain(
@@ -11993,7 +12167,7 @@ describe("runtime Skill activation", () => {
       );
       expect(body.files[0]?.content).toContain("# Infra ops");
       expect(
-        readRuntimeSkill(composeRuntimeSkills([packActivation(infraSkill)]), {
+        readRuntimeSkill(composeRuntimeSkills([sessionActivation(infraSkill)]), {
           skill: "infra-ops",
           paths: ["references/runbook.md"],
         }).files?.[0]?.content,
@@ -12034,7 +12208,7 @@ describe("runtime Skill activation", () => {
     expect(() =>
       buildOpenGeniAgent(testSettings(), [], {
         skillCatalog: [],
-        skillActivations: [packActivation(infraSkill)],
+        skillActivations: [sessionActivation(infraSkill)],
       }),
     ).toThrow("either host Skill catalog/reader or runtime Skill activations");
   });
@@ -12104,16 +12278,16 @@ function installedActivation(loaded: ReturnType<typeof loadSkillLibrarySkill>) {
   };
 }
 
-function packActivation(artifact: {
+function sessionActivation(artifact: {
   name: string;
   description?: string | null;
   files: readonly { path: string; content: string }[];
 }) {
   return {
-    source: "pack" as const,
-    id: `pack:test:${artifact.name}`,
+    source: "session" as const,
+    id: `session:test:${artifact.name}`,
     artifact,
-    reason: "owned by test Pack",
+    reason: "explicitly selected for test session",
   };
 }
 

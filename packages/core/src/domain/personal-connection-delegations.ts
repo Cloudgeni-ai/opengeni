@@ -1,8 +1,8 @@
 import type { McpServerConfig, Settings } from "@opengeni/config";
-import { HTTPException } from "hono/http-exception";
 import type {
   AccessGrant,
   ConnectionMetadata,
+  McpConnectionAccountBinding,
   McpConnectionAccountSelection,
   McpPersonalConnectionDelegation,
   McpServerConnectionRef,
@@ -25,6 +25,7 @@ import {
 import {
   getPersonalGitHubRepositorySelectionState,
   getSessionTurnPersonalConnectionDelegations,
+  getSessionTurnMcpAccountBindings,
   getConnectionMetadata,
   getSocialConnection,
   listConnectionsMetadata,
@@ -36,6 +37,12 @@ import {
   type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
 import { personalGitHubRepositoryResources } from "./resources";
+import { ConnectionAccountSelectionError } from "./connection-account-selection-error";
+export { ConnectionAccountSelectionError } from "./connection-account-selection-error";
+import {
+  mcpAccountBindingsFromVisibleConnections,
+  personalDelegationsForAccountBindings,
+} from "./mcp-account-bindings";
 
 export type PersonalConnectionDelegationSource =
   | {
@@ -158,14 +165,27 @@ export function personalConnectionDelegationSourceForGrant(
   return { kind: "subject", subjectId: grant.subjectId, accountId: grant.accountId };
 }
 
-/** Account-picker inventory, never an execution grant or credential response. */
+/** Account-picker inventory: shared workspace accounts and this sender's own
+ * personal accounts. Visibility is never an execution grant or a credential
+ * response; every selected connection is validated again at admission/use. */
 export async function listOwnConnectionAccountsForGrant(
   db: Database,
   grant: AccessGrant,
 ): Promise<ConnectionMetadata[]> {
   const source = personalConnectionDelegationSourceForGrant(grant);
-  if (source.kind !== "subject") return [];
-  return listOwnConnectionMetadata(db, { ...source, workspaceId: grant.workspaceId });
+  const workspace = (await listConnectionsMetadata(db, grant.workspaceId, null)).filter(
+    (connection) =>
+      connection.subjectId === null &&
+      connection.workspaceId === grant.workspaceId &&
+      connection.accountId === grant.accountId &&
+      connection.status === "active",
+  );
+  if (source.kind !== "subject") return workspace;
+  const personal = await listOwnConnectionMetadata(db, {
+    ...source,
+    workspaceId: grant.workspaceId,
+  });
+  return [...workspace, ...personal];
 }
 
 async function listOwnConnectionMetadata(
@@ -340,11 +360,15 @@ function sameProviderDomain(left: string, right: string): boolean {
   return left.toLowerCase() === right.toLowerCase();
 }
 
-/** An account choice needs user attention; retrying the same work cannot fix it. */
-export class ConnectionAccountSelectionError extends HTTPException {
-  override name = "ConnectionAccountSelectionError";
-  constructor(message: string) {
-    super(422, { message });
+function canonicalConnectionResource(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return value.trim();
+    url.hash = "";
+    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+    return url.toString();
+  } catch {
+    return value.trim();
   }
 }
 
@@ -371,6 +395,10 @@ export function personalConnectionDelegationsFromVisibleConnections(input: {
         candidate.authorityId !== null &&
         sameProviderDomain(candidate.providerDomain, ref.providerDomain) &&
         (!ref.kind || candidate.kind === ref.kind) &&
+        (!ref.resource ||
+          (typeof candidate.metadata.resource === "string" &&
+            canonicalConnectionResource(candidate.metadata.resource) ===
+              canonicalConnectionResource(ref.resource))) &&
         (!ref.connectionId || candidate.id === ref.connectionId),
     );
     if (!selection && eligible.length > 1) {
@@ -655,6 +683,7 @@ export function personalConnectionDelegationsEqual(
     const other = byServer.get(delegation.serverId);
     return (
       other?.connectionId === delegation.connectionId &&
+      other.canonicalServerId === delegation.canonicalServerId &&
       other.originWorkspaceId === delegation.originWorkspaceId &&
       other.ownerSubjectId === delegation.ownerSubjectId &&
       sameProviderDomain(other.providerDomain, delegation.providerDomain) &&
@@ -762,6 +791,101 @@ export function withFrozenPersonalConnectionDelegations(input: {
   };
 }
 
+/** Freeze all native account routes without conflating workspace ownership
+ * with the exact causal human required for personal connections. */
+export async function freezeConnectionAccounts(
+  input: Parameters<typeof freezePersonalConnectionDelegations>[0] & { accountId: string },
+): Promise<{
+  mcpAccountBindings: McpConnectionAccountBinding[] | null;
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
+}> {
+  const selectedIds = new Set(input.tools.map((tool) => tool.id));
+  const servers = input.settings.mcpServers.filter(
+    (server) =>
+      selectedIds.has(server.id) &&
+      server.connectionRef &&
+      server.connectionRef.authoritySource !== "host",
+  );
+  const serverIds = new Set(servers.map((server) => server.id));
+  let mcpAccountBindings: McpConnectionAccountBinding[];
+  if (input.source.kind === "turn") {
+    if (input.authoritySelections?.length) {
+      throw new ConnectionAccountSelectionError(
+        "Agent-created work inherits the exact parent accounts",
+      );
+    }
+    const inherited = await getSessionTurnMcpAccountBindings(
+      input.db,
+      input.workspaceId,
+      input.source.sessionId,
+      input.source.turnId,
+    );
+    if (inherited === null) {
+      return {
+        mcpAccountBindings: null,
+        personalConnectionDelegations: await freezePersonalConnectionDelegations(input),
+      };
+    }
+    mcpAccountBindings = inherited.filter((binding) => serverIds.has(binding.canonicalServerId));
+  } else {
+    const personal =
+      input.source.kind === "subject" &&
+      (await ownerStillBelongsToWorkspace(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.source.subjectId,
+      }))
+        ? await listOwnConnectionMetadata(input.db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.source.subjectId,
+          })
+        : [];
+    const workspace = await listConnectionsMetadata(input.db, input.workspaceId, null);
+    mcpAccountBindings = mcpAccountBindingsFromVisibleConnections({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.source.kind === "subject" ? input.source.subjectId : null,
+      servers,
+      selectionsFrozen: input.authoritySelectionsFrozen === true,
+      connections: [
+        ...workspace.filter((connection) => connection.subjectId === null),
+        ...personal,
+      ],
+      ...(input.authoritySelections
+        ? {
+            selections: input.authoritySelections.filter((selection) =>
+              serverIds.has(selection.serverId),
+            ),
+          }
+        : {}),
+    });
+  }
+  // Dedicated first-party publication/repository/social surfaces keep their
+  // existing selection and authority contracts; they are not generic MCP routes.
+  const special = await freezePersonalConnectionDelegations({
+    ...input,
+    settings: {
+      ...input.settings,
+      mcpServers: input.settings.mcpServers.filter((server) => !serverIds.has(server.id)),
+    },
+    ...(input.authoritySelections
+      ? {
+          authoritySelections: input.authoritySelections.filter(
+            (selection) => !serverIds.has(selection.serverId),
+          ),
+        }
+      : {}),
+  });
+  return {
+    mcpAccountBindings,
+    personalConnectionDelegations: [
+      ...personalDelegationsForAccountBindings(mcpAccountBindings),
+      ...special,
+    ],
+  };
+}
+
 export async function freezePersonalConnectionDelegations(input: {
   db: Database;
   workspaceId: string;
@@ -770,6 +894,8 @@ export async function freezePersonalConnectionDelegations(input: {
   resources?: ResourceRef[];
   source: PersonalConnectionDelegationSource;
   authoritySelections?: McpConnectionAccountSelection[];
+  /** Internal durable schedule snapshot, not a default account selector. */
+  authoritySelectionsFrozen?: boolean;
   /** Exact first-party export tool + permission gate, not broad opengeni attachment. */
   googleDrivePublicationEnabled?: boolean;
   /** Exact first-party Atlassian tool + permission gate. */
@@ -881,7 +1007,11 @@ export async function freezePersonalConnectionDelegations(input: {
     db: input.db,
     accountId: input.source.accountId,
     subjectId: ownerSubjectId,
-    connections: visibleConnections,
+    connections: input.authoritySelectionsFrozen
+      ? visibleConnections.filter(
+          (connection) => connection.id === personalGitHubAuthoritySelection?.connectionId,
+        )
+      : visibleConnections,
     resources: input.resources ?? [],
     ...(personalGitHubAuthoritySelection
       ? { authoritySelection: personalGitHubAuthoritySelection }
@@ -917,7 +1047,11 @@ export async function freezePersonalConnectionDelegations(input: {
   const googleDrivePublication = input.googleDrivePublicationEnabled
     ? googleDrivePublicationDelegationFromVisibleConnections({
         subjectId: ownerSubjectId,
-        connections: visibleConnections,
+        connections: input.authoritySelectionsFrozen
+          ? visibleConnections.filter(
+              (connection) => connection.id === googleDriveAuthoritySelection?.connectionId,
+            )
+          : visibleConnections,
         ...(googleDriveAuthoritySelection
           ? { authoritySelection: googleDriveAuthoritySelection }
           : {}),

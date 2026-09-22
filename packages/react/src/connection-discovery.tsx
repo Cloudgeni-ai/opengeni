@@ -1,14 +1,22 @@
+import type { ConnectAccount, ConnectController, ConnectProvider } from "@opengeni/connect";
+import { ConnectChooser } from "./connect-chooser";
+import {
+  capabilityConnectProviderId,
+  connectionServicePresentation,
+  isServiceConnectProvider,
+} from "./connection-service-presentation";
 import type { CapabilityCatalogItem, ConnectionMetadata, OpenGeniClient } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
 import { CapabilityCatalogRow } from "./capability-catalog-row";
 import { ConnectionLogo } from "./connection-logo";
 import { ConnectionSkeleton } from "./connection-skeleton";
-import { capabilityLogoFallback } from "./capability-logo-fallback";
+import { ConnectionServiceLogo } from "./connection-service-logo";
 import { McpConnectionCard } from "./components/session-mcp-capability-card";
-import { matchingActiveMcpConnections } from "./mcp-connection-status";
+import { mcpConnectionDiscoveryState } from "./mcp-connection-status";
 
 export type ConnectionDiscoveryProps = {
   client: OpenGeniClient;
+  controller?: ConnectController | undefined;
   workspaceId: string;
   returnUrl: string;
   onConfigured?: (() => void | Promise<void>) | undefined;
@@ -17,10 +25,10 @@ export type ConnectionDiscoveryProps = {
 /** Service discovery over the native catalogue. No host-owned OAuth state or
  * assumed account selection: details resolve current authority before acting. */
 export function ConnectionDiscovery(props: ConnectionDiscoveryProps) {
-  const [client, setClient] = useState(props.client);
+  const [scope, setScope] = useState({ client: props.client, controller: props.controller });
   const [generation, setGeneration] = useState(0);
-  if (client !== props.client) {
-    setClient(props.client);
+  if (scope.client !== props.client || scope.controller !== props.controller) {
+    setScope({ client: props.client, controller: props.controller });
     setGeneration(generation + 1);
   }
   return <ScopedDiscovery key={`${generation}:${props.workspaceId}`} {...props} />;
@@ -28,10 +36,15 @@ export function ConnectionDiscovery(props: ConnectionDiscoveryProps) {
 
 function ScopedDiscovery({
   client,
+  controller,
   workspaceId,
   returnUrl,
   onConfigured,
 }: ConnectionDiscoveryProps) {
+  const [providers, setProviders] = useState<ConnectProvider[] | null>(null);
+  const [accounts, setAccounts] = useState<ConnectAccount[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState<ConnectProvider | null>(null);
+  const [providerFailed, setProviderFailed] = useState(false);
   const [items, setItems] = useState<CapabilityCatalogItem[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
@@ -41,11 +54,38 @@ function ScopedDiscovery({
   const [selected, setSelected] = useState<CapabilityCatalogItem | null>(null);
   const opener = useRef<HTMLElement | null>(null);
   useEffect(() => {
-    let current = true;
+    const abort = new AbortController();
+    // Capture each read independently: even a synchronously throwing transport
+    // is captured by Promise.all, and cannot strand another read's rejection.
+    const read = async <T,>(operation: () => Promise<T>): Promise<T> => {
+      abort.signal.throwIfAborted();
+      return operation();
+    };
     setFailed(false);
-    void Promise.all([client.listCapabilities(workspaceId), client.listConnections(workspaceId)])
+    setSelectedProvider(null);
+    setProviders(null);
+    setItems(null);
+    setProviderFailed(false);
+    if (controller)
+      void Promise.all([
+        read(() => controller.transport.catalog(workspaceId, { signal: abort.signal })),
+        read(() => controller.transport.accounts(workspaceId, { signal: abort.signal })),
+      ])
+        .then(([catalog, inventory]) => {
+          if (!abort.signal.aborted) {
+            setProviders(catalog.filter(isServiceConnectProvider));
+            setAccounts(inventory);
+          }
+        })
+        .catch(() => {
+          if (!abort.signal.aborted) setProviderFailed(true);
+        });
+    void Promise.all([
+      read(() => client.listCapabilities(workspaceId)),
+      read(() => client.listConnections(workspaceId)),
+    ])
       .then(([catalog, inventory]) => {
-        if (current) {
+        if (!abort.signal.aborted) {
           setConnections(inventory);
           setItems(
             catalog.items.filter(
@@ -58,18 +98,43 @@ function ScopedDiscovery({
         }
       })
       .catch(() => {
-        if (current) setFailed(true);
+        if (!abort.signal.aborted) setFailed(true);
       });
     return () => {
-      current = false;
+      abort.abort();
     };
-  }, [client, workspaceId, reload]);
+  }, [client, controller, workspaceId, reload]);
   const matches =
     items?.filter((item) =>
       `${item.name} ${item.description ?? ""} ${item.providerDomain ?? ""}`
         .toLocaleLowerCase()
         .includes(query.trim().toLocaleLowerCase()),
     ) ?? [];
+  const providerMatches = (providers ?? []).filter(
+    (provider) =>
+      !items?.some((item) => capabilityConnectProviderId(item) === provider.id) &&
+      provider.label.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+  );
+  const loading = (!items && !failed) || Boolean(controller && !providers && !providerFailed);
+  if (selectedProvider && controller)
+    return (
+      <section aria-label={`Connect ${selectedProvider.label}`}>
+        <button type="button" onClick={() => setSelectedProvider(null)}>
+          Back to connections
+        </button>
+        <ConnectionLogo
+          name={selectedProvider.label}
+          src={connectionServicePresentation(selectedProvider).logo}
+        />
+        <ConnectChooser
+          controller={controller}
+          returnUrl={returnUrl}
+          presentation="catalog"
+          providerOnly
+          initialProviderId={selectedProvider.id}
+        />
+      </section>
+    );
   return (
     <section className="og-connection-discovery" aria-label="Find a connection">
       <h3>Add a connection</h3>
@@ -85,46 +150,64 @@ function ScopedDiscovery({
           }}
         />
       </label>
-      <div className="og-connection-discovery-results" aria-busy={!items && !failed}>
-        {failed ? (
-          <p role="alert">
-            Services could not be loaded.{" "}
-            <button onClick={() => setReload((value) => value + 1)}>Retry</button>
-          </p>
-        ) : !items ? (
-          <ConnectionSkeleton rows={5} label="Loading services" />
-        ) : (
-          <>
-            <div>
-              {matches.slice(0, limit).map((item) => {
-                const connected = matchingActiveMcpConnections(item, connections).length === 1;
-                return (
-                  <CapabilityCatalogRow
-                    key={item.id}
-                    name={item.name}
-                    description={item.description ?? undefined}
-                    icon={<ServiceLogo client={client} item={item} />}
-                    status={connected ? "added" : item.enabled ? "attention" : "available"}
-                    statusLabel={
-                      connected ? "Connected" : item.enabled ? "Review connection" : "Connect"
-                    }
-                    showStatusLabel={connected}
-                    onOpen={() => {
-                      opener.current =
-                        document.activeElement instanceof HTMLElement
-                          ? document.activeElement
-                          : null;
-                      setSelected(item);
-                    }}
-                  />
-                );
-              })}
-            </div>
-            {!matches.length ? <p role="status">No services match your search.</p> : null}
-            {matches.length > limit ? (
-              <button onClick={() => setLimit((value) => value + 12)}>Show more services</button>
-            ) : null}
-          </>
+      {(providerFailed || failed) && (
+        <p role="alert">
+          Some services could not be loaded.{" "}
+          <button type="button" onClick={() => setReload((value) => value + 1)}>
+            Retry
+          </button>
+        </p>
+      )}
+      <div className="og-connection-discovery-results">
+        {providerMatches.map((provider) => {
+          const connected = accounts.some(
+            (account) => account.providerId === provider.id && account.status === "connected",
+          );
+          return (
+            <CapabilityCatalogRow
+              key={provider.id}
+              name={provider.label}
+              icon={
+                <ConnectionLogo
+                  name={provider.label}
+                  src={connectionServicePresentation(provider).logo}
+                />
+              }
+              status={connected ? "added" : "available"}
+              statusLabel={connected ? "Connected" : "Connect"}
+              showStatusLabel
+              onOpen={() => setSelectedProvider(provider)}
+            />
+          );
+        })}
+        {matches.slice(0, limit).map((item) => {
+          const state = mcpConnectionDiscoveryState(item, connections);
+          return (
+            <CapabilityCatalogRow
+              key={item.id}
+              name={item.name}
+              description={item.description ?? undefined}
+              icon={<ConnectionServiceLogo client={client} item={item} name={item.name} />}
+              status={state.status}
+              statusLabel={state.label}
+              showStatusLabel
+              onOpen={() => {
+                opener.current =
+                  document.activeElement instanceof HTMLElement ? document.activeElement : null;
+                setSelected(item);
+              }}
+            />
+          );
+        })}
+
+        {loading && <ConnectionSkeleton rows={3} label="Loading services" />}
+        {!loading && !failed && !providerFailed && !matches.length && !providerMatches.length && (
+          <p role="status">No services match your search.</p>
+        )}
+        {matches.length > limit && (
+          <button type="button" onClick={() => setLimit((value) => value + 12)}>
+            Show more services
+          </button>
         )}
       </div>
       {selected ? (
@@ -148,46 +231,5 @@ function ScopedDiscovery({
         />
       ) : null}
     </section>
-  );
-}
-
-function ServiceLogo({ client, item }: { client: OpenGeniClient; item: CapabilityCatalogItem }) {
-  const [src, setSrc] = useState<string | null>(null);
-  const [settled, setSettled] = useState(false);
-  useEffect(() => {
-    setSrc(null);
-    setSettled(false);
-    const path = item.logoAssetPath;
-    if (!path?.startsWith("catalog-assets/")) return;
-    const abort = new AbortController();
-    let url: string | null = null;
-    void client
-      .downloadCatalogAsset(path, { signal: abort.signal })
-      .then((blob) => {
-        if (abort.signal.aborted || !blob.type.startsWith("image/") || blob.size > 2_000_000)
-          return;
-        url = URL.createObjectURL(blob);
-        setSrc(url);
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (!abort.signal.aborted) setSettled(true);
-      });
-    return () => {
-      abort.abort();
-      if (url) URL.revokeObjectURL(url);
-    };
-  }, [client, item.logoAssetPath]);
-  return (
-    <ConnectionLogo
-      name={item.name}
-      src={
-        src ??
-        (item.logoAssetPath?.startsWith("catalog-assets/") && !settled
-          ? null
-          : capabilityLogoFallback(item))
-      }
-      loading={Boolean(item.logoAssetPath?.startsWith("catalog-assets/")) && !settled}
-    />
   );
 }

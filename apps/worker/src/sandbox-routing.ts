@@ -17,12 +17,13 @@
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
 import {
   createProviderCommandRetainer,
-  retainedProviderCommandPersistence,
+  supervisedCommandProtocolReady,
 } from "@opengeni/db/retained-provider-commands";
 import {
   adoptConnectedMachineSessionBackgroundCommand,
   adoptManagedSessionBackgroundCommand,
   advanceWorkspaceGenerationForRetainedProcess,
+  retainedProviderCommandPersistence,
   advanceWorkspaceGeneration,
   getRetainedProcess,
   retainWorkspaceMutationProcess,
@@ -72,6 +73,7 @@ import {
   type RoutingMutationSettlementResult,
   type RoutingSandboxFirstOperationObserver,
   type RoutingSandboxOperationObserver,
+  type RoutingSandboxCaptureWaitObserver,
   type RoutingSandboxWaitObservation,
   type RoutingRetainedProcess,
   type RoutingRetainedProcessTerminalProof,
@@ -112,6 +114,7 @@ export type RoutingWiringServices = {
   onOp?: SelfhostedOpObserver;
   /** Every physical routed provider call, across cloud and selfhosted homes. */
   onSandboxOperation?: RoutingSandboxOperationObserver;
+  onSandboxCaptureWait?: RoutingSandboxCaptureWaitObserver;
   /** The op-stream durable-resume journal (the Temporal adaptation from
    *  op-journal.ts): attach generation + settled-frontier persistence. Absent ⇒
    *  the runtime defaults (generation "1", no persistence) — tests / non-turn
@@ -124,11 +127,12 @@ export type RoutingWiringServices = {
     instanceId: string;
     leaseEpoch: number;
   }) => Promise<void>;
-  /** Called when a route repair replaces the worker's original home handle. */
+  /** Prepare and publish the worker's home handle. Rejection leaves the route
+   * unpublished; replacement preparation must settle before the first tool op. */
   onHomeSandboxRebound?: (input: {
     established: EstablishedSandboxSession;
     leaseEpoch: number;
-  }) => void;
+  }) => void | Promise<void>;
   /** Cancel bounded capture waits with the owning turn activity. */
   waitSignal?: AbortSignal;
 };
@@ -342,7 +346,7 @@ async function resolveCurrentHomeBackend(
   // A route epoch can advance without a provider replacement. Reuse the exact
   // established handle only when its identity still equals the durable one.
   if (lease.instanceId === established.instanceId) {
-    services.onHomeSandboxRebound?.({
+    await services.onHomeSandboxRebound?.({
       established,
       leaseEpoch: lease.leaseEpoch,
     });
@@ -393,6 +397,7 @@ async function resolveCurrentHomeBackend(
       sandboxGroupId: ids.sandboxGroupId,
       expectedEpoch: lease.leaseEpoch,
       expectedInstanceId: lease.instanceId,
+      expectedBackend: lease.backend,
       diagnostic: "provider_not_found_during_home_route_rebind",
     });
     if (marked.status === "marked") {
@@ -416,7 +421,7 @@ async function resolveCurrentHomeBackend(
   if (rebound.instanceId !== lease.instanceId || reboundBackend !== resumeBackend) {
     throw homeRouteRecoveryError(lease, lease.leaseEpoch);
   }
-  services.onHomeSandboxRebound?.({
+  await services.onHomeSandboxRebound?.({
     established: rebound,
     leaseEpoch: lease.leaseEpoch,
   });
@@ -747,7 +752,7 @@ function settleRetainedProcessForTurn(
     if (
       !durable ||
       durable.providerSessionId !== process.providerSessionId ||
-      durable.providerBackend !== backend.kind ||
+      durable.providerBackend !== (sandboxBackendForSdkBackendId(backend.kind) ?? backend.kind) ||
       durable.providerInstanceId !== backend.providerInstanceId ||
       durable.leaseEpoch !== backend.leaseEpoch ||
       durable.routeKind !== (backend.sandboxId === null ? "home" : "active") ||
@@ -795,7 +800,7 @@ function adoptRetainedProcessAsBackgroundCommandForTurn(
     if (
       !durable ||
       durable.providerSessionId !== process.providerSessionId ||
-      durable.providerBackend !== backend.kind ||
+      durable.providerBackend !== (sandboxBackendForSdkBackendId(backend.kind) ?? backend.kind) ||
       durable.providerInstanceId !== backend.providerInstanceId ||
       durable.leaseEpoch !== backend.leaseEpoch ||
       durable.routeKind !== (backend.sandboxId === null ? "home" : "active") ||
@@ -1026,16 +1031,25 @@ export function wrapTurnBoxWithRouting(
     },
     resolveActiveBackend: resolver,
     ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
+    ...(services.onSandboxCaptureWait ? { onCaptureWait: services.onSandboxCaptureWait } : {}),
     providerCommandHandle: admittedCommandHandle,
+    providerSupervisionReady: async () =>
+      settings.modalCommandSupervisionEnabled && (await supervisedCommandProtocolReady(db)),
     ...(ids.workspaceMutationFence
       ? {
           providerCommandPersistence: (process: RoutingRetainedProcess) =>
-            retainedProviderCommandPersistence(db, {
-              accountId: ids.workspaceMutationFence!.accountId,
-              workspaceId: ids.workspaceId,
-              sessionId: ids.sessionId,
-              processId: process.id,
-            }),
+            retainedProviderCommandPersistence(
+              db,
+              {
+                accountId: ids.workspaceMutationFence!.accountId,
+                workspaceId: ids.workspaceId,
+                sessionId: ids.sessionId,
+                processId: process.id,
+              },
+              services.bus
+                ? (events) => services.bus!.publish(ids.workspaceId, ids.sessionId, events)
+                : undefined,
+            ),
         }
       : {}),
     ...(beforeMutation ? { beforeMutation } : {}),
@@ -1069,6 +1083,7 @@ export function wrapTurnBoxWithRouting(
               sandboxGroupId: home.sandboxGroupId,
               expectedEpoch,
               expectedInstanceId,
+              expectedBackend: home.backend,
               diagnostic: "provider_not_found_during_routed_operation",
             });
             if (marked.status === "marked") {
@@ -1276,17 +1291,26 @@ export function wrapLazyTurnBoxWithRouting(
       return routedResolver(pointer);
     },
     ...(services.onSandboxOperation ? { onOperation: services.onSandboxOperation } : {}),
+    ...(services.onSandboxCaptureWait ? { onCaptureWait: services.onSandboxCaptureWait } : {}),
     ...(args.onFirstOperation ? { onFirstOperation: args.onFirstOperation } : {}),
     providerCommandHandle: admittedCommandHandle,
+    providerSupervisionReady: async () =>
+      settings.modalCommandSupervisionEnabled && (await supervisedCommandProtocolReady(db)),
     ...(ids.workspaceMutationFence
       ? {
           providerCommandPersistence: (process: RoutingRetainedProcess) =>
-            retainedProviderCommandPersistence(db, {
-              accountId: ids.workspaceMutationFence!.accountId,
-              workspaceId: ids.workspaceId,
-              sessionId: ids.sessionId,
-              processId: process.id,
-            }),
+            retainedProviderCommandPersistence(
+              db,
+              {
+                accountId: ids.workspaceMutationFence!.accountId,
+                workspaceId: ids.workspaceId,
+                sessionId: ids.sessionId,
+                processId: process.id,
+              },
+              services.bus
+                ? (events) => services.bus!.publish(ids.workspaceId, ids.sessionId, events)
+                : undefined,
+            ),
         }
       : {}),
     ...(beforeMutation ? { beforeMutation } : {}),
@@ -1321,6 +1345,7 @@ export function wrapLazyTurnBoxWithRouting(
               sandboxGroupId: home.sandboxGroupId,
               expectedEpoch: backend.leaseEpoch,
               expectedInstanceId: backend.providerInstanceId,
+              expectedBackend: home.backend,
               diagnostic: "provider_not_found_during_routed_operation",
             });
             if (marked.status === "marked") {

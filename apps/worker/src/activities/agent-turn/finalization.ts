@@ -1,7 +1,7 @@
 import {
   commitSessionAttemptQuiescence,
   listPendingSessionTurns,
-  recordCodexAccountUsageWithWakeTargets,
+  recordCodexAccountUsageForFinalization,
   releaseCodexCredentialLease,
   releaseXaiCredentialLease,
   updateXaiQuotaMetadata,
@@ -33,6 +33,7 @@ import {
   makeMachineOpObserver,
   recordSessionEventAppendPhase,
   turnLifecycleMetricsFor,
+  runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
 import {
   maybePersistWarmWorkspaceSnapshot,
@@ -411,13 +412,29 @@ async function finalizeTurnAttemptSteps(
       // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
       // full both-windows snapshot (parseCodexUsageHeaders gates on both), so this
       // is byte-identical to the /wham/usage write — no partial-window clobber.
-      if (providerTurn.latestCodexUsage) {
+      if (
+        providerTurn.latestCodexUsage &&
+        attempt.turnId &&
+        leases.codex.held &&
+        leases.codex.holderId &&
+        leases.codex.generation !== null &&
+        providerTurn.effectiveCodexCredentialVersion !== null
+      ) {
         const usageMutation = await waitForTurnFinalizerStep(
-          recordCodexAccountUsageWithWakeTargets(
+          recordCodexAccountUsageForFinalization(
             db,
             input.workspaceId,
             providerTurn.effectiveCodexCredentialId,
             providerTurn.latestCodexUsage,
+            {
+              turnId: attempt.turnId,
+              sessionId: input.sessionId,
+              attemptId: input.attemptId,
+              executionGeneration: attempt.executionGeneration,
+              holderId: leases.codex.holderId,
+              generation: leases.codex.generation,
+              credentialVersion: providerTurn.effectiveCodexCredentialVersion,
+            },
           ).catch(() => null),
           finalizerSignal,
         );
@@ -654,7 +671,13 @@ async function finalizeTurnAttemptSteps(
         settledTurnId
       ) {
         const snapshot = maybePersistWarmWorkspaceSnapshot(
-          { db, settings, objectStorage },
+          {
+            db,
+            settings,
+            objectStorage,
+            sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+            observability,
+          },
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,

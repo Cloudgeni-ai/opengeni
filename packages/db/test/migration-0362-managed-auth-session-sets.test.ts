@@ -155,6 +155,43 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
   expect(nestedPostgresSqlState(failure)).toBe(state);
 }
 
+function withRateLimitClock(run: (setClock: (instant: string) => Promise<void>) => Promise<void>) {
+  return async () => {
+    if (!owned || !client) return;
+    const admin = owned.admin;
+    const [routine] = await admin<Array<{ definition: string }>>`
+      select pg_catalog.pg_get_functiondef(
+        'public.managed_auth_login_transaction_rate_limit_take(text,text)'::regprocedure
+      ) as definition
+    `;
+    if (!routine) throw new Error("rate limiter routine missing");
+    const clockExpression = "pg_catalog.clock_timestamp()";
+    // Only the limiter's two clock reads change, in this file's disposable DB.
+    // Keep the real app-role call, date_bin, limits, locks, rollback and RLS.
+    expect(routine.definition.split(clockExpression)).toHaveLength(3);
+    const setClock = async (instant: string) => {
+      const [literal] = await admin<Array<{ expression: string }>>`
+        select pg_catalog.format('%L::timestamptz', ${instant}::timestamptz) as expression
+      `;
+      if (!literal) throw new Error("rate limiter clock literal missing");
+      await admin.unsafe(routine.definition.replaceAll(clockExpression, literal.expression));
+    };
+    try {
+      await setClock("2026-09-19T09:59:59.999Z");
+      await run(setClock);
+    } finally {
+      await admin.unsafe(routine.definition);
+      const [restored] = await admin<Array<{ definition: string }>>`
+        select pg_catalog.pg_get_functiondef(
+          'public.managed_auth_login_transaction_rate_limit_take(text,text)'::regprocedure
+        ) as definition
+      `;
+      expect(restored?.definition).toBe(routine.definition);
+      await admin`delete from managed_auth_login_transaction_rate_limits`;
+    }
+  };
+}
+
 describe("migration 0362 managed browser session sets", () => {
   test("pins the restricted runtime posture and exposes only definer routines", async () => {
     for (const table of [
@@ -365,54 +402,66 @@ describe("migration 0362 managed browser session sets", () => {
     expect(await getManagedAuthSessionSetAuthorityState(client.db, reauthAuthority)).toBe("absent");
   });
 
-  test("bounds pre-auth transactions across repeated and fresh authorities and purges expiry", async () => {
-    if (!owned || !client) return;
-    const preauthScopeHash = hex(`preauth-client-${crypto.randomUUID()}`);
-    const inputs = Array.from({ length: 9 }, (_, index) => {
-      const authority = `preauth-authority-${index}-${crypto.randomUUID()}`;
-      const returnIntentId = index === 0 ? crypto.randomUUID() : null;
-      return {
-        authorityHash: hex(authority),
-        csrfHash: hex(`csrf:${authority}`),
-        rateScopeHash: preauthScopeHash,
-        operationId: crypto.randomUUID(),
-        requestDigest: hex(`begin-preauth-${index}`),
-        expectedGeneration: "1",
-        expectedActorEpoch: "1",
-        transactionId: crypto.randomUUID(),
-        transactionSecretHash: hex(`secret:${authority}`),
-        kind: "add" as const,
-        targetSlotId: null,
-        returnIntentId,
-        returnPath: returnIntentId ? `/sessions/${crypto.randomUUID()}` : null,
-        expiresAt: new Date(Date.now() + 600_000),
-      };
-    });
-
-    const first = await beginManagedAuthLoginTransaction(client.db, inputs[0]!);
-    expect(await beginManagedAuthLoginTransaction(client.db, inputs[0]!)).toEqual(first);
-    await expect(
-      beginManagedAuthLoginTransaction(client.db, {
-        ...inputs[0]!,
-        operationId: crypto.randomUUID(),
-        requestDigest: hex("second-live-preauth"),
-        transactionId: crypto.randomUUID(),
-      }),
-    ).rejects.toBeInstanceOf(ManagedAuthLoginTransactionRateLimitError);
-
-    for (const input of inputs.slice(1, 8)) {
-      expect(await beginManagedAuthLoginTransaction(client.db, input)).toMatchObject({
-        kind: "add",
+  test(
+    "bounds pre-auth transactions across repeated and fresh authorities and purges expiry",
+    withRateLimitClock(async (setClock) => {
+      if (!owned || !client) return;
+      const preauthScopeHash = hex(`preauth-client-${crypto.randomUUID()}`);
+      const inputs = Array.from({ length: 9 }, (_, index) => {
+        const authority = `preauth-authority-${index}-${crypto.randomUUID()}`;
+        const returnIntentId = index === 0 ? crypto.randomUUID() : null;
+        return {
+          authorityHash: hex(authority),
+          csrfHash: hex(`csrf:${authority}`),
+          rateScopeHash: preauthScopeHash,
+          operationId: crypto.randomUUID(),
+          requestDigest: hex(`begin-preauth-${index}`),
+          expectedGeneration: "1",
+          expectedActorEpoch: "1",
+          transactionId: crypto.randomUUID(),
+          transactionSecretHash: hex(`secret:${authority}`),
+          kind: "add" as const,
+          targetSlotId: null,
+          returnIntentId,
+          returnPath: returnIntentId ? `/sessions/${crypto.randomUUID()}` : null,
+          expiresAt: new Date(Date.now() + 600_000),
+        };
       });
-    }
-    await expect(beginManagedAuthLoginTransaction(client.db, inputs[8]!)).rejects.toBeInstanceOf(
-      ManagedAuthLoginTransactionRateLimitError,
-    );
 
-    const admittedHashes = inputs.slice(0, 8).map((input) => input.authorityHash);
-    const [bounded] = await owned.admin<
-      Array<{ sets: string; transactions: string; operations: string; pending: string }>
-    >`
+      const first = await beginManagedAuthLoginTransaction(client.db, inputs[0]!);
+      expect(await beginManagedAuthLoginTransaction(client.db, inputs[0]!)).toEqual(first);
+      await expect(
+        beginManagedAuthLoginTransaction(client.db, {
+          ...inputs[0]!,
+          operationId: crypto.randomUUID(),
+          requestDigest: hex("second-live-preauth"),
+          transactionId: crypto.randomUUID(),
+        }),
+      ).rejects.toBeInstanceOf(ManagedAuthLoginTransactionRateLimitError);
+
+      for (const input of inputs.slice(1, 8)) {
+        expect(await beginManagedAuthLoginTransaction(client.db, input)).toMatchObject({
+          kind: "add",
+        });
+      }
+      await expect(beginManagedAuthLoginTransaction(client.db, inputs[8]!)).rejects.toBeInstanceOf(
+        ManagedAuthLoginTransactionRateLimitError,
+      );
+      const [fullBucket] = await owned.admin<
+        Array<{ attempt_count: number; window_started_at: Date }>
+      >`
+        select attempt_count, window_started_at from managed_auth_login_transaction_rate_limits
+        where scope_kind = 'client' and scope_hash = ${preauthScopeHash}
+      `;
+      expect(fullBucket).toEqual({
+        attempt_count: 8,
+        window_started_at: new Date("2026-09-19T09:50:00Z"),
+      });
+
+      const admittedHashes = inputs.slice(0, 8).map((input) => input.authorityHash);
+      const [bounded] = await owned.admin<
+        Array<{ sets: string; transactions: string; operations: string; pending: string }>
+      >`
       select
         count(distinct session_set.id)::text as sets,
         count(distinct login_transaction.id)::text as transactions,
@@ -427,13 +476,13 @@ describe("migration 0362 managed browser session sets", () => {
         on operation.session_set_id = session_set.id
       where session_set.authority_hash = any(${admittedHashes}::text[])
     `;
-    expect(bounded).toEqual({ sets: "8", transactions: "8", operations: "8", pending: "8" });
-    expect(await getManagedAuthSessionSetAuthorityState(client.db, inputs[8]!.authorityHash)).toBe(
-      "absent",
-    );
-    const [deniedRows] = await owned.admin<
-      Array<{ installations: string; sets: string; transactions: string; operations: string }>
-    >`
+      expect(bounded).toEqual({ sets: "8", transactions: "8", operations: "8", pending: "8" });
+      expect(
+        await getManagedAuthSessionSetAuthorityState(client.db, inputs[8]!.authorityHash),
+      ).toBe("absent");
+      const [deniedRows] = await owned.admin<
+        Array<{ installations: string; sets: string; transactions: string; operations: string }>
+      >`
       select
         (select count(*)::text from managed_auth_browser_installations
           where authority_hash = ${inputs[8]!.authorityHash}) as installations,
@@ -444,64 +493,95 @@ describe("migration 0362 managed browser session sets", () => {
         (select count(*)::text from managed_auth_session_set_operations
           where operation_id = ${inputs[8]!.operationId}::uuid) as operations
     `;
-    expect(deniedRows).toEqual({
-      installations: "0",
-      sets: "0",
-      transactions: "0",
-      operations: "0",
-    });
+      expect(deniedRows).toEqual({
+        installations: "0",
+        sets: "0",
+        transactions: "0",
+        operations: "0",
+      });
 
-    await owned.admin`
+      await owned.admin`
       update managed_auth_login_transaction_rate_limits set attempt_count = 500
       where scope_kind = 'global'
     `;
-    const globalDenied = {
-      ...inputs[8]!,
-      authorityHash: hex(`globally-denied-${crypto.randomUUID()}`),
-      csrfHash: hex(`globally-denied-csrf-${crypto.randomUUID()}`),
-      rateScopeHash: hex(`spoofed-client-${crypto.randomUUID()}`),
-      operationId: crypto.randomUUID(),
-      requestDigest: hex(`globally-denied-request-${crypto.randomUUID()}`),
-      transactionId: crypto.randomUUID(),
-      transactionSecretHash: hex(`globally-denied-secret-${crypto.randomUUID()}`),
-    };
-    await expect(beginManagedAuthLoginTransaction(client.db, globalDenied)).rejects.toBeInstanceOf(
-      ManagedAuthLoginTransactionRateLimitError,
-    );
-    expect(
-      await getManagedAuthSessionSetAuthorityState(client.db, globalDenied.authorityHash),
-    ).toBe("absent");
-    await owned.admin`delete from managed_auth_login_transaction_rate_limits`;
+      const globalDenied = {
+        ...inputs[8]!,
+        authorityHash: hex(`globally-denied-${crypto.randomUUID()}`),
+        csrfHash: hex(`globally-denied-csrf-${crypto.randomUUID()}`),
+        rateScopeHash: hex(`spoofed-client-${crypto.randomUUID()}`),
+        operationId: crypto.randomUUID(),
+        requestDigest: hex(`globally-denied-request-${crypto.randomUUID()}`),
+        transactionId: crypto.randomUUID(),
+        transactionSecretHash: hex(`globally-denied-secret-${crypto.randomUUID()}`),
+      };
+      await expect(
+        beginManagedAuthLoginTransaction(client.db, globalDenied),
+      ).rejects.toBeInstanceOf(ManagedAuthLoginTransactionRateLimitError);
+      expect(
+        await getManagedAuthSessionSetAuthorityState(client.db, globalDenied.authorityHash),
+      ).toBe("absent");
 
-    await owned.admin`
+      // The quota is per fixed ten-minute bucket, not per rolling ten minutes.
+      // The old wall-clock fixture intermittently crossed this boundary between
+      // its first and ninth calls (CI run 35435993932), legitimately admitting #9.
+      // Prove both rejection immediately before and admission exactly at rollover.
+      await setClock("2026-09-19T10:00:00.000Z");
+      expect(await beginManagedAuthLoginTransaction(client.db, inputs[8]!)).toMatchObject({
+        kind: "add",
+      });
+      const counters = await owned.admin<
+        Array<{ scope_kind: string; attempt_count: number; window_started_at: Date }>
+      >`
+      select scope_kind, attempt_count, window_started_at
+      from managed_auth_login_transaction_rate_limits
+      where scope_kind = 'global'
+        or (scope_kind = 'client' and scope_hash = ${preauthScopeHash})
+      order by scope_kind
+    `;
+      expect([...counters]).toEqual([
+        {
+          scope_kind: "client",
+          attempt_count: 1,
+          window_started_at: new Date("2026-09-19T10:00:00Z"),
+        },
+        {
+          scope_kind: "global",
+          attempt_count: 1,
+          window_started_at: new Date("2026-09-19T10:00:00Z"),
+        },
+      ]);
+      admittedHashes.push(inputs[8]!.authorityHash);
+      await owned.admin`delete from managed_auth_login_transaction_rate_limits`;
+
+      await owned.admin`
       update managed_auth_login_transactions login_transaction set
         expires_at = login_transaction.created_at + interval '1 millisecond'
       from managed_auth_session_sets session_set
       where login_transaction.session_set_id = session_set.id
         and session_set.authority_hash = any(${admittedHashes}::text[])
     `;
-    await owned.admin`
+      await owned.admin`
       update managed_auth_session_sets set idle_expires_at = created_at + interval '1 millisecond'
       where authority_hash = any(${admittedHashes}::text[])
     `;
-    await owned.admin`
+      await owned.admin`
       update managed_auth_browser_installations installation set
         idle_expires_at = installation.created_at + interval '1 millisecond'
       from managed_auth_session_sets session_set
       where session_set.installation_id = installation.id
         and session_set.authority_hash = any(${admittedHashes}::text[])
     `;
-    expect(await reapExpiredManagedAuthSessionSets(client.db, 20)).toBeGreaterThanOrEqual(8);
+      expect(await reapExpiredManagedAuthSessionSets(client.db, 20)).toBeGreaterThanOrEqual(9);
 
-    const [purged] = await owned.admin<
-      Array<{
-        installations: string;
-        sets: string;
-        intents: string;
-        transactions: string;
-        operations: string;
-      }>
-    >`
+      const [purged] = await owned.admin<
+        Array<{
+          installations: string;
+          sets: string;
+          intents: string;
+          transactions: string;
+          operations: string;
+        }>
+      >`
       select
         (select count(*)::text from managed_auth_browser_installations
           where authority_hash = any(${admittedHashes}::text[])) as installations,
@@ -518,14 +598,15 @@ describe("migration 0362 managed browser session sets", () => {
             on session_set.id = operation.session_set_id
           where session_set.authority_hash = any(${admittedHashes}::text[])) as operations
     `;
-    expect(purged).toEqual({
-      installations: "0",
-      sets: "0",
-      intents: "0",
-      transactions: "0",
-      operations: "0",
-    });
-  });
+      expect(purged).toEqual({
+        installations: "0",
+        sets: "0",
+        intents: "0",
+        transactions: "0",
+        operations: "0",
+      });
+    }),
+  );
 
   test("keeps same-human exact login bindings in independent slots without changing selection", async () => {
     if (!owned || !client) return;

@@ -9,8 +9,8 @@ import {
 } from "@opengeni/db";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import type { SessionMessageSearchResponse } from "../../packages/sdk/src/session-message-search";
+import { acquireSearchTestDatabase } from "../../packages/db/test/session-message-search-fixture";
 import {
-  acquireSharedTestDatabase,
   freePort,
   MemoryEventBus,
   runCommand,
@@ -79,11 +79,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       );
     }
 
-    const acquired = await acquireSharedTestDatabase("session-search-browser");
-    if (!acquired) {
-      throw new Error("session search browser E2E requires real PostgreSQL; no skip is allowed");
-    }
-    shared = acquired;
+    shared = await acquireSearchTestDatabase("session-search-browser");
     const appRole = decodeURIComponent(new URL(shared.appUrl).username);
     const [posture] = await shared.admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
       select rolsuper, rolbypassrls from pg_roles where rolname = ${appRole}`;
@@ -145,6 +141,80 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
     await api?.stop(false);
     await dbClient?.close().catch(() => undefined);
     await shared?.release();
+  }, 60_000);
+
+  test("desktop expanded header keeps icon-only search inline and opens its dialog by mouse and keyboard", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      await workspaceFromPage(page);
+      const search = page.getByRole("button", { name: "Search sessions", exact: true });
+      await search.waitFor();
+      expect(await search.count()).toBe(1);
+      expect(await search.innerText()).toBe("");
+      expect(await search.getAttribute("aria-haspopup")).toBe("dialog");
+      expect(await search.locator('svg[aria-hidden="true"]').count()).toBe(1);
+
+      const header = search.locator("..");
+      const title = header.getByText("Browse sessions", { exact: true });
+      const project = header.getByRole("button", { name: "New project", exact: true });
+      const filter = header.getByRole("button", { name: "Session view, customized", exact: true });
+      await project.waitFor();
+      const searchBox = (await search.boundingBox())!;
+      for (const control of [title, project, filter]) {
+        const box = await control.boundingBox();
+        expect(box).not.toBeNull();
+        expect(
+          Math.abs(box!.y + box!.height / 2 - (searchBox.y + searchBox.height / 2)),
+        ).toBeLessThan(2);
+      }
+      expect(searchBox.width).toBeLessThanOrEqual(32);
+      expect(searchBox.height).toBeLessThanOrEqual(32);
+      // The heading is immediately followed by the list, not a second search row.
+      expect(
+        await header.evaluate((element) => element.nextElementSibling?.getAttribute("role")),
+      ).toBe("region");
+      await page.screenshot({ path: `${artifactDir}/session-search-compact-header-desktop.png` });
+
+      const dialog = await openSearchDialog(page);
+      await page.keyboard.press("Escape");
+      await dialog.waitFor({ state: "hidden" });
+      for (const key of ["Enter", "Space"]) {
+        await search.focus();
+        await page.keyboard.press(key);
+        await dialog
+          .getByRole("searchbox", { name: "Search session titles and messages", exact: true })
+          .waitFor();
+        await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "hidden" });
+      }
+
+      await filter.click();
+      await page.getByRole("menuitem", { name: "Status Active" }).hover();
+      await page.getByRole("menuitemradio", { name: "Archived", exact: true }).click();
+      const customized = header.getByRole("button", {
+        name: "Session view, customized",
+        exact: true,
+      });
+      await customized.waitFor();
+      await page.mouse.move(1000, 700);
+      await customized.blur();
+      expect(await customized.locator(".bg-brand").count()).toBe(1);
+      await waitFor(
+        async () =>
+          (await customized.evaluate((element) => getComputedStyle(element).backgroundColor)) ===
+          "rgba(0, 0, 0, 0)",
+      );
+      await page.screenshot({
+        path: `${artifactDir}/session-search-compact-header-filter-desktop.png`,
+      });
+    } finally {
+      await context.close();
+    }
   }, 60_000);
 
   test("finds titles, user messages, and completed assistant messages, then opens the exact occurrence", async () => {
@@ -639,6 +709,22 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       const recordedScroll = await list.evaluate((node) => node.scrollTop);
       const scanningAtDeparture = (await dialog.innerText()).includes("Searching saved history");
 
+      // A draft typo/undo must not replace the committed query, selected row,
+      // preview, or exact scroll position, nor issue requests for the typo.
+      const typoRequests: string[] = [];
+      page.on("request", (request) => {
+        if (request.url().includes("harborlightx")) typoRequests.push(request.url());
+      });
+      await input.fill("harborlightx");
+      expect(await preview.locator("h3").innerText()).toBe(selectedTitle);
+      await input.fill("harborlight");
+      await page.waitForTimeout(350);
+      expect(typoRequests).toHaveLength(0);
+      expect(await preview.locator("h3").innerText()).toBe(selectedTitle);
+      expect(
+        Math.abs((await list.evaluate((node) => node.scrollTop)) - recordedScroll),
+      ).toBeLessThanOrEqual(4);
+
       // Open here → conversation with the find strip carrying the query…
       await preview.getByRole("button", { name: "Open session", exact: true }).click();
       const find = conversationFind(page);
@@ -785,6 +871,71 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
     }
   }, 120_000);
 
+  test("message failures preserve title hits, retry only messages, and denial clears every pane", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const accountId = await accountIdForWorkspace(workspaceId);
+      await seedSession(workspaceId, accountId, "resiliencequartz title");
+      let status = 503;
+      let messageReads = 0;
+      let titleReads = 0;
+      await page.route("**/session-message-search?**", async (route) => {
+        messageReads++;
+        await route.fulfill({
+          status,
+          contentType: "application/json",
+          body: JSON.stringify({ error: { message: "injected failure" } }),
+        });
+      });
+      page.on("request", (request) => {
+        const url = new URL(request.url());
+        if (
+          url.pathname.endsWith("/sessions") &&
+          url.searchParams.get("search") === "resiliencequartz"
+        )
+          titleReads++;
+      });
+      const dialog = await openSearchDialog(page);
+      await dialog
+        .getByRole("searchbox", { name: "Search session titles and messages" })
+        .fill("resiliencequartz");
+      const row = dialog
+        .locator("[data-search-result]")
+        .filter({ hasText: "resiliencequartz title" });
+      await row.waitFor({ timeout: 15_000 });
+      const retry = dialog.getByRole("button", { name: "Retry search", exact: true });
+      await retry.waitFor();
+      expect(await row.count()).toBe(1);
+      await page.screenshot({ path: `${artifactDir}/session-search-transient-warning.png` });
+      const beforeTitles = titleReads;
+      const beforeMessages = messageReads;
+      await retry.click();
+      await waitFor(() => messageReads > beforeMessages, { timeoutMs: 5_000 });
+      await retry.waitFor();
+      expect(titleReads).toBe(beforeTitles);
+      expect(await row.count()).toBe(1);
+      status = 403;
+      await retry.click();
+      await waitFor(async () => (await dialog.locator("[data-search-result]").count()) === 0, {
+        timeoutMs: 5_000,
+      });
+      expect(
+        await dialog.getByRole("region", { name: "Conversation preview", exact: true }).count(),
+      ).toBe(0);
+      expect(await dialog.innerText()).not.toContain("resiliencequartz title");
+      expect(await dialog.innerText()).not.toContain("injected failure");
+      await page.screenshot({ path: `${artifactDir}/session-search-access-denied.png` });
+    } finally {
+      await context.close();
+    }
+  }, 120_000);
+
   test("a changed query replaces prior results and never leaks across workspaces", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
@@ -811,7 +962,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       await input.fill("amberjack");
       await results.filter({ hasText: "amberjack report" }).first().waitFor({ timeout: 15_000 });
 
-      // Replacing the query must drop the previous query's rows immediately,
+      // Once the draft commits, replacing the query must drop previous rows,
       // not merge or leave them beside the new results.
       await input.fill("cobaltine");
       await waitFor(

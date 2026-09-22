@@ -41,8 +41,7 @@ const trigger = {
   sessionTemplate,
   status: "active" as const,
   revision: 7,
-  packInstallationId: null,
-  packTemplateId: null,
+
   createdBySubjectId: "owner",
   createdAt: new Date(0).toISOString(),
   updatedAt: new Date(0).toISOString(),

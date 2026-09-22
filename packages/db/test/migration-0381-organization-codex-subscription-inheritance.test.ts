@@ -117,13 +117,13 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       /setActiveOrganizationCodexCredential[\s\S]*?from\(schema\.organizationCodexRotationSettings\)[\s\S]*?\.for\("update"\)[\s\S]*?from\(schema\.codexSubscriptionCredentials\)/u,
     );
     expect(dbIndexSource).toMatch(
-      /setWorkspaceCodexSubscriptionMode[\s\S]*?lockWorkspaceCodexSubscriptionSource[\s\S]*?assertCodexSubscriptionSourceChangeAllowed/u,
+      /setWorkspaceCodexSubscriptionMode[\s\S]*?lockWorkspaceCodexSubscriptionSource[\s\S]*?captureLegacyCodexTurnSources/u,
     );
     expect(dbIndexSource).toMatch(
-      /assertCodexSubscriptionSourceChangeAllowed[\s\S]*?waiting_capacity[\s\S]*?codexCredentialLeases\.leasedUntil[\s\S]*?CodexSubscriptionSourceChangeBlockedError/u,
+      /captureLegacyCodexTurnSources[\s\S]*?select capture_legacy_codex_turn_sources\([\s\S]*?opengeni_private\.current_account_id\(\)/u,
     );
     expect(dbIndexSource).toMatch(
-      /mutateCodexCapacityInTransaction[\s\S]*?sourceBefore[\s\S]*?sourceAfter[\s\S]*?assertCodexSubscriptionSourceChangeAllowed/u,
+      /mutateCodexCapacityInTransaction[\s\S]*?lockWorkspaceCodexSubscriptionSource[\s\S]*?captureLegacyCodexTurnSources[\s\S]*?await mutate/u,
     );
     expect(dbIndexSource).toMatch(
       /lockOrganizationCodexSubscriptionSources[\s\S]*?list_organization_codex_workspace_ids[\s\S]*?lockWorkspaceCodexSubscriptionSource/u,
@@ -570,14 +570,14 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
         subjectId: null,
         mode: "disabled",
       }),
-    ).rejects.toThrow("Codex subscription source cannot change while active turns are using it");
+    ).resolves.toMatchObject({ effectiveSource: "disabled" });
     const [retainedPreference] = await shared.admin<{ mode: string }[]>`
       select mode from workspace_codex_subscription_preferences
       where workspace_id = ${workspace!.id}`;
-    expect(retainedPreference?.mode).toBe("workspace");
+    expect(retainedPreference?.mode).toBe("disabled");
   });
 
-  test("fences a first workspace credential when the automatic source was organization", async () => {
+  test("connects a first workspace credential while preserving the accepted organization source", async () => {
     if (!shared || !app || !client) return;
     const [account] = await shared.admin<{ id: string }[]>`
       insert into managed_accounts (name) values ('codex-pre-connect-source-fence') returning id`;
@@ -657,7 +657,7 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
           return { result: upserted, changed: true };
         },
       ),
-    ).rejects.toThrow("Codex subscription source cannot change while active turns are using it");
+    ).resolves.toHaveProperty("result");
     expect(sourceBeforeConnect).toMatchObject({
       mode: "automatic",
       effectiveSource: "organization",
@@ -676,10 +676,10 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
         ) as preferences
       from codex_subscription_credentials credential
       where credential.account_id = ${account!.id}`;
-    expect(rolledBack).toEqual({ workspace_credentials: 0, preferences: 0 });
+    expect(rolledBack).toEqual({ workspace_credentials: 1, preferences: 1 });
   });
 
-  test("fences an effective source change while a Codex turn waits for capacity", async () => {
+  test("changes source while retaining a legacy capacity waiter's original source", async () => {
     if (!shared || !app || !client) return;
     const [account] = await shared.admin<{ id: string }[]>`
       insert into managed_accounts (name) values ('codex-waiting-source-fence') returning id`;
@@ -738,17 +738,20 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
         subjectId: null,
         mode: "disabled",
       }),
-    ).rejects.toThrow("Codex subscription source cannot change while active turns are using it");
+    ).resolves.toMatchObject({ effectiveSource: "disabled" });
     await setAppContext({ accountId: account!.id, workspaceId: workspace!.id });
     const [source] = await app<{ source: string }[]>`
       select resolve_workspace_codex_subscription_source(
         ${account!.id}, ${workspace!.id}
       ) as source`;
-    expect(source?.source).toBe("organization");
+    expect(source?.source).toBe("disabled");
+    const [binding] =
+      await shared.admin`select source from codex_turn_source_bindings where turn_id = ${turn.id}`;
+    expect(binding?.source).toBe("organization");
     expect(turn.id).toBeString();
   });
 
-  test("fences organization pool connect and disconnect against active Personal turns", async () => {
+  test("organization pool changes preserve legacy Personal turn source bindings", async () => {
     if (!shared || !client) return;
     const [account] = await shared.admin<{ id: string }[]>`
       insert into managed_accounts (name) values ('personal organization source fences') returning id`;
@@ -799,18 +802,14 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
         expiresAt: null,
         lastRefreshAt: null,
       });
-    await expect(connect()).rejects.toThrow(
-      "Codex subscription source cannot change while active turns are using it",
-    );
+    const credential = await connect();
     const [rolledBack] = await shared.admin<{ count: number }[]>`
       select count(*)::int as count from codex_subscription_credentials
       where account_id = ${account!.id}`;
-    expect(rolledBack?.count).toBe(0);
-    await shared.admin.begin(async (transaction) => {
-      await transaction`set local session_replication_role = replica`;
-      await transaction`update session_turns set status = 'completed' where id = ${turn.id}`;
-    });
-    const credential = await connect();
+    expect(rolledBack?.count).toBe(1);
+    const [binding] =
+      await shared.admin`select source from codex_turn_source_bindings where turn_id = ${turn.id}`;
+    expect(binding?.source).toBe("workspace");
     await shared.admin.begin(async (transaction) => {
       await transaction`set local session_replication_role = replica`;
       await transaction`update session_turns set status = 'waiting_capacity' where id = ${turn.id}`;
@@ -821,13 +820,13 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
         actorSubjectId,
         credentialId: credential.id,
       }),
-    ).rejects.toThrow("Codex subscription source cannot change while active turns are using it");
+    ).resolves.toMatchObject({ removed: true });
     expect(await getWorkspaceCodexSubscriptionSource(client.db, workspace!.id)).toMatchObject({
-      effectiveSource: "organization",
+      effectiveSource: "workspace",
     });
     const [retained] = await shared.admin<{ id: string }[]>`
       select id from codex_subscription_credentials where id = ${credential.id}`;
-    expect(retained?.id).toBe(credential.id);
+    expect(retained).toBeUndefined();
   });
 
   test("allows organization credential leases in inheriting shared and Personal workspaces", async () => {
@@ -903,12 +902,12 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
         subjectId: null,
         mode: "disabled",
       }),
-    ).rejects.toThrow("Codex subscription source cannot change while active turns are using it");
+    ).resolves.toMatchObject({ effectiveSource: "disabled" });
     const [sourceAfterRejectedChange] = await app<{ source: string }[]>`
       select resolve_workspace_codex_subscription_source(
         ${account!.id}, ${sharedWorkspace!.id}
       ) as source`;
-    expect(sourceAfterRejectedChange?.source).toBe("organization");
+    expect(sourceAfterRejectedChange?.source).toBe("disabled");
     await app`delete from codex_credential_leases where id is not null`;
     await shared.admin.begin(async (transaction) => {
       await transaction`set local session_replication_role = replica`;
@@ -922,7 +921,7 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
         subjectId: null,
         mode: "disabled",
       }),
-    ).rejects.toThrow("Codex subscription source cannot change while active turns are using it");
+    ).resolves.toMatchObject({ effectiveSource: "disabled" });
     await shared.admin.begin(async (transaction) => {
       await transaction`set local session_replication_role = replica`;
       await transaction`

@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { act, useState, type ComponentProps } from "react";
 import { SessionSearchPreview } from "./session-search-dialog";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
   registerDom,
   renderComponent,
@@ -8,6 +9,62 @@ import {
 } from "../../../../../packages/react/test/render-hook";
 
 registerDom();
+
+test("context denial hides the title and passage, signals the parent, and aborts SDK reads", async () => {
+  type Props = ComponentProps<typeof SessionSearchPreview>;
+  const signals: AbortSignal[] = [];
+  let denied = 0;
+  const client = {
+    listEvents: async (_workspace: string, _session: string, options: { signal: AbortSignal }) => {
+      signals.push(options.signal);
+      throw new OpenGeniApiError(403, "private diagnostics");
+    },
+  } as unknown as Props["client"];
+  const search = {
+    page: {
+      matches: [
+        {
+          eventId: "e",
+          sequence: 7,
+          messageMatchOffset: 0,
+          role: "user",
+          snippet: { text: "secret passage" },
+        },
+      ],
+      hasMore: false,
+    },
+    loading: false,
+    error: null,
+    pageIndex: 0,
+  } as unknown as Props["search"];
+  const view = await renderComponent(
+    <SessionSearchPreview
+      client={client}
+      authority="a"
+      workspaceId="w"
+      sessionId="s"
+      title="secret title"
+      query="secret"
+      enabled
+      search={search}
+      index={0}
+      setIndex={() => {}}
+      scrollPosition={{ current: 0 }}
+      onOpen={() => {}}
+      onBack={() => {}}
+      onAccessDenied={() => denied++}
+    />,
+  );
+  await flush(150);
+  expect(denied).toBe(1);
+  expect(view.container.textContent).not.toContain("secret title");
+  expect(view.container.textContent).not.toContain("secret passage");
+  expect(view.container.textContent).not.toContain("private diagnostics");
+  expect(signals).toHaveLength(2);
+  expect(signals[0]).toBe(signals[1]);
+  await view.unmount();
+  expect(signals[0]!.aborted).toBe(true);
+});
 
 test("previous preview batch lands on its last occurrence, then moves backward normally", async () => {
   type Props = ComponentProps<typeof SessionSearchPreview>;

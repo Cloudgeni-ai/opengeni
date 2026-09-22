@@ -196,6 +196,9 @@ externalSecret:
   dataFrom: []
 
 api:
+  # Additional Kubernetes volumes and mounts for the API container (for example TLS Secrets).
+  extraVolumes: []
+  extraVolumeMounts: []
   enabled: true
   replicaCount: 2
   strategy:
@@ -273,6 +276,9 @@ api:
     targetCPUUtilizationPercentage: 70
 
 worker:
+  # Shared by control and turn workers; appended to any built-in volumes and mounts.
+  extraVolumes: []
+  extraVolumeMounts: []
   enabled: true
   image:
     repository: opengeni-worker
@@ -403,6 +409,10 @@ worker:
 artifactMaterializer:
   enabled: false
   replicaCount: 1
+  # null preserves the cluster default. false selects a pod user namespace;
+  # node kernel/runtime support is required. See docs/deployment.md before
+  # selecting procMount: Unmasked or a node-local AppArmor profile.
+  hostUsers: null
   # Defaults to secret.existingSecret for backward-compatible secret ownership,
   # while still projecting only these dedicated keys into the workload.
   credentialsSecret: ""
@@ -1222,6 +1232,9 @@ observability:
     endpoint: ""
   collector:
     enabled: false
+    # Appended to the collector's built-in config volume and mount.
+    extraVolumes: []
+    extraVolumeMounts: []
     image:
       repository: otel/opentelemetry-collector-contrib
       tag: "0.139.0"

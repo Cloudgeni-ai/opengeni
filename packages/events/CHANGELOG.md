@@ -1,5 +1,53 @@
 # @opengeni/events
 
+## 0.4.29
+
+### Patch Changes
+
+- 9d9b94b: Keep the published dependency closure aligned with the updated plugin removal
+  contracts. The SDK exposes named removal outcomes and optional preview-token
+  confirmation alongside the existing installation-version check.
+- Updated dependencies [4ddab4a]
+- Updated dependencies [6d0a4de]
+- Updated dependencies [59bad3f]
+- Updated dependencies [c64a94f]
+- Updated dependencies [1c924ed]
+- Updated dependencies [c31a951]
+- Updated dependencies [f90d628]
+- Updated dependencies [348e54d]
+- Updated dependencies [aa09567]
+- Updated dependencies [d1ab270]
+- Updated dependencies [f90d628]
+- Updated dependencies [0bf014d]
+- Updated dependencies [c702159]
+- Updated dependencies [3977932]
+- Updated dependencies [f90d628]
+- Updated dependencies [c8bb974]
+- Updated dependencies [3fa175e]
+- Updated dependencies [332a02d]
+- Updated dependencies [132b945]
+- Updated dependencies [779b16b]
+- Updated dependencies [9d5bb1c]
+- Updated dependencies [1cb688d]
+- Updated dependencies [621201d]
+- Updated dependencies [e261b39]
+- Updated dependencies [f90d628]
+- Updated dependencies [1bfb6a4]
+- Updated dependencies [f90d628]
+- Updated dependencies [7e2436a]
+- Updated dependencies [0bf014d]
+- Updated dependencies [6ed7dfb]
+- Updated dependencies [b0a5a54]
+- Updated dependencies [1d6e49a]
+- Updated dependencies [23d4542]
+- Updated dependencies [f90d628]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [c66ba31]
+- Updated dependencies [f7c9169]
+- Updated dependencies [0ea365c]
+  - @opengeni/db@6.0.0
+  - @opengeni/contracts@5.0.0
+
 ## 0.4.28
 
 ### Patch Changes

@@ -45,7 +45,7 @@ export function RigSetupSection({
   if (!activeVersion) {
     return (
       <Notice tone="muted" title="No active version to edit">
-        This rig has no active version yet.
+        This sandbox environment has no active version yet.
       </Notice>
     );
   }

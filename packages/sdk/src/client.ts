@@ -155,6 +155,7 @@ import type {
   BillingEntitlementsResponse,
   CodexAccount,
   CodexAccountsResponse,
+  SessionCodexAccountsResponse,
   CodexAppsUpdate,
   CodexRotationSettings,
   CodexOverviewResponse,
@@ -284,8 +285,6 @@ import type {
   CreateWorkspaceRequest,
   EnsureWorkspaceRequest,
   EnsureWorkspaceResponse,
-  // Enrollment UX (design 11): the click-Grant approve-page lookup/deny + headless
-  // enroll-token mint.
   DeviceEnrollmentApproveRequest,
   DeviceEnrollmentApproveResponse,
   DeviceEnrollmentDenyResponse,
@@ -296,10 +295,8 @@ import type {
   Document,
   DocumentBase,
   EnableCapabilityRequest,
-  EnablePackRequest,
   FileAsset,
   FileDownloadUrlResponse,
-  GetPackResponse,
   GitHubActionPoliciesResponse,
   GitHubActionPolicyActorState,
   GitHubAppInfo,
@@ -348,8 +345,6 @@ import type {
   StartOrganizationRecoveryOperationRequest,
   UpdateOrganizationWorkspaceRequest,
   UpdateOrganizationRetentionPolicyRequest,
-  ListPacksResponse,
-  // Bring-your-own-compute: the Machines dashboard + per-machine metrics (M10).
   MachinesResponse,
   MetricSample,
   MachineMetricsSeriesResponse,
@@ -358,20 +353,15 @@ import type {
   MachineOperationPolicy,
   UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
-  // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
   ListWorkspaceMembersResponse,
   ListWorkspaceMemberCandidatesResponse,
-  InstallPackRequest,
-  PackInstallationPreview,
   ListSlackUserLinkAccessRequestsResponse,
   PrepareSlackUserLinkAccessRequest,
   SlackUserLinkAccessMutationRequest,
   SlackUserLinkAccessRequest,
   ApproveSlackUserLinkAccessRequest,
-  PackInstallation,
-  PackUninstallPreview,
   RetainedScreenshotDownload,
   RetainedScreenshotDownloadOptions,
   RetainedArtifactDownload,
@@ -385,8 +375,6 @@ import type {
   VideoGenerationOperationSummary,
   VideoGenerationPolicy,
   WorkspaceVideoGenerationSettings,
-  RegisterCapabilityPackRequest,
-  PreviewPackInstallationRequest,
   PreviewSkillImportRequest,
   ScheduledTask,
   ScheduledTaskRun,
@@ -406,8 +394,6 @@ import type {
   UpdateSessionPinRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionVisibilityResponse,
-  UninstallPackRequest,
-  UninstallPackResult,
   SessionScopeSubjectId,
   SessionEvent,
   SessionEventCompactResult,
@@ -444,11 +430,15 @@ import type {
   SaveNewSessionDraftRequest,
   SteerSessionQueueItemRequest,
   SessionControlResponse,
+  SessionRetryRequest,
+  SandboxRecoveryProjection,
+  SandboxRecoveryRequest,
+  SandboxRecoveryResponse,
+  SessionRetryResponse,
   WorkspaceInferenceControlResponse,
   WorkspaceControlEvent,
   SessionTurn,
   SubmitHumanInputResponseRequest,
-  // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
   SessionCapabilities,
   AttachViewerRequest,
   AttachViewerResponse,
@@ -456,7 +446,6 @@ import type {
   AcknowledgeStreamResponse,
   ViewerHeartbeatRequest,
   ViewerHeartbeatResponse,
-  // Channel-A structured services (P4.4).
   FsListRequest,
   FsListResponse,
   FsListBatchRequest,
@@ -483,7 +472,6 @@ import type {
   GitLogResponse,
   GitShowRequest,
   GitShowResponse,
-  // Workbench v2 turn-end capture reads (M2).
   GetWorkspaceCaptureResponse,
   GetWorkspaceCaptureFileResponse,
   TerminalExecRequest,
@@ -525,7 +513,6 @@ import type {
   ProposeRigChangeRequest,
   WorkspaceMember,
   WorkspaceMemberCandidate,
-  WorkspaceRegisteredPack,
   Workspace,
   ListConnectionsResponse,
   ListSlackInstallationBindingsResponse,
@@ -2528,6 +2515,43 @@ export class OpenGeniClient {
     return await this.requestSessionCommand<SubmitComposerDraftResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft/submit`,
+      request,
+    );
+  }
+
+  /** Inspect bounded checkpoint recovery eligibility without changing session state. */
+  async getSandboxRecovery(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SandboxRecoveryProjection> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/sandbox-recovery`,
+    );
+  }
+
+  /** Restore only the explicitly selected checkpoint; never retry a command. */
+  async recoverSandbox(
+    workspaceId: string,
+    sessionId: string,
+    request: SandboxRecoveryRequest,
+  ): Promise<SandboxRecoveryResponse> {
+    return this.requestSessionCommand(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/sandbox-recovery`,
+      request,
+    );
+  }
+
+  /** Retry the exact failed turn. Keep clientEventId unchanged on transport retries. */
+  async retrySession(
+    workspaceId: string,
+    sessionId: string,
+    request: SessionRetryRequest,
+  ): Promise<SessionRetryResponse> {
+    return await this.requestSessionCommand<SessionRetryResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/retry`,
       request,
     );
   }
@@ -6131,11 +6155,11 @@ export class OpenGeniClient {
   async getFile(
     workspaceId: string,
     fileId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions & { sessionId?: string | undefined } = {},
   ): Promise<FileAsset> {
     return await this.requestJson<FileAsset>(
       "GET",
-      `/v1/workspaces/${workspaceId}/files/${fileId}`,
+      `/v1/workspaces/${workspaceId}/files/${fileId}${options.sessionId ? `?sessionId=${encodeURIComponent(options.sessionId)}` : ""}`,
       undefined,
       {},
       options,
@@ -6351,11 +6375,11 @@ export class OpenGeniClient {
   async createFileDownloadUrl(
     workspaceId: string,
     fileId: string,
-    options: OpenGeniRequestOptions = {},
+    options: OpenGeniRequestOptions & { sessionId?: string | undefined } = {},
   ): Promise<FileDownloadUrlResponse> {
     return await this.requestJson<FileDownloadUrlResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/files/${fileId}/download-url`,
+      `/v1/workspaces/${workspaceId}/files/${fileId}/download-url${options.sessionId ? `?sessionId=${encodeURIComponent(options.sessionId)}` : ""}`,
       undefined,
       {},
       options,
@@ -6717,105 +6741,7 @@ export class OpenGeniClient {
     );
   }
 
-  // --- Capability packs ------------------------------------------------------------------
-
-  /** Built-in + registered packs, with the workspace's installations. */
-  async listPacks(workspaceId: string): Promise<ListPacksResponse> {
-    return await this.requestJson<ListPacksResponse>("GET", `/v1/workspaces/${workspaceId}/packs`);
-  }
-
-  /** Register (or replace) a workspace-scoped pack from a manifest. */
-  async registerPack(
-    workspaceId: string,
-    manifest: RegisterCapabilityPackRequest,
-  ): Promise<WorkspaceRegisteredPack> {
-    return await this.requestJson<WorkspaceRegisteredPack>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/packs`,
-      manifest,
-    );
-  }
-
-  async getPack(workspaceId: string, packId: string): Promise<GetPackResponse> {
-    return await this.requestJson<GetPackResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}`,
-    );
-  }
-
-  async enablePack(
-    workspaceId: string,
-    packId: string,
-    request: EnablePackRequest = {},
-  ): Promise<PackInstallation> {
-    return await this.requestJson<PackInstallation>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/enable`,
-      request,
-    );
-  }
-
   /** Resolve pinned components, Variable Set, and Rig requirements before installation. */
-  async previewPackInstallation(
-    workspaceId: string,
-    packId: string,
-    request: PreviewPackInstallationRequest = {},
-  ): Promise<PackInstallationPreview> {
-    return await this.requestJson<PackInstallationPreview>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/installation-preview`,
-      request,
-    );
-  }
-
-  /** Install, update, or repair a Pack from an exact previewed manifest. */
-  async installPack(
-    workspaceId: string,
-    packId: string,
-    request: InstallPackRequest,
-  ): Promise<PackInstallation> {
-    return await this.requestJson<PackInstallation>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/install`,
-      request,
-    );
-  }
-
-  /** Preview which Pack-owned components will be retained by other owners. */
-  async previewPackUninstall(workspaceId: string, packId: string): Promise<PackUninstallPreview> {
-    return await this.requestJson<PackUninstallPreview>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/uninstall-preview`,
-    );
-  }
-
-  /** Safely release Pack ownership and disable only now-ownerless components. */
-  async uninstallPack(
-    workspaceId: string,
-    packId: string,
-    request: UninstallPackRequest,
-  ): Promise<UninstallPackResult> {
-    return await this.requestJson<UninstallPackResult>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/installation`,
-      request,
-    );
-  }
-
-  /** Unregister a workspace-scoped pack (built-in packs cannot be deleted). */
-  async deletePack(workspaceId: string, packId: string): Promise<void> {
-    await this.requestVoid(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}`,
-    );
-  }
-
-  async listPackInstallations(workspaceId: string): Promise<PackInstallation[]> {
-    return await this.requestJson<PackInstallation[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/packs/installations`,
-    );
-  }
 
   // --- Capabilities -------------------------------------------------------------------------
 
@@ -8151,6 +8077,17 @@ export class OpenGeniClient {
     return await this.requestJson<CodexAccountsResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/codex/accounts`,
+    );
+  }
+
+  /** Session-authorized retry choices plus the current accepted account. */
+  async listSessionCodexAccounts(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionCodexAccountsResponse> {
+    return await this.requestJson<SessionCodexAccountsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-accounts`,
     );
   }
 

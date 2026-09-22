@@ -7,10 +7,11 @@ describe("turn input update batches", () => {
   for (const triggerType of [
     "user.message",
     "system.update.delivered",
+    "session.context.compaction.requested",
     "user.approvalDecision",
     "user.humanInputResponse",
   ] as const) {
-    test(`${triggerType} accepts multiple batches without rebuilding or reordering loaded history`, async () => {
+    test(`${triggerType} preserves canonical history with the trigger's required update batches`, async () => {
       const workspaceId = crypto.randomUUID();
       const sessionId = crypto.randomUUID();
       const turnId = crypto.randomUUID();
@@ -65,6 +66,10 @@ describe("turn input update batches", () => {
           providerApi: "responses" as const,
           fileAuthority: { accountId: crypto.randomUUID(), subjectId: "user:test" },
         };
+        if (triggerType === "session.context.compaction.requested") {
+          updates.mockResolvedValue([]);
+          trigger.payload = {} as typeof trigger.payload;
+        }
         await turnInput({} as db.Database, runtime, {}, trigger, options);
         await turnInput({} as db.Database, runtime, {}, trigger, { ...options, recovering: true });
         expect(preparedInputs[0]).toEqual(history);

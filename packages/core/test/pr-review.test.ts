@@ -6,45 +6,24 @@ import {
   UpdatePrReviewRepositoryBindingRequest,
 } from "@opengeni/contracts";
 import {
+  OPENGENI_PR_REVIEW_SKILL,
+  PR_REVIEW_AUTOMATION_SETUP,
   prReviewCredentialBindingId,
-  prReviewPackConnectorId,
   prReviewRegistrationIdFromCredentialBinding,
   normalizePrReviewProviderBaseUrl,
   normalizePrReviewPullRequestEvent,
   prReviewAutomationAdapter,
   verifyPrReviewWebhook,
 } from "../src/domain/pr-review";
-import { getCapabilityPack } from "../src/domain/packs";
 
 describe("OpenGeni Review Bot provider boundary", () => {
-  test("ships as an installable provider-neutral Pack with the PR-review skill", () => {
-    const pack = getCapabilityPack("pr-review");
-    expect(pack).not.toBeNull();
-    expect(pack?.version).toBe("0.2.0");
-    expect(pack?.skills.map((skill) => skill.name)).toEqual(["pr-review"]);
-    expect(pack?.connectors.flatMap((connector) => connector.providers)).toEqual([
-      "github",
-      "gitlab",
-      "azure_devops",
-    ]);
-    expect(pack?.connectors.map(({ id, scopes }) => ({ id, scopes }))).toEqual([
-      {
-        id: "github",
-        scopes: ["metadata:read", "contents:read", "pull_requests:write"],
-      },
-      { id: "gitlab", scopes: ["api", "read_repository"] },
-      { id: "azure-devops", scopes: ["vso.code", "vso.threads_full"] },
-    ]);
-    expect(pack?.automationTemplates).toEqual([
-      expect.objectContaining({
-        id: "review-pull-request",
-        adapterId: "source-control.pull-request.v1",
-        eventTypes: ["pull_request.review_requested"],
-        connectionRequirement: "source-control-provider",
-      }),
-    ]);
+  test("provides independent provider-neutral review setup and its reviewed Skill", () => {
+    expect(PR_REVIEW_AUTOMATION_SETUP).toMatchObject({
+      adapterId: "source-control.pull-request.v1",
+      eventTypes: ["pull_request.review_requested"],
+    });
 
-    const skill = pack?.skills[0]?.files.find((file) => file.path === "SKILL.md")?.content;
+    const skill = OPENGENI_PR_REVIEW_SKILL.files.find((file) => file.path === "SKILL.md")?.content;
     expect(skill).toContain("## Security review");
     expect(skill).toContain("## Application review");
     expect(skill).toContain("## Infrastructure review");
@@ -199,8 +178,8 @@ describe("OpenGeni Review Bot provider boundary", () => {
         webhookUsername: null,
       },
     });
-    const pack = getCapabilityPack("pr-review")!;
-    const template = pack.automationTemplates![0]!;
+
+    const template = PR_REVIEW_AUTOMATION_SETUP;
     const trigger = {
       id: triggerId,
       accountId: "123e4567-e89b-42d3-a456-426614174004",
@@ -225,8 +204,6 @@ describe("OpenGeni Review Bot provider boundary", () => {
       sessionTemplate: template.sessionTemplate,
       status: "active" as const,
       revision: 1,
-      packInstallationId: "123e4567-e89b-42d3-a456-426614174006",
-      packTemplateId: template.id,
       createdBySubjectId: "owner",
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -302,12 +279,6 @@ describe("OpenGeni Review Bot provider boundary", () => {
     expect(prReviewCredentialBindingId(id)).toBe(`pr-review:${id}`);
     expect(prReviewRegistrationIdFromCredentialBinding(`pr-review:${id}`)).toBe(id);
     expect(prReviewRegistrationIdFromCredentialBinding("pr-review:not-a-uuid")).toBeNull();
-  });
-
-  test("maps providers to their exact Pack connector owner", () => {
-    expect(prReviewPackConnectorId("github")).toBe("github");
-    expect(prReviewPackConnectorId("gitlab")).toBe("gitlab");
-    expect(prReviewPackConnectorId("azure_devops")).toBe("azure-devops");
   });
 
   test("requires a dedicated GitHub App key and provider tokens elsewhere", () => {

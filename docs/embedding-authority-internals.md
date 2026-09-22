@@ -2,6 +2,15 @@
 
 Companion to [the architecture map](architecture.md), [product integration](product-integration.md) and [remote MCP credentials](remote-mcp-credentials.md). Code and current tests own exact behavior.
 
+Connector discovery resolves account-qualified execution tool IDs through the
+current turn's accepted bindings. An enabled connector is not proof of a usable
+account. Missing tools with an accepted account, or historical work lacking an
+account snapshot, report execution unavailability rather than inventing a need
+to reconnect. Actual credential failures retain their native recovery notices.
+Custom native OAuth installations supply omitted catalog authentication metadata
+from their stored connection kind; host-managed references never become native
+OAuth recovery targets.
+
 `packages/connect` owns the framework-neutral setup controller and its
 transport contract. It keeps durable attempt state distinct from browser
 navigation and from credential submission; backend adapters own admission
@@ -213,3 +222,12 @@ The web Capabilities route owns tabs, global search, and curated ordering.
 `apps/web/src/components/capabilities/connection-services.ts` groups explicit
 provider identities without merging their independent authorization options.
 Northstar demonstrates the same SDK catalogue with its existing API proxy.
+
+In catalog mode, `ConnectPanel` presents available provider adapters and MCP
+services through one searchable `ConnectionDiscovery` list. The optional custom
+connection chooser remains separate. Service presentation is shared by discovery
+and account rows; personal credentials do not need a workspace installation
+reference to display their service name and logo. Display matching never selects
+a credential or changes ownership. Curated API integrations retain the explicit
+tool-selection step after OAuth; authorizing an account alone does not install
+its operations.

@@ -6,15 +6,14 @@ import {
   createOrganizationApiKey,
   deleteWorkspace,
   ensureExternalIdentity,
-  enablePackInstallation,
   listPrReviewAppRegistrations,
   listPrReviewRepositoryBindings,
   listGitHubInstallationAccessForWorkspace,
   type DbClient,
 } from "@opengeni/db";
-import { getCapabilityPack } from "@opengeni/core";
+
 import { grantWorkspaceAccess, withWorkspaceSubjectRls } from "@opengeni/db";
-import { stableJson } from "@opengeni/contracts";
+
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
   acquireSharedTestDatabase,
@@ -67,16 +66,6 @@ for (const providerId of ["github-app", "github-lens"] as const)
             permissions: ["workspace:admin", "secrets:write"],
           }),
         );
-        const pack = getCapabilityPack("pr-review")!;
-        await enablePackInstallation(client.db, {
-          accountId: grant.accountId,
-          workspaceId,
-          packId: pack.id,
-          manifestSnapshot: pack,
-          manifestDigest: createHash("sha256").update(stableJson(pack)).digest("hex"),
-          installedBySubjectId: identity.subjectId,
-          metadata: {},
-        });
       }
       const token = randomBytes(24).toString("hex");
       await createOrganizationApiKey(client.db, {

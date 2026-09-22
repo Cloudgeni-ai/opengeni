@@ -357,6 +357,28 @@ describe("exact-attempt workspace governance prompt", () => {
     expect(renderWorkspaceGovernanceContext({ instructionPolicy: policySnapshot([]) })).toBeNull();
   });
 
+  test("durable behavior routing stays in CORE with or without an active policy", () => {
+    for (const entries of [
+      [],
+      [policyEntry({ kind: "policy", scope: "global", content: "ACTIVE_RULE" })],
+    ]) {
+      const governance = renderWorkspaceGovernanceContext(
+        { instructionPolicy: policySnapshot(entries) },
+        { sharedSkillReader: true },
+      );
+      // Governance may be absent; it must not own the durable-storage guidance.
+      expect(governance ?? "").not.toContain("instruction_policy_save");
+      const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+        workspaceGovernance: governance ?? undefined,
+      });
+      const prompt = agent.instructions as string;
+      expect(prompt).toContain("instruction_policy_save");
+      expect(prompt).toContain("Do not save behavioral preferences as Knowledge");
+      expect(prompt.split("Choose durable storage by purpose")).toHaveLength(2);
+      if (entries.length) expect(prompt).toContain("ACTIVE_RULE");
+    }
+  });
+
   test("fails closed when activated policy text exceeds the prompt budget", () => {
     expect(() =>
       renderWorkspaceGovernanceContext({

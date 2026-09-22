@@ -6,7 +6,9 @@ import "../styles.css";
 const content =
   "# Review fixture\n\n" + "Exact Skill text 日本語 👩🏽‍💻. ".repeat(600) + "END_OF_SKILL";
 const sibling = "<script>window.unexpectedExecution = true</script>\n" + "x".repeat(1000);
+const removing = new URLSearchParams(location.search).has("remove");
 const reference = {
+  ...(removing ? { removalOperationId: "removal-operation" } : {}),
   sourceOperationId: "operation",
   skillId: "skill",
   revisionId: "revision",
@@ -14,6 +16,7 @@ const reference = {
   expectedScopeVersion: 1,
 };
 const record: SkillRecord = {
+  ...(removing ? { removalOperationId: "removal-operation" } : {}),
   id: "skill",
   stableKey: "fixture",
   scope: "workspace",
@@ -45,13 +48,21 @@ createRoot(document.getElementById("root")!).render(
           {
             id: "skill:revision",
             kind: "single_select",
-            label: "Save this Skill?",
-            prompt: "Save the exact files below?",
+            label: removing ? "Permanently delete this Skill?" : "Save this Skill?",
+            prompt: removing
+              ? "Permanently delete this Skill and all its stored revisions?"
+              : "Save the exact files below?",
+            ...(removing
+              ? {
+                  helpText:
+                    "This cannot be undone. All stored Skill revisions will be deleted; conversations remain unchanged.",
+                }
+              : {}),
             required: true,
             allowOther: false,
             options: [
-              { id: "save", label: "Save" },
-              { id: "skip", label: "Don't save" },
+              { id: "save", label: removing ? "Permanently delete" : "Save" },
+              { id: "skip", label: removing ? "Keep Skill" : "Don't save" },
             ],
             skillReview: reference,
           },

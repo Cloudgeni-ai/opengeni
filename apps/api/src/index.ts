@@ -266,7 +266,7 @@ export async function createTemporalWorkflowClient(
     startRigVerification: async ({ workspaceId, changeId, versionId, workflowId }) => {
       const targetId = changeId ?? versionId;
       if (!targetId) {
-        throw new Error("rig verification requires changeId or versionId");
+        throw new Error("sandbox environment verification requires changeId or versionId");
       }
       try {
         await temporal.workflow.start("rigVerificationWorkflow", {

@@ -75,6 +75,7 @@ function fixture(
       sessionId: "session-1",
       attemptId: "attempt-1",
       turn,
+      canonicalMcpServerIds: ["example"],
       isSessionTenancyProductActivated: async () => options.activated ?? true,
       authorizeAcceptedUse: async (_db, use) => {
         uses.push(use);
@@ -145,6 +146,146 @@ test("native acquisition receives accepted attempt context and retains refresh i
   ).toBe(3);
   f.revoke();
   expect(await result.authorizeProviderRequest?.()).toBe(false);
+});
+
+test("account-qualified routes refuse sibling identities and canonical fallback before resolution", async () => {
+  const personal = {
+    serverId: "example-personal",
+    canonicalServerId: "example",
+    connectionId,
+    originWorkspaceId: "workspace-1",
+    providerDomain: "example.test",
+    kind: "oauth2" as const,
+    subjectScope: "subject" as const,
+    ownerSubjectId: "external_user:alice",
+    accountLabel: "Alice",
+    connectionRef: { ...request.connectionRef },
+  };
+  const workspace = {
+    ...personal,
+    serverId: "example-workspace",
+    connectionId: "33333333-3333-4333-8333-333333333333",
+    subjectScope: "workspace" as const,
+    ownerSubjectId: null,
+    accountLabel: "Team",
+    connectionRef: {
+      ...request.connectionRef,
+      connectionId: "33333333-3333-4333-8333-333333333333",
+      subjectScope: "workspace" as const,
+    },
+  };
+  const f = fixture({
+    resolve: async (input) => ({
+      status: "ok",
+      headers: {},
+      connectionId: input.connectionRef.connectionId!,
+      connectionVersion: 1,
+    }),
+    turn: {
+      mcpAccountBindings: [personal, workspace],
+      personalConnectionDelegations: [
+        {
+          serverId: personal.serverId,
+          connectionId,
+          ownerSubjectId: personal.ownerSubjectId,
+          providerDomain: personal.providerDomain,
+          kind: personal.kind,
+        },
+      ],
+    },
+  });
+  for (const denied of [
+    request,
+    { ...request, serverId: personal.serverId, subjectId: "external_user:bob" },
+    {
+      ...request,
+      serverId: personal.serverId,
+      connectionRef: { ...request.connectionRef, connectionId: workspace.connectionId },
+    },
+    { ...request, serverId: workspace.serverId },
+    {
+      ...request,
+      serverId: personal.serverId,
+      connectionRef: { ...request.connectionRef, scopes: ["unaccepted.admin"] },
+    },
+  ]) {
+    expect((await f.resolve(denied)).status).toBe("auth_needed");
+  }
+  expect(f.calls).toHaveLength(0);
+  expect((await f.resolve({ ...request, serverId: personal.serverId })).status).toBe("ok");
+  expect(
+    (
+      await f.resolve({
+        ...request,
+        serverId: workspace.serverId,
+        connectionRef: {
+          ...request.connectionRef,
+          connectionId: workspace.connectionId,
+          subjectScope: "workspace",
+        },
+      })
+    ).status,
+  ).toBe("ok");
+  expect(f.calls.map((call) => call.serverId)).toEqual([personal.serverId, workspace.serverId]);
+  expect(f.calls[1]?.subjectId).toBeUndefined();
+});
+
+test("account routes pin authority generation and reject a resolver returning a different account", async () => {
+  const f = fixture({
+    turn: {
+      mcpAccountBindings: [
+        {
+          serverId: "example-personal",
+          canonicalServerId: "example",
+          connectionId,
+          originWorkspaceId: "workspace-1",
+          providerDomain: "example.test",
+          kind: "oauth2",
+          subjectScope: "subject",
+          ownerSubjectId: "external_user:alice",
+          accountLabel: "Alice",
+          connectionRef: { ...request.connectionRef },
+          connectionAuthorityGeneration: 17,
+        },
+      ],
+      personalConnectionDelegations: [
+        {
+          serverId: "example-personal",
+          connectionId,
+          ownerSubjectId: "external_user:alice",
+          providerDomain: "example.test",
+          kind: "oauth2",
+        },
+      ],
+    },
+    resolve: async () => ({
+      status: "ok",
+      connectionId: "33333333-3333-4333-8333-333333333333",
+      headers: { Authorization: "Bearer must-not-escape" },
+    }),
+  });
+  const result = await f.resolve({
+    ...request,
+    serverId: "example-personal",
+    expectedAuthorityGeneration: 999,
+  });
+  expect(result.status).toBe("auth_needed");
+  expect(JSON.stringify(result)).not.toContain("must-not-escape");
+  expect(f.calls[0]?.expectedAuthorityGeneration).toBe(17);
+});
+
+test("an empty accepted account set cannot acquire a canonical default", async () => {
+  const f = fixture({ turn: { mcpAccountBindings: [] } });
+  expect((await f.resolve(request)).status).toBe("auth_needed");
+  expect(
+    (
+      await f.resolve({
+        ...request,
+        connectionRef: { ...request.connectionRef, subjectScope: "workspace" },
+      })
+    ).status,
+  ).toBe("auth_needed");
+  expect(f.calls).toHaveLength(0);
 });
 
 test("personal use without the exact accepted selection never enters credential resolution", async () => {

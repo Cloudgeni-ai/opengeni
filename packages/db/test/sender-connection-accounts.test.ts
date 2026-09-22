@@ -56,6 +56,167 @@ afterAll(async () => {
   await shared?.release();
 });
 
+test("workspace-connection agent messages retain their causal human without reviving revoked receipts", async () => {
+  if (!shared) return;
+  const sql = shared.admin;
+  for (const change of ["revoked", "generation"] as const) {
+    const [account] =
+      await sql`insert into managed_accounts (name) values ('workspace message receipt') returning id`;
+    const [workspace] =
+      await sql`insert into workspaces (account_id,name) values (${account!.id},'workspace message receipt') returning id`;
+    const [personal] =
+      await sql`insert into workspaces (account_id,name) values (${account!.id},'Personal fixture') returning id`;
+    const human = `user:${crypto.randomUUID()}`;
+    const scope = { accountId: account!.id as string, workspaceId: workspace!.id as string };
+    await sql`insert into organization_memberships (account_id,subject_id,status,personal_workspace_id) values (${scope.accountId},${human},'active',${personal!.id})`;
+    await sql`insert into workspace_memberships (account_id,workspace_id,subject_id) values (${scope.accountId},${scope.workspaceId},${human})`;
+    await sql`insert into workspace_inference_controls (account_id,workspace_id) values (${scope.accountId},${scope.workspaceId})`;
+    const [connection] =
+      await sql`insert into connections (account_id,workspace_id,provider_domain,kind,credential_encrypted)
+      values (${scope.accountId},${scope.workspaceId},'mail.test','oauth2','fixture-ciphertext') returning id,authority_generation`;
+    const binding = {
+      serverId: `account-${"b".repeat(64)}`,
+      canonicalServerId: "mail",
+      connectionId: connection!.id as string,
+      originWorkspaceId: scope.workspaceId,
+      subjectScope: "workspace" as const,
+      ownerSubjectId: null,
+      accountLabel: "Workspace mail",
+      providerDomain: "mail.test",
+      kind: "oauth2" as const,
+      connectionRef: {
+        connectionId: connection!.id as string,
+        providerDomain: "mail.test",
+        subjectScope: "workspace" as const,
+        kind: "oauth2" as const,
+      },
+      connectionAuthorityGeneration: Number(connection!.authority_generation),
+    };
+    const source = await createSession(client.db, {
+      ...scope,
+      initialMessage: "",
+      subjectId: human,
+      createdBy: { kind: "subject", subjectId: human },
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await withWorkspaceSubjectSessionActivityRls(client.db, scope.workspaceId, human, (tx) =>
+      submitHumanPromptInTransaction(tx, {
+        ...scope,
+        sessionId: source.id,
+        subjectId: human,
+        actor: { type: "human", subjectId: human },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "Use workspace mail",
+        resources: [],
+        model: "test-model",
+        reasoningEffort: "low",
+        reasoningEffortFallback: "low",
+        source: "user",
+        personalConnectionDelegations: [],
+        mcpAccountBindings: [binding],
+      }),
+    );
+    const sourceAttempt = crypto.randomUUID();
+    const claimedSource = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+      sessionId: source.id,
+      workflowId: `session-${source.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: sourceAttempt,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimedSource.action !== "claimed") throw new Error("Source was not claimed");
+    const target = await createSession(client.db, {
+      ...scope,
+      initialMessage: "",
+      parentSessionId: source.id,
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    if (change === "revoked") {
+      await sql`update connections set status='revoked' where id=${binding.connectionId}`;
+    } else {
+      await sql`update connections set authority_generation=authority_generation+1 where id=${binding.connectionId}`;
+    }
+    const sent = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      scope.workspaceId,
+      human,
+      (tx) =>
+        sendAgentMessageInTransaction(tx, {
+          ...scope,
+          targetSessionId: target.id,
+          operationKey: crypto.randomUUID(),
+          text: "Process the result",
+          actor: {
+            type: "agent_attempt",
+            sessionId: source.id,
+            turnId: claimedSource.turn.id,
+            attemptId: sourceAttempt,
+            executionGeneration: claimedSource.turn.executionGeneration,
+          },
+        }),
+    );
+    const [update] =
+      await sql`select lineage,personal_connection_delegations,mcp_account_bindings from session_system_updates where id=${sent.updateId}`;
+    expect(update!.lineage.connectionAuthoritySubjectId).toBeUndefined();
+    expect(update!.personal_connection_delegations).toEqual([]);
+    expect(update!.mcp_account_bindings).toEqual([binding]);
+    const targetAttempt = crypto.randomUUID();
+    const claimedTarget = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: targetAttempt,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimedTarget.action !== "claimed")
+      throw new Error(`Message was not claimed: ${claimedTarget.action}`);
+    const [turn] =
+      await sql`select initiator_kind,initiating_human_subject_id,personal_connection_delegations,mcp_account_bindings from session_turns where id=${claimedTarget.turn.id}`;
+    expect(turn).toMatchObject({
+      initiator_kind: "subject",
+      initiating_human_subject_id: human,
+      personal_connection_delegations: [],
+      mcp_account_bindings: [binding],
+    });
+    for (const usePhase of ["credential_resolution", "provider_request"] as const) {
+      const result = await resolveAcceptedConnectionUse(client.db, {
+        ...scope,
+        sessionId: target.id,
+        turnId: claimedTarget.turn.id,
+        attemptId: targetAttempt,
+        executionGeneration: claimedTarget.turn.executionGeneration,
+        physicalRequestId: crypto.randomUUID(),
+        usePhase,
+        serverId: binding.serverId,
+        connectionId: binding.connectionId,
+        providerDomain: binding.providerDomain,
+        connectionKind: "oauth2",
+        subjectScope: "workspace",
+      });
+      expect(result).toMatchObject({
+        status: "denied",
+        reason:
+          change === "revoked" ? "connection_status_inactive" : "connection_generation_changed",
+      });
+    }
+  }
+}, 180_000);
+
 test("owner inventory works without private conversation activation and isolates participants", async () => {
   if (!shared) return;
   const sql = shared.admin;

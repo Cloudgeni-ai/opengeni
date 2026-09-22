@@ -27,6 +27,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { randomUUID } from "node:crypto";
+import { retainsHolderForWarmCapture } from "./warm-capture-holder";
 import {
   acquireLease,
   adoptLegacyModalCheckpointArtifact,
@@ -86,7 +87,9 @@ import {
   WorkspaceArchiveStorageError,
   type ObjectStorage,
 } from "@opengeni/storage";
-import type { Observability } from "@opengeni/observability";
+import { sandboxLeaseTelemetryKey, type Observability } from "@opengeni/observability";
+import { safeSnapshotError } from "./sandbox-snapshot-diagnostics";
+export { safeSnapshotError } from "./sandbox-snapshot-diagnostics";
 import { parseWorkspaceArchiveObjectRef } from "@opengeni/contracts";
 import {
   persistWorkspaceArchiveCandidate,
@@ -125,9 +128,7 @@ export type SandboxResumeServices = {
   db: Database;
   settings: Settings;
   objectStorage?: ObjectStorage | null;
-  /** Exact settings before a verified rig provider image overlaid the logical
-   * pack/deployment image. Fresh-create NotFound fallback must preserve an
-   * ID-only logical base instead of selecting the provider default. */
+
   logicalFallbackSettings?: Settings;
   sandboxMetrics?: RuntimeMetricsHooks;
   /** Structured logger for lifecycle decisions (holder release reasons). Falls
@@ -367,54 +368,6 @@ class SnapshotTimeoutError extends Error {
     super(`workspace snapshot timed out after ${timeoutMs}ms`);
     this.name = "SnapshotTimeoutError";
   }
-}
-
-export function safeSnapshotError(error: unknown): {
-  errorClass: "SnapshotOperationError";
-  errorCode: "snapshot_operation_failed";
-  status?: number;
-  origin: "sandbox-resume";
-  causeName?: string;
-  integrityCode?: string;
-} {
-  const fields: {
-    errorClass: "SnapshotOperationError";
-    errorCode: "snapshot_operation_failed";
-    status?: number;
-    origin: "sandbox-resume";
-    causeName?: string;
-    integrityCode?: string;
-  } = {
-    errorClass: "SnapshotOperationError",
-    errorCode: "snapshot_operation_failed",
-    origin: "sandbox-resume",
-  };
-  try {
-    if (error && typeof error === "object") {
-      const candidate = error as {
-        name?: unknown;
-        code?: unknown;
-        status?: unknown;
-        statusCode?: unknown;
-      };
-      if (
-        typeof candidate.name === "string" &&
-        /^[A-Z][A-Za-z0-9]{2,62}Error$/u.test(candidate.name)
-      ) {
-        fields.causeName = candidate.name;
-      }
-      if (typeof candidate.code === "string" && /^[a-z0-9_]{1,64}$/u.test(candidate.code)) {
-        fields.integrityCode = candidate.code;
-      }
-      const rawStatus = candidate.status ?? candidate.statusCode;
-      const status = Number(rawStatus);
-      if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
-    }
-  } catch {
-    // Public diagnostics are best-effort and must never replace the exact
-    // internal snapshot failure.
-  }
-  return fields;
 }
 
 export async function waitForWarmSnapshot(
@@ -787,6 +740,19 @@ async function persistWarmWorkspaceSnapshot(
   registerOwnedContinuation: (continuation: Promise<void>) => void,
 ): Promise<boolean> {
   const { db, settings } = services;
+  const warnSnapshotFailure = (message: string, error: unknown): void => {
+    const fields = {
+      ...safeSnapshotError(error),
+      sandboxLeaseKey: sandboxLeaseTelemetryKey(ids.workspaceId, ids.sandboxGroupId),
+      leaseEpoch,
+    };
+    try {
+      if (services.observability) services.observability.warn(message, fields);
+      else console.warn(message, fields);
+    } catch {
+      // Diagnostics cannot change provider settlement or capture-gate cleanup.
+    }
+  };
   const intervalMs = settings.sandboxSnapshotIntervalMs;
   if (intervalMs <= 0 && !force) {
     return false;
@@ -896,6 +862,9 @@ async function persistWarmWorkspaceSnapshot(
         : {}),
     });
     if (claimed.status !== "claimed") {
+      // A scheduled interval not being due is normal, including after a failed
+      // attempt. Do not turn every ten-second heartbeat into an error log.
+      if (claimed.status === "throttled") return false;
       console.error("mid-session workspace snapshot skipped (capture claim)", {
         sandboxGroupId: ids.sandboxGroupId,
         status: claimed.status,
@@ -951,6 +920,8 @@ async function persistWarmWorkspaceSnapshot(
     // turn signal resolves first. Its finally block is the only normal release
     // of the exact admission gate; a late callback cannot release a successor.
     const captureAndPublish = (async (): Promise<boolean> => {
+      const captureStarted = performance.now();
+      let captureOutcome: "completed" | "failed" = "failed";
       let archive: VerifiedWorkspaceArchivePayload | undefined;
       let candidate: { id: string } | null = null;
       let publicationAttempted = false;
@@ -1001,6 +972,7 @@ async function persistWarmWorkspaceSnapshot(
         if (!wrote && candidate) {
           await abandonCandidate(candidate.id, "snapshot_publication_fenced");
         }
+        if (wrote) captureOutcome = "completed";
         return wrote;
       } catch (error) {
         if (candidate && !publicationAttempted)
@@ -1018,20 +990,24 @@ async function persistWarmWorkspaceSnapshot(
           expectedEpoch: leaseEpoch,
           expectedInstanceId: instanceId,
         }).catch((error) => {
-          console.error(
-            "mid-session workspace capture gate release failed",
-            safeSnapshotError(error),
-          );
+          captureOutcome = "failed";
+          warnSnapshotFailure("mid-session workspace capture gate release failed", error);
         });
+        try {
+          services.sandboxMetrics?.onWorkspaceCapture?.({
+            backend: lease.backend,
+            outcome: captureOutcome,
+            durationSeconds: Math.max(0, performance.now() - captureStarted) / 1_000,
+          });
+        } catch {
+          // A completed capture and released gate cannot depend on telemetry.
+        }
       }
     })();
     const settled = captureAndPublish.then(
       (persisted) => ({ kind: "settled" as const, persisted }),
       (error) => {
-        console.error(
-          "mid-session workspace snapshot failed (turn unaffected)",
-          safeSnapshotError(error),
-        );
+        warnSnapshotFailure("mid-session workspace snapshot failed (turn unaffected)", error);
         return { kind: "settled" as const, persisted: false };
       },
     );
@@ -1063,12 +1039,10 @@ async function persistWarmWorkspaceSnapshot(
     // exact claim cleanup, so it cannot leak an unhandled promise or artifact.
     return outcome.kind === "settled" ? outcome.persisted : false;
   } catch (error) {
-    // Protection, not a dependency: a failed snapshot must never fail (or slow
-    // down retrying) the turn. The next heartbeat/turn-end tick retries.
-    console.error(
-      "mid-session workspace snapshot failed (turn unaffected)",
-      safeSnapshotError(error),
-    );
+    // A failed snapshot does not fail the turn. Physical captures can still
+    // fence commands until their exact gate settles; the caller timeout is not
+    // permission to release that gate. The next eligible tick can retry.
+    warnSnapshotFailure("mid-session workspace snapshot failed (turn unaffected)", error);
     return false;
   }
 }
@@ -1276,7 +1250,16 @@ export async function resumeBoxForTurn(
   // provider operation may still be mutating /workspace. Both loops therefore
   // converge on "holder alive -> never release"; finalization performs the
   // proof-bearing release.
-  const releaseDeadHolder = (reason: string): void => {
+  const releaseDeadHolder = async (reason: string): Promise<void> => {
+    // Logical closure deliberately fences heartbeat authority. It is not proof
+    // that the already-admitted capture has physically settled: the finalizer
+    // owns that wait and the original deadline bounds dead-worker recovery.
+    // Match the reaper's retention rule without touching holder/lease TTLs.
+    if (reason === "holder_gone" && kind === "turn" && holderLeaseHeartbeat) {
+      const expectedEpoch = holderLeaseHeartbeat.expectedEpoch;
+      const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
+      if (retainsHolderForWarmCapture(lease, expectedEpoch)) return;
+    }
     const message = "sandbox resume holder released: holder no longer live";
     const fields = {
       workspaceId: ids.workspaceId,
@@ -1301,13 +1284,13 @@ export async function resumeBoxForTurn(
         expectedEpoch: heartbeat.expectedEpoch,
         leaseTtlMs: heartbeat.leaseTtlMs,
       })
-        .then((status) => {
+        .then(async (status) => {
           if (heartbeat !== holderLeaseHeartbeat) return;
           if (!status.holderAlive) {
             // Reaped, released, or its exact attempt is no longer the active
             // writer. Stop this otherwise-unbounded provider operation and
             // idempotently drop any remaining holder state.
-            releaseDeadHolder(status.fence);
+            await releaseDeadHolder(status.fence);
             return;
           }
           if (status.fence === "epoch") {
@@ -1316,7 +1299,7 @@ export async function resumeBoxForTurn(
             // instance replaced, re-established by a later turn). The holder
             // row is stale authority for an instance that no longer exists;
             // drop it promptly instead of pinning a successor's lease.
-            releaseDeadHolder(status.fence);
+            await releaseDeadHolder(status.fence);
             return;
           }
           // The box is still serving this live holder: keep the provider TTL
@@ -1338,13 +1321,13 @@ export async function resumeBoxForTurn(
       kind,
       holderId,
     })
-      .then((touched) => {
+      .then(async (touched) => {
         if (heartbeat !== holderLeaseHeartbeat) return;
         // A canonical turn holder is rejected once its exact attempt is no
         // longer the active writer (touch is attempt-fenced only; it never
         // consults lease authority, so false here always means holder death).
         if (!touched) {
-          releaseDeadHolder("holder_gone");
+          await releaseDeadHolder("holder_gone");
           return;
         }
         void maybeRenewProviderExpiration().catch(() => undefined);
@@ -1422,7 +1405,8 @@ export async function resumeBoxForTurn(
       const continuityRecovery = acquired.lease.recovery.continuity;
       if (
         (acquired.lease.recovery.archive.status === "available" &&
-          acquired.lease.archiveComplete) ||
+          (acquired.lease.archiveComplete ||
+            acquired.lease.historicalRecoveryAuthorized === true)) ||
         (acquired.lease.recovery.archive.status === "none" &&
           workspaceArchiveFieldsFromEnvelope(archiveSource) !== null)
       ) {
@@ -1875,6 +1859,7 @@ export async function resumeBoxForTurn(
         sandboxGroupId: ids.sandboxGroupId,
         expectedEpoch: leaseEpoch,
         expectedInstanceId: live.instanceId,
+        expectedBackend: ids.backend,
       });
       if (marked.status === "marked") {
         await services.onSandboxLost?.({
