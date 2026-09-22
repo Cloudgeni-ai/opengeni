@@ -34,11 +34,14 @@ test("control bursts do not refetch model metadata; admitted turns and reconcili
     return null;
   }
   const events: SessionEvent[] = [];
-  const render = (event: WorkspaceControlEvent | null, feed = events) => (
-    <OpenGeniContext.Provider value={{ ...context, workspaceControlEvent: event }}>
-      <Header events={feed} />
-    </OpenGeniContext.Provider>
-  );
+  const render = (event: WorkspaceControlEvent | null, feed = events) => {
+    const value = { ...context, workspaceControlEvent: event };
+    return (
+      <OpenGeniContext.Provider value={value}>
+        <Header events={feed} />
+      </OpenGeniContext.Provider>
+    );
+  };
   const mounted = await renderComponent(render(null));
   try {
     await flush();
