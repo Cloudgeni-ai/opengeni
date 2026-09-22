@@ -9,8 +9,10 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 
 import {
+  createInFlightCoalescer,
   normalizeWorkspaceInsightsQueryFilter,
   registerInsightsRoutes,
+  workspaceInsightsCoalesceKey,
 } from "../src/routes/insights";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -22,7 +24,7 @@ describe("insights route discipline", () => {
     const grantCall = 'requireAccessGrant(c, deps, workspaceId, "workspace:admin")';
     const grantAt = routesSrc.indexOf(grantCall);
     expect(grantAt).toBeGreaterThanOrEqual(0);
-    const getAt = routesSrc.indexOf("await getWorkspaceInsights(", grantAt);
+    const getAt = routesSrc.indexOf("getWorkspaceInsights(", grantAt);
     const validationAt = routesSrc.indexOf(
       'normalizeWorkspaceInsightsQueryFilter(providerRaw, "provider")',
       grantAt,
@@ -189,5 +191,52 @@ describe("insights route discipline", () => {
     expect(observeAt).toBeGreaterThan(finallyAt);
     expect(routesSrc).toContain("providerFiltered: provider !== null");
     expect(routesSrc).toContain("modelFiltered: model !== null");
+  });
+  test("identical concurrent reads share one in-flight rollup and settle independently", async () => {
+    const coalescer = createInFlightCoalescer<number>();
+    let started = 0;
+    let release!: (value: number) => void;
+    const work = () => {
+      started += 1;
+      return new Promise<number>((settle) => {
+        release = settle;
+      });
+    };
+    const key = workspaceInsightsCoalesceKey({
+      workspaceId: "ws",
+      range: "week",
+      provider: null,
+      model: null,
+    });
+    const first = coalescer.run(key, work);
+    const second = coalescer.run(key, work);
+    expect(started).toBe(1);
+    expect(coalescer.size).toBe(1);
+    release(7);
+    expect(await first).toBe(7);
+    expect(await second).toBe(7);
+    expect(coalescer.size).toBe(0);
+
+    const third = coalescer.run(key, work);
+    expect(started).toBe(2);
+    release(9);
+    expect(await third).toBe(9);
+  });
+
+  test("distinct workspace, range, or filter keys never share work and failures clear the slot", async () => {
+    const coalescer = createInFlightCoalescer<string>();
+    const keys = [
+      { workspaceId: "a", range: "week", provider: null, model: null },
+      { workspaceId: "b", range: "week", provider: null, model: null },
+      { workspaceId: "a", range: "today", provider: null, model: null },
+      { workspaceId: "a", range: "week", provider: "openai", model: null },
+      { workspaceId: "a", range: "week", provider: null, model: "openai" },
+    ].map(workspaceInsightsCoalesceKey);
+    expect(new Set(keys).size).toBe(keys.length);
+
+    const failing = coalescer.run(keys[0]!, () => Promise.reject(new Error("rollup failed")));
+    await expect(failing).rejects.toThrow("rollup failed");
+    expect(coalescer.size).toBe(0);
+    expect(await coalescer.run(keys[0]!, () => Promise.resolve("fresh"))).toBe("fresh");
   });
 });

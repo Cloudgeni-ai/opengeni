@@ -27,9 +27,49 @@ export function normalizeWorkspaceInsightsQueryFilter(
   }
 }
 
+/**
+ * Share one in-flight computation between identical concurrent callers.
+ *
+ * An Insights response is workspace-scoped and identical for every workspace
+ * admin, so a reload, a second tab, or a retried fetch must join the rollup
+ * that is already running instead of starting another multi-second aggregate
+ * on the database. Authorization and filter validation still run per request
+ * before a caller may join; the map only ever holds settled-or-running work.
+ */
+export function createInFlightCoalescer<T>(): {
+  run: (key: string, work: () => Promise<T>) => Promise<T>;
+  readonly size: number;
+} {
+  const inFlight = new Map<string, Promise<T>>();
+  return {
+    run(key, work) {
+      const pending = inFlight.get(key);
+      if (pending) return pending;
+      const started: Promise<T> = work().finally(() => {
+        if (inFlight.get(key) === started) inFlight.delete(key);
+      });
+      inFlight.set(key, started);
+      return started;
+    },
+    get size() {
+      return inFlight.size;
+    },
+  };
+}
+
+export function workspaceInsightsCoalesceKey(input: {
+  workspaceId: string;
+  range: string;
+  provider: string | null;
+  model: string | null;
+}): string {
+  return [input.workspaceId, input.range, input.provider ?? "", input.model ?? ""].join("\u0000");
+}
+
 export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
   const observeRequest = workspaceInsightsMetricObserver(deps.observability);
   const observePhase = workspaceInsightsPhaseMetricObserver(deps.observability);
+  const coalesce = createInFlightCoalescer<Awaited<ReturnType<typeof getWorkspaceInsights>>>();
   app.get("/v1/workspaces/:workspaceId/insights", async (c) => {
     const startedAtMs = performance.now();
     const rangeRaw = c.req.query("range") ?? "week";
@@ -54,16 +94,20 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
       provider = normalizeWorkspaceInsightsQueryFilter(providerRaw, "provider");
       model = normalizeWorkspaceInsightsQueryFilter(modelRaw, "model");
 
-      const response = await getWorkspaceInsights(
-        deps.db,
-        deps.settings,
-        {
-          workspaceId,
-          range: rangeParsed.data,
-          provider,
-          model,
-        },
-        observePhase,
+      const response = await coalesce.run(
+        workspaceInsightsCoalesceKey({ workspaceId, range: rangeParsed.data, provider, model }),
+        () =>
+          getWorkspaceInsights(
+            deps.db,
+            deps.settings,
+            {
+              workspaceId,
+              range: rangeParsed.data,
+              provider,
+              model,
+            },
+            observePhase,
+          ),
       );
       c.header("cache-control", "private, no-store");
       const result = c.json(WorkspaceInsightsResponse.parse(response));

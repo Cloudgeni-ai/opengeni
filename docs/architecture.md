@@ -977,7 +977,14 @@ credits-path price and is zero for externally billed calls.
 
 Insights usage uses a four-column projection (0484), preserving full-row readers
 and identical tenant/actor/visibility checks. Transaction-capability writes still
-require a writable database.
+require a writable database. Migration 0507 pins `enable_nestloop = off` on the
+five fact authority functions (0359, 0484): a time-series window newer than the
+last `ANALYZE` is estimated as about one row, which otherwise turns the
+MATERIALIZED visible-session join into a per-fact rescan of every workspace
+session (minutes per request on a busy workspace); the pin keeps that join a
+hash join and changes no authorization semantics. The Insights route also
+coalesces identical in-flight reads per API process, so a reload joins the
+running rollup instead of starting another.
 Canonical: `packages/db/src/insights-usage-bundle.ts`.
 
 Codex and SuperGrok pools own credentials and capacity without changing logical

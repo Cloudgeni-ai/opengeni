@@ -137,6 +137,9 @@ describe("release schema contract", () => {
 
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
+    const insightsFactReadsHashJoin = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0507_insights_fact_reads_hash_join.sql",
+    );
     const backgroundCommandText = completeSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
     );
@@ -373,6 +376,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (insightsFactReadsHashJoin ? 1 : 0) +
         (backgroundCommandText ? 1 : 0) +
         (controlRevisionFrontier ? 1 : 0) +
         (skillFolderLimits ? 1 : 0) +
@@ -632,115 +636,122 @@ describe("release schema contract", () => {
         ? { latestMigration: "0505_workspace_control_revision_frontier.sql" }
         : {}),
       ...(backgroundCommandText ? { latestMigration: "0506_background_command_text.sql" } : {}),
+      ...(insightsFactReadsHashJoin
+        ? { latestMigration: "0507_insights_fact_reads_hash_join.sql" }
+        : {}),
     });
     expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: backgroundCommandText
-        ? "0506_background_command_text.sql"
-        : controlRevisionFrontier
-          ? "0505_workspace_control_revision_frontier.sql"
-          : skillFolderLimits
-            ? "0504_skill_folder_limits.sql"
-            : meaningfulAttention
-              ? "0503_session_meaningful_attention.sql"
-              : activeMessageBoundaryForks
-                ? "0502_active_message_boundary_forks.sql"
-                : sessionSharingExecution
-                  ? "0501_session_sharing_execution.sql"
-                  : sessionAttachmentAccess
-                    ? "0499_session_attachment_access.sql"
-                    : enrollmentMembershipFence
-                      ? "0498_enrollment_membership_fence.sql"
-                      : modalInventoryOwnerRead
-                        ? "0497_modal_inventory_owner_read_capability.sql"
-                        : supervisedCommandSettlement
-                          ? "0496_supervised_command_settlement.sql"
-                          : consentedRecovery
-                            ? "0495_consented_sandbox_recovery.sql"
-                            : mcpAccountBindings
-                              ? "0494_mcp_account_bindings.sql"
-                              : stoppingCommandErrorContainment
-                                ? "0493_stopping_command_error_containment.sql"
-                                : codexAcceptedSourceAuthority
-                                  ? "0492_codex_accepted_source_authority.sql"
-                                  : warmCaptureHolderReclamation
-                                    ? "0491_warm_capture_holder_reclamation.sql"
-                                    : periodicCaptureAttemptCadence
-                                      ? "0490_periodic_capture_attempt_cadence.sql"
-                                      : modalCommandByteOffsets
-                                        ? "0489_modal_command_byte_offsets.sql"
-                                        : permanentSkillRemoval
-                                          ? "0488_permanent_skill_removal.sql"
-                                          : skillCatalogMessageForks
-                                            ? "0487_skill_catalog_message_forks.sql"
-                                            : reasoningConfigurationMessageForks
-                                              ? "0486_reasoning_configuration_message_forks.sql"
-                                              : inheritedMcpApprovalPolicies
-                                                ? "0485_inherited_mcp_approval_policies.sql"
-                                                : insightsUsageProjection
-                                                  ? "0484_insights_usage_projection.sql"
-                                                  : preclaimAdmissionBlock
-                                                    ? "0483_preclaim_admission_block.sql"
-                                                    : packsRemoved
-                                                      ? "0482_remove_packs.sql"
-                                                      : personalConnectionVisibilityCleanup
-                                                        ? "0481_personal_connection_visibility_cleanup.sql"
-                                                        : privateSessionKeyAdministration
-                                                          ? "0480_private_session_organization_key_administration.sql"
-                                                          : connectionCreateIdempotency
-                                                            ? "0479_connection_create_idempotency.sql"
-                                                            : senderOwnedConnections
-                                                              ? "0478_sender_owned_connections.sql"
-                                                              : managedSignInMethods
-                                                                ? "0477_managed_sign_in_methods.sql"
-                                                                : sessionEventHistoryPolicyPlanning
-                                                                  ? "0476_session_event_history_policy_planning.sql"
-                                                                  : sessionEventHistoryStatistics
-                                                                    ? "0475_session_event_history_statistics.sql"
-                                                                    : goalReportRequirements
-                                                                      ? "0474_goal_report_requirements.sql"
-                                                                      : organizationUsageAnalyticalCapability
-                                                                        ? "0473_organization_usage_analytical_capability.sql"
-                                                                        : "0472_usage_events_workspace_recent_index.sql",
-      deploymentMode: backgroundCommandText
+      path: insightsFactReadsHashJoin
+        ? "0507_insights_fact_reads_hash_join.sql"
+        : backgroundCommandText
+          ? "0506_background_command_text.sql"
+          : controlRevisionFrontier
+            ? "0505_workspace_control_revision_frontier.sql"
+            : skillFolderLimits
+              ? "0504_skill_folder_limits.sql"
+              : meaningfulAttention
+                ? "0503_session_meaningful_attention.sql"
+                : activeMessageBoundaryForks
+                  ? "0502_active_message_boundary_forks.sql"
+                  : sessionSharingExecution
+                    ? "0501_session_sharing_execution.sql"
+                    : sessionAttachmentAccess
+                      ? "0499_session_attachment_access.sql"
+                      : enrollmentMembershipFence
+                        ? "0498_enrollment_membership_fence.sql"
+                        : modalInventoryOwnerRead
+                          ? "0497_modal_inventory_owner_read_capability.sql"
+                          : supervisedCommandSettlement
+                            ? "0496_supervised_command_settlement.sql"
+                            : consentedRecovery
+                              ? "0495_consented_sandbox_recovery.sql"
+                              : mcpAccountBindings
+                                ? "0494_mcp_account_bindings.sql"
+                                : stoppingCommandErrorContainment
+                                  ? "0493_stopping_command_error_containment.sql"
+                                  : codexAcceptedSourceAuthority
+                                    ? "0492_codex_accepted_source_authority.sql"
+                                    : warmCaptureHolderReclamation
+                                      ? "0491_warm_capture_holder_reclamation.sql"
+                                      : periodicCaptureAttemptCadence
+                                        ? "0490_periodic_capture_attempt_cadence.sql"
+                                        : modalCommandByteOffsets
+                                          ? "0489_modal_command_byte_offsets.sql"
+                                          : permanentSkillRemoval
+                                            ? "0488_permanent_skill_removal.sql"
+                                            : skillCatalogMessageForks
+                                              ? "0487_skill_catalog_message_forks.sql"
+                                              : reasoningConfigurationMessageForks
+                                                ? "0486_reasoning_configuration_message_forks.sql"
+                                                : inheritedMcpApprovalPolicies
+                                                  ? "0485_inherited_mcp_approval_policies.sql"
+                                                  : insightsUsageProjection
+                                                    ? "0484_insights_usage_projection.sql"
+                                                    : preclaimAdmissionBlock
+                                                      ? "0483_preclaim_admission_block.sql"
+                                                      : packsRemoved
+                                                        ? "0482_remove_packs.sql"
+                                                        : personalConnectionVisibilityCleanup
+                                                          ? "0481_personal_connection_visibility_cleanup.sql"
+                                                          : privateSessionKeyAdministration
+                                                            ? "0480_private_session_organization_key_administration.sql"
+                                                            : connectionCreateIdempotency
+                                                              ? "0479_connection_create_idempotency.sql"
+                                                              : senderOwnedConnections
+                                                                ? "0478_sender_owned_connections.sql"
+                                                                : managedSignInMethods
+                                                                  ? "0477_managed_sign_in_methods.sql"
+                                                                  : sessionEventHistoryPolicyPlanning
+                                                                    ? "0476_session_event_history_policy_planning.sql"
+                                                                    : sessionEventHistoryStatistics
+                                                                      ? "0475_session_event_history_statistics.sql"
+                                                                      : goalReportRequirements
+                                                                        ? "0474_goal_report_requirements.sql"
+                                                                        : organizationUsageAnalyticalCapability
+                                                                          ? "0473_organization_usage_analytical_capability.sql"
+                                                                          : "0472_usage_events_workspace_recent_index.sql",
+      deploymentMode: insightsFactReadsHashJoin
         ? "rolling"
-        : controlRevisionFrontier
+        : backgroundCommandText
           ? "rolling"
-          : skillFolderLimits
+          : controlRevisionFrontier
             ? "rolling"
-            : meaningfulAttention
-              ? "maintenance"
-              : activeMessageBoundaryForks
-                ? "rolling"
-                : sessionSharingExecution
-                  ? "maintenance"
-                  : sessionAttachmentAccess
-                    ? "rolling"
-                    : enrollmentMembershipFence
-                      ? "maintenance"
-                      : modalInventoryOwnerRead || supervisedCommandSettlement
-                        ? "rolling"
-                        : consentedRecovery
+            : skillFolderLimits
+              ? "rolling"
+              : meaningfulAttention
+                ? "maintenance"
+                : activeMessageBoundaryForks
+                  ? "rolling"
+                  : sessionSharingExecution
+                    ? "maintenance"
+                    : sessionAttachmentAccess
+                      ? "rolling"
+                      : enrollmentMembershipFence
+                        ? "maintenance"
+                        : modalInventoryOwnerRead || supervisedCommandSettlement
                           ? "rolling"
-                          : mcpAccountBindings
-                            ? "maintenance"
-                            : stoppingCommandErrorContainment
-                              ? "rolling"
-                              : codexAcceptedSourceAuthority
-                                ? "maintenance"
-                                : warmCaptureHolderReclamation || periodicCaptureAttemptCadence
-                                  ? "rolling"
-                                  : modalCommandByteOffsets ||
-                                      permanentSkillRemoval ||
-                                      (!skillCatalogMessageForks &&
-                                        !reasoningConfigurationMessageForks &&
-                                        !inheritedMcpApprovalPolicies &&
-                                        !insightsUsageProjection &&
-                                        !preclaimAdmissionBlock &&
-                                        (packsRemoved ||
-                                          (!connectionCreateIdempotency &&
-                                            (senderOwnedConnections || managedSignInMethods))))
-                                    ? "maintenance"
-                                    : "rolling",
+                          : consentedRecovery
+                            ? "rolling"
+                            : mcpAccountBindings
+                              ? "maintenance"
+                              : stoppingCommandErrorContainment
+                                ? "rolling"
+                                : codexAcceptedSourceAuthority
+                                  ? "maintenance"
+                                  : warmCaptureHolderReclamation || periodicCaptureAttemptCadence
+                                    ? "rolling"
+                                    : modalCommandByteOffsets ||
+                                        permanentSkillRemoval ||
+                                        (!skillCatalogMessageForks &&
+                                          !reasoningConfigurationMessageForks &&
+                                          !inheritedMcpApprovalPolicies &&
+                                          !insightsUsageProjection &&
+                                          !preclaimAdmissionBlock &&
+                                          (packsRemoved ||
+                                            (!connectionCreateIdempotency &&
+                                              (senderOwnedConnections || managedSignInMethods))))
+                                      ? "maintenance"
+                                      : "rolling",
     });
     expect(
       completeSourceContract.migrations.find(
@@ -1835,6 +1846,9 @@ describe("release schema contract", () => {
     const meaningfulAttention = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0503_session_meaningful_attention.sql",
     );
+    const insightsFactReadsHashJoin = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0507_insights_fact_reads_hash_join.sql",
+    );
     const backgroundCommandText = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
     );
@@ -2455,6 +2469,7 @@ describe("release schema contract", () => {
       "0504_skill_folder_limits.sql",
       "0505_workspace_control_revision_frontier.sql",
       "0506_background_command_text.sql",
+      "0507_insights_fact_reads_hash_join.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -3008,8 +3023,14 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0506_background_command_text.sql",
       };
+    if (insightsFactReadsHashJoin)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0507_insights_fact_reads_hash_join.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (insightsFactReadsHashJoin ? 1 : 0) +
         (backgroundCommandText ? 1 : 0) +
         (controlRevisionFrontier ? 1 : 0) +
         (skillFolderLimits ? 1 : 0) +
@@ -3471,6 +3492,9 @@ describe("release schema contract", () => {
         ? { latestMigration: "0505_workspace_control_revision_frontier.sql" }
         : {}),
       ...(backgroundCommandText ? { latestMigration: "0506_background_command_text.sql" } : {}),
+      ...(insightsFactReadsHashJoin
+        ? { latestMigration: "0507_insights_fact_reads_hash_join.sql" }
+        : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport
