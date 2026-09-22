@@ -106,6 +106,7 @@ import {
   type ToolGatewayCaller,
   type ToolGatewayCatalog,
   type ToolGatewayCatalogEntry,
+  type ToolDisplayMetadata,
   type ToolRef,
   type VideoGenerationCapabilities,
   type VideoGenerationToolResult,
@@ -3996,6 +3997,7 @@ class DeferredPreparedMcpServer implements MCPServer {
   readonly deferredPreparation = true;
   readonly name: string;
   private readonly listedModelNames = new Set<string>();
+  private preparedTarget: PrefixedMcpServer | null = null;
 
   constructor(
     readonly registryId: string,
@@ -4027,6 +4029,7 @@ class DeferredPreparedMcpServer implements MCPServer {
     if (!this.isPrepared()) return [];
     const target = await this.resolveTarget();
     const tools = target ? ((await target.listTools()) as RuntimeMcpTool[]) : [];
+    this.preparedTarget = target instanceof PrefixedMcpServer ? target : null;
     this.listedModelNames.clear();
     for (const tool of tools) this.listedModelNames.add(tool.name);
     return tools;
@@ -4034,6 +4037,10 @@ class DeferredPreparedMcpServer implements MCPServer {
 
   modelToolNames(): Iterable<string> {
     return this.listedModelNames.values();
+  }
+
+  toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
+    return this.preparedTarget?.toolDisplayMetadata(name);
   }
 
   async unprefixedToolName(name: string): Promise<string> {
@@ -6513,14 +6520,52 @@ function normalizeUrl(raw: string): string | null {
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
   const name = sharedPrefixedMcpToolName(registryId, toolName);
-  // The SDK normalizes punctuation (including hyphens) and providers cap names
-  // at 64 characters. Use the complete digest, not lossy truncation. Hex names
-  // cannot collide with ordinary names, which always contain the __ separator.
-  return name.length <= 64 && /^[A-Za-z0-9_]+$/.test(name)
-    ? name
-    : createHash("sha256")
-        .update(JSON.stringify([registryId, toolName]))
-        .digest("hex");
+  if (name.length <= 64 && /^[A-Za-z0-9_]+$/.test(name)) return name;
+  // This is a readable wire alias, never account or execution authority. The
+  // exact tuple stays in the catalog and duplicate aliases fail closed there.
+  // Hash the full tuple before bounding the leaf so long/punctuation-equivalent
+  // names cannot silently select a different tool.
+  const digest = legacyMcpToolDigest(registryId, toolName).slice(0, 24);
+  const leaf = toolName.replace(/[^A-Za-z0-9_]/g, "_").slice(0, 34) || "tool";
+  return `mcp_${digest}__${leaf}`;
+}
+
+function legacyMcpToolDigest(registryId: string, toolName: string): string {
+  return createHash("sha256")
+    .update(JSON.stringify([registryId, toolName]))
+    .digest("hex");
+}
+
+/** Read only already-prepared display facts; never trigger deferred connections
+ * merely to render an unrelated intrinsic tool event. */
+export function mcpToolDisplayMetadata(
+  servers: readonly MCPServer[],
+  name: string,
+): ToolDisplayMetadata | undefined {
+  for (const server of servers) {
+    if (server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer) {
+      const display = server.toolDisplayMetadata(name);
+      if (display) return display;
+    }
+  }
+  return undefined;
+}
+
+/** Enrich an event copy only; never rename or modify the executable call. */
+export function withMcpToolDisplayMetadata(
+  servers: readonly MCPServer[],
+  payload: unknown,
+): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const item = payload as Record<string, unknown>;
+  const raw =
+    item.rawItem && typeof item.rawItem === "object"
+      ? (item.rawItem as Record<string, unknown>)
+      : {};
+  const name = item.name ?? item.toolName ?? raw.name;
+  if (typeof name !== "string") return payload;
+  const display = mcpToolDisplayMetadata(servers, name);
+  return display ? { ...item, display } : payload;
 }
 
 const MCP_SDK_LIFECYCLE_NAME = "opengeni-mcp-lifecycle";
@@ -6718,6 +6763,11 @@ export class PrefixedMcpServer implements MCPServer {
   private listedToolSchemaTokens = 0;
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
   private readonly originalToolNames = new Map<string, string>();
+  private readonly displayMetadata = new Map<string, ToolDisplayMetadata>();
+
+  toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
+    return this.displayMetadata.get(name);
+  }
   /** Exact attempt-local classification, including names too long for a prefix. */
   modelToolNames(): Iterable<string> {
     return this.originalToolNames.keys();
@@ -6926,6 +6976,13 @@ export class PrefixedMcpServer implements MCPServer {
           if (prior !== undefined && prior !== tool.name)
             throw new Error("MCP model tool identity collision");
           this.originalToolNames.set(name, tool.name);
+          const display: ToolDisplayMetadata = {
+            toolName: tool.name,
+            ...(tool.title ? { title: tool.title } : {}),
+            ...(this.accountLabel ? { accountLabel: this.accountLabel } : {}),
+          };
+          this.displayMetadata.set(name, display);
+          this.displayMetadata.set(legacyMcpToolDigest(this.registryId, tool.name), display);
           return {
             ...tool,
             name,
@@ -7292,11 +7349,7 @@ export async function restoreInterruptedRunState(
   }
   return await RunState.fromString(agent, serializedRunState, {
     clientToolSearchRehydration: "preserve_history",
-    ...(lazyRuntime
-      ? {
-          resolveMissingFunctionTool: createResolveMissingFunctionTool(lazyRuntime),
-        }
-      : {}),
+    resolveMissingFunctionTool: mcpToolResolverForAgent(agent),
   });
 }
 
@@ -8107,10 +8160,38 @@ function lazyToolRunBindings(agent: Agent<any, any>): {
   resolveMissingFunctionTool?: ReturnType<typeof createResolveMissingFunctionTool>;
 } {
   const runtime = lazyToolRuntimeForAgent(agent);
-  if (!runtime) return {};
   return {
-    toolNotFoundBehavior: "return_error_to_model",
-    resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
+    ...(runtime ? { toolNotFoundBehavior: "return_error_to_model" as const } : {}),
+    resolveMissingFunctionTool: mcpToolResolverForAgent(agent),
+  };
+}
+
+/** Old hashes are aliases only for an exact tool in the current authorized
+ * catalog. Never recover tools from history, labels, URLs, or a different account. */
+function mcpToolResolverForAgent(agent: Agent<any, any>) {
+  const lazyRuntime = lazyToolRuntimeForAgent(agent);
+  const resolveCurrent = lazyRuntime ? createResolveMissingFunctionTool(lazyRuntime) : null;
+  return async (input: { name: string; toolCall?: unknown }) => {
+    const current = await resolveCurrent?.(input);
+    if (current) return current;
+    if (!/^[a-f0-9]{64}$/.test(input.name)) return null;
+    const tools = await agent.getMcpTools(new RunContext());
+    let resolvedName: string | undefined;
+    for (const server of agent.mcpServers) {
+      if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
+        continue;
+      for (const descriptor of await server.listTools()) {
+        const rawName = await server.unprefixedToolName(descriptor.name);
+        if (legacyMcpToolDigest(server.registryId, rawName) !== input.name) continue;
+        if (resolvedName !== undefined && resolvedName !== descriptor.name)
+          throw new Error("MCP legacy model tool identity collision");
+        resolvedName = descriptor.name;
+      }
+    }
+    const tool = tools.find(
+      (candidate) => candidate.type === "function" && candidate.name === resolvedName,
+    );
+    return tool?.type === "function" ? { ...tool, name: input.name } : null;
   };
 }
 

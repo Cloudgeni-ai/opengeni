@@ -79,6 +79,7 @@ import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 
 export type BuildTurnAgentDeps = {
   skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
+  mcpServers: Settings["mcpServers"];
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
   runtime: ActivityServices["runtime"];
@@ -139,6 +140,7 @@ export type BuildTurnAgentDeps = {
 
 export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   const {
+    mcpServers,
     input,
     db,
     runtime,
@@ -621,7 +623,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
     try {
-      return runtime.buildAgent(eventing.modelRunSettings, runtimeResources, {
+      // Approval policy must use the same accepted account identities as tool
+      // preparation. Keep the separately resolved model/sandbox settings intact.
+      return runtime.buildAgent({ ...eventing.modelRunSettings, mcpServers }, runtimeResources, {
         ...(linkedToolAuthority
           ? {
               authorizeAttemptExecution: async () => {

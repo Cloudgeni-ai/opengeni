@@ -36,7 +36,9 @@ export function RollingActivity({
   const fallback = (
     <span className="og-rolling-label">
       <WrenchIcon className="size-3.5" />
-      <span>{item.kind === "tool-call" ? toolDisplayName(item.name) : "Working"}</span>
+      <span>
+        {item.kind === "tool-call" ? toolDisplayName(item.name, item.display) : "Working"}
+      </span>
     </span>
   );
   return (
@@ -46,7 +48,7 @@ export function RollingActivity({
     >
       <span className="sr-only">
         {item.kind === "tool-call"
-          ? toolDisplayName(item.name)
+          ? toolDisplayName(item.name, item.display)
           : item.kind === "reasoning"
             ? "Thinking"
             : "Working"}

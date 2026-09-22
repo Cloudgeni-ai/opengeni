@@ -13,6 +13,25 @@ sandbox, then upload the self-contained HTML and optional source.
 Do not invent a Site framework, deployment service, App Host, wildcard domain,
 provider-specific API wrapper, or OpenGeni-only build CLI.
 
+## Sites have no server; AI comes from the host
+
+A Site never needs its own server, API key, or hosting provider to reach
+OpenGeni. Model access, agent conversations, and workspace tools all come from
+the host bridge: `createOpenGeniSiteClient` from `@opengeni/sdk/site` plus the
+`@opengeni/react/session-ui` conversation surface. The parent page owns the
+credentials and workspace identity; Site code receives neither, so "keep
+credentials server-side" is already satisfied by that bridge.
+
+When the user asks for AI, chat, an assistant, "Ask the data", or a "backend"
+inside a Site, that bridge is the design. Do not propose Vercel, another
+server, a tunnel, or a Connected Machine for OpenGeni access, do not spawn a
+child to build a separate backend, and do not post a Connect card for a
+hosting provider the user did not name. A separate server is only relevant for
+a genuinely non-OpenGeni need: a third-party API that requires a secret the
+viewer's browser must not hold, a persistent database, or scheduled jobs. If
+the request seems to need one of those, or you cannot tell where the user
+wants the AI to run, say which designs are possible and ask before building.
+
 ## Start from the durable Site
 
 - For an existing page the user wants to view and share, consider Sites before
@@ -20,8 +39,10 @@ provider-specific API wrapper, or OpenGeni-only build CLI.
   packaged as self-contained HTML, preserve its design and behavior, and retain
   editable source when available. A local preview alone is still appropriate
   when that is all the user requests. Explain workspace access for the published
-  link; do not imply it is public to anyone. If the app requires a backend that
-  Sites cannot host, explain that constraint instead of dropping functionality.
+  link; do not imply it is public to anyone. OpenGeni AI and tool access are
+  never such a backend (see above). If the app genuinely requires server-side
+  compute that Sites cannot host, explain that constraint and ask how the user
+  wants to proceed instead of dropping functionality or choosing a host.
 - For a new Site, create a normal project directory with `package.json`,
   `index.html`, TypeScript/React source, styles, tests, and any ordinary build
   configuration the app needs.

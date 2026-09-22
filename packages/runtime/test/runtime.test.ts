@@ -49,6 +49,8 @@ import {
   azureOpenAIDefaultQuery,
   buildAgentCapabilities,
   buildOpenGeniAgent,
+  restoreInterruptedRunState,
+  withMcpToolDisplayMetadata,
   HUMAN_INPUT_TOOL_NAME,
   buildManifest,
   compactMcpResultCustomDataRunState,
@@ -2435,6 +2437,9 @@ describe("runtime event normalization", () => {
 
     async function connectorPolicyFixture(input: {
       connectorDecision: "allow" | "ask" | "block";
+      serverId?: string;
+      accountLabel?: string;
+      lazyToolTransport?: "codex_native" | "generic_dispatch";
       legacyApproval?: boolean;
       withoutConnection?: boolean;
       begin?: ConnectorActionPolicyHooks["begin"];
@@ -2443,7 +2448,7 @@ describe("runtime event normalization", () => {
     }) {
       const mcp = startTestMcpServer();
       const baseConfig = {
-        id: input.withoutConnection ? "remote" : "docs",
+        id: input.serverId ?? (input.withoutConnection ? "remote" : "docs"),
         name: "Document Search",
         url: mcp.url,
         cacheToolsList: false,
@@ -2480,6 +2485,8 @@ describe("runtime event normalization", () => {
       };
       const settings = testSettings({
         sandboxBackend: input.sandboxBackend ?? "none",
+        codexToolSearchEnabled: true,
+        lazyToolSearchEnabled: true,
         mcpServers: [
           {
             ...baseConfig,
@@ -2494,32 +2501,69 @@ describe("runtime event normalization", () => {
           },
         ],
       });
-      const prepared = await prepareAgentTools(
-        settings,
-        [{ kind: "mcp", id: input.withoutConnection ? "remote" : "docs" }],
-        {
-          accountId: "11111111-1111-4111-8111-111111111111",
-          workspaceId: "22222222-2222-4222-8222-222222222222",
-          sessionId: "33333333-3333-4333-8333-333333333333",
-          turnId: "44444444-4444-4444-8444-444444444444",
-          attemptId: "55555555-5555-4555-8555-555555555555",
-          executionGeneration: 1,
-          credentialSubjectId: "subject-a",
-          resolveCredential: async () => ({
-            status: "ok",
-            connectionId: "connection-1",
-            headers: { authorization: "Bearer connector-token" },
-          }),
-          connectorActionPolicy: hooks,
-        },
-      );
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: baseConfig.id }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        credentialSubjectId: "subject-a",
+        mcpAccountLabels: input.accountLabel
+          ? new Map([[baseConfig.id, input.accountLabel]])
+          : undefined,
+        deferNonEagerUntilToolDemand: input.lazyToolTransport !== undefined,
+        resolveCredential: async () => ({
+          status: "ok",
+          connectionId: "connection-1",
+          headers: { authorization: "Bearer connector-token" },
+        }),
+        connectorActionPolicy: hooks,
+      });
       const agent = buildOpenGeniAgent(settings, [], {
+        lazyToolTransport: input.lazyToolTransport,
+        toolPreparationReady: prepared.ready,
         mcpServers: prepared.mcpServers,
         resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
         connectorActionPolicy: hooks,
       });
-      return { agent, calls, mcp, prepared };
+      return { agent, calls, mcp, prepared, settings };
     }
+
+    test.each([undefined, "codex_native", "generic_dispatch"] as const)(
+      "account-qualified connector Ask pauses before executing a model call (%s)",
+      async (lazyToolTransport) => {
+        const serverId = `account-${"a".repeat(64)}`;
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          serverId,
+          lazyToolTransport,
+        });
+        try {
+          const name = prefixedMcpToolName(serverId, "search_documents");
+          const model = new ScriptedModel([
+            { output: [scriptedFunctionCall(name, { query: "example" }, "account-model-call")] },
+          ]);
+          const result = await runAgentStream(
+            fixture.agent.clone({ model }),
+            "Search documents",
+            fixture.settings,
+          );
+          for await (const _event of result.toStream()) {
+            // Drain the model call through the actual approval interruption.
+          }
+          await result.completed;
+          expect(result.interruptions).toHaveLength(1);
+          expect(fixture.calls).toContain("prepare:account-model-call:example");
+          expect(fixture.mcp.calls).toHaveLength(0);
+          const restored = await restoreInterruptedRunState(fixture.agent, result.state.toString());
+          expect(restored.getInterruptions()).toHaveLength(1);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      },
+    );
 
     test("explicit false approval survives rebuilding a connection-backed agent and its clone", async () => {
       for (const connectorDecision of ["allow", "ask", "block"] as const) {
@@ -2556,6 +2600,90 @@ describe("runtime event normalization", () => {
             fixture.mcp.close();
           }
         }
+      }
+    });
+
+    test.each([undefined, "codex_native", "generic_dispatch"] as const)(
+      "legacy hash-named approval state resolves only its exact authorized account (%s)",
+      async (lazyToolTransport) => {
+        const serverId = `account-${"a".repeat(64)}`;
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          serverId,
+          lazyToolTransport,
+        });
+        const other = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          serverId: `account-${"b".repeat(64)}`,
+          lazyToolTransport,
+        });
+        try {
+          const legacy = createHash("sha256")
+            .update(JSON.stringify([serverId, "search_documents"]))
+            .digest("hex");
+          const model = new ScriptedModel([
+            { output: [scriptedFunctionCall(legacy, { query: "example" }, "legacy-call")] },
+          ]);
+          const result = await runAgentStream(
+            fixture.agent.clone({ model }),
+            "Search documents",
+            fixture.settings,
+          );
+          for await (const _event of result.toStream()) {
+            /* drain to approval */
+          }
+          await result.completed;
+          expect(result.interruptions).toHaveLength(1);
+          expect(fixture.mcp.calls).toHaveLength(0);
+          const restored = await restoreInterruptedRunState(fixture.agent, result.state.toString());
+          expect(restored.getInterruptions()).toHaveLength(1);
+          await expect(
+            restoreInterruptedRunState(other.agent, result.state.toString()),
+          ).rejects.toThrow();
+          expect(other.mcp.calls).toHaveLength(0);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+          await other.prepared.close();
+          other.mcp.close();
+        }
+      },
+    );
+
+    test("prepared account display facts enrich event copies without changing catalog authority", async () => {
+      const serverId = `account-${"a".repeat(64)}`;
+      const accountLabel = "Documents — Personal: alice@example.test";
+      const fixture = await connectorPolicyFixture({
+        connectorDecision: "ask",
+        serverId,
+        accountLabel,
+      });
+      try {
+        const name = prefixedMcpToolName(serverId, "search_documents");
+        const requestsBefore = fixture.mcp.requests.length;
+        const call = { id: "display-call", name, arguments: { query: "example" } };
+        const display = { toolName: "search_documents", accountLabel };
+        expect(withMcpToolDisplayMetadata(fixture.prepared.mcpServers, call)).toMatchObject({
+          ...call,
+          display,
+        });
+        expect(call).not.toHaveProperty("display");
+        expect(
+          withMcpToolDisplayMetadata(fixture.prepared.mcpServers, {
+            rawItem: { name, callId: "display-call" },
+          }),
+        ).toMatchObject({ display });
+        expect(
+          fixture.prepared.attemptToolCatalog?.entries.find((entry) => entry.modelName === name),
+        ).toMatchObject({ identity: { serverId, toolName: "search_documents" } });
+        expect(
+          fixture.prepared.attemptToolCatalog?.entries.find((entry) => entry.modelName === name),
+        ).not.toHaveProperty("accountLabel");
+        expect(fixture.mcp.requests.length).toBe(requestsBefore);
+        expect(fixture.mcp.calls).toHaveLength(0);
+      } finally {
+        await fixture.prepared.close();
+        fixture.mcp.close();
       }
     });
 
@@ -6329,6 +6457,20 @@ describe("runtime event normalization", () => {
     expect(prefixedMcpToolName("files", "files_get_download_url")).toBe(
       "files__files_get_download_url",
     );
+  });
+
+  test("account-qualified model aliases retain a readable tool leaf within provider limits", () => {
+    const first = `account-${"a".repeat(64)}`;
+    const second = `account-${"b".repeat(64)}`;
+    const name = prefixedMcpToolName(first, "search_documents");
+    expect(name).toEndWith("__search_documents");
+    expect(name.length).toBeLessThanOrEqual(64);
+    expect(name).toMatch(/^[A-Za-z0-9_]+$/);
+    expect(name).not.toBe(prefixedMcpToolName(second, "search_documents"));
+    expect(prefixedMcpToolName(first, "a.b")).not.toBe(prefixedMcpToolName(first, "a-b"));
+    const long = "search_" + "documents_".repeat(20);
+    expect(prefixedMcpToolName(first, long).length).toBeLessThanOrEqual(64);
+    expect(prefixedMcpToolName(first, long)).not.toBe(prefixedMcpToolName(first, long + "other"));
   });
 
   test("PrefixedMcpServer preserves the complete legacy callTool result and callToolResult", async () => {

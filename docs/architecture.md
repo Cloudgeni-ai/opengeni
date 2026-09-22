@@ -1201,6 +1201,9 @@ approval classification, and execution. Runtime builds one enabled first-party
 and integration MCP catalog. Model, exact-attempt Codemode, current-human MCP,
 and workspace HTTP/SDK adapters share its executor closures. Friendly names and
 JavaScript paths project opaque `{serverId, toolName}` identities, never authority.
+Bounded MCP aliases preserve readable actions; historical hashes resolve only
+against the current authorized catalog. Event display metadata never changes
+call identity or approval authority.
 Normalized paths receive identity-derived suffixes, remaining stable across
 neighbor changes. Allocation rejects namespace/tool-prefix and exact collisions
 before publication. Local model tools bind only to the final combined local/MCP
@@ -1355,6 +1358,10 @@ artifacts, generated images, and published files, preserving existing content
 authority. File provenance stays separate from bytes; `kind:id` identifies list
 entries. Browsing never executes Sites or wakes compute. See
 [`artifact-library.md`](artifact-library.md).
+
+Published-file links use `Markdown.artifactHref`; `retained-file-preview.tsx`
+shares media/PDF previews through authorized storage APIs. Sandbox links remain
+workspace-inspector requests.
 
 Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
@@ -1529,7 +1536,7 @@ Turn-end review capture yields to queued turns and fences late commits. Single-r
 `@opengeni/db` owns cross-service Postgres contracts, forward migrations, and
 runtime-role/RLS posture.
 
-Postgres owns object access, upload completion, and retained-evidence liveness.
+Postgres owns file access/liveness; fork screenshots require ancestry and copied receipts, preserving RLS.
 Storage endpoints and signed URLs are transport details; keep URLs, object keys,
 and provider identities out of prompt history when a provider-neutral receipt suffices.
 

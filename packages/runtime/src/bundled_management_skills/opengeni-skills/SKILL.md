@@ -27,7 +27,7 @@ Read supporting files only when needed. Reads return current saved content;
 you do not need to pin a version to follow a Skill.
 
 To discover supporting files, call `skill_read` with `listFiles: true` and no
-`paths`. This returns only relative `paths` (at most 128) and available revision
+`paths`. This returns only relative `paths` (at most 1,024) and available revision
 identity, never file bodies. Then request only the paths you need. Inventory
 cannot be combined with `paths` and does not require sandbox checkout.
 

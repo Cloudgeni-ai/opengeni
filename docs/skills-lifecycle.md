@@ -62,8 +62,9 @@ conversation or Skill content; it adds the removal marker and guarded lifecycle.
 A Skill has exactly one scoped identity and current head in
 `preference_registry_preferences`, and one immutable revision history in
 `preference_registry_revisions`. A revision's `skill_files` is its complete
-UTF-8 text folder, including nonempty `SKILL.md`. Limits are 128 files,
-256 KiB per file, and 1 MiB total. Paths are root-relative, unique, and cannot
+UTF-8 text folder, including nonempty `SKILL.md`. Limits are 1,024 files,
+2 MiB per file, and 8 MiB total. Individual reads remain limited to 128 paths
+and 512 KiB of output; use checkout for larger files. Paths are root-relative, unique, and cannot
 contain traversal, backslashes, absolute paths, control characters, or drive
 prefixes. NUL, malformed Unicode, and binary storage are unsupported.
 

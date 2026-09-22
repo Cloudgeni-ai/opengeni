@@ -1711,7 +1711,7 @@ function registerSandboxFileArtifactTool(
     "sandbox_file_publish",
     {
       description:
-        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Returns a permanent, authenticated artifact receipt; never invent or expose a sandbox: URL as the durable result.",
+        "Publish one exact file from this session's /workspace into durable workspace storage. Use this before presenting a video, ZIP, CSV, JSON, Markdown, HTML, PDF, Office file, or other sandbox output as downloadable. Present the returned artifact.artifactId as [Open file](artifact:<artifactId>), or ![Preview](artifact:<artifactId>) for inline image/video/audio/PDF previews. Replace <artifactId> with the exact returned ID and use a descriptive label. Never expose a sandbox: URL as the durable result.",
       inputSchema: {
         path: z4.string().min(1).max(4_096),
       },

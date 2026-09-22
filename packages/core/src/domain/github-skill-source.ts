@@ -4,6 +4,7 @@ import type { GitHubSkillSourceClient, GitHubSkillTreeEntry } from "./skill-impo
 import { pinnedFetch, readResponseJsonBounded, readResponseTextBounded } from "@opengeni/network";
 import {
   PORTABLE_SKILL_MAX_FILES,
+  PORTABLE_SKILL_MAX_FILE_BYTES,
   PORTABLE_SKILL_MAX_TOTAL_BYTES,
   type SkillLibraryFile,
 } from "@opengeni/runtime/skill-library";
@@ -11,7 +12,8 @@ import {
 const githubApiBase = "https://api.github.com";
 const githubRequestTimeoutMs = 15_000;
 const githubMetadataMaxBytes = 4 * 1024 * 1024;
-const githubBlobResponseMaxBytes = 512 * 1024;
+// GitHub blobs are base64-encoded JSON; allow framing and line wrapping.
+const githubBlobResponseMaxBytes = PORTABLE_SKILL_MAX_FILE_BYTES * 2;
 
 type GitHubJsonRequest = (path: string, maxBytes: number, label: string) => Promise<unknown>;
 

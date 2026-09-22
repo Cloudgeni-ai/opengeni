@@ -180,9 +180,9 @@ import type {
 } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
-const InlineChatImage = lazy(() =>
-  import("@/components/artifacts/inline-chat-image").then((module) => ({
-    default: module.InlineChatImage,
+const InlineChatArtifact = lazy(() =>
+  import("@/components/artifacts/retained-file-preview").then((module) => ({
+    default: module.InlineChatArtifact,
   })),
 );
 const ChatInteractiveBlock = lazy(() =>
@@ -2321,18 +2321,16 @@ function SessionChatPane(props: {
       const artifactId = retainedImageId(image.src);
       return artifactId ? (
         <Suspense fallback={<span role="status">Loading image…</span>}>
-          <InlineChatImage
+          <InlineChatArtifact
             key={props.session.workspaceId + ":" + artifactId}
             workspaceId={props.session.workspaceId}
             artifactId={artifactId}
             alt={image.alt}
-            showArtifactLink
-            fromSession={props.session.id}
           />
         </Suspense>
       ) : null;
     },
-    [props.session.workspaceId, props.session.id],
+    [props.session.workspaceId],
   );
   const renderInteractiveBlock = useCallback(
     (block: { kind: "html" | "site"; content: string }) => (
@@ -2362,6 +2360,7 @@ function SessionChatPane(props: {
       return (
         <div data-testid="assistant-markdown">
           <MarkdownText
+            artifactHref={(id) => `/workspaces/${props.session.workspaceId}/artifacts/files/${id}`}
             text={text}
             searchTarget={renderContext.searchTarget}
             streaming={item.kind === "agent-message" && item.streaming}
