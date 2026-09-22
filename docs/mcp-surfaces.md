@@ -53,6 +53,25 @@ Provider-specific status tools remain read-only and do not synthesize cards.
 
 ### Recovery from tool-search misses
 
+Before inference, the shared lazy-tool adapter prepends a system-context tool
+group directory on all three transports. It uses only the currently authorized
+deferred pool: each row contains a literal `namePrefix` and one tool
+example with a short description. Namespaced tools group by their namespace
+through the last `__`; other runtime tools group by their first word prefix.
+These are routing groups, not new permission scopes or guessed integration names.
+
+The directory is deterministically ordered and capped at 4 KiB. Omitted groups
+remain discoverable through unfiltered `tool_list`. While background preparation
+is pending it explicitly reports a partial directory; it never waits just to
+advertise tools. The next request rebuilds the directory from the current pool,
+including additions/removals. It does not modify the stable tool-schema block
+or persist catalog hints into conversation history.
+
+For example, a directory row with `namePrefix: "slack__"` can be browsed with
+`tool_list({namePrefix: "slack__"})`. Follow its `nextCursor` with the same
+prefix, then call `tool_search({query: "", names: ["slack__read"]})` to load a
+chosen tool. Use the exact prefix/name returned by discovery, not this example.
+
 Progressive discovery uses the same authorized deferred pool on Codex-native,
 OpenAI-native, and generic-dispatch transports. Keyword search is ranked, not
 exhaustive. `tool_list` is a query-independent fallback: it returns compact

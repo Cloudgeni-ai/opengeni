@@ -179,6 +179,105 @@ async function runStreamed(
 }
 
 describe("query-independent tool discovery", () => {
+  test("directory preserves request/history identity until the catalog changes", async () => {
+    const tools = [weatherTool(), firstPartyTool("browser_open", "Open a page")];
+    const agent = {
+      async getAllTools() {
+        return tools;
+      },
+    };
+    const runtime = installLazyToolRuntime(agent, "openai_native", new Set([SERVER_ID]));
+    await agent.getAllTools();
+    const requests: ModelRequest[] = [];
+    const model = new CapturingModel();
+    model.getResponse = async (request) => {
+      requests.push(request);
+      return { usage: new Usage(), output: [finalMessage("ok")] };
+    };
+    const wrapped = runtime.wrapModel(model);
+    const history = [{ role: "user" as const, content: "Original user message" }];
+    const request = { ...baseRequest([]), input: history };
+    await wrapped.getResponse(request);
+    runtime.refresh([...tools].reverse());
+    await wrapped.getResponse(request);
+    expect(request.input).toBe(history);
+    expect(history).toHaveLength(1);
+    expect(requests[0]!.input[0]).toBe(requests[1]!.input[0]);
+    expect(requests[0]!.input[1]).toBe(history[0]);
+    runtime.refresh([tools[1]!]);
+    await wrapped.getResponse(request);
+    expect(requests[2]!.input[0]).not.toBe(requests[1]!.input[0]);
+    expect(requests[2]!.input[1]).toBe(history[0]);
+    expect(JSON.stringify(requests[2]!.input[0])).not.toContain(WEATHER_TOOL);
+  });
+
+  for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
+    test(`${transport}: group directory uses the authorized lazy pool and supports browse then disclose`, async () => {
+      const catalog = [
+        firstPartyTool("slack__read", "Read Slack messages"),
+        firstPartyTool("slack__send", "Send Slack messages"),
+        firstPartyTool("exec_command", "Run shell commands"),
+        firstPartyTool("eager__status", "Eager server status"),
+      ];
+      const agent = new Agent({ name: "directory", model: "scripted", tools: catalog });
+      const runtime = installLazyToolRuntime(
+        agent,
+        transport,
+        new Set(["slack", "eager"]),
+        undefined,
+        new Set(["slack"]),
+      );
+      await agent.getAllTools(undefined as never);
+      const list = runtime.controlTools.find(
+        (candidate) => candidate.type === "function" && candidate.name === "tool_list",
+      );
+      if (!list || list.type !== "function") throw new Error("missing tool_list");
+      const page = JSON.parse(
+        String(
+          await list.invoke(
+            {} as never,
+            JSON.stringify({ namePrefix: "slack__" }),
+            undefined as never,
+          ),
+        ),
+      );
+      expect(page.tools.map((descriptor: { name: string }) => descriptor.name)).toEqual([
+        "slack__read",
+        "slack__send",
+      ]);
+      expect(page.nextCursor).toBeNull();
+      expect(runtime.search({ query: "", names: [page.tools[0].name] })).toEqual([catalog[0]!]);
+
+      const model = new CapturingModel();
+      const runner = new Runner({
+        modelProvider: new LazyToolModelProvider(providerFor(model), runtime),
+      });
+      const session = new MemorySession();
+      await runner.run(agent, "Hello", { session });
+      const request = model.requests[0]!;
+      expect(Array.isArray(request.input)).toBe(true);
+      const directory = request.input[0] as { role: string; content: string };
+      expect(directory.role).toBe("system");
+      expect(directory.content).toContain('"namePrefix":"slack__"');
+      expect(directory.content).not.toContain("exec_command");
+      expect(directory.content).not.toContain("eager__");
+      expect(directory.content).not.toContain('"parameters"');
+      expect(
+        request.tools.some(
+          (candidate) => candidate.type === "function" && candidate.name === "slack__read",
+        ),
+      ).toBe(false);
+      expect(JSON.stringify(await session.getItems())).not.toContain(
+        "Available deferred tool groups",
+      );
+
+      agent.tools = [catalog[2]!];
+      await runner.run(agent, "Hello again");
+      expect(JSON.stringify(model.requests[1]!.input)).not.toContain("slack__");
+      expect(runtime.toolGroupContext()).toBeUndefined();
+    });
+  }
+
   test("multi-byte listing pages stay byte-bounded and exhaust the catalog without gaps", async () => {
     const names = Array.from({ length: 85 }, (_, i) => `records__${String(i).padStart(3, "0")}`);
     const catalog = names.map((name) => firstPartyTool(name, "🧭".repeat(500)));
@@ -1151,7 +1250,11 @@ describe("generic lazy tool dispatch", () => {
 
     await runStreamed(agent, model, runtime);
     expect(executions).toBe(1);
-    expect((model.requests[1]!.input as Array<Record<string, unknown>>)[1]).toMatchObject({
+    expect(
+      (model.requests[1]!.input as Array<Record<string, unknown>>).find(
+        (item) => item.type === "function_call",
+      ),
+    ).toMatchObject({
       type: "function_call",
       name: "tool_invoke",
     });
@@ -1385,6 +1488,9 @@ describe("generic lazy tool dispatch", () => {
     await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
 
     expect(JSON.stringify(inner.requests[0]!.tools)).toBe(JSON.stringify(inner.requests[1]!.tools));
+    expect(JSON.stringify(inner.requests[0]!.input)).toContain(WEATHER_TOOL);
+    expect(JSON.stringify(inner.requests[1]!.input)).toContain(`${SERVER_ID}__forecast_v2`);
+    expect(JSON.stringify(inner.requests[1]!.input)).not.toContain(WEATHER_TOOL);
     expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
       "tool_search",
       "tool_invoke",
@@ -2048,6 +2154,8 @@ describe("OpenAI/Azure native client tool search", () => {
       "tool_search",
       "tool_list",
     ]);
+    expect(JSON.stringify(model.requests[0]!.input)).toContain("directory is partial");
+    expect(JSON.stringify(model.requests[0]!.input)).not.toContain(WEATHER_TOOL);
     expect(executions).toBe(0);
 
     releasePreparation();
@@ -2057,6 +2165,7 @@ describe("OpenAI/Azure native client tool search", () => {
     expect(executions).toBe(1);
     expect(JSON.stringify(model.requests[1]!.input)).toContain(WEATHER_TOOL);
     expect(JSON.stringify(model.requests[1]!.input)).not.toContain(`${requiredServerId}__status`);
+    expect(JSON.stringify(model.requests[1]!.input)).not.toContain("directory is partial");
     expect(
       (await agent.getAllTools(undefined as never)).map((candidate) => candidate.name),
     ).toEqual([`${requiredServerId}__status`, "tool_search", "tool_list"]);

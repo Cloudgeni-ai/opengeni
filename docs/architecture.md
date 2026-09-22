@@ -899,6 +899,13 @@ workspace's selectable model IDs and deployment-defined costs; it does not
 switch the session model. Other non-MCP function tools and non-eager MCP schemas
 remain behind progressive search.
 
+The shared lazy-tool request adapter adds a bounded, request-local directory of
+authorized deferred tool groups. Its literal prefixes feed the existing
+`tool_list` browser; `tool_search` discloses selected schemas. The directory is
+derived from the same current pool as discovery, never a second authority or a
+persisted conversation item. Background preparation remains non-blocking.
+See [MCP surfaces](mcp-surfaces.md#recovery-from-tool-search-misses).
+
 Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
 managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
 
