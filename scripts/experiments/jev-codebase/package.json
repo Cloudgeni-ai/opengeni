@@ -1,0 +1,17 @@
+{
+  "name": "opengeni-jev-codebase-experiment",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test ./core.test.ts ./investigation.test.ts ./trajectory.test.ts ./compact-investigation.test.ts ./gateway-diagnostics.test.ts ./batched-judge.test.ts ./gateway-call.test.ts ./typesafe-direct.test.ts ./evidence-package.test.ts ./citation-registry.test.ts ./content-investigation.test.ts ./main-model.test.ts ./codex-tool.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/gateway": "4.0.86",
+    "ai": "7.0.106"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "5.9.3"
+  }
+}

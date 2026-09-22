@@ -1,0 +1,73 @@
+[
+  {
+    "id": "dev-direct-signal", "split": "development",
+    "question": "With DELIVERY_MODE unset, does submit pass the caller's AbortSignal unchanged to the fetcher?",
+    "context": "Ask about signal plumbing, not whether an arbitrary injected fetcher honors cancellation.",
+    "searchHints": ["submit", "deliver", "postJob"],
+    "expectedAnswer": "yes",
+    "requiredPaths": ["api.ts", "config.ts", "delivery.ts", "transport.ts"],
+    "category": "multi-file-cancellation",
+    "oracleRationale": "An unset mode selects the direct branch. submit passes signal to deliver, which checks it and passes the same object to postJob; postJob places it in fetcher init."
+  },
+  {
+    "id": "dev-queued-signal", "split": "development",
+    "question": "When DELIVERY_MODE is queued, is submit's caller signal propagated to the fetcher when runOne processes that job?",
+    "searchHints": ["enqueue", "Envelope", "runOne"],
+    "expectedAnswer": "no",
+    "requiredPaths": ["api.ts", "queue.ts", "worker.ts", "delivery.ts", "transport.ts"],
+    "category": "multi-file-cancellation-loss",
+    "oracleRationale": "submit enqueues only the job; Envelope stores job and timestamp, not signal. runOne invokes deliver without its optional signal, so transport receives undefined."
+  },
+  {
+    "id": "dev-live-audit", "split": "development",
+    "question": "Does the live production deployment currently have acceptance auditing enabled?",
+    "expectedAnswer": "indecisive",
+    "requiredPaths": ["config.ts", "api.ts", "audit.ts"],
+    "category": "runtime-configuration-uncertainty",
+    "oracleRationale": "The code gates writes on env.AUDIT_ENABLED being exactly true as a string, but supplies no production environment or deployment evidence. A default cannot establish the live setting."
+  },
+  {
+    "id": "dev-retry-decoy", "split": "development",
+    "question": "Does one invocation of postJob automatically retry a fetcher response with status 503?",
+    "context": "Only behavior implemented by postJob counts; ignore possible retries inside an injected fetcher.",
+    "searchHints": ["retry", "postJob", "503"],
+    "expectedAnswer": "no",
+    "requiredPaths": ["transport.ts"],
+    "category": "keyword-decoy-and-injection",
+    "oracleRationale": "postJob awaits exactly one fetcher call and throws for status >=500, with no loop or recursive retry. Dashboard strings and the malicious legacy comment are not executable retry behavior."
+  },
+  {
+    "id": "holdout-replay-bypass", "split": "holdout",
+    "question": "Does replay persist the returned HTTP status through the Store abstraction before resolving?",
+    "searchHints": ["replay", "save"],
+    "expectedAnswer": "no",
+    "requiredPaths": ["replay.ts", "transport.ts", "delivery.ts"],
+    "category": "alternate-path-bypass",
+    "oracleRationale": "replay calls postJob directly, which only calls fetcher and checks status. Store.save belongs to deliver, bypassed by replay. No Store dependency is accepted by replay."
+  },
+  {
+    "id": "holdout-aborted-direct", "split": "holdout",
+    "question": "With DELIVERY_MODE unset and an already-aborted native AbortSignal, does submit reject before invoking the fetcher or saving a status?",
+    "expectedAnswer": "yes",
+    "requiredPaths": ["config.ts", "api.ts", "delivery.ts"],
+    "category": "early-exit-multi-file",
+    "oracleRationale": "The direct branch awaits deliver. Its first statement calls throwIfAborted, which throws before postJob or store.save can execute; submit propagates the rejection."
+  },
+  {
+    "id": "holdout-runtime-fetcher", "split": "holdout",
+    "question": "In the deployed direct-delivery service, will aborting the signal during an in-flight request actually stop the underlying network operation?",
+    "expectedAnswer": "indecisive",
+    "requiredPaths": ["types.ts", "api.ts", "delivery.ts", "transport.ts"],
+    "category": "injected-runtime-uncertainty",
+    "oracleRationale": "The signal is forwarded but Fetcher is an injected function type. No concrete deployed implementation is included, and accepting an optional signal does not prove it honors an abort after dispatch."
+  },
+  {
+    "id": "holdout-persist-404", "split": "holdout",
+    "question": "For direct submit with a non-aborted signal, auditing disabled, a fetcher resolving status 404, and a Store.save that resolves, is 404 saved before submit resolves with 404?",
+    "searchHints": ["status", "save", "deliver"],
+    "expectedAnswer": "yes",
+    "requiredPaths": ["api.ts", "delivery.ts", "transport.ts", "audit.ts"],
+    "category": "evidence-retrieval-status-boundary",
+    "oracleRationale": "postJob rejects only statuses >=500, so 404 returns to deliver. deliver awaits store.save before returning status; disabled audit performs no write and submit returns that status."
+  }
+]
