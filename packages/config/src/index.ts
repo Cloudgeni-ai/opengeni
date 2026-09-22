@@ -2270,7 +2270,7 @@ export const ModelCatalogDocument = z
      * fallback for existing documents; operators should set this explicitly
      * when cutting over a registry or connected-subscription default. */
     defaultModel: z.string().min(1).optional(),
-    builtInModels: z.array(z.string().min(1)).min(1),
+    builtInModels: z.array(z.string().min(1)),
     registryProviders: z.array(DeploymentRegistryProviderSchema).default([]),
     codexModels: z.array(CodexCatalogModelSchema).optional(),
     gatewayModels: z.array(DeploymentGatewayCatalogModelSchema).default([]),
@@ -2283,6 +2283,13 @@ export const ModelCatalogDocument = z
   })
   .strict()
   .superRefine((document, context) => {
+    if (document.builtInModels.length === 0 && !document.defaultModel) {
+      context.addIssue({
+        code: "custom",
+        path: ["defaultModel"],
+        message: "catalogs without built-in models require an explicit default model",
+      });
+    }
     const productIds = new Set<string>();
     const providerIds = new Set<string>();
     const gatewayUpstreamIds = new Set<string>();
