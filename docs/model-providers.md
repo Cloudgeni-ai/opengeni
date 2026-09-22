@@ -163,6 +163,29 @@ workspace-facing cost are deliberately independent:
 Database documents use schema version 1 and contain only reviewed membership
 and optional line-safe notes:
 
+The optional `codexModels` array replaces connected Codex membership without
+changing its credential broker. Omission preserves built-in defaults; `[]`
+removes all Codex models. Each entry requires `id: "codex/<slug>"`, matching
+`upstreamModelId: "<slug>"`, and a complete V1 `capabilities` object. Labels,
+aliases and context/compaction/tool-output token settings use the registry-model
+schema. Credentials, transport URLs, pricing and billing overrides are rejected.
+An explicit Codex default must belong to this list when supplied. Update through
+the existing version-checked catalog upsert below; subsequent catalog reads and
+new-turn admission use that membership, while accepted turn policy remains
+frozen. Subscription enablement, credential readiness and workspace policy still
+apply. Catalog inclusion does not prove the provider supports a slug.
+Removal also makes previously accepted queued/resumed attempts fail their
+current-catalog check; this is not a hidden-but-executable retirement list.
+To retire only from new selection, keep the exact model definition and set
+`retired: true` instead of deleting it. Retired entries are absent from pickers,
+`list_models`, and new-turn/child-session admission. A worker may restore only
+the exact retired definition referenced by an already persisted accepted-turn
+policy, after verifying its executable digest. Retirement itself does not change
+that digest. Missing-policy legacy turns are not granted this exception. Live
+workspace deny policy, session restrictions, subscription enablement, and broker
+credential checks still apply; retirement is not permission to bypass revocation.
+Choose an active deployment default before retiring its old entry.
+
 ```json
 {
   "schemaVersion": 1,

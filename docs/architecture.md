@@ -347,9 +347,9 @@ Gateway and OpenRouter rows are provider-qualified workspace overlays, never
 deployment catalog or billing rows. Deployment-managed `openrouter/*` and
 workspace-managed `workspace-openrouter/*` remain separate provider and billing
 identities even when they name the same upstream slug.
-The accepted turn policy freezes executable provider identity, not the separate
-workspace-facing cost policy. Operators must drain or fence accepted turns
-before changing `free`/`credits` for a product.
+Accepted turns freeze provider identity, not cost policy. Drain or fence them
+before changing `free`/`credits`. Database `codexModels` overrides membership,
+not credentials; retirement preserves only exact accepted execution.
 
 Documentation explains contracts without duplicating drift-prone lists.
 Cross-boundary enums are additive within major releases unless the whole release

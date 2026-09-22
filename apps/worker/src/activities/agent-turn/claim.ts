@@ -19,6 +19,7 @@ import { linkCurrentSpanToAdmission, turnExecutionTelemetryKey } from "@opengeni
 import { deliverChildRequiresActionToParent } from "../parent-wake";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
+  settingsForAcceptedSubscriptionTurn,
   resolveTurnExecutionPolicyV1,
   type Settings,
 } from "@opengeni/config";
@@ -277,7 +278,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     gatewaySettings,
     claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
   );
-  const capabilitySettings = await settingsWithOrganizationProviderCredentials(
+  let capabilitySettings = await settingsWithOrganizationProviderCredentials(
     db,
     input.accountId,
     input.workspaceId,
@@ -287,7 +288,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const codexAppsCredentialId = capabilitySettings.codexConnectedAppsEnabled
     ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
     : null;
-  runtime.configure(capabilitySettings);
   const policyForAbsent =
     claimedPolicy.kind === "valid"
       ? claimedPolicy.policy
@@ -304,6 +304,16 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   if (!installedPolicy.accepted) {
     throw new TurnAttemptFencedError(`turn execution policy was fenced: ${installedPolicy.reason}`);
   }
+  capabilitySettings = settingsForAcceptedSubscriptionTurn(
+    capabilitySettings,
+    installedPolicy.policy,
+    {
+      modelId: turn.model,
+      reasoningEffort: turn.reasoningEffort,
+      latencyMode: turn.latencyMode,
+    },
+  );
+  runtime.configure(capabilitySettings);
   const verifiedExecutionPolicy = assertTurnExecutionPolicyMatchesConfigV1(
     capabilitySettings,
     installedPolicy.policy,

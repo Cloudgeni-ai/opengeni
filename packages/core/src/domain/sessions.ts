@@ -16,6 +16,7 @@ import { sessionCreationMetadata } from "../site-session-origin";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
+  withCodexCatalogProvider,
   ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
   ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
   resolveFirstPartyMcpToolPolicy,
@@ -1424,6 +1425,18 @@ export function canonicalConfiguredModel(
     return model;
   }
   const canonicalModel = canonicalizeConfiguredModelId(settings, model);
+  if (
+    canonicalModel.startsWith(CODEX_MODEL_ID_PREFIX) &&
+    settings.resolvedCodexModelsJson !== undefined
+  ) {
+    if (
+      settings.codexSubscriptionEnabled &&
+      configuredAllowedModels(withCodexCatalogProvider(settings)).includes(canonicalModel)
+    ) {
+      return canonicalModel;
+    }
+    throw new HTTPException(422, { message: `model is not available: ${model}` });
+  }
   if (configuredAllowedModels(settings).includes(canonicalModel)) {
     return canonicalModel;
   }
