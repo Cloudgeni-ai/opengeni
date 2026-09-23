@@ -952,6 +952,34 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     },
   );
 
+  app.get(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/screenshot",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:read",
+      );
+      const targetId = requireOpaqueParam(context, "targetId");
+      const frame = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.read",
+        "browser.read",
+        async ({ sessionClient }) => await sessionClient.capture(targetId),
+      );
+      return new Response(frame.data.slice().buffer, {
+        status: 200,
+        headers: {
+          "cache-control": "no-store",
+          "content-type": frame.mediaType,
+          "x-opengeni-browser-frame": frame.metadataHeader,
+        },
+      });
+    },
+  );
+
   app.post(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions",
     async (context) => {

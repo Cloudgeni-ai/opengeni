@@ -654,6 +654,61 @@ describe("interaction attempt tools", () => {
     ]);
   });
 
+  test("returns browser pixels only when a still image is requested", async () => {
+    const target = browserTarget();
+    const observation = browserObservation(target);
+    const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+    let captures = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeBrowserTarget: async () => observation,
+        captureBrowserTarget: async () => {
+          captures += 1;
+          return {
+            frameId: "captured-browser-frame",
+            browserSessionId,
+            controllerGeneration: target.controllerGeneration,
+            targetId: target.id,
+            targetGeneration: target.targetGeneration,
+            documentGeneration: target.documentGeneration!,
+            sequence: 1,
+            mediaType: "image/jpeg",
+            width: 1,
+            height: 1,
+            deviceScaleFactor: 1,
+            scrollX: 0,
+            scrollY: 0,
+            capturedAt: now,
+            data: image,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read"],
+    });
+    const context = {
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    };
+    const semantic = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id },
+      context,
+    );
+    expect(captures).toBe(0);
+    expect(semantic.content).toHaveLength(1);
+    const visual = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id, includeScreenshot: true },
+      context,
+    );
+    expect(captures).toBe(1);
+    expect(visual.content).toEqual([
+      { type: "text", text: JSON.stringify(observation) },
+      { type: "image", data: Buffer.from(image).toString("base64"), mimeType: "image/jpeg" },
+    ]);
+  });
+
   test("publishes every declared atomic name only once", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       transport: unusedTransport(),

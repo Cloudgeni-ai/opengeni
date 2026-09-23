@@ -365,9 +365,14 @@ e2e(
         expect(names(await driver.observe(popup.id))).toContain("Popup ready");
       }
 
+      const beforeRedirect = page.target.url;
       page = await act(driver, page, { type: "navigate", url: `${fixture.mainUrl}/redirect` });
       expect(page.target.url).toBe(`${fixture.mainUrl}/destination`);
       expect(names(page)).toContain("Redirect complete");
+      page = await act(driver, page, { type: "history", direction: "back" });
+      expect(page.target.url).toBe(beforeRedirect);
+      page = await act(driver, page, { type: "history", direction: "forward" });
+      expect(page.target.url).toBe(`${fixture.mainUrl}/destination`);
     } finally {
       await driver.close().catch(() => undefined);
       await downloadStore.close().catch(() => undefined);
