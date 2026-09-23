@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { collectDevelopmentPrerequisites, createPrerequisiteHost, developmentPrerequisiteErrors, type PrerequisiteHost } from "./check-development-prerequisites";
+import { collectDevelopmentPrerequisites, collectDevelopmentSourceBuildPrerequisites, createPrerequisiteHost, developmentPrerequisiteErrors, type PrerequisiteHost } from "./check-development-prerequisites";
 import { resolve } from "node:path";
 
 const ready = {
@@ -134,6 +134,24 @@ describe("backend-aware read-only preflight", () => {
     expect(commands).toContain("rustup run 1.97.0 rustc --version");
     expect(commands).toContain("rustup run stable rustc --version");
     expect(commands.every((command) => !command.includes(" install"))).toBe(true);
+  });
+
+  test("resolve defers artifact-only build requirements without claiming verified prebuilt", async () => {
+    const { host, commands } = fixture({ which: (command) => ["rustup", "cc", "cargo"].includes(command) ? null : `/bin/${command}` });
+    expect((await collectDevelopmentPrerequisites({ artifactRuntime: "resolve", environment: {} }, host)).errors).toEqual([]);
+    expect(commands).toEqual(["docker info", "docker compose version", "docker buildx version"]);
+    const relay = await collectDevelopmentPrerequisites({ artifactRuntime: "resolve", environment: { OPENGENI_SANDBOX_SELFHOSTED_ENABLED: "true" } }, host);
+    expect(relay.errors).toHaveLength(3);
+  });
+
+  test("source fallback separately aggregates build requirements without probing services", async () => {
+    const { host, commands } = fixture({ which: () => null });
+    const errors = await collectDevelopmentSourceBuildPrerequisites({ artifactRuntime: "source-build", relayRuntime: "disabled", environment: {} }, host);
+    expect(errors).toEqual([expect.stringContaining("rustup"), expect.stringContaining("cc")]);
+    expect(commands).toEqual([]);
+    const readyHost = fixture();
+    expect(await collectDevelopmentSourceBuildPrerequisites({ artifactRuntime: "source-build", relayRuntime: "disabled", environment: {} }, readyHost.host)).toEqual([]);
+    expect(readyHost.commands).toEqual(["rustup run 1.97.0 rustc --version", "rustup run 1.97.0 cargo --version"]);
   });
 
   test("MinIO is explicit, pinned, and does not require Garage", async () => {

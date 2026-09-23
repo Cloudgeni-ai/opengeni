@@ -8,8 +8,9 @@ export type DevelopmentPrerequisiteOptions = {
   repositoryRoot?: string;
   /** Already resolved launcher authority. This checker never sources shell files. */
   environment?: NodeJS.ProcessEnv;
-  /** Only the runtime verifier may select verified-prebuilt; never trust an env flag. */
-  artifactRuntime?: "source-build" | "verified-prebuilt";
+  /** resolve defers artifact build checks until the resolver needs source fallback;
+   * it is NOT a verified runtime. Only the verifier may select verified-prebuilt. */
+  artifactRuntime?: "source-build" | "verified-prebuilt" | "resolve";
   /** Defaults to source-build only when effective selfhosted is enabled. */
   relayRuntime?: "source-build" | "verified-prebuilt" | "disabled";
 };
@@ -53,7 +54,15 @@ export function developmentPrerequisiteErrors(options: {
   for (const command of ["bash", "git", "curl", "ps"]) {
     if (!options.which(command)) errors.push(`Missing ${command}. Install host packages (Debian/Ubuntu: sudo apt-get install bash git curl procps; macOS: Xcode Command Line Tools via xcode-select --install, plus brew install bash curl).`);
   }
-  if (options.artifactRuntime !== "verified-prebuilt" ||
+  errors.push(...sourceBuildHostErrors(options));
+  return errors;
+}
+
+function sourceBuildHostErrors(options: Pick<DevelopmentPrerequisiteOptions, "artifactRuntime" | "relayRuntime"> & {
+  which: PrerequisiteHost["which"];
+}): string[] {
+  const errors: string[] = [];
+  if ((options.artifactRuntime ?? "source-build") === "source-build" ||
       (options.relayRuntime !== "verified-prebuilt" && options.relayRuntime !== "disabled")) {
     for (const [command, hint] of [
       ["rustup", "Install rustup using a downloaded, inspected installer from https://rustup.rs; source builds use the checked-in Rust toolchain, not an arbitrary system rustc."],
@@ -72,11 +81,10 @@ export async function collectDevelopmentPrerequisites(
 ): Promise<{ backend: "docker" | "native"; errors: string[] }> {
   const repositoryRoot = options.repositoryRoot ?? resolve(import.meta.dir, "..");
   const environment = options.environment ?? process.env;
-  const relayRuntime = options.relayRuntime ??
-    (environment.OPENGENI_SANDBOX_SELFHOSTED_ENABLED === "true" ? "source-build" : "disabled");
   const host = suppliedHost ?? createPrerequisiteHost(environment, repositoryRoot);
   const errors = developmentPrerequisiteErrors({
-    ...host, ...options, relayRuntime, requiredBunVersion: await canonicalBunVersion(repositoryRoot),
+    ...host, artifactRuntime: "resolve", relayRuntime: "disabled",
+    requiredBunVersion: await canonicalBunVersion(repositoryRoot),
   });
   const requested = environment.OPENGENI_DEV_BACKEND || "auto";
   if (!["auto", "native", "docker"].includes(requested)) {
@@ -162,7 +170,27 @@ export async function collectDevelopmentPrerequisites(
       }
     }
   }
-  if (options.artifactRuntime !== "verified-prebuilt" && host.which("rustup")) {
+  errors.push(...await collectDevelopmentSourceBuildPrerequisites(options, host));
+  return { backend, errors };
+}
+
+/** Called by the runtime resolver BEFORE a source fallback build. Independent of
+ * infrastructure: no Docker/PG/service checks, installs, or generated files. */
+export async function collectDevelopmentSourceBuildPrerequisites(
+  options: DevelopmentPrerequisiteOptions = {},
+  suppliedHost?: PrerequisiteHost,
+): Promise<string[]> {
+  const repositoryRoot = options.repositoryRoot ?? resolve(import.meta.dir, "..");
+  const environment = options.environment ?? process.env;
+  const relayRuntime = options.relayRuntime ??
+    (environment.OPENGENI_SANDBOX_SELFHOSTED_ENABLED === "true" ? "source-build" : "disabled");
+  const host = suppliedHost ?? createPrerequisiteHost(environment, repositoryRoot);
+  const errors = sourceBuildHostErrors({ ...options, relayRuntime, which: host.which });
+  const requireProbe = async (command: string, args: string[], message: string, match?: RegExp) => {
+    const result = await host.probe(command, args);
+    if (!result.ok || (match && !match.test(result.stdout))) errors.push(message);
+  };
+  if ((options.artifactRuntime ?? "source-build") === "source-build" && host.which("rustup")) {
     const parsed = Bun.TOML.parse(readFileSync(join(repositoryRoot, "packages/artifact-tool/kernel/rust-toolchain.toml"), "utf8")) as { toolchain: { channel: string } };
     const channel = parsed.toolchain.channel;
     if (!/^\d+\.\d+\.\d+$/u.test(channel)) throw new Error("Invalid pinned artifact Rust toolchain");
@@ -170,13 +198,14 @@ export async function collectDevelopmentPrerequisites(
     await requireProbe("rustup", ["run", channel, "cargo", "--version"], `Artifact source-build requires cargo in Rust ${channel}. Run: rustup toolchain install ${channel} --profile minimal --no-self-update.`);
   }
   if (relayRuntime === "source-build") {
-    if (requireCommand("cargo", "The local relay is a separate source build. Install the toolchain selected by agent/rust-toolchain.toml, or have the launcher disable the relay/use a verified prebuilt relay.")) await requireProbe("cargo", ["--version"], "Relay cargo is not usable. Install the toolchain selected by agent/rust-toolchain.toml; the artifact runtime's prebuilt status does not satisfy relay build requirements.");
+    if (!host.which("cargo")) errors.push("Missing cargo. The local relay is a separate source build. Install the toolchain selected by agent/rust-toolchain.toml, or have the launcher disable the relay/use a verified prebuilt relay.");
+    else await requireProbe("cargo", ["--version"], "Relay cargo is not usable. Install the toolchain selected by agent/rust-toolchain.toml; the artifact runtime's prebuilt status does not satisfy relay build requirements.");
     if (host.which("rustup")) {
       const parsed = Bun.TOML.parse(readFileSync(join(repositoryRoot, "agent/rust-toolchain.toml"), "utf8")) as { toolchain: { channel: string } };
       await requireProbe("rustup", ["run", parsed.toolchain.channel, "rustc", "--version"], "Relay source-build toolchain is unavailable. Install the channel from agent/rust-toolchain.toml using rustup toolchain install; that file currently selects a floating stable channel, not an exact release pin.");
     }
   }
-  return { backend, errors };
+  return errors;
 }
 
 /** Fixed per-command and whole-preflight budgets; captured output never enters diagnostics. */
@@ -228,6 +257,14 @@ export function createPrerequisiteHost(environment: NodeJS.ProcessEnv, cwd: stri
 
 export async function checkDevelopmentPrerequisites(options: DevelopmentPrerequisiteOptions = {}): Promise<void> {
   const { errors } = await collectDevelopmentPrerequisites(options);
+  assertPrerequisites(errors);
+}
+
+export async function checkDevelopmentSourceBuildPrerequisites(options: DevelopmentPrerequisiteOptions = {}): Promise<void> {
+  assertPrerequisites(await collectDevelopmentSourceBuildPrerequisites(options));
+}
+
+function assertPrerequisites(errors: string[]): void {
   if (errors.length > 0) {
     console.error("OpenGeni startup prerequisites are missing:\n" + errors.map((error) => `  - ${error}`).join("\n"));
     throw new Error("OpenGeni startup prerequisites are not satisfied; no prerequisite installation was attempted");
