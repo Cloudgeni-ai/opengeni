@@ -2113,8 +2113,12 @@ function SessionChatPane(props: {
   const composerPolicyValid = Boolean(
     composerPolicy && (catalogComboValid || matchesFrozenSessionPolicy),
   );
+  const noRunnableModel =
+    !modelCatalog.loading &&
+    modelCatalog.rows.length > 0 &&
+    !modelCatalog.rows.some((row) => row.selectable);
   const composerPolicyError =
-    composerPolicy && !modelCatalog.loading && !composerPolicyValid
+    composerPolicy && !modelCatalog.loading && !composerPolicyValid && !noRunnableModel
       ? "Choose a model, reasoning level, and speed supported by this session."
       : null;
   composerPolicyValidRef.current = composerPolicyValid;
@@ -2922,6 +2926,7 @@ function SessionChatPane(props: {
                   error={modelCatalog.error ?? composerPolicyError}
                   sessionKey={props.session.id}
                   menuSide="top"
+                  connectModelsHref={`/workspaces/${encodeURIComponent(props.session.workspaceId)}/settings?section=models`}
                   codexOnly={props.session.codexCompactionMode === "remote_v2"}
                   onModelChange={composer.setModel}
                   onEffortChange={composer.setReasoningEffort}

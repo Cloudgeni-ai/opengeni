@@ -46,7 +46,7 @@ import {
   type SelfhostedOperationResourcePolicy,
 } from "@opengeni/runtime/sandbox";
 import { relayConfigFromSettings } from "./routing";
-import { managedSessionGroupBackend } from "./runtime-settings";
+import { managedSessionGroupBackend, sessionGroupMachinePresentation } from "./runtime-settings";
 
 export type FleetServices = {
   db: Database;
@@ -130,7 +130,7 @@ export type FleetSandboxEntry = {
   /** The sandbox id used as the attach/swap/run_on `target`. For the session's
    *  own group box this is the group id (a null active pointer == this box). */
   id: string;
-  kind: "modal" | "selfhosted" | "opensandbox";
+  kind: Exclude<SandboxBackend, "none">;
   name: string;
   liveness: FleetLiveness;
   /** True for the session's currently-active sandbox (the routing target). */
@@ -325,10 +325,11 @@ export async function listFleet(
         : groupRecovering
           ? "recovering"
           : "wakeable";
+    const presentation = sessionGroupMachinePresentation(groupBackend);
     entries.push({
       id: ctx.sessionGroupId,
-      kind: groupBackend === "opensandbox" ? "opensandbox" : "modal",
-      name: "session sandbox",
+      kind: presentation.kind,
+      name: presentation.name,
       liveness: groupOnline ? "online" : groupRecovering ? "reconnecting" : "offline",
       active: groupActive,
       isSessionGroup: true,
