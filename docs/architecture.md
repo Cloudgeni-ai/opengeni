@@ -1297,16 +1297,12 @@ direct-call path.
 Provider adapters may narrow destinations, credentials, and retries, never
 weaken shared connection, approval, idempotency, or audit boundaries.
 
-The attempt-frozen connector Allow/Ask/Block policy and
-`connector_action_requests` ledger apply to model and Codemode execution only.
-Current-human HTTP/SDK and workspace MCP calls are direct human actions: they
-use the ordinary `requireApproval` classification and preserve a caller-generated
-operation id only for provider-specific handling. Sites retain ordinary per-call
-approval after active-Site and selected-version allowlist revalidation. Older
-published versions remain callable using their own declared tools and the
-viewer’s current permissions. These direct surfaces do
-not synthesize attempt-owned connector rows or a second generalized exactly-once
-journal.
+The attempt-frozen Allow/Ask/Block policy and `connector_action_requests` apply
+to model and Codemode execution. Human HTTP/SDK and workspace MCP calls use
+`requireApproval`; provider handling may retain caller operation IDs. Sites
+approve each call after active-Site and version-allowlist checks. Older versions
+expose their declared tools under current viewer permissions. These paths create
+no attempt-owned connector rows or duplicate exactly-once journal.
 
 GitHub App binding offers explicit selection of existing owner-authorized
 installations or GitHub's new-installation flow for another personal account/organization.
@@ -1321,6 +1317,9 @@ DB connector-policy rows and accepted-attempt snapshots govern execution.
 Canonical: [`capabilities.md`](capabilities.md),
 [`integrations-design.md`](integrations-design.md),
 [`mcp-surfaces.md`](mcp-surfaces.md), and [`credentials.md`](credentials.md).
+
+MCP OAuth redirects carry a short signed reference to encrypted, time-limited
+Postgres state under workspace RLS, then check the existing one-use nonce.
 
 ### 7.5 Artifacts, browser control, and managed computer sessions
 

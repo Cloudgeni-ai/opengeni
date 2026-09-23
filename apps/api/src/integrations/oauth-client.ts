@@ -29,9 +29,11 @@ import {
   getGlobalCatalogOAuthProfile,
   listConnectionsMetadata,
   loadIntegrationOAuthClient,
+  loadIntegrationOAuthPendingState,
   normalizeBearerScheme,
   replaceIntegrationOAuthClientIfCurrent,
   storeIntegrationOAuthClient,
+  storeIntegrationOAuthPendingState,
   updateConnection,
   withDatabaseStatementTimeout,
   type Database,
@@ -55,7 +57,7 @@ import {
   type McpProtectedResourceMetadata,
 } from "@opengeni/network";
 import { Buffer } from "node:buffer";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
 import {
   assertConnectionOwnershipAllowedForPrincipal,
@@ -196,7 +198,8 @@ export type OAuthStartStage =
   | "mcp_challenge"
   | "protected_resource_metadata"
   | "authorization_server_metadata"
-  | "client_registration";
+  | "client_registration"
+  | "state_persist";
 
 class OAuthStartStageError extends Error {
   constructor(
@@ -524,7 +527,7 @@ async function startMcpOAuthWithinDeadline(
     ),
   );
   const key = requireEnvironmentEncryption(settings);
-  const state = createSignedState(requireIntegrationsStateSecret(settings), {
+  const fullState = createSignedState(requireIntegrationsStateSecret(settings), {
     ...(context.integrationKey ? { integrationKey: context.integrationKey } : {}),
     ...(context.connectAttemptId ? { connectAttemptId: context.connectAttemptId } : {}),
     accountId: context.accountId,
@@ -574,6 +577,29 @@ async function startMcpOAuthWithinDeadline(
     returnPath,
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
+  const expiresAt = new Date(Date.now() + oauthStateTtlMs);
+  let state = fullState;
+  if (settings.integrationsOauthShortStateEnabled) {
+    const stateId = randomUUID();
+    state = createSignedState(requireIntegrationsStateSecret(settings), {
+      kind: "mcp_oauth_reference",
+      id: stateId,
+      accountId: context.accountId,
+      workspaceId: context.workspaceId,
+    });
+    if (state.length > 512) {
+      throw new Error("MCP OAuth reference state exceeded its provider-safe length");
+    }
+    await deadline.run("state_persist", async () =>
+      storeIntegrationOAuthPendingState(db, {
+        id: stateId,
+        accountId: context.accountId,
+        workspaceId: context.workspaceId,
+        stateEncrypted: encryptEnvironmentValue(key, fullState),
+        expiresAt,
+      }),
+    );
+  }
   const authorizationUrl = buildAuthorizationUrl({
     endpoint: discovery.as.authorizationEndpoint,
     settings,
@@ -589,7 +615,7 @@ async function startMcpOAuthWithinDeadline(
   return OAuthStartResponse.parse({
     state,
     authorizationUrl,
-    expiresAt: new Date(Date.now() + oauthStateTtlMs).toISOString(),
+    expiresAt: expiresAt.toISOString(),
   });
 }
 
@@ -701,7 +727,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
     };
   }
   try {
-    state = readOAuthState(input.state, settings);
+    state = await resolveMcpOAuthState(db, settings, input.state, deadline);
     integrationKey = state.integrationKey ?? "custom:mcp";
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(db, state, state.connectAttemptId);
@@ -1718,6 +1744,41 @@ export function buildAuthorizationUrl(input: {
   return url.toString();
 }
 
+async function resolveMcpOAuthState(
+  db: Database,
+  settings: Settings,
+  state: string,
+  deadline: OAuthCallbackDeadline,
+): Promise<OAuthStatePayload> {
+  const reference = readSignedState(state, requireIntegrationsStateSecret(settings)) as Record<
+    string,
+    unknown
+  > | null;
+  if (reference?.kind !== "mcp_oauth_reference") {
+    // In-flight grants from the previous release remain valid for their
+    // normal ten-minute lifetime during a rolling deployment.
+    return readOAuthState(state, settings);
+  }
+  const accountId = requiredString(reference.accountId, "state.accountId");
+  const workspaceId = requiredString(reference.workspaceId, "state.workspaceId");
+  const id = requiredString(reference.id, "state.id");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) {
+    throw new HTTPException(400, { message: "invalid OAuth state reference" });
+  }
+  const encrypted = await runCallbackDatabaseStage(deadline, "state_verify", db, (scopedDb) =>
+    loadIntegrationOAuthPendingState(scopedDb, { accountId, workspaceId, id }),
+  );
+  if (!encrypted) {
+    throw new HTTPException(400, { message: "invalid or expired OAuth state" });
+  }
+  const fullState = decryptEnvironmentValue(requireEnvironmentEncryption(settings), encrypted);
+  const resolved = readOAuthState(fullState, settings);
+  if (resolved.accountId !== accountId || resolved.workspaceId !== workspaceId) {
+    throw new HTTPException(400, { message: "OAuth state reference mismatch" });
+  }
+  return resolved;
+}
+
 function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   const payload = readSignedState(state, requireIntegrationsStateSecret(settings)) as Record<
     string,
@@ -2170,6 +2231,8 @@ function oauthStartStageLabel(stage: OAuthStartStage): string {
       return "authorization-server discovery";
     case "client_registration":
       return "OAuth client registration";
+    case "state_persist":
+      return "OAuth state persistence";
   }
 }
 

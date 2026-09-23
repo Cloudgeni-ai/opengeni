@@ -311,6 +311,15 @@ operation, source, and outcome labels. The same observer emits
 (`surface`, `op`, `provider`, `outcome`, `durationMs`). It never emits workspace,
 subject, tool-name, argument, result, credential, or approval-token values.
 
+## MCP provider OAuth short-state rollout (0507)
+
+Apply rolling migration `0507_integration_oauth_pending_states.sql`, then deploy
+the new API with `OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED=false` on all
+replicas. Once every old API replica has drained, set the flag to `true` in a
+separate configuration rollout. Both flag values accept old and short callback
+states; only new replicas can read short states. Providers such as Resend that
+limit `state` length work after the flag is enabled.
+
 ## Personal GitHub OAuth
 
 Personal GitHub is disabled by default. Managed staging and production must use

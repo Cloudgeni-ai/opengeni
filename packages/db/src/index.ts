@@ -649,6 +649,10 @@ export * from "./organization-xai-subscriptions";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {
+  loadIntegrationOAuthPendingState,
+  storeIntegrationOAuthPendingState,
+} from "./integration-oauth-pending-states";
+export {
   decryptEnvironmentValue as decryptVariableSetValue,
   encryptEnvironmentValue as encryptVariableSetValue,
 } from "./environment-crypto";
