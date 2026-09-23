@@ -886,11 +886,9 @@ admission; see [run lifecycle](run-lifecycle.md).
 `artifacts:publish`, archive, restore, and exact mutation fences apply;
 pure service work fails closed. See [run lifecycle](run-lifecycle.md).
 
-Tool disclosure is progressive, but authority is not. A tool may be eager or
-lazy, local or MCP-backed, direct-model or Codemode-accessible; every invocation
-still resolves through the current authorized catalog and the same execution
-fences. Approval-required tools remain approval-required regardless of access
-path.
+Tool disclosure is progressive; every invocation uses the current authorized
+catalog and execution fences. Approval requirements apply equally to eager/lazy,
+local/MCP, and direct/Codemode calls.
 
 The closed always-visible local first-request set is `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
@@ -899,12 +897,7 @@ workspace's selectable model IDs and deployment-defined costs; it does not
 switch the session model. Other non-MCP function tools and non-eager MCP schemas
 remain behind progressive search.
 
-The shared lazy-tool request adapter adds a bounded, request-local directory of
-authorized deferred tool groups. Its literal prefixes feed the existing
-`tool_list` browser; `tool_search` discloses selected schemas. The directory is
-derived from the same current pool as discovery, never a second authority or a
-persisted conversation item. Background preparation remains non-blocking.
-See [MCP surfaces](mcp-surfaces.md#recovery-from-tool-search-misses).
+Request-local [directories](mcp-surfaces.md#recovery-from-tool-search-misses) advertise authorized deferred tools without blocking preparation.
 
 Repository descriptors route IDs through sandbox-bound `repository_skill_read`;
 managed `skill_read` remains separate. See [run lifecycle](run-lifecycle.md).
