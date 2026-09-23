@@ -1838,6 +1838,20 @@ describe("turn execution policy V1", () => {
     }
     expect(accepted).toEqual(before);
 
+    // This digest omits both wireProfile and promptCaching. Each compatibility
+    // path accepts one historical change only; they must never compose.
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(
+        current,
+        {
+          ...accepted,
+          definitionVersion:
+            "sha256:3c14a06a1e57af53d8cd11944ace3ecc8cdb15623d672aa362207a7b5e8d29cc",
+        },
+        input,
+      ),
+    ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
+
     // Compatibility is one-way: it cannot restore a capability on an old worker.
     expect(() => assertTurnExecutionPolicyMatchesConfigV1(historical, newer, input)).toThrow(
       "current provider definition",
