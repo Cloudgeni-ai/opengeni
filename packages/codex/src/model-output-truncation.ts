@@ -21,6 +21,7 @@
 
 import { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "./oversized-image-card";
 import { RetainedArtifactMetadataSchema } from "@opengeni/contracts";
+import { preservesHostedCallStatus, type HostedCallStatusItemType } from "./hosted-call-status";
 
 export { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "./oversized-image-card";
 
@@ -43,7 +44,9 @@ type WithoutOutputOnlyProviderDataField<T extends ModelHistoryItem> = "providerD
   : object;
 
 type WithoutOutputOnlyHistoryItemFields<T extends ModelHistoryItem> = T extends unknown
-  ? Omit<T, "status" | "providerData"> & WithoutOutputOnlyProviderDataField<T>
+  ? T extends { type: HostedCallStatusItemType }
+    ? T
+    : Omit<T, "status" | "providerData"> & WithoutOutputOnlyProviderDataField<T>
   : never;
 
 /**
@@ -52,13 +55,17 @@ type WithoutOutputOnlyHistoryItemFields<T extends ModelHistoryItem> = T extends 
  * — and Codex's input schema 400s it (`Unknown parameter: 'input[N].status'`).
  * SuperGrok accepts items with or without it. The SDK also nests `status` on
  * `providerData` (reasoning items) and flattens it back onto the request.
- * Canonical history therefore omits both at persist so portable sessions can
- * cross Responses providers.
+ * Canonical history omits both for those items so portable sessions can cross
+ * Responses providers. Hosted tool calls are different: the provider requires
+ * their status on replay, and the SDK reads it to reconstruct the wire item.
  */
 export function omitOutputOnlyHistoryItemFields<T extends ModelHistoryItem>(
   item: T,
 ): WithoutOutputOnlyHistoryItemFields<T> {
   if (!item || typeof item !== "object") {
+    return item as unknown as WithoutOutputOnlyHistoryItemFields<T>;
+  }
+  if (preservesHostedCallStatus(item.type)) {
     return item as unknown as WithoutOutputOnlyHistoryItemFields<T>;
   }
   const providerData =

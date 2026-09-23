@@ -10,6 +10,29 @@ import {
 } from "../src/model-output-truncation";
 
 describe("Codex-parity model tool-output truncation", () => {
+  test("persistence preserves provider-hosted call status across JSON restart", () => {
+    for (const type of [
+      "web_search_call",
+      "file_search_call",
+      "code_interpreter_call",
+      "image_generation_call",
+    ] as const) {
+      for (const status of ["completed", "in_progress", "failed"]) {
+        const item = Object.freeze({
+          type: "hosted_tool_call" as const,
+          name: type,
+          status,
+          providerData: Object.freeze({ type, id: "provider-item", status }),
+        });
+        const persisted = canonicalizePersistedHistoryItem(item);
+        expect(JSON.parse(JSON.stringify(persisted))).toEqual(item);
+        expect(canonicalizePersistedHistoryItem(persisted)).toEqual(item);
+        expect(item.status).toBe(status);
+        expect(canonicalizePersistedHistoryItem({ type, status })).toEqual({ type, status });
+      }
+    }
+  });
+
   test("keeps a schema-valid screenshot receipt intact after text budget exhaustion", () => {
     const marker = {
       type: "retained_artifact",
