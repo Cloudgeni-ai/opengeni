@@ -881,6 +881,20 @@ without mutating the SDK object, while undefined array entries and every other
 non-JSON graph fail with the exact offending path. The lossless database codec
 stays strict rather than silently changing arbitrary input.
 
+Pending-call registration retries only PostgreSQL-confirmed deadlock (`40P01`)
+or serialization (`40001`) rollback, with three total attempts and 25/50 ms
+backoff. The worker supplies the root database handle: each attempt re-enters a
+fresh RLS transaction and checks the current turn attempt fence. Passing a
+caller-owned transaction would use savepoints instead and is not this contract.
+A duplicate must match the same tenant/session/turn/call identity, call type,
+and decoded JSON structure with exact keys (no locale collation or Unicode
+normalization); its originating attempt is retained. The duplicate acknowledgement
+is not permission to replay an effect. Known transport failure evidence wins over
+even a nested rollback SQLSTATE and stops retries. No transport/ambiguous-commit
+recovery is supported, and inference/tool execution stays outside this
+database-only boundary. Exhaustion uses the canonical sanitized persistence-error
+projection; the original cause remains internal diagnostic evidence.
+
 A completed pending tool receipt retains two deliberately separate lossless
 projections: the bounded SDK result item that may become model-visible history,
 and the exact `agent.toolCall.output` value used by the durable audit event.
