@@ -1,5 +1,33 @@
 # @opengeni/runtime
 
+## 4.0.1
+
+### Patch Changes
+
+- 701ea95: Preserve the original shell command when adopting background processes, so running command rows and completion notices show the command instead of execCommand. Keep long command rows ellipsized and expose their saved preview on hover and expansion.
+- e9c4379: Resolve published-file Markdown links through host navigation, expose message presentation in SessionConversation, and document exact retained-file link/embed syntax.
+- d92af11: Keep original command text through ambiguous launch recovery and persist it separately from bounded previews. Preserve whitespace, mark clipped previews with an ellipsis, and show complete commands on expansion and hover.
+- f60ca2b: Raise Skill folder limits eightfold to 1,024 files, 2 MiB per file, and 8 MiB total, while retaining bounded reads and existing validation.
+- 86c710a: Expose a first-party Connected Machine enrollment-token tool with existing enrollment-management authority, short-lived tokens and deployment-bound installer commands. Include agent guidance without introducing an additional approval flow.
+- 2f8bc58: Use bounded readable MCP tool aliases while preserving exact account routing and historical approval rehydration. Retain action and account display metadata in native and Codemode timeline events and approval cards without changing execution or approval identity. Legacy opaque calls resolve only against the current authorized tool catalog.
+- a184108: Teach agents that a Site reaches OpenGeni models and tools through the host bridge and never needs its own server. Ask about external commitments or material architecture changes beyond the authorized scope while preserving established and delegated choices.
+- Updated dependencies [a642885]
+- Updated dependencies [793a6c9]
+- Updated dependencies [d92af11]
+- Updated dependencies [f60ca2b]
+- Updated dependencies [a11d810]
+- Updated dependencies [86c710a]
+- Updated dependencies [ab3adb3]
+- Updated dependencies [2f8bc58]
+- Updated dependencies [a11d810]
+- Updated dependencies [90e089a]
+  - @opengeni/codex@0.2.25
+  - @opengeni/config@2.1.0
+  - @opengeni/contracts@5.1.0
+  - @opengeni/sdk@7.1.0
+  - @opengeni/codemode@0.6.1
+  - @opengeni/tool-gateway@0.1.12
+
 ## 4.0.0
 
 ### Major Changes
