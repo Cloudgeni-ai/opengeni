@@ -3716,6 +3716,9 @@
 :where(.og-root).text-og-status-waiting,:where(.og-root) .text-og-status-waiting {
     color: var(--og-color-status-waiting);
   }
+:where(.og-root).text-og-surface-1,:where(.og-root) .text-og-surface-1 {
+    color: var(--og-color-surface-1);
+  }
 :where(.og-root).text-popover-foreground,:where(.og-root) .text-popover-foreground {
     color: var(--color-fg);
   }
