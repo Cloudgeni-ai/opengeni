@@ -756,8 +756,8 @@ describe("interaction attempt tools", () => {
           targetGeneration: target.targetGeneration,
           sequence: 0,
           mediaType: "image/jpeg",
-          width: 1,
-          height: 1,
+          width: 1024,
+          height: 640,
           capturedAt: now,
           sha256: "0".repeat(64),
           data: image,
@@ -768,14 +768,22 @@ describe("interaction attempt tools", () => {
       selectedTools: ["computer_observe"],
       permissions: ["sessions:read"],
     });
+    expect(definitions[0]!.outputSchema).toMatchObject({
+      type: "object",
+      properties: { capturedFrame: { type: "object" } },
+    });
     const result = await definitions[0]!.execute(
       { computerSessionId, targetId: target.id },
       { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
     );
 
-    expect(result.structuredContent).toMatchObject({ frameId: "captured-frame" });
+    const capturedFrame = { width: 1024, height: 640 };
+    expect(result.structuredContent).toMatchObject({ frameId: "captured-frame", capturedFrame });
     expect(result.content).toEqual([
-      { type: "text", text: JSON.stringify({ ...observation, frameId: "captured-frame" }) },
+      {
+        type: "text",
+        text: JSON.stringify({ ...observation, frameId: "captured-frame", capturedFrame }),
+      },
       { type: "image", data: Buffer.from(image).toString("base64"), mimeType: "image/jpeg" },
     ]);
   });
