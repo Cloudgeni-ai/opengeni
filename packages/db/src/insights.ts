@@ -990,34 +990,45 @@ export async function aggregateSessionDepth(
 }> {
   const context = await rlsContextForWorkspace(db, workspaceId);
   return await withRlsContext(db, context, async (scopedDb) => {
-    const buckets = await scopedDb
-      .select({
-        depth: schema.sessions.nestedAgentDepth,
-        sessions: sql<number>`count(*)::int`,
-      })
-      .from(schema.sessions)
-      .where(eq(schema.sessions.workspaceId, workspaceId))
-      .groupBy(schema.sessions.nestedAgentDepth)
-      .orderBy(schema.sessions.nestedAgentDepth);
-    const [stats] = await scopedDb
-      .select({
-        sessionsTouched: sql<number>`count(*)::int`,
-        rootSessions: sql<number>`count(*) filter (where ${schema.sessions.nestedAgentDepth} = 0)::int`,
-        deepestDepth: sql<number>`coalesce(max(${schema.sessions.nestedAgentDepth}), 0)`,
-        avgDepth: sql<number>`coalesce(avg(${schema.sessions.nestedAgentDepth}), 0)`,
-      })
-      .from(schema.sessions)
-      .where(eq(schema.sessions.workspaceId, workspaceId));
-    const [deepest] = await scopedDb
-      .select({
-        id: schema.sessions.id,
-        title: schema.sessions.title,
-        depth: schema.sessions.nestedAgentDepth,
-      })
-      .from(schema.sessions)
-      .where(eq(schema.sessions.workspaceId, workspaceId))
-      .orderBy(desc(schema.sessions.nestedAgentDepth), desc(schema.sessions.updatedAt))
-      .limit(1);
+    // One grouped pass over the workspace's sessions yields every count the
+    // summary needs; the totals, root count, deepest depth, and mean are
+    // derived from the buckets instead of rescanning a wide sessions heap.
+    const buckets = (
+      await scopedDb
+        .select({
+          depth: schema.sessions.nestedAgentDepth,
+          sessions: sql<number>`count(*)::int`,
+        })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.workspaceId, workspaceId))
+        .groupBy(schema.sessions.nestedAgentDepth)
+        .orderBy(schema.sessions.nestedAgentDepth)
+    ).map((row) => ({ depth: row.depth, sessions: Number(row.sessions) }));
+    const sessionsTouched = buckets.reduce((sum, bucket) => sum + bucket.sessions, 0);
+    const rootSessions = buckets.find((bucket) => bucket.depth === 0)?.sessions ?? 0;
+    const deepestDepth = buckets.reduce((max, bucket) => Math.max(max, bucket.depth), 0);
+    const avgDepth =
+      sessionsTouched > 0
+        ? buckets.reduce((sum, bucket) => sum + bucket.depth * bucket.sessions, 0) / sessionsTouched
+        : 0;
+    const [deepest] =
+      sessionsTouched > 0
+        ? await scopedDb
+            .select({
+              id: schema.sessions.id,
+              title: schema.sessions.title,
+              depth: schema.sessions.nestedAgentDepth,
+            })
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, workspaceId),
+                eq(schema.sessions.nestedAgentDepth, deepestDepth),
+              ),
+            )
+            .orderBy(desc(schema.sessions.updatedAt))
+            .limit(1)
+        : [];
     const [goals] = await scopedDb
       .select({
         active: sql<number>`count(*) filter (where ${schema.sessionGoals.status} = 'active')::int`,
@@ -1026,16 +1037,13 @@ export async function aggregateSessionDepth(
       .from(schema.sessionGoals)
       .where(eq(schema.sessionGoals.workspaceId, workspaceId));
     return {
-      buckets: buckets.map((row) => ({
-        depth: row.depth,
-        sessions: Number(row.sessions),
-      })),
-      sessionsTouched: Number(stats?.sessionsTouched ?? 0),
-      rootSessions: Number(stats?.rootSessions ?? 0),
-      deepestDepth: Number(stats?.deepestDepth ?? 0),
+      buckets,
+      sessionsTouched,
+      rootSessions,
+      deepestDepth,
       deepestSessionId: deepest?.id ?? null,
       deepestSessionTitle: deepest?.title?.trim() || "",
-      avgDepth: Number(stats?.avgDepth ?? 0),
+      avgDepth,
       goalsActive: Number(goals?.active ?? 0),
       goalsCompleted: Number(goals?.completed ?? 0),
     };

@@ -755,7 +755,7 @@ export {
   type UserLookup,
   type UserProfileLookup,
 } from "./database";
-export { withSessionRlsActorContext } from "./database";
+export { currentSessionRlsActorIdentityKey, withSessionRlsActorContext } from "./database";
 export { withDatabaseTimingObserver, type DatabaseTimingObservation } from "./database-timing";
 export { normalizedCredentialHeaders } from "./connection-token-resolver";
 import {
