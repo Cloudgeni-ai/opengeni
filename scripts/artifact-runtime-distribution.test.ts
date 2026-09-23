@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { copyKernelSourceFixture } from "./artifact-kernel-source-identity.fixture";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -94,6 +95,7 @@ test("anonymous HTTP rejects off-provider redirects, excess bytes, errors and ex
 async function fixture() {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "runtime-distribution-"));
   roots.push(temporaryRoot);
+  const sourceIdentity = await copyKernelSourceFixture(temporaryRoot);
   const archives = new Map<number, Buffer>();
   const targets = RUNTIME_NATIVE_TARGETS.map((target, index) => {
     const bytes = Buffer.from(`fixture-native-${target}`);
@@ -102,7 +104,7 @@ async function fixture() {
       producer: "opengeni-artifact-kernel-smoke-v2",
       target,
       kind: "native",
-      buildIdentity: "opengeni-artifact-kernel/fixture;abi=1",
+      buildIdentity: `opengeni-artifact-kernel/fixture;abi=1;source=${sourceIdentity};toolchain=test`,
       capabilities: { bytes: 1, sha256: runtimeDigest(Buffer.from("c")) as `sha256:${string}` },
       spreadsheetFormulaProjectionCorpusSha256: `sha256:${"f".repeat(64)}`,
       runtimeFiles: [
@@ -252,11 +254,18 @@ async function fixture() {
     expect(bytes.length).toBeLessThanOrEqual(limit);
     return bytes;
   };
-  const options = { sourceSha, runId: 10, runAttempt: 1, temporaryRoot, api };
+  const options = {
+    sourceSha,
+    runId: 10,
+    runAttempt: 1,
+    temporaryRoot,
+    sourceRoot: temporaryRoot,
+    api,
+  };
   return { options, producer, state, provenance, archives, assetBytes, mutations, download };
 }
 
-test("publishes seven receipt-verified archives via draft, then resolves anonymously and caches without gh", async () => {
+test("publishes seven receipt-verified archives via draft, then authenticates anonymous cache reuse without gh", async () => {
   const f = await fixture();
   expect(await publishArtifactRuntime(f.options)).toEqual({ releaseId: 20, reused: false });
   expect(f.mutations).toHaveLength(11);
@@ -281,6 +290,10 @@ test("publishes seven receipt-verified archives via draft, then resolves anonymo
     available: true,
     source: "release",
   });
+  expect(await resolveDevelopmentArtifactRuntime(opts)).toMatchObject({
+    available: true,
+    source: "cache",
+  });
   expect(
     await resolveDevelopmentArtifactRuntime({
       ...opts,
@@ -288,11 +301,21 @@ test("publishes seven receipt-verified archives via draft, then resolves anonymo
         throw new Error("offline");
       },
     }),
-  ).toMatchObject({ available: true, source: "cache" });
+  ).toMatchObject({ available: false });
   f.mutations.length = 0;
   f.state.listing = [];
   f.archives.clear();
   expect(await publishArtifactRuntime(f.options)).toEqual({ releaseId: 20, reused: true });
+  expect(f.mutations).toHaveLength(0);
+});
+
+test("rejects internally consistent archives built from different source before publication", async () => {
+  const f = await fixture();
+  await Bun.write(
+    join(f.options.sourceRoot, "packages/artifact-tool/kernel/src/review-source.rs"),
+    "// changed source\n",
+  );
+  await expect(publishArtifactRuntime(f.options)).rejects.toThrow("checkout kernel source");
   expect(f.mutations).toHaveLength(0);
 });
 

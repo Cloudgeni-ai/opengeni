@@ -266,6 +266,7 @@ async function createRepositoryFixture() {
     "scripts/prepare-development-artifact-runtime.ts": "// fixture\n",
     "scripts/resolve-development-artifact-runtime.ts": "// fixture\n",
     "scripts/artifact-runtime-distribution.ts": "// fixture\n",
+    "scripts/artifact-kernel-source-identity.ts": "// fixture\n",
   };
   for (const [path, contents] of Object.entries(files)) {
     await mkdir(dirname(join(repositoryRoot, path)), { recursive: true });

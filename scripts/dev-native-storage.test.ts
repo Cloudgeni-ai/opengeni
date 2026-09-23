@@ -4,8 +4,10 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  linkSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,6 +31,28 @@ function temporary() {
 }
 afterEach(() => {
   for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true });
+});
+
+test("Garage configuration refuses linked directories and files without changing their targets", () => {
+  const target = temporary();
+  const external = join(target, "external");
+  writeFileSync(external, "keep me");
+  for (const name of ["garage.toml", "rpc-secret"]) {
+    for (const hard of [false, true]) {
+      const state = temporary();
+      mkdirSync(join(state, "garage"));
+      (hard ? linkSync : symlinkSync)(external, join(state, "garage", name));
+      expect(() => configureGarage(state)).toThrow("without links");
+      expect(readFileSync(external, "utf8")).toBe("keep me");
+    }
+  }
+  for (const name of ["garage", "garage/meta", "garage/data"]) {
+    const state = temporary();
+    if (name.includes("/")) mkdirSync(join(state, "garage"));
+    symlinkSync(target, join(state, name));
+    expect(() => configureGarage(state)).toThrow("must not be a link");
+    expect(existsSync(join(target, "garage.toml"))).toBe(false);
+  }
 });
 
 describe("native provider selection", () => {

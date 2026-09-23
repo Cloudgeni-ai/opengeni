@@ -308,8 +308,7 @@ export async function collectDevelopmentSourceBuildPrerequisites(
   const repositoryRoot = options.repositoryRoot ?? resolve(import.meta.dir, "..");
   const environment = options.environment ?? process.env;
   const relayRuntime =
-    options.relayRuntime ??
-    (environment.OPENGENI_SANDBOX_SELFHOSTED_ENABLED === "true" ? "source-build" : "disabled");
+    options.relayRuntime ?? (requiresLocalRelay(environment) ? "source-build" : "disabled");
   const host = suppliedHost ?? createPrerequisiteHost(environment, repositoryRoot);
   const errors = sourceBuildHostErrors({
     ...options,
@@ -331,24 +330,31 @@ export async function collectDevelopmentSourceBuildPrerequisites(
     const channel = parsed.toolchain.channel;
     if (!/^\d+\.\d+\.\d+$/u.test(channel))
       throw new Error("Invalid pinned artifact Rust toolchain");
-    await requireProbe(
-      "rustup",
-      ["run", channel, "rustc", "--version"],
-      `Artifact source-build requires pinned Rust ${channel}. Run: rustup toolchain install ${channel} --profile minimal --no-self-update. Or supply a source/host/integrity-verified prebuilt artifact runtime through the launcher.`,
-      new RegExp(`^rustc ${channel.replaceAll(".", "\\.")}\\s`, "u"),
-    );
-    await requireProbe(
-      "rustup",
-      ["run", channel, "cargo", "--version"],
-      `Artifact source-build requires cargo in Rust ${channel}. Run: rustup toolchain install ${channel} --profile minimal --no-self-update.`,
-    );
-    if (host.platform === "win32") {
+    const rustc = await host.probe("rustup", ["run", channel, "rustc", "--version"]);
+    // The build helper installs the repository's toolchain on demand. A read-only
+    // preflight must not reject that supported fresh-machine path.
+    const checkInstalledToolchain = rustc.ok || environment.RUSTUP_AUTO_INSTALL === "0";
+    if (checkInstalledToolchain) {
+      if (
+        !rustc.ok ||
+        !new RegExp(`^rustc ${channel.replaceAll(".", "\\.")}\\s`, "u").test(rustc.stdout)
+      )
+        errors.push(
+          `Artifact source-build requires pinned Rust ${channel}. Run: rustup toolchain install ${channel} --profile minimal --no-self-update.`,
+        );
       await requireProbe(
         "rustup",
-        ["run", channel, "rustc", "-vV"],
-        `Standalone Windows artifact builds require the x86_64-pc-windows-msvc Rust host, not GNU/MinGW. Configure rustup set default-host x86_64-pc-windows-msvc, install Rust ${channel}, and use the MSVC x64 Native Tools Command Prompt.`,
-        /^host: x86_64-pc-windows-msvc\r?$/mu,
+        ["run", channel, "cargo", "--version"],
+        `Artifact source-build requires cargo in Rust ${channel}. Run: rustup toolchain install ${channel} --profile minimal --no-self-update.`,
       );
+      if (host.platform === "win32") {
+        await requireProbe(
+          "rustup",
+          ["run", channel, "rustc", "-vV"],
+          `Standalone Windows artifact builds require the x86_64-pc-windows-msvc Rust host, not GNU/MinGW. Configure rustup set default-host x86_64-pc-windows-msvc, install Rust ${channel}, and use the MSVC x64 Native Tools Command Prompt.`,
+          /^host: x86_64-pc-windows-msvc\r?$/mu,
+        );
+      }
     }
   }
   if (
@@ -383,6 +389,17 @@ export async function collectDevelopmentSourceBuildPrerequisites(
     }
   }
   return errors;
+}
+
+function requiresLocalRelay(environment: NodeJS.ProcessEnv): boolean {
+  if (environment.OPENGENI_SANDBOX_SELFHOSTED_ENABLED !== "true") return false;
+  if (environment.OPENGENI_RELAY_BIND) return true;
+  const address = environment.OPENGENI_SELFHOSTED_RELAY_URL || "ws://127.0.0.1:8280";
+  try {
+    return ["localhost", "127.0.0.1"].includes(new URL(address).hostname);
+  } catch {
+    throw new Error("Invalid OPENGENI_SELFHOSTED_RELAY_URL. Use a ws:// or wss:// address.");
+  }
 }
 
 /** Fixed per-command and whole-preflight budgets; captured output never enters diagnostics. */

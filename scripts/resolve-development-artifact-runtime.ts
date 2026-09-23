@@ -8,6 +8,10 @@ import {
   type NativeArtifactRuntimeTarget,
 } from "../packages/artifact-tool/src/runtime";
 import { resolvePublicRuntimeArchive, type RuntimeDownload } from "./artifact-runtime-distribution";
+import {
+  artifactKernelSourceIdentity,
+  assertKernelSourceIdentity,
+} from "./artifact-kernel-source-identity";
 
 const REPOSITORY = "Cloudgeni-ai/opengeni";
 const REPOSITORY_ID = 1212552738;
@@ -75,6 +79,7 @@ export async function resolveDevelopmentArtifactRuntime(options: {
         throw new Error("source changed during prebuilt resolution");
       }
     };
+    const expectedSource = await artifactKernelSourceIdentity(options.repositoryRoot);
     const cacheParent = join(options.repositoryRoot, ".opengeni", "artifact-runtime-prebuilt");
     for (const path of [join(options.repositoryRoot, ".opengeni"), cacheParent]) {
       await mkdir(path, { recursive: true });
@@ -102,19 +107,19 @@ export async function resolveDevelopmentArtifactRuntime(options: {
         throw new Error("artifact provenance does not match the exact repository/source/target");
       }
     };
-    try {
-      if ((await lstat(cache)).isSymbolicLink()) throw new Error("cache symlink");
-      const metadata = JSON.parse(
-        (await boundedFile(join(cache, "provenance.json"), 1024 * 1024)).toString(),
-      );
-      validateArtifact(metadata);
-      const archive = await boundedFile(join(cache, "archive.zip"), MAX_ARCHIVE);
-      await verifyArchive(archive, metadata, options.target, cache, false);
-      await recheckSource();
-      return { available: true, assetRoot: cache, sourceSha, source: "cache" };
-    } catch {
-      /* A missing/corrupt cache never supplies executable authority. */
-    }
+    const reuseAuthenticatedCache = async (metadata: Artifact): Promise<boolean> => {
+      try {
+        if ((await lstat(cache)).isSymbolicLink()) throw new Error("cache symlink");
+        validateArtifact(metadata);
+        const archive = await boundedFile(join(cache, "archive.zip"), MAX_ARCHIVE);
+        await verifyArchive(archive, metadata, options.target, cache, false, expectedSource);
+        await recheckSource();
+        return true;
+      } catch {
+        /* A missing/corrupt cache never supplies executable authority. */
+        return false;
+      }
+    };
 
     let publicFailure = "";
     try {
@@ -125,8 +130,17 @@ export async function resolveDevelopmentArtifactRuntime(options: {
         options.publicDownload,
       );
       validateArtifact(published.artifact);
+      if (await reuseAuthenticatedCache(published.artifact))
+        return { available: true, assetRoot: cache, sourceSha, source: "cache" };
       staging = await mkdtemp(join(cacheParent, ".download-"));
-      await verifyArchive(published.archive, published.artifact, options.target, staging, true);
+      await verifyArchive(
+        published.archive,
+        published.artifact,
+        options.target,
+        staging,
+        true,
+        expectedSource,
+      );
       await writeFile(join(staging, "archive.zip"), published.archive);
       await writeFile(join(staging, "provenance.json"), JSON.stringify(published.artifact));
       await rm(cache, { recursive: true, force: true });
@@ -171,6 +185,8 @@ export async function resolveDevelopmentArtifactRuntime(options: {
       throw new Error(
         `public release unavailable (${publicFailure}); no successful exact-source artifact within the bounded 10-artifact lookup (CI retention is 3 days)`,
       );
+    if (await reuseAuthenticatedCache(selected))
+      return { available: true, assetRoot: cache, sourceSha, source: "cache" };
     const archive = await run(
       [
         "gh",
@@ -182,7 +198,7 @@ export async function resolveDevelopmentArtifactRuntime(options: {
       MAX_ARCHIVE,
     );
     staging = await mkdtemp(join(cacheParent, ".download-"));
-    await verifyArchive(archive, selected, options.target, staging, true);
+    await verifyArchive(archive, selected, options.target, staging, true, expectedSource);
     await writeFile(join(staging, "archive.zip"), archive);
     await writeFile(join(staging, "provenance.json"), JSON.stringify(selected));
     // Remove only this exact generated cache key. Never touch a source build or installation.
@@ -227,6 +243,7 @@ export async function verifyArchive(
   target: NativeArtifactRuntimeTarget,
   root: string,
   extract: boolean,
+  expectedSource: string,
 ) {
   if (archive.length !== artifact.size_in_bytes || digest(archive) !== artifact.digest) {
     throw new Error("provider archive size/digest mismatch");
@@ -246,6 +263,7 @@ export async function verifyArchive(
     }
   }
   const receipt = await readArtifactKernelBuildReceipt(target, root);
+  assertKernelSourceIdentity(receipt.buildIdentity, expectedSource);
   if (receipt.runtimeFiles.length !== 1 || receipt.runtimeFiles[0]?.path !== NATIVE)
     throw new Error("unexpected native receipt files");
   const proof = receipt.runtimeFiles[0];

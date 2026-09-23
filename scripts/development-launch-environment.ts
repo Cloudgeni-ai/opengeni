@@ -2,14 +2,22 @@ import { detectTarget, toolBin } from "./install-development-tools";
 import { resolveFixture } from "./dev-native-storage";
 import { join } from "node:path";
 
-// Only non-secret settings needed by preflight cross the subprocess boundary.
+// Only settings needed by preflight cross the subprocess boundary; never log them.
 const preflightKeys = [
   "PATH",
+  "DOCKER_HOST",
+  "DOCKER_CONTEXT",
+  "DOCKER_CONFIG",
+  "DOCKER_TLS",
+  "DOCKER_TLS_VERIFY",
+  "DOCKER_CERT_PATH",
   "OPENGENI_DEV_BACKEND",
   "OPENGENI_DOCKER_PROBE_TIMEOUT_SECONDS",
   "OPENGENI_OBJECT_STORAGE_FIXTURE",
   "OPENGENI_SANDBOX_BACKEND",
   "OPENGENI_SANDBOX_SELFHOSTED_ENABLED",
+  "OPENGENI_SELFHOSTED_RELAY_URL",
+  "OPENGENI_RELAY_BIND",
   "OPENGENI_COMPOSE_PROJECT",
 ] as const;
 
@@ -55,7 +63,14 @@ exec "$1" -e "$2"`,
       "Cannot read local startup configuration. Check .env shell syntax and project settings; no services were started.",
     );
   }
-  const snapshot = JSON.parse(result.stdout.toString());
+  let snapshot;
+  try {
+    snapshot = JSON.parse(result.stdout.toString());
+  } catch {
+    throw new Error(
+      "Cannot read local startup configuration. Remove commands that print output from .env; no services were started.",
+    );
+  }
   if (typeof snapshot.project !== "string" || !/^[a-z0-9][a-z0-9-]*$/u.test(snapshot.project)) {
     throw new Error("Invalid development stack project name");
   }

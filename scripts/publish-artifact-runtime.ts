@@ -23,6 +23,7 @@ import {
   type RuntimeSourceArtifact,
 } from "./artifact-runtime-distribution";
 import { verifyArchive } from "./resolve-development-artifact-runtime";
+import { artifactKernelSourceIdentity } from "./artifact-kernel-source-identity";
 
 export type RuntimePublisherApi = {
   get(path: string): Promise<any>;
@@ -64,6 +65,7 @@ export function validateRuntimeProducer(
 }
 
 export async function publishArtifactRuntime(options: {
+  sourceRoot: string;
   sourceSha: string;
   runId: number;
   runAttempt: number;
@@ -71,6 +73,7 @@ export async function publishArtifactRuntime(options: {
   api: RuntimePublisherApi;
 }): Promise<{ releaseId: number; reused: boolean }> {
   const { api, sourceSha, runId, runAttempt } = options;
+  const expectedSource = await artifactKernelSourceIdentity(options.sourceRoot);
   const tagName = runtimeReleaseTag(sourceSha);
   const runPath = `actions/runs/${runId}`;
   const firstRun = await api.get(runPath);
@@ -142,7 +145,7 @@ export async function publishArtifactRuntime(options: {
     let corpusDigest: string | undefined;
     for (const { target, artifact } of artifacts) {
       const archive = await api.artifactBytes(artifact.id);
-      await verifyArchive(archive, artifact, target, staging, true);
+      await verifyArchive(archive, artifact, target, staging, true, expectedSource);
       const receipt = await readArtifactKernelBuildReceipt(target, staging);
       if (
         buildIdentity &&
@@ -358,6 +361,7 @@ if (import.meta.main) {
     JSON.stringify(
       await publishArtifactRuntime({
         ...options,
+        sourceRoot,
         temporaryRoot: process.env.RUNNER_TEMP,
         api: githubPublisherApi(token),
       }),

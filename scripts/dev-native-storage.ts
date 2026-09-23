@@ -1,8 +1,16 @@
 #!/usr/bin/env bun
 // Native development fixtures only. Never point this provisioner at remote storage.
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 export const garageVersion = "2.3.0";
 export type Fixture = "garage" | "minio";
@@ -82,32 +90,58 @@ export function storageSettings(env = process.env) {
   return { port, rpcPort, bucket, accessKey, secretKey };
 }
 
+function ensureRealDirectory(path: string): void {
+  const absolute = resolve(path);
+  const parent = dirname(absolute);
+  if (parent !== absolute) ensureRealDirectory(parent);
+  const stat = lstatSync(absolute, { throwIfNoEntry: false });
+  if (stat) {
+    if (!stat.isDirectory() || stat.isSymbolicLink())
+      throw new Error("Native storage directory must not be a link or non-directory");
+  } else mkdirSync(absolute, { mode: 0o700 });
+}
+
+function checkStateFile(path: string): void {
+  const stat = lstatSync(path, { throwIfNoEntry: false });
+  if (stat && (!stat.isFile() || stat.nlink !== 1))
+    throw new Error("Native storage file must be a regular file without links");
+}
+
 export function configureGarage(state: string, settings = storageSettings()) {
   const directory = join(state, "garage");
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  ensureRealDirectory(directory);
   const secretFile = join(directory, "rpc-secret");
+  const config = join(directory, "garage.toml");
+  checkStateFile(secretFile);
+  checkStateFile(config);
+  for (const name of ["meta", "data"]) ensureRealDirectory(join(directory, name));
   if (!existsSync(secretFile))
     writeFileSync(secretFile, randomBytes(32).toString("hex"), { mode: 0o600, flag: "wx" });
   const secret = readFileSync(secretFile, "utf8");
   if (!/^[0-9a-f]{64}$/.test(secret)) throw new Error("Invalid saved Garage RPC secret");
-  const config = join(directory, "garage.toml");
-  writeFileSync(
-    config,
-    [
-      `metadata_dir = ${JSON.stringify(join(directory, "meta"))}`,
-      `data_dir = ${JSON.stringify(join(directory, "data"))}`,
-      'db_engine = "sqlite"',
-      "replication_factor = 1",
-      `rpc_bind_addr = "127.0.0.1:${settings.rpcPort}"`,
-      `rpc_public_addr = "127.0.0.1:${settings.rpcPort}"`,
-      `rpc_secret = "${secret}"`,
-      "[s3_api]",
-      's3_region = "us-east-1"',
-      `api_bind_addr = "127.0.0.1:${settings.port}"`,
-      "",
-    ].join("\n"),
-    { mode: 0o600 },
-  );
+  const temporaryConfig = join(directory, `.garage-${randomBytes(12).toString("hex")}.toml`);
+  try {
+    writeFileSync(
+      temporaryConfig,
+      [
+        `metadata_dir = ${JSON.stringify(join(directory, "meta"))}`,
+        `data_dir = ${JSON.stringify(join(directory, "data"))}`,
+        'db_engine = "sqlite"',
+        "replication_factor = 1",
+        `rpc_bind_addr = "127.0.0.1:${settings.rpcPort}"`,
+        `rpc_public_addr = "127.0.0.1:${settings.rpcPort}"`,
+        `rpc_secret = "${secret}"`,
+        "[s3_api]",
+        's3_region = "us-east-1"',
+        `api_bind_addr = "127.0.0.1:${settings.port}"`,
+        "",
+      ].join("\n"),
+      { mode: 0o600, flag: "wx" },
+    );
+    renameSync(temporaryConfig, config);
+  } finally {
+    rmSync(temporaryConfig, { force: true });
+  }
   return config;
 }
 

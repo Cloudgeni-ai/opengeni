@@ -162,6 +162,7 @@
   "devDependencies": {
     "@axe-core/playwright": "4.10.2",
     "@changesets/cli": "^2.31.0",
+    "@noble/hashes": "1.8.0",
     "@openai/agents": "0.14.3",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/api-router": "workspace:*",

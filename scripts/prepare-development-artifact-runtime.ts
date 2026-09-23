@@ -279,6 +279,7 @@ export async function developmentArtifactRuntimeSourceFingerprint(
     "scripts/prepare-development-artifact-runtime.ts",
     "scripts/resolve-development-artifact-runtime.ts",
     "scripts/artifact-runtime-distribution.ts",
+    "scripts/artifact-kernel-source-identity.ts",
   ];
   const files: string[] = [];
   for (const input of inputs) {

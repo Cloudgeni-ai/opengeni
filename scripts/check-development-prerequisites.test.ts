@@ -85,6 +85,44 @@ function fixture(overrides: Partial<PrerequisiteHost> = {}) {
 
 const prebuilt = { artifactRuntime: "verified-prebuilt", relayRuntime: "disabled" } as const;
 
+test("missing pinned Rust can be installed by the build helper unless explicitly disabled", async () => {
+  const { host, commands } = fixture({ probe: () => ({ ok: false, stdout: "" }) });
+  const options = { artifactRuntime: "source-build", relayRuntime: "disabled" } as const;
+  expect(
+    await collectDevelopmentSourceBuildPrerequisites({ ...options, environment: {} }, host),
+  ).toEqual([]);
+  expect(
+    await collectDevelopmentSourceBuildPrerequisites(
+      { ...options, environment: { RUSTUP_AUTO_INSTALL: "0" } },
+      host,
+    ),
+  ).toHaveLength(2);
+  expect(commands.some((command) => command.includes("install"))).toBe(false);
+});
+
+test("a remote relay needs no local compiler unless an explicit bind requests a local relay", async () => {
+  const { host } = fixture({ which: () => null });
+  const environment = {
+    OPENGENI_SANDBOX_SELFHOSTED_ENABLED: "true",
+    OPENGENI_SELFHOSTED_RELAY_URL: "wss://relay.example",
+  };
+  expect(
+    await collectDevelopmentSourceBuildPrerequisites(
+      { artifactRuntime: "resolve", environment },
+      host,
+    ),
+  ).toEqual([]);
+  expect(
+    await collectDevelopmentSourceBuildPrerequisites(
+      {
+        artifactRuntime: "resolve",
+        environment: { ...environment, OPENGENI_RELAY_BIND: "0.0.0.0:8280" },
+      },
+      host,
+    ),
+  ).toHaveLength(3);
+});
+
 describe("backend-aware read-only preflight", () => {
   test("Docker checks daemon, Compose, Buildx, but not native infrastructure", async () => {
     const { host, commands } = fixture();

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateRawSync } from "node:zlib";
 import { canonicalArtifactKernelBuildReceiptBytes } from "../packages/artifact-tool/kernel/bindings/package-receipt";
+import { copyKernelSourceFixture } from "./artifact-kernel-source-identity.fixture";
 import type { NativeArtifactRuntimeTarget } from "../packages/artifact-tool/src/runtime";
 import {
   decodeArtifactRuntimeZip,
@@ -33,13 +34,14 @@ const digest = (bytes: Uint8Array): `sha256:${string}` =>
 async function fixture(target: NativeArtifactRuntimeTarget = "linux-x64-gnu") {
   const repositoryRoot = await mkdtemp(join(tmpdir(), "artifact-prebuilt-"));
   roots.push(repositoryRoot);
+  const sourceIdentity = await copyKernelSourceFixture(repositoryRoot);
   const native = Buffer.from("not executable; receipt verification fixture");
   const receipt = canonicalArtifactKernelBuildReceiptBytes({
     schemaVersion: 2,
     producer: "opengeni-artifact-kernel-smoke-v2",
     target,
     kind: "native",
-    buildIdentity: "opengeni-artifact-kernel/test;abi=1",
+    buildIdentity: `opengeni-artifact-kernel/test;abi=1;source=${sourceIdentity};toolchain=test`,
     capabilities: { bytes: 1, sha256: digest(Buffer.from("c")) },
     spreadsheetFormulaProjectionCorpusSha256: digest(Buffer.from("corpus")),
     runtimeFiles: [{ path: nativeName, bytes: native.length, sha256: digest(native) }],
@@ -105,17 +107,19 @@ async function fixture(target: NativeArtifactRuntimeTarget = "linux-x64-gnu") {
 }
 
 for (const target of targets) {
-  test(`verifies exact ${target} download and offline cache without Rust`, async () => {
+  test(`verifies exact ${target} download and provider-authenticated cache without Rust`, async () => {
     const f = await fixture(target);
     const first = await resolveDevelopmentArtifactRuntime(f);
     expect(first).toMatchObject({ available: true, source: "actions", sourceSha: sha });
-    f.state.offline = true;
     f.calls.length = 0;
     expect(await resolveDevelopmentArtifactRuntime(f)).toMatchObject({
       available: true,
       source: "cache",
     });
-    expect(f.calls.every((args) => args[0] === "git")).toBe(true);
+    expect(f.calls.some((args) => args[0] === "gh")).toBe(true);
+    expect(f.calls.some((args) => args.at(-1)?.endsWith("/zip"))).toBe(false);
+    f.state.offline = true;
+    expect(await resolveDevelopmentArtifactRuntime(f)).toMatchObject({ available: false });
   });
 }
 
@@ -170,6 +174,44 @@ test("corrupt cache is not reused offline", async () => {
   expect(await resolveDevelopmentArtifactRuntime(f)).toMatchObject({ available: false });
 });
 
+test("self-consistent cache metadata cannot replace provider authority", async () => {
+  const f = await fixture();
+  const first = await resolveDevelopmentArtifactRuntime(f);
+  if (!first.available) throw new Error(first.diagnostic);
+  const receipt = JSON.parse(f.entries[0]![1].toString());
+  const replacement = Buffer.from("replaced binary and matching local receipt");
+  receipt.runtimeFiles[0].bytes = replacement.length;
+  receipt.runtimeFiles[0].sha256 = digest(replacement);
+  f.entries[0]![1] = Buffer.from(canonicalArtifactKernelBuildReceiptBytes(receipt));
+  f.entries[1]![1] = replacement;
+  const archive = zip(f.entries);
+  await writeFile(join(first.assetRoot, "archive.zip"), archive);
+  await writeFile(
+    join(first.assetRoot, "provenance.json"),
+    JSON.stringify({ ...f.artifact, digest: digest(archive), size_in_bytes: archive.length }),
+  );
+  for (const [path, bytes] of f.entries) await writeFile(join(first.assetRoot, path), bytes);
+  f.state.offline = true;
+  expect(await resolveDevelopmentArtifactRuntime(f)).toMatchObject({ available: false });
+  f.state.offline = false;
+  expect(await resolveDevelopmentArtifactRuntime(f)).toMatchObject({
+    available: true,
+    source: "actions",
+  });
+});
+
+test("a stale kernel source identity is rejected despite matching provider digest", async () => {
+  const f = await fixture();
+  await writeFile(
+    join(f.repositoryRoot, "packages/artifact-tool/kernel/src/review-source.rs"),
+    "// changed source\n",
+  );
+  expect(await resolveDevelopmentArtifactRuntime(f)).toMatchObject({
+    available: false,
+    diagnostic: expect.stringContaining("checkout kernel source"),
+  });
+});
+
 test("cache retention is limited to three generated source-target entries", async () => {
   const first = await fixture();
   for (const target of targets.slice(0, 4)) {
@@ -188,7 +230,7 @@ test("rejects symlinked cache roots without writing through them", async () => {
   const other = await fixture();
   await symlink(other.repositoryRoot, join(f.repositoryRoot, ".opengeni"));
   expect(await resolveDevelopmentArtifactRuntime(f)).toMatchObject({ available: false });
-  expect(await readdir(other.repositoryRoot)).toHaveLength(0);
+  expect(await readdir(other.repositoryRoot)).toEqual(["packages"]);
 });
 
 test("accepts bounded deflate and rejects expansion beyond its declared size", async () => {

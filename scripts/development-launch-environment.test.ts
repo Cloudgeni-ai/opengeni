@@ -51,3 +51,30 @@ test("existing dotenv and invocation backend use the same precedence as startup"
     else process.env.OPENGENI_DEV_BACKEND = previous;
   }
 });
+
+test("preflight carries effective Docker and remote relay settings", async () => {
+  const root = await fixture();
+  await writeFile(
+    join(root, ".env"),
+    "DOCKER_HOST=tcp://docker.example:2376\nDOCKER_CONTEXT=remote\nDOCKER_TLS_VERIFY=1\nDOCKER_CERT_PATH=/certs\nOPENGENI_SELFHOSTED_RELAY_URL=wss://relay.example\nOPENGENI_RELAY_BIND=0.0.0.0:8280\n",
+  );
+  const { environment } = readDevelopmentLaunchEnvironment(root);
+  expect(environment.DOCKER_HOST).toBe("tcp://docker.example:2376");
+  expect(environment.DOCKER_CONTEXT).toBe("remote");
+  expect(environment.DOCKER_TLS_VERIFY).toBe("1");
+  expect(environment.DOCKER_CERT_PATH).toBe("/certs");
+  expect(environment.OPENGENI_SELFHOSTED_RELAY_URL).toBe("wss://relay.example");
+  expect(environment.OPENGENI_RELAY_BIND).toBe("0.0.0.0:8280");
+});
+
+test("dotenv output never appears in a configuration parse error", async () => {
+  const root = await fixture();
+  await writeFile(join(root, ".env"), "printf 'private-test-value'\n");
+  try {
+    readDevelopmentLaunchEnvironment(root);
+    throw new Error("Expected configuration failure");
+  } catch (error) {
+    expect(String(error)).toContain("Cannot read local startup configuration");
+    expect(String(error)).not.toContain("private-test-value");
+  }
+});
