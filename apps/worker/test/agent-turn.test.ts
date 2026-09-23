@@ -669,10 +669,13 @@ describe("turn exact-content boundaries", () => {
     ).toBe("approval_1");
   });
 
-  test("retains intentional screenshot and view-image outputs, not incidental action frames", () => {
+  test("retains explicit and opt-in browser images, but not incidental computer action frames", () => {
     expect(toolCallProducesRetainableSessionImage("computer_screenshot")).toBe(true);
     expect(toolCallProducesRetainableSessionImage("view_image")).toBe(true);
     expect(toolCallProducesRetainableSessionImage("interaction__computer_observe")).toBe(true);
+    expect(toolCallProducesRetainableSessionImage("browser_screenshot")).toBe(true);
+    expect(toolCallProducesRetainableSessionImage("interaction__browser_observe")).toBe(true);
+    expect(toolCallProducesRetainableSessionImage("interaction__browser_act")).toBe(true);
     expect(toolCallProducesRetainableSessionImage("computer_click")).toBe(false);
     expect(toolCallProducesRetainableSessionImage("computer_scroll")).toBe(false);
   });

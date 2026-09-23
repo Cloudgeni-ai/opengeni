@@ -110,7 +110,8 @@ short summaries, without an aggregate stdout cap or default pagination;
 use `list --query <substring>` to filter, or explicitly opt into a slice with
 `--limit <1..100> --offset <integer>`,
 `list --json` for digest/count/continuation metadata, or `list --full` for the legacy
-complete catalog. `show <path>` returns one tool's details/schema, capped at 64 KiB.
+complete catalog. `show <path>` returns the complete details/schema for one tool;
+redirect large output to a file and read only needed ranges.
 It reaches the same journal/executor as model MCP; the machine
 still owns every ordinary credential and ambient environment.
 

@@ -61,7 +61,7 @@ import {
 import {
   compactRetainedScreenshotHistory,
   sdkEventContainsInlineImage,
-  retainComputerScreenshot,
+  retainSessionScreenshot,
   typedScreenshotFromSdkEvent,
   unavailableRetainedSessionImage,
 } from "../retained-screenshots";
@@ -108,6 +108,7 @@ import {
 import {
   pendingToolCallFromSdkEvent,
   toolCallProducesRetainableSessionImage,
+  retainableBrowserScreenshotToolCall,
   completedToolCallFromSdkEvent,
 } from "./history";
 import { checkpointHistoryBeforeProviderDispatch } from "./provider-dispatch-barrier";
@@ -1125,6 +1126,12 @@ export async function runTurnStreamAttempt(
           currentToolBatchCallIds.add(pendingToolCall.callId);
           if (toolCallProducesRetainableSessionImage(pendingToolCall.callName)) {
             media.retainedSessionImageCallIds.add(pendingToolCall.callId);
+            if (retainableBrowserScreenshotToolCall(pendingToolCall.callName)) {
+              media.retainedSessionImageKindsByCallId.set(
+                pendingToolCall.callId,
+                "browser_screenshot",
+              );
+            }
           }
         }
         const completedToolCall = completedToolCallFromSdkEvent(durableSdkEvent);
@@ -1147,6 +1154,7 @@ export async function runTurnStreamAttempt(
               toolCallId: completedToolCall.callId,
               toolOutputId: completedToolCall.callId,
               reason: "unsupported",
+              kind: media.retainedSessionImageKindsByCallId.get(completedToolCall.callId),
             });
             media.retainedScreenshotReceiptsByCallId.set(
               completedToolCall.callId,
@@ -1169,12 +1177,13 @@ export async function runTurnStreamAttempt(
               toolCallId: typedScreenshot.callId,
               toolOutputId: typedScreenshot.toolOutputId,
               reason: "pending",
+              kind: media.retainedSessionImageKindsByCallId.get(completedToolCall.callId),
             });
             media.retainedScreenshotReceiptsByCallId.set(
               completedToolCall.callId,
               retainedScreenshotMetadata,
             );
-            retainedScreenshotMetadata = await retainComputerScreenshot({
+            retainedScreenshotMetadata = await retainSessionScreenshot({
               db,
               objectStorage,
               accountId: input.accountId,
@@ -1183,6 +1192,7 @@ export async function runTurnStreamAttempt(
               turnId: activeTurnId,
               attemptId: input.attemptId,
               output: typedScreenshot,
+              kind: media.retainedSessionImageKindsByCallId.get(completedToolCall.callId),
             });
             media.retainedScreenshotReceiptsByCallId.set(
               completedToolCall.callId,
@@ -1339,6 +1349,7 @@ export async function runTurnStreamAttempt(
           }
           for (const callId of stableToolCallIdsToClear) {
             media.retainedSessionImageCallIds.delete(callId);
+            media.retainedSessionImageKindsByCallId.delete(callId);
           }
         }
       }

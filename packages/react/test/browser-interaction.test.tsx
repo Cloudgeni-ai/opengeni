@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { StreamFrame, StreamOpen, StreamOpenAck } from "@opengeni/agent-proto";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
@@ -832,6 +832,111 @@ describe("BrowserSession React resources", () => {
     expect(hook.result.current.error).toBeNull();
     await hook.unmount();
   });
+  test("keeps tab inventory polling while semantic observation is paused and refreshes on fallback", async () => {
+    let inventoryCalls = 0;
+    let observationCalls = 0;
+    let currentTarget = target();
+    const client = fakeClient({
+      getBrowserSession: async () => browserSession(),
+      listBrowserTargets: async () => {
+        inventoryCalls += 1;
+        return {
+          browserSessionId: BROWSER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets: [currentTarget],
+        };
+      },
+      observeBrowserTarget: async () => {
+        observationCalls += 1;
+        return observation(BROWSER_SESSION_ID, currentTarget);
+      },
+    });
+    const props = (semanticObservationEnabled: boolean, pollIntervalMs = 750) => ({
+      client,
+      workspaceId: WORKSPACE_ID,
+      browserSessionId: BROWSER_SESSION_ID,
+      pollIntervalMs,
+      semanticObservationEnabled,
+    });
+    const hook = await renderHook(
+      (options: ReturnType<typeof props>) => useBrowserSession(options),
+      props(true),
+    );
+    await flush(20);
+    expect(observationCalls).toBe(1);
+
+    jest.useFakeTimers();
+    try {
+      // Changing the interval installs the timer under the fake clock.
+      await hook.rerender(props(false, 760));
+      await actRun(async () => {
+        jest.advanceTimersByTime(800);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(inventoryCalls).toBeGreaterThan(1);
+      expect(observationCalls).toBe(1);
+      expect(hook.result.current.observation?.target.id).toBe(currentTarget.id);
+
+      currentTarget = target(BROWSER_SESSION_ID, "target-1", "document-2");
+      await actRun(async () => {
+        jest.advanceTimersByTime(800);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(hook.result.current.observation).toBeNull();
+      expect(observationCalls).toBe(1);
+
+      await hook.rerender(props(true));
+      await actRun(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(observationCalls).toBe(2);
+      expect(hook.result.current.observation?.target.documentGeneration).toBe("document-2");
+    } finally {
+      await hook.unmount();
+      jest.useRealTimers();
+    }
+  });
+
+  test("uses a fresh tab-selection observation when the frame has not arrived yet", async () => {
+    const currentTarget = target();
+    let observationCalls = 0;
+    const client = fakeClient({
+      getBrowserSession: async () => browserSession(),
+      listBrowserTargets: async () => ({
+        browserSessionId: BROWSER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [currentTarget],
+      }),
+      observeBrowserTarget: async () => {
+        observationCalls += 1;
+        return observation(BROWSER_SESSION_ID, currentTarget);
+      },
+      selectBrowserTarget: async () => observation(BROWSER_SESSION_ID, currentTarget),
+    });
+    const props = (semanticObservationEnabled: boolean) => ({
+      client,
+      workspaceId: WORKSPACE_ID,
+      browserSessionId: BROWSER_SESSION_ID,
+      semanticObservationEnabled,
+    });
+    const hook = await renderHook(
+      (options: ReturnType<typeof props>) => useBrowserSession(options),
+      props(false),
+    );
+    try {
+      await flush(20);
+      expect(observationCalls).toBe(0);
+      await actRun(async () => await hook.result.current.selectTarget(currentTarget.id));
+      await hook.rerender(props(true));
+      expect(observationCalls).toBe(0);
+      expect(hook.result.current.observation?.target.id).toBe(currentTarget.id);
+    } finally {
+      await hook.unmount();
+    }
+  });
 });
 
 describe("BrowserSession frame stream", () => {
@@ -1031,6 +1136,69 @@ describe("BrowserSession frame stream", () => {
 });
 
 describe("BrowserViewer", () => {
+  test("keeps the frame connection warm without AX polling behind another dock tab", async () => {
+    let observationCalls = 0;
+    let inventoryCalls = 0;
+    const sockets: FakeBrowserSocket[] = [];
+    const currentTarget = target();
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [browserSession()] }),
+      getBrowserSession: async () => browserSession(),
+      listBrowserTargets: async () => {
+        inventoryCalls += 1;
+        return {
+          browserSessionId: BROWSER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets: [currentTarget],
+        };
+      },
+      observeBrowserTarget: async () => {
+        observationCalls += 1;
+        return observation(BROWSER_SESSION_ID, currentTarget);
+      },
+      attachBrowserSession: async () => attachment(currentTarget.id),
+    });
+    const viewer = (active: boolean) => (
+      <BrowserViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        active={active}
+        webSocketFactory={(url, protocols) => {
+          const socket = new FakeBrowserSocket(url, protocols);
+          sockets.push(socket);
+          return socket as unknown as BrowserFrameWebSocket;
+        }}
+      />
+    );
+    const rendered = await renderComponent(viewer(true));
+    await flush(30);
+    expect(observationCalls).toBe(1);
+    expect(sockets).toHaveLength(1);
+    await dispatch(sockets[0]!, "open");
+    await dispatch(sockets[0]!, "message", { data: frameMessage(currentTarget.id, 1).buffer });
+    await flush(10);
+
+    try {
+      await rendered.rerender(viewer(false));
+      await flush(2_100);
+      expect(inventoryCalls).toBeGreaterThan(1);
+      expect(observationCalls).toBe(1);
+      expect(sockets[0]?.closed).toBe(false);
+
+      await rendered.rerender(viewer(true));
+      await flush(2_100);
+      expect(observationCalls).toBe(1);
+      expect(sockets).toHaveLength(1);
+
+      await dispatch(sockets[0]!, "close");
+      await flush(20);
+      expect(observationCalls).toBe(2);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("retires a stale Connected Machine browser and stops polling the permanent conflict", async () => {
     const stale = {
       ...browserSession(),

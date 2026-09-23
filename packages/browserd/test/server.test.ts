@@ -1059,6 +1059,29 @@ function fakeDriver(
     async observe() {
       return observation();
     },
+    async targetState() {
+      return {
+        browserSessionId: context.browserSessionId,
+        controllerGeneration: context.controllerGeneration,
+        targetId: target.id,
+        targetGeneration: target.targetGeneration,
+        documentGeneration: target.documentGeneration,
+        frameId: "frame-1",
+      };
+    },
+    async readDom(_targetId, domRequest) {
+      return {
+        browserSessionId: context.browserSessionId,
+        controllerGeneration: context.controllerGeneration,
+        targetId: target.id,
+        targetGeneration: target.targetGeneration,
+        documentGeneration: target.documentGeneration,
+        frameId: "frame-1",
+        kind: domRequest.kind,
+        count: domRequest.kind === "element" ? 1 : 0,
+        truncated: false,
+      };
+    },
     async dispatch() {
       return observation();
     },
@@ -1120,6 +1143,11 @@ function fakeDriver(
 }
 
 function frame(context: BrowserSupervisorDriverContext, target: BrowserTarget): BrowserImageFrame {
+  // A Buffer subarray retains a larger backing ArrayBuffer. The HTTP response
+  // must serve this exact view, without the sentinel bytes on either side.
+  const fixture = png();
+  const backing = Buffer.alloc(fixture.length + 16, 0x7f);
+  Buffer.from(fixture).copy(backing, 8);
   return {
     frameId: "image-1",
     browserSessionId: context.browserSessionId,
@@ -1134,7 +1162,7 @@ function frame(context: BrowserSupervisorDriverContext, target: BrowserTarget): 
     deviceScaleFactor: 1,
     scrollX: 0,
     scrollY: 0,
-    data: png(),
+    data: backing.subarray(8, 8 + fixture.length),
     capturedAt: "2026-08-09T12:00:00.000Z",
   };
 }

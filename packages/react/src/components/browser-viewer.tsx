@@ -82,6 +82,9 @@ export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
   /** The selected OpenGeni agent/session. Peer BrowserSessions stay discoverable. */
   sessionId: string;
   enabled?: boolean | undefined;
+  /** Whether the Browser tab is selected. Keeps the mounted media stream warm
+   * while pausing semantic reads behind other dock tabs. */
+  active?: boolean | undefined;
   className?: string | undefined;
   onNotify?: ((notification: BrowserViewerNotification) => void) | undefined;
   /** Tests/demos only. Production uses the browser's native WebSocket. */
@@ -139,6 +142,7 @@ type BrowserDiagnosticsView = {
 export function BrowserViewer({
   sessionId,
   enabled = true,
+  active = true,
   className,
   onNotify,
   webSocketFactory,
@@ -287,6 +291,7 @@ export function BrowserViewer({
   );
   const controllerReady = selectedRegistrySession?.lifecycle === "active";
   const resumeSession = registry.resume;
+  const [hasLiveFrame, setHasLiveFrame] = useState(false);
 
   const wakeBrowser = useCallback(
     async (session: BrowserSession, retry = false): Promise<void> => {
@@ -348,6 +353,7 @@ export function BrowserViewer({
     ...override,
     browserSessionId: selection?.sessionId ?? null,
     enabled: enabled && selection !== null && controllerReady,
+    semanticObservationEnabled: active && !hasLiveFrame,
   });
   useEffect(() => {
     if (!isSourcePlacementChangedError(browser.error, "browser_session")) return;
@@ -413,6 +419,10 @@ export function BrowserViewer({
   )
     ? frames.frame
     : null;
+  const frameIsLive = frames.state === "live" && displayedFrame !== null;
+  useEffect(() => {
+    setHasLiveFrame(frameIsLive);
+  }, [frameIsLive]);
   const supportsLiveFrames = browser.session?.capabilities.liveFrames === true;
   const displayConnectionState = supportsLiveFrames
     ? frames.state === "live" && !displayedFrame

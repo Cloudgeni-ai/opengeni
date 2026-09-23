@@ -1,4 +1,5 @@
 import type {
+  AttemptToolResult,
   AttachedBrowserDevice,
   AuthRun,
   AuthRunListResponse,
@@ -47,7 +48,8 @@ import type {
 import type { CodemodeCallOptions, CodemodeClient } from "./index";
 import { environmentCodemodeClient, type CodemodeClientProvider } from "./environment";
 import { CodemodeArtifactCollection } from "./artifacts";
-import { callStructured, codemodeClientProvider } from "./structured";
+import { materializeCodemodeImages, type CodemodeLocalImage } from "./images";
+import { callStructured, codemodeClientProvider, CodemodeToolExecutionError } from "./structured";
 
 export { CodemodeToolExecutionError } from "./structured";
 
@@ -56,6 +58,8 @@ const PATH = {
   browserOpen: ["interaction", "browser", "open"],
   browserTabs: ["interaction", "browser", "tabs"],
   browserObserve: ["interaction", "browser", "observe"],
+  browserRead: ["interaction", "browser", "read"],
+  browserScreenshot: ["interaction", "browser", "screenshot"],
   browserAct: ["interaction", "browser", "act"],
   browserClipboard: ["interaction", "browser", "clipboard"],
   browserDebug: ["interaction", "browser", "debug"],
@@ -107,6 +111,101 @@ export type BrowserActionFences = {
   expectedDocumentGeneration?: string | null | undefined;
   expectedFrameId?: string | null | undefined;
 };
+
+export type CodemodeBrowserScreenshotOptions = {
+  /** Capture the entire scrollable page when supported by the browser. */
+  fullPage?: boolean | undefined;
+  /** Save the still at this exact path. Existing files are never overwritten. */
+  saveTo?: string | undefined;
+};
+
+export type CodemodeBrowserScreenshotMetadata = Readonly<{
+  kind: "browser_screenshot";
+  browserSessionId: string;
+  targetId: string;
+  frameId: string;
+  targetGeneration: string;
+  documentGeneration: string;
+  mediaType: "image/png" | "image/jpeg";
+  width: number;
+  height: number;
+  deviceScaleFactor: number;
+  scrollX: number;
+  scrollY: number;
+  capturedAt: string;
+  fullPage: boolean;
+}>;
+
+export type CodemodeBrowserScreenshot = CodemodeLocalImage &
+  Readonly<{
+    /** Small structured frame metadata; pixel bytes stay in the local image file. */
+    metadata: CodemodeBrowserScreenshotMetadata;
+  }>;
+
+export type CodemodeBrowserAgentNode = Readonly<{
+  ref: string;
+  role: string;
+  depth: number;
+  name?: string;
+  description?: string;
+  value?: string | { redacted: true; reason: string };
+  states: readonly string[];
+  actions: readonly string[];
+}>;
+
+export type CodemodeBrowserAgentView = Readonly<{
+  kind: "compact";
+  sourceKind: "snapshot" | "diff" | "none";
+  nodes: readonly CodemodeBrowserAgentNode[];
+  sourceNodeCount: number;
+  omittedNodeCount: number;
+  removedRefCount: number;
+  clippedFieldCount: number;
+  maxNodes: number;
+  maxNodeBytes: number;
+}>;
+
+export type CodemodeBrowserAgentObservation = BrowserObservation & {
+  /** Present on the compact default; absent when the full tree was requested. */
+  agentView?: CodemodeBrowserAgentView;
+};
+
+export type CodemodeBrowserActionReceipt = Omit<BrowserActionReceipt, "observation"> & {
+  observation: CodemodeBrowserAgentObservation | null;
+};
+
+export type CodemodeBrowserActionOptions = BrowserActionFences & {
+  view?: "compact" | "full" | "none" | undefined;
+};
+
+export type CodemodeBrowserReadOptions = Readonly<{
+  mode?: "matches" | "count" | "subtree";
+  ref?: string;
+  scopeRef?: string;
+  role?: string;
+  nameContains?: string;
+  textContains?: string;
+  state?: string;
+  action?: string;
+  limit?: number;
+}>;
+
+export type CodemodeBrowserReadResult = Readonly<{
+  browserSessionId: string;
+  targetId: string;
+  observationId: string;
+  targetGeneration: string;
+  documentGeneration: string | null;
+  frameId: string | null;
+  source: "accessibility";
+  mode: "matches" | "count" | "subtree";
+  scopeFound: boolean;
+  nodes: readonly CodemodeBrowserAgentNode[];
+  totalMatches: number;
+  omittedMatches: number;
+  clippedFieldCount: number;
+  maxNodeBytes: number;
+}>;
 
 export type ComputerActionFences = {
   expectedTargetGeneration?: string | undefined;
@@ -273,17 +372,45 @@ export class CodemodeBrowser {
   async observe(
     targetId?: string,
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserObservation> {
+  ): Promise<CodemodeBrowserAgentObservation> {
     return await this.tabs
       .use(await this.tabs.resolveId(targetId, callOptions))
       .observe(callOptions);
   }
 
+  async observeFull(
+    targetId?: string,
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<BrowserObservation> {
+    return await this.tabs
+      .use(await this.tabs.resolveId(targetId, callOptions))
+      .observeFull(callOptions);
+  }
+
+  async read(
+    options: CodemodeBrowserReadOptions & { targetId?: string | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<CodemodeBrowserReadResult> {
+    const { targetId, ...query } = options;
+    return await this.tabs
+      .use(await this.tabs.resolveId(targetId, callOptions))
+      .read(query, callOptions);
+  }
+
+  async screenshot(
+    options: CodemodeBrowserScreenshotOptions & { targetId?: string | undefined } = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<CodemodeBrowserScreenshot> {
+    return await this.tabs
+      .use(await this.tabs.resolveId(options.targetId, callOptions))
+      .screenshot(options, callOptions);
+  }
+
   async act(
     action: BrowserAction,
-    options: BrowserActionFences & { targetId?: string | undefined } = {},
+    options: CodemodeBrowserActionOptions & { targetId?: string | undefined } = {},
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<CodemodeBrowserActionReceipt> {
     const targetId = await this.tabs.resolveId(options.targetId, callOptions);
     return await this.tabs.use(targetId).act(action, options, callOptions);
   }
@@ -541,7 +668,7 @@ export class CodemodeBrowserTab {
     readonly id: string,
   ) {}
 
-  async observe(callOptions: CodemodeCallOptions = {}): Promise<BrowserObservation> {
+  async observe(callOptions: CodemodeCallOptions = {}): Promise<CodemodeBrowserAgentObservation> {
     return await callStructured(
       this.client,
       PATH.browserObserve,
@@ -550,11 +677,50 @@ export class CodemodeBrowserTab {
     );
   }
 
+  async observeFull(callOptions: CodemodeCallOptions = {}): Promise<BrowserObservation> {
+    return await callStructured(
+      this.client,
+      PATH.browserObserve,
+      { browserSessionId: this.browserSessionId, targetId: this.id, view: "full" },
+      callOptions,
+    );
+  }
+
+  async read(
+    options: CodemodeBrowserReadOptions = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<CodemodeBrowserReadResult> {
+    return await callStructured(
+      this.client,
+      PATH.browserRead,
+      { browserSessionId: this.browserSessionId, targetId: this.id, ...options },
+      callOptions,
+    );
+  }
+
+  async screenshot(
+    options: CodemodeBrowserScreenshotOptions = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<CodemodeBrowserScreenshot> {
+    const result = await (
+      await this.client()
+    ).callPath(
+      PATH.browserScreenshot,
+      {
+        browserSessionId: this.browserSessionId,
+        targetId: this.id,
+        ...(options.fullPage === undefined ? {} : { fullPage: options.fullPage }),
+      },
+      callOptions,
+    );
+    return await materializeBrowserScreenshot(result, options.saveTo);
+  }
+
   async act(
     action: BrowserAction,
-    fences: BrowserActionFences = {},
+    fences: CodemodeBrowserActionOptions = {},
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<CodemodeBrowserActionReceipt> {
     return await callStructured(
       this.client,
       PATH.browserAct,
@@ -1205,6 +1371,33 @@ export class CodemodeComputerLocator {
       callOptions,
     );
   }
+}
+
+/** Keep screenshot pixels out of Code Mode text output; `view_image` reads the local file. */
+async function materializeBrowserScreenshot(
+  result: AttemptToolResult,
+  saveTo: string | undefined,
+): Promise<CodemodeBrowserScreenshot> {
+  if (result.isError) throw new CodemodeToolExecutionError(result);
+  if (!result.structuredContent) {
+    throw new Error("Codemode tool interaction.browser.screenshot returned no structured content");
+  }
+  const image = result.content.find((content) => content.type === "image");
+  if (
+    typeof result.structuredContent.mediaType === "string" &&
+    image &&
+    result.structuredContent.mediaType !== image.mimeType
+  ) {
+    throw new Error("Codemode browser screenshot image type differs from frame metadata");
+  }
+  const images = await materializeCodemodeImages(result, {
+    ...(saveTo === undefined ? {} : { saveTo }),
+    requireOne: true,
+  });
+  return {
+    ...images[0]!,
+    metadata: result.structuredContent as CodemodeBrowserScreenshotMetadata,
+  };
 }
 
 export function createOpenGeniCodemode(

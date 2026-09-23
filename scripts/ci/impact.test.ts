@@ -862,6 +862,7 @@ function requiredResult(
     integration: number;
     e2e: number;
     browser: number;
+    browserdRealE2e?: boolean;
     artifactRuntime: boolean;
     build: number;
     bakeImages?: boolean;
@@ -890,6 +891,9 @@ function requiredResult(
       "browser",
       String(options.browser),
       "--argjson",
+      "browserdRealE2e",
+      String(options.browserdRealE2e ?? options.mode === "full"),
+      "--argjson",
       "artifactRuntime",
       String(options.artifactRuntime),
       "--argjson",
@@ -917,6 +921,7 @@ describe("workflow fail-closed contracts", () => {
       "artifact-runtime": { result: "success" },
       "test-suite": { result: "success" },
       "browser-acceptance": { result: "success" },
+      "browserd-real-e2e": { result: "success" },
       "package-contracts": { result: "success" },
       deployment: { result: "success" },
       images: { result: "success" },
@@ -950,6 +955,22 @@ describe("workflow fail-closed contracts", () => {
     ).toBe(false);
     expect(
       requiredResult(
+        { ...full, "browserd-real-e2e": { result: "skipped" } },
+        {
+          event: "pull_request",
+          mode: "focused",
+          unit: 1,
+          integration: 1,
+          e2e: 1,
+          browser: 1,
+          browserdRealE2e: true,
+          artifactRuntime: true,
+          build: 1,
+        },
+      ),
+    ).toBe(false);
+    expect(
+      requiredResult(
         {
           ...full,
           "unit-shards": { result: "skipped" },
@@ -958,6 +979,7 @@ describe("workflow fail-closed contracts", () => {
           "artifact-runtime": { result: "skipped" },
           "test-suite": { result: "skipped" },
           "browser-acceptance": { result: "skipped" },
+          "browserd-real-e2e": { result: "skipped" },
           "package-contracts": { result: "skipped" },
           deployment: { result: "skipped" },
           images: { result: "skipped" },
@@ -979,6 +1001,7 @@ describe("workflow fail-closed contracts", () => {
         {
           ...full,
           "browser-acceptance": { result: "skipped" },
+          "browserd-real-e2e": { result: "skipped" },
           "artifact-runtime": { result: "skipped" },
           images: { result: "skipped" },
         },
@@ -1020,6 +1043,7 @@ describe("workflow fail-closed contracts", () => {
       "e2e-shards",
       "test-suite",
       "browser-acceptance",
+      "browserd-real-e2e",
       "package-contracts",
     ]) {
       results[name] = { result: "skipped" };

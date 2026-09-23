@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFile, rm } from "node:fs/promises";
+import { dirname } from "node:path";
 import {
   CodemodeClient,
   CodemodeOperationError,
@@ -745,5 +747,69 @@ describe("CodemodeClient", () => {
       code: "not_ready",
       retryable: true,
     } satisfies Partial<CodemodeToolCallError>);
+  });
+
+  test("keeps raw image blocks and gives typed calls local image paths with original content", async () => {
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X9p8AAAAASUVORK5CYII=",
+      "base64",
+    );
+    const structuredContent = { count: 1, images: ["server-owned-key"] };
+    const content = [
+      { type: "text" as const, text: "one image" },
+      { type: "image" as const, data: png.toString("base64"), mimeType: "image/png" },
+      { type: "resource_link" as const, name: "source", uri: "https://example.test/source" },
+    ];
+    const typedDefinition: AttemptToolDefinition = {
+      ...definition,
+      outputSchema: {
+        type: "object",
+        properties: {
+          count: { type: "integer" },
+          images: { type: "array", items: { type: "string" } },
+        },
+        required: ["count", "images"],
+        additionalProperties: false,
+      },
+    };
+    const catalog = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [typedDefinition],
+    }).catalog;
+    const client = new CodemodeClient({
+      baseUrl: "https://api.example.test/codemode",
+      token: "token",
+      fetch: (async (input, init) => {
+        if (String(input).endsWith("/catalog")) return Response.json(catalog);
+        const body = JSON.parse(String(init?.body)) as { operationId: string };
+        return Response.json({
+          operation: {
+            ...operation(body.operationId, catalog.digest, "completed"),
+            result: { content, structuredContent },
+          },
+          dispatch: "terminal",
+        });
+      }) as typeof fetch,
+    });
+
+    const raw = await client.callPath(["docs", "search"], { query: "hello" });
+    expect(raw.content).toEqual(content);
+    expect(raw.structuredContent).toEqual(structuredContent);
+    const typed = (await createCodemodeTools(() => client).docs!.search!({ query: "hello" })) as {
+      structuredContent: typeof structuredContent;
+      images: Array<{ path: string; mimeType: string; sizeBytes: number }>;
+      otherContent: unknown[];
+    };
+    try {
+      expect(typed.structuredContent).toEqual(structuredContent);
+      expect(typed.otherContent).toEqual([content[0], content[2]]);
+      expect(typed.images).toHaveLength(1);
+      expect(typed.images[0]).toMatchObject({ mimeType: "image/png", sizeBytes: png.length });
+      expect(await readFile(typed.images[0]!.path)).toEqual(png);
+      expect(JSON.stringify(typed)).not.toContain(png.toString("base64"));
+    } finally {
+      await rm(dirname(typed.images[0]!.path), { recursive: true, force: true });
+    }
   });
 });

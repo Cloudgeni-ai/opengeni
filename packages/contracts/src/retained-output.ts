@@ -35,6 +35,7 @@ export const RetainedOutputKind = z.enum([
   "internal_update",
   "event_media",
   "computer_screenshot",
+  "browser_screenshot",
   "generated_image",
   "generated_video",
   "file",
@@ -124,6 +125,7 @@ export const RetainedArtifactReferenceSchema = z
 
     if (
       value.kind === "computer_screenshot" ||
+      value.kind === "browser_screenshot" ||
       value.kind === "generated_image" ||
       value.kind === "generated_video"
     ) {
@@ -187,12 +189,12 @@ export const RetainedArtifactReferenceSchema = z
       }
     }
 
-    if (value.kind === "computer_screenshot") {
+    if (value.kind === "computer_screenshot" || value.kind === "browser_screenshot") {
       if (value.retention.policy !== "session_screenshot" || !sessionMatch) {
         ctx.addIssue({
           code: "custom",
           path: ["retention"],
-          message: "computer screenshots require session-scoped expiring retrieval",
+          message: "session screenshots require session-scoped expiring retrieval",
         });
       }
     }
@@ -252,7 +254,22 @@ export type RetainedScreenshotArtifactInput = RetainedArtifactFileInput & {
   width: number;
   height: number;
   expiresAt: string;
+  kind?: "computer_screenshot" | "browser_screenshot";
 };
+
+export type RetainedSessionScreenshotKind = "computer_screenshot" | "browser_screenshot";
+
+/** The persisted, server-authored storage key distinguishes browser captures from legacy computer captures. */
+export function retainedSessionScreenshotKindFromObjectKey(
+  objectKey: string,
+): RetainedSessionScreenshotKind | null {
+  const match =
+    /^workspaces\/[0-9a-f-]+\/files\/[0-9a-f-]+\/retained\/(session-image|computer-screenshot|screenshot|browser-screenshot)\.(png|jpg|webp)$/.exec(
+      objectKey,
+    );
+  if (!match) return null;
+  return match[1] === "browser-screenshot" ? "browser_screenshot" : "computer_screenshot";
+}
 
 export type RetainedGeneratedImageArtifactInput = RetainedArtifactFileInput & {
   width: number;
@@ -305,7 +322,7 @@ export function retainedScreenshotReferenceFromFile(
   const value = {
     available: true as const,
     artifactId: file.id,
-    kind: "computer_screenshot" as const,
+    kind: file.kind ?? "computer_screenshot",
     contentType: canonicalRetainedContentType(file.contentType),
     originalBytes: file.sizeBytes,
     sha256: file.sha256,

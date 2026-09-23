@@ -117,6 +117,8 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   browser_open: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_tabs: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_observe: { sessionRequired: true, allOf: ["sessions:read"] },
+  browser_read: { sessionRequired: true, allOf: ["sessions:read"] },
+  browser_screenshot: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_act: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_debug: { sessionRequired: true, allOf: ["sessions:read"] },

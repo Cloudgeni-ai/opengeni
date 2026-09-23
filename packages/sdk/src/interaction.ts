@@ -1,4 +1,15 @@
 import type { OpenGeniRequestOptions } from "./client";
+import type {
+  BrowserDomReadRequest,
+  BrowserDomReadResponse,
+  BrowserTargetState,
+} from "@opengeni/contracts";
+export type {
+  BrowserDomReadRequest,
+  BrowserDomReadResponse,
+  BrowserDomSafeAttribute,
+  BrowserTargetState,
+} from "@opengeni/contracts";
 import { OpenGeniApiError } from "./errors";
 import type { RetainedArtifactReference } from "./types";
 
@@ -1495,11 +1506,25 @@ export interface InteractionTransport {
     targetId: string,
     options?: OpenGeniRequestOptions,
   ): Promise<BrowserObservation>;
+  getBrowserTargetState(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<BrowserTargetState>;
+  readBrowserDom(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    request: BrowserDomReadRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<BrowserDomReadResponse>;
   captureBrowserTarget(
     workspaceId: string,
     browserSessionId: string,
     targetId: string,
     options?: OpenGeniRequestOptions,
+    captureOptions?: BrowserScreenshotOptions,
   ): Promise<BrowserFrame>;
   actInBrowser(
     workspaceId: string,
@@ -2147,8 +2172,47 @@ export class BrowserSessionResource {
     return await this.transport.observeBrowserTarget(this.workspaceId, this.id, targetId, options);
   }
 
-  async capture(targetId: string, options: OpenGeniRequestOptions = {}): Promise<BrowserFrame> {
-    return await this.transport.captureBrowserTarget(this.workspaceId, this.id, targetId, options);
+  async targetState(
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserTargetState> {
+    return await this.transport.getBrowserTargetState(this.workspaceId, this.id, targetId, options);
+  }
+
+  async readDom(
+    targetId: string,
+    request: BrowserDomReadRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserDomReadResponse> {
+    return await this.transport.readBrowserDom(
+      this.workspaceId,
+      this.id,
+      targetId,
+      request,
+      options,
+    );
+  }
+
+  async capture(
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+    captureOptions: BrowserScreenshotOptions = {},
+  ): Promise<BrowserFrame> {
+    return await this.transport.captureBrowserTarget(
+      this.workspaceId,
+      this.id,
+      targetId,
+      options,
+      captureOptions,
+    );
+  }
+
+  async screenshot(
+    targetId: string,
+    captureOptions: BrowserScreenshotOptions = {},
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserFrame> {
+    return await this.capture(targetId, options, captureOptions);
   }
 
   async act(
@@ -2534,6 +2598,14 @@ export type BrowserFrameMetadata = {
 };
 
 export type BrowserFrame = BrowserFrameMetadata & { data: Uint8Array };
+
+export type BrowserScreenshotOptions = {
+  /** Capture the document content instead of the visible viewport. */
+  fullPage?: boolean;
+  format?: "jpeg" | "png";
+  /** JPEG quality, from 1 to 100. Ignored for PNG. */
+  quality?: number;
+};
 
 export type ComputerFrameMetadata = {
   frameId: string;

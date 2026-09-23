@@ -26,6 +26,7 @@ import {
 import {
   materializeRetainedScreenshotHistory,
   retainComputerScreenshot,
+  retainSessionScreenshot,
   validateComputerScreenshot,
 } from "../src/activities/retained-screenshots";
 import type { ActivityServices } from "../src/activities/types";
@@ -709,6 +710,37 @@ describe("retained screenshot lifecycle fences", () => {
     expect(result.sha256).toBe(SCREENSHOT.sha256);
     expect(await artifactRow(result.artifactId)).toMatchObject({
       status: "ready",
+    });
+  }, 180_000);
+
+  test("browser screenshot uses the existing quota and replays a distinct session receipt", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const input = {
+      db,
+      objectStorage: memory.storage,
+      ...fixture,
+      kind: "browser_screenshot" as const,
+      output: {
+        callId: "call-browser-screenshot",
+        toolOutputId: "output-browser-screenshot",
+        bytes: PNG,
+        mediaType: "image/png",
+      },
+      retentionMs: 60_000,
+      workspaceQuotaBytes: 1024 * 1024,
+    };
+    const first = await retainSessionScreenshot(input);
+    const replay = await retainSessionScreenshot(input);
+    expect(first).toMatchObject({ available: true, kind: "browser_screenshot" });
+    expect(replay).toEqual(first);
+    expect([...memory.objects.keys()]).toEqual([
+      `workspaces/${fixture.workspaceId}/files/${first.artifactId}/retained/browser-screenshot.png`,
+    ]);
+    expect(await getWorkspaceScreenshotQuota(db, fixture.workspaceId)).toEqual({
+      reservedBytes: 0,
+      readyBytes: PNG.byteLength,
     });
   }, 180_000);
 

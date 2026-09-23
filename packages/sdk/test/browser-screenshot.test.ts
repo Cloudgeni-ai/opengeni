@@ -47,6 +47,48 @@ test("captures the requested browser target as a bounded image", async () => {
   expect(frame.mediaType).toBe("image/jpeg");
 });
 
+test("forwards explicit full-page and encoding options without changing request-options position", async () => {
+  let requestedUrl = "";
+  const controller = new AbortController();
+  const sdk = new OpenGeniClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input, init) => {
+      requestedUrl = String(input);
+      expect(init?.signal).toBe(controller.signal);
+      return frameResponse();
+    },
+  });
+  await sdk.captureBrowserTarget(
+    workspaceId,
+    browserSessionId,
+    targetId,
+    { signal: controller.signal },
+    { fullPage: true, format: "jpeg", quality: 80 },
+  );
+  expect(new URL(requestedUrl).searchParams.toString()).toBe(
+    "fullPage=true&format=jpeg&quality=80",
+  );
+  await expect(
+    sdk.captureBrowserTarget(workspaceId, browserSessionId, targetId, {}, { quality: 101 }),
+  ).rejects.toThrow("quality");
+});
+
+test("browser session screenshot uses capture options directly", async () => {
+  let requestedUrl = "";
+  const sdk = new OpenGeniClient({
+    baseUrl: "https://api.example.test",
+    fetch: async (input) => {
+      requestedUrl = String(input);
+      return frameResponse();
+    },
+  });
+  const frame = await sdk.interaction.browsers
+    .session(workspaceId, browserSessionId)
+    .screenshot(targetId, { fullPage: true });
+  expect(new URL(requestedUrl).searchParams.get("fullPage")).toBe("true");
+  expect(frame.data).toEqual(data);
+});
+
 test("rejects a screenshot bound to another browser target", async () => {
   const sdk = new OpenGeniClient({
     baseUrl: "https://api.example.test",

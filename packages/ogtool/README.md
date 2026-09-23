@@ -80,10 +80,11 @@ the total/offset footer. Both `--flag value` and `--flag=value` are supported.
 `--full` rejects `--json`, `--query`, `--limit`, and `--offset`, including explicitly
 supplied defaults. Unknown/duplicate flags and extra arguments are errors.
 `show` accepts the same exact path/model-name/identity aliases as `call`
-and rejects unknown or ambiguous names. Its JSON output (including the final newline)
-is limited to 64 KiB; oversized details fail without partial output or schema
-truncation. Use `list --full` redirected to a file, or `declarations <output-file>`,
-for larger schemas. Existing scripts parsing the old `list` JSON must use `list --full`.
+and rejects unknown or ambiguous names. It returns the complete single-tool JSON,
+including large schemas. To keep a large schema out of agent context, redirect
+`ogtool show <path> > tool.json` and read only the needed file ranges; use
+`ogtool declarations <output-file>` for generated TypeScript types. Existing
+scripts parsing the old `list` JSON must use `list --full`.
 
 The Connected Machine fallback, `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode`,
 supports the same `list`, `list --json`, `list --full`, and `show` discovery behavior.

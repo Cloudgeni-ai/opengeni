@@ -528,6 +528,8 @@ const browser = await client.interaction.browsers.currentOrOpen({
 const { targets } = await browser.tabs.list();
 const target = targets.find((candidate) => candidate.selected) ?? targets[0]!;
 const page = await browser.observe(target.id);
+const screenshot = await browser.screenshot(target.id, { fullPage: true });
+// screenshot.data is bounded image bytes; mediaType and dimensions travel with it.
 
 const receipt = await browser.act({
   operationId: crypto.randomUUID(),
@@ -543,6 +545,10 @@ if (receipt.state === "outcome_unknown") {
   console.log(await browser.receipt(receipt.operationId));
 }
 ```
+
+`browser.targetState(targetId)` reads generation fences without an accessibility
+tree. `browser.readDom(targetId, request)` returns a bounded element or count
+query using those fences; sensitive values are redacted.
 
 Browser identities are immutable version graphs: live browser state stays
 private until `browser.publishRevision(...)` explicitly creates a new revision.

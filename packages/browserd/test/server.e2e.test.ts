@@ -5,6 +5,8 @@ import { join } from "node:path";
 import type {
   BrowserActionCommand,
   BrowserObservation,
+  BrowserTargetState,
+  BrowserDomReadResponse,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import {
@@ -114,6 +116,47 @@ e2e(
       expect(
         names(await observe(server, reference.browserSessionId, observation.target.id, viewToken)),
       ).toContain("Clicked 4 times");
+
+      const targetPath = `/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}`;
+      const stateResponse = await fetch(`${server.url}${targetPath}/state`, {
+        headers: { authorization: `Bearer ${viewToken}` },
+      });
+      expect(stateResponse.status).toBe(200);
+      const state = ((await stateResponse.json()) as { data: BrowserTargetState }).data;
+      expect(state).toMatchObject({
+        browserSessionId: reference.browserSessionId,
+        targetId: observation.target.id,
+        targetGeneration: observation.target.targetGeneration,
+        documentGeneration: observation.target.documentGeneration,
+        frameId: observation.frameId,
+      });
+      const read = await request(server, `${targetPath}/dom-read`, viewToken, {
+        kind: "element",
+        locator: { kind: "css", selector: "button" },
+        attributes: ["role", "title"],
+        expectedTargetGeneration: state.targetGeneration,
+        expectedDocumentGeneration: state.documentGeneration,
+        expectedFrameId: state.frameId,
+      });
+      expect(read.status).toBe(200);
+      expect(((await read.json()) as { data: BrowserDomReadResponse }).data).toMatchObject({
+        kind: "element",
+        count: 1,
+        text: "Clicked 4 times",
+        truncated: false,
+        attributes: { role: null, title: null },
+      });
+      const staleRead = await request(server, `${targetPath}/dom-read`, viewToken, {
+        kind: "count",
+        selector: "button",
+        expectedTargetGeneration: state.targetGeneration,
+        expectedDocumentGeneration: "stale-document",
+        expectedFrameId: state.frameId,
+      });
+      expect(staleRead.status).toBe(409);
+      expect((await staleRead.json()) as { error: { code: string } }).toMatchObject({
+        error: { code: "document_stale" },
+      });
 
       const screenshot = await fetch(
         `${server.url}/v1/browser-sessions/${reference.browserSessionId}/targets/${encodeURIComponent(observation.target.id)}/screenshot`,

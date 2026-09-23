@@ -64,12 +64,21 @@ import { openGeni } from "@opengeni/codemode";
 
 const browser = await openGeni.browsers.open({ initialUrl: "http://127.0.0.1:3000" });
 const tab = await browser.tabs.selected();
+const page = await tab.observe(); // Compact refs and explicit omission counts.
+const buttons = await tab.read({ role: "button", nameContains: "Save", limit: 5 });
 await tab.getByRole("button", { name: "Save" }).click();
+const still = await tab.screenshot();
+console.log(still.path); // Open this local PNG/JPEG/WebP with view_image.
 
 const computer = await openGeni.computers.open();
 const app = await computer.apps.focused();
 await app.getByRole("button", { name: "1" }).invoke();
 ```
+
+`tab.observeFull()` retrieves the complete accessibility snapshot when compact
+refs or a focused `tab.read()` query are insufficient. Focused reads search the
+accessibility tree; they do not return arbitrary DOM attributes or hidden
+input values.
 
 Both surfaces return the same durable tool receipts. Human approval, catalog
 generation, operation idempotency, and outcome-unknown behavior remain enforced
@@ -83,6 +92,24 @@ attempt host's exact approved SDK invocation context; calling the environment
 directly cannot bypass approval. The dispatcher keeps its claim alive during
 gateway preparation and reuses a deterministic durable tool-created event if a
 pre-execution claim is reclaimed.
+
+`tab.screenshot({ fullPage?: boolean, saveTo?: string })` calls the same atomic
+`interaction.browser.screenshot` tool and writes its image block to a private
+local file. It returns the absolute path, MIME type, byte count, and small frame
+metadata, without printing base64 pixels. Use the agent's `view_image` tool on
+that path to inspect the still. `saveTo` writes to an exact caller-chosen path
+and refuses to overwrite an existing file. `CodemodeClient.callPath` remains
+available when code needs the complete MCP result, including image blocks.
+Default image paths are private OS scratch files; later image calls remove this
+client's scratch directories older than 24 hours. Use `saveTo` when a file must
+remain available longer; that path is caller-owned and never pruned by Code Mode.
+The generated `tools.*` namespace normally returns structured output directly.
+When a typed tool returns image blocks, it instead returns
+`{ structuredContent, images, otherContent }`: `images` contains local paths,
+and `otherContent` preserves text and other non-image blocks. Generated
+declarations express this union. Open `images[n].path` with `view_image`.
+The facade and typed wrapper keep base64 out of program output; raw `callPath`
+retains it and should not be printed wholesale.
 
 `CodemodeCallOptions.signal` cancels only the caller's HTTP/polling observation.
 It does not request server cancellation and cannot prove that an operation

@@ -104,11 +104,28 @@ e2e(
       screenshotDirectory: join(directory, "screenshots"),
       headed: false,
     });
+    const cdpMethods: string[] = [];
     const driver = new AgentBrowserDriver({
       browserSessionId,
       controllerGeneration,
       runner,
       downloadDirectory: join(directory, "downloads"),
+      connect: async (endpoint) => {
+        const connection = await CdpConnection.connect(endpoint);
+        return {
+          send: async <T = Record<string, unknown>>(
+            method: string,
+            params?: Readonly<Record<string, unknown>>,
+            options?: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal },
+          ): Promise<T> => {
+            cdpMethods.push(method);
+            return await connection.send<T>(method, params, options);
+          },
+          on: connection.on.bind(connection),
+          waitForEvent: connection.waitForEvent.bind(connection),
+          close: connection.close.bind(connection),
+        };
+      },
     });
     let releaseBarrier!: () => void;
     const barrier = new Promise<void>((resolve) => {
@@ -157,6 +174,64 @@ e2e(
         mediaType: "image/png",
       });
       expect([...screenshot.data.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+      const fullAxBefore = cdpMethods.filter(
+        (method) => method === "Accessibility.getFullAXTree",
+      ).length;
+      const state = await driver.targetState(initial.target.id);
+      expect(state).toMatchObject({
+        browserSessionId,
+        controllerGeneration,
+        targetId: initial.target.id,
+        targetGeneration: initial.target.targetGeneration,
+        documentGeneration: initial.target.documentGeneration,
+        frameId: initial.frameId,
+      });
+      const readFence = {
+        expectedTargetGeneration: state.targetGeneration,
+        expectedDocumentGeneration: state.documentGeneration!,
+        expectedFrameId: state.frameId!,
+      };
+      expect(
+        await driver.readDom(initial.target.id, {
+          kind: "count",
+          selector: "button",
+          ...readFence,
+        }),
+      ).toMatchObject({ kind: "count", count: 4, truncated: false });
+      expect(
+        await driver.readDom(initial.target.id, {
+          kind: "element",
+          locator: { kind: "css", selector: "#message" },
+          attributes: ["placeholder", "type"],
+          ...readFence,
+        }),
+      ).toMatchObject({
+        kind: "element",
+        count: 1,
+        value: "",
+        redacted: null,
+        attributes: { placeholder: "Say something", type: null },
+        truncated: false,
+      });
+      expect(cdpMethods.filter((method) => method === "Accessibility.getFullAXTree")).toHaveLength(
+        fullAxBefore,
+      );
+      expect(
+        await driver.readDom(initial.target.id, {
+          kind: "element",
+          locator: { kind: "css", selector: "main > p:first-of-type" },
+          maxChars: 6,
+          ...readFence,
+        }),
+      ).toMatchObject({ kind: "element", text: "Static", truncated: true });
+      await expect(
+        driver.readDom(initial.target.id, {
+          kind: "count",
+          selector: "button",
+          ...readFence,
+          expectedDocumentGeneration: "stale-document",
+        }),
+      ).rejects.toMatchObject({ code: "document_stale" });
       const frames = await driver.subscribeFrames(initial.target.id, {
         format: "jpeg",
         maxWidth: 640,
@@ -308,6 +383,40 @@ e2e(
 
       const parallelOrigin = `http://127.0.0.1:${server.port}`;
       const authPage = await driver.openTarget(`${parallelOrigin}/auth`);
+      const authState = await driver.targetState(authPage.target.id);
+      expect(
+        await driver.readDom(authPage.target.id, {
+          kind: "element",
+          locator: { kind: "css", selector: "#password" },
+          attributes: ["name", "type"],
+          expectedTargetGeneration: authState.targetGeneration,
+          expectedDocumentGeneration: authState.documentGeneration!,
+          expectedFrameId: authState.frameId!,
+        }),
+      ).toMatchObject({
+        kind: "element",
+        count: 1,
+        text: null,
+        value: null,
+        attributes: {},
+        redacted: "password",
+        truncated: false,
+      });
+      expect(
+        await driver.readDom(authPage.target.id, {
+          kind: "element",
+          locator: { kind: "css", selector: "#card" },
+          attributes: ["name", "type"],
+          expectedTargetGeneration: authState.targetGeneration,
+          expectedDocumentGeneration: authState.documentGeneration!,
+          expectedFrameId: authState.frameId!,
+        }),
+      ).toMatchObject({
+        kind: "element",
+        value: null,
+        attributes: {},
+        redacted: "payment",
+      });
       const protectedResult = await driver.protectedFill(
         protectedAuthCommand(authPage, parallelOrigin),
       );
@@ -318,6 +427,19 @@ e2e(
       expect(JSON.stringify(await driver.debug(authPage.target.id))).not.toContain(
         "fixture-password",
       );
+      await expect(driver.captureScreenshot(authPage.target.id)).rejects.toMatchObject({
+        code: "permission_denied",
+      });
+      const protectedState = await driver.targetState(authPage.target.id);
+      await expect(
+        driver.readDom(authPage.target.id, {
+          kind: "count",
+          selector: "button",
+          expectedTargetGeneration: protectedState.targetGeneration,
+          expectedDocumentGeneration: protectedState.documentGeneration!,
+          expectedFrameId: protectedState.frameId!,
+        }),
+      ).rejects.toMatchObject({ code: "permission_denied" });
 
       const firstParallel = await driver.openTarget("about:blank");
       const secondParallel = await driver.openTarget("about:blank");
@@ -489,7 +611,8 @@ function authFixture(): string {
       <label>Username <input id="username" name="username" autocomplete="username"></label>
       <label>Password <input id="password" name="password" type="password" autocomplete="current-password" oninput="console.error('credential:' + this.value)"></label>
       <button id="login" type="submit">Sign in</button>
-    </form>`;
+    </form>
+    <input id="card" name="card-number" autocomplete="cc-number" value="fixture-card-secret">`;
 }
 
 function dataUrl(html: string): string {

@@ -1896,6 +1896,73 @@ export const BrowserLocator = z.discriminatedUnion("kind", [
 ]);
 export type BrowserLocator = z.infer<typeof BrowserLocator>;
 
+/** Cheap causal state for a target. This is intentionally independent of an
+ * accessibility observation, which can require a full tree for every frame. */
+export const BrowserTargetState = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    targetId: boundedOpaqueId,
+    targetGeneration: opaqueGeneration,
+    documentGeneration: opaqueGeneration.nullable(),
+    frameId: opaqueGeneration.nullable(),
+  })
+  .strict();
+export type BrowserTargetState = z.infer<typeof BrowserTargetState>;
+
+export const BrowserDomSafeAttribute = z.enum([
+  "href",
+  "src",
+  "alt",
+  "title",
+  "role",
+  "aria-label",
+  "aria-expanded",
+  "aria-checked",
+  "aria-selected",
+  "placeholder",
+  "type",
+  "name",
+  "data-testid",
+]);
+export type BrowserDomSafeAttribute = z.infer<typeof BrowserDomSafeAttribute>;
+
+const BrowserDomReadFence = z.object({
+  expectedTargetGeneration: opaqueGeneration,
+  expectedDocumentGeneration: opaqueGeneration,
+  expectedFrameId: opaqueGeneration,
+});
+
+/** A fixed, read-only query. The caller never supplies executable JavaScript.
+ * CSS count is scoped to the target's main document; child frames and shadow
+ * roots are not part of its count. */
+export const BrowserDomReadRequest = z.discriminatedUnion("kind", [
+  BrowserDomReadFence.extend({
+    kind: z.literal("element"),
+    locator: BrowserLocator,
+    attributes: z.array(BrowserDomSafeAttribute).max(13).optional(),
+    maxChars: z.number().int().min(1).max(32_768).optional(),
+  }).strict(),
+  BrowserDomReadFence.extend({
+    kind: z.literal("count"),
+    selector: z.string().min(1).max(8_192),
+  }).strict(),
+]);
+export type BrowserDomReadRequest = z.infer<typeof BrowserDomReadRequest>;
+
+export const BrowserDomReadResponse = BrowserTargetState.extend({
+  kind: z.enum(["element", "count"]),
+  count: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  text: z.string().max(32_768).nullable().optional(),
+  value: z.string().max(32_768).nullable().optional(),
+  attributes: z
+    .partialRecord(BrowserDomSafeAttribute, z.string().max(32_768).nullable())
+    .optional(),
+  redacted: z.enum(["password", "payment", "private", "policy"]).nullable().optional(),
+  truncated: z.boolean(),
+}).strict();
+export type BrowserDomReadResponse = z.infer<typeof BrowserDomReadResponse>;
+
 /** Provider-neutral locator for native accessibility trees. Native automation
  * identifiers are intentionally distinct from DOM selectors/test ids: AX,
  * AT-SPI, and UIA adapters resolve them inside the exact observed target. */

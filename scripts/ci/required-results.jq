@@ -8,10 +8,12 @@
 (if $mode == "docs" and ($bakeImages | not) then
    ."test-suite".result == "skipped" and
    ."browser-acceptance".result == "skipped" and
+   ."browserd-real-e2e".result == "skipped" and
    .deployment.result == "skipped" and
    .images.result == "skipped"
  else
    (if $mode == "docs" then ."test-suite".result == "skipped" else ."test-suite".result == "success" end) and
+   (if $browserdRealE2e then ."browserd-real-e2e".result == "success" else ."browserd-real-e2e".result == "skipped" end) and
    (if $browser == 0 then ."browser-acceptance".result == "skipped" else ."browser-acceptance".result == "success" end) and
    .deployment.result == "success" and
    (if $bakeImages then .images.result == "success" else .images.result == "skipped" end)

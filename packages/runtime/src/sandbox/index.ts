@@ -303,6 +303,8 @@ export {
   provisionBrowserControlClient,
   validateComputerControlFrameEvidence,
   type BrowserControlPlacementSession,
+  type BrowserControlScreenshotOptions,
+  type BrowserControlFrame,
   type BrowserStateDownloadGrant,
   type BrowserStateUploadGrant,
   type BrowserViewGrant,
