@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { posix as posixPath } from "node:path";
+import { managedCodemodeClientEnvironment } from "./codemode-client";
 
 import type {
   ExecCommandArgs,
@@ -86,10 +87,12 @@ export function withCodemodeTokenEnvironment(
   cmd: string,
   tokenFile: string,
   codemodeUrl?: string,
+  clientDirectory?: string,
 ): string {
   return [
     `export OPENGENI_CODEMODE_TOKEN_FILE=${shellCodemodePath(tokenFile)}`,
     ...(codemodeUrl ? [`export OPENGENI_CODEMODE_URL=${shellQuote(codemodeUrl)}`] : []),
+    ...(clientDirectory ? managedCodemodeClientEnvironment(clientDirectory) : []),
     cmd,
   ].join("\n");
 }
@@ -99,6 +102,7 @@ export function withCodemodeTokenSession<T extends object>(
   session: T,
   tokenFile: string,
   codemodeUrl?: string,
+  clientDirectory?: string,
 ): T {
   return new Proxy(session, {
     get(target, property, receiver) {
@@ -110,7 +114,7 @@ export function withCodemodeTokenSession<T extends object>(
         return async (args: ExecCommandArgs) =>
           await command.call(target, {
             ...args,
-            cmd: withCodemodeTokenEnvironment(args.cmd, tokenFile, codemodeUrl),
+            cmd: withCodemodeTokenEnvironment(args.cmd, tokenFile, codemodeUrl, clientDirectory),
           });
       }
       const value = Reflect.get(target, property, receiver) as unknown;
@@ -124,12 +128,13 @@ export function withCodemodeTokenClient(
   client: SandboxClient,
   tokenFile: string,
   codemodeUrl?: string,
+  clientDirectory?: string,
 ): SandboxClient {
   const decorated = new WeakMap<object, SandboxSessionLike>();
   const wrap = <T extends SandboxSessionLike>(session: T): T => {
     const existing = decorated.get(session);
     if (existing) return existing as T;
-    const wrapped = withCodemodeTokenSession(session, tokenFile, codemodeUrl);
+    const wrapped = withCodemodeTokenSession(session, tokenFile, codemodeUrl, clientDirectory);
     decorated.set(session, wrapped);
     return wrapped;
   };

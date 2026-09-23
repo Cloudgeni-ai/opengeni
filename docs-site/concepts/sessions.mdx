@@ -41,6 +41,25 @@ their own activity indicators.
 
 When a session is waiting on you (a tool approval or a structured question), a normal Send replaces that wait with your new prompt.
 
+## Recovering unavailable workspace files
+
+If a managed Modal workspace is unavailable but an older registered checkpoint
+remains, an authorized signed-in human can review and explicitly restore that
+checkpoint in the same chat. This is available only when the session is the sole
+member of its sandbox group and has no unsettled work.
+
+The confirmation identifies the checkpoint time. Newer filesystem changes are
+unavailable; the conversation stays intact and external effects are not undone.
+The displayed generation gap is not a count of lost files or edits. Accepting
+consent is not proof of completion: restoration must pass verification before the
+UI reports it restored. The agent receives a persistent filesystem warning before
+later inference. No failed command is automatically retried. Pause and Cancel
+remain separate controls, and changing models cannot repair missing files.
+
+Shared groups, other providers, previous/unregistered checkpoints, and empty
+workspace resets are not supported by this recovery action. If recovery is blocked,
+the UI explains the blocker instead of promising a fresh sandbox with intact files.
+
 ## Attached context
 
 A session can carry repositories, uploaded files, workspace documents, selected tools, and Skills. Tool selection is durable session state: an explicit tool list is taken verbatim, and omitting it selects the workspace default.
@@ -52,8 +71,9 @@ presentations, images, and published files. Use its type filters, title search,
 sorting, and grid or list view to find an output without reopening its conversation.
 The session's Artifacts panel shows outputs associated with that conversation.
 
-Published images are retained in workspace storage and can display directly in
-chat. Opening them does not require starting the compute sandbox. A file merely
+Published files are retained in workspace storage. Images, video, audio and PDFs
+can display directly in chat and in the artifact panel. Other file formats offer
+a download. Opening them does not require starting the compute sandbox. A file merely
 created in the filesystem is not published automatically: the agent must publish
 the output it intends to deliver. Input attachments and temporary files do not
 automatically become library entries.
@@ -70,6 +90,29 @@ An agent can spawn child sessions for parallel or delegated work. Children run a
 ## Visibility
 
 Workspaces are shared by their members, and sessions in a shared workspace are visible to members by default. An organization owner can allow members to create "Only me" sessions that only their owner can see. Personal workspaces belong to one person.
+
+### Connected accounts
+
+Open **Connectors** in the composer to see the accounts attached to each enabled
+connector. Personal and workspace accounts can be attached together. Account rows
+show a readable identity and whether the connection is **Only me** or **This
+workspace**; use their toggles to narrow which accounts the agent may use.
+Add or connect accounts from the connector's **Capabilities** page, not from the
+chat's account list.
+
+Connectors configured for one exact account keep that restriction. Account
+selection does not broaden an existing pinned custom integration.
+
+Personal credentials belong to the person sending the message, even in a shared
+session. Another participant cannot inherit those credentials by replying. The
+results of an action in a shared session are still visible to its participants.
+Scheduled tasks use their execution owner's authorized account selections and
+revalidate access for each occurrence.
+
+Each attached account has its own tool route. A missing or revoked account is an
+access failure, not permission to silently switch to another identity. If you
+attach several accounts, name the account or workspace when the intended identity
+is not clear from your request—especially for actions that send or change data.
 
 ## Agent access in product integrations
 
@@ -102,6 +145,20 @@ use the model, reasoning effort and speed from the latest turn that started.
 Session labels and fresh message drafts use those settings too. Before any turn
 starts, the initial session settings apply. Existing drafts, queued messages and
 historical turns retain their own settings.
+
+## Codex subscription source
+
+Workspace model settings let you connect Codex subscriptions even when the
+workspace inherits organization subscriptions. **Automatic** uses workspace
+subscriptions when connected, otherwise the organization's subscriptions.
+**This workspace only** and **Organization only** select one source explicitly;
+they do not combine the two pools.
+
+You can change this setting while work is in progress. New work uses the selected
+source; already-accepted turns keep their original source, including while
+recovering, awaiting an action, or waiting for capacity. Connecting an account
+does not change your selected mode: **Organization only** stays selected, and
+**Turn off Codex** stays off for new work.
 
 ## Voice input
 

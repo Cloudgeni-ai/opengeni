@@ -90,9 +90,7 @@ export async function resolveGoogleDrivePublicationTarget(
   );
   if (frozen.length !== 1) return null;
   const delegation = frozen[0]!;
-  const activated = delegation.userDelegation !== undefined;
   if (
-    !activated &&
     !(await ports.getMembership(db, {
       accountId: workspace.accountId,
       workspaceId,
@@ -101,7 +99,7 @@ export async function resolveGoogleDrivePublicationTarget(
   ) {
     return null;
   }
-  const originWorkspaceId = activated ? delegation.originWorkspaceId : workspaceId;
+  const originWorkspaceId = delegation.originWorkspaceId;
   if (!originWorkspaceId) return null;
   const connection = await ports.getConnection(
     db,

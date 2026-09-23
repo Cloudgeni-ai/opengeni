@@ -7,6 +7,7 @@ import { useChannels, useSessionLineage, useWorkspaceSessions } from "@opengeni/
 import { SiteOriginLink } from "@/components/session/site-origin-link";
 import { SiteSessionGroupHeading } from "./site-session-group-heading";
 import { SessionBrowseOrderControls } from "./session-browse-order-controls";
+import { requestSessionSearch } from "@/lib/session-search-route";
 import {
   OpenGeniApiError,
   OpenGeniSessionListCursorError,
@@ -314,6 +315,10 @@ export function SessionList() {
   // Poll so running sessions surface and move to the top without a manual
   // refresh; the previous index relied on a one-shot load.
   const [searchDraft, setSearchDraft] = useState("");
+  const openSearchDialog = useCallback(
+    () => requestSessionSearch(rail.workspaceId),
+    [rail.workspaceId],
+  );
   const [search, setSearch] = useState("");
   const browsePreferenceStorageId = useMemo(
     () => sessionBrowsePreferenceStorageId(context.accessContext.subjectId, rail.workspaceId),
@@ -391,6 +396,8 @@ export function SessionList() {
   } = channelsQuery;
   const [channelDialogOpen, setChannelDialogOpen] = useState(false);
   const [channelNameDraft, setChannelNameDraft] = useState("");
+  const [projectPendingRename, setProjectPendingRename] = useState<Channel | null>(null);
+  const [projectRenameDraft, setProjectRenameDraft] = useState("");
   const [projectPendingDelete, setProjectPendingDelete] = useState<Channel | null>(null);
   const [sessionPendingDelete, setSessionPendingDelete] = useState<Session | null>(null);
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
@@ -460,14 +467,20 @@ export function SessionList() {
   >(() => new Map());
   const archiveMembershipEvidence = useMemo(() => {
     const evidence = new Map([...archiveOverrides].map(([id, receipt]) => [id, receipt.session]));
-    for (const session of sessions) {
+    // A retained first page can overlap a newer continuation. Preserve its
+    // versioned archive decision separately from whole-row merge priority;
+    // channel membership still follows its independent read authority below.
+    const continuationSessions = activeGroupContinuations.flatMap(([key, continuation]) =>
+      key === "archived" ? [] : continuation.sessions,
+    );
+    for (const session of [...sessions, ...continuationSessions]) {
       const previous = evidence.get(session.id);
       if (!previous || (session.archiveVersion ?? 0) > (previous.archiveVersion ?? 0)) {
         evidence.set(session.id, session);
       }
     }
     return evidence;
-  }, [archiveOverrides, sessions]);
+  }, [activeGroupContinuations, archiveOverrides, sessions]);
   const archiveReadEvidence = useMemo(() => {
     const rowReadGenerations = new Map<string, number>();
     for (const [, continuation] of activeGroupContinuations) {
@@ -1404,6 +1417,20 @@ export function SessionList() {
     },
     [context, refreshSessionPages, verifySessionChannelMove],
   );
+  const submitRenameProject = useCallback(async () => {
+    const name = projectRenameDraft.trim();
+    if (!projectPendingRename || !name || channelsQuery.mutating) return;
+    if (name === projectPendingRename.name) {
+      setProjectPendingRename(null);
+      return;
+    }
+    const updated = await updateProject(projectPendingRename.id, { name });
+    if (updated) {
+      setProjectPendingRename(null);
+    } else {
+      toast.error("Couldn't rename the project. The name may already be in use.");
+    }
+  }, [projectRenameDraft, projectPendingRename, channelsQuery.mutating, updateProject]);
   const onToggleProjectPin = useCallback(
     async (project: Channel) => {
       const updated = await updateProject(project.id, { pinned: !project.pinned });
@@ -2533,35 +2560,26 @@ export function SessionList() {
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex min-w-0 items-center justify-between gap-2 pb-1 pl-[18px] pr-3 pt-1">
-        <span className="text-sm font-normal text-fg-muted">
+      <div className="mb-1 flex min-w-0 shrink-0 items-center gap-1 pl-[18px] pr-3 pt-1">
+        <span className="min-w-0 flex-1 truncate text-sm font-normal text-fg-muted">
           {search ? "Search results" : browseControlsActive ? "Browse sessions" : "Sessions"}
         </span>
-      </div>
-
-      <div className="mb-1 ml-2 mr-3 flex shrink-0 items-center gap-1">
-        <label className="relative min-w-0 flex-1">
-          <span className="sr-only">Search sessions</span>
-          <SearchIcon
-            aria-hidden="true"
-            className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-fg-subtle"
-          />
-          <input
-            type="search"
-            value={searchDraft}
-            onChange={(event) => updateSearchDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape" && searchDraft) {
-                event.preventDefault();
-                updateSearchDraft("");
-              }
-            }}
-            maxLength={200}
-            placeholder="Search"
-            aria-label="Search sessions"
-            className="h-7 w-full min-w-0 rounded-md border border-border bg-bg/45 pl-7 pr-2 text-xs text-fg outline-none placeholder:text-fg-subtle hover:border-border-strong focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/40 pointer-coarse:h-11 pointer-coarse:text-base"
-          />
-        </label>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              onClick={openSearchDialog}
+              aria-label="Search sessions"
+              aria-haspopup="dialog"
+              className="shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
+            >
+              <SearchIcon aria-hidden="true" className="size-3.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">Search sessions</TooltipContent>
+        </Tooltip>
         {channelMode ? (
           <Tooltip>
             <TooltipTrigger asChild>
@@ -2586,10 +2604,7 @@ export function SessionList() {
               variant="ghost"
               size="icon-xs"
               aria-label={browseControlsActive ? "Session view, customized" : "Session view"}
-              className={cn(
-                "relative shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11",
-                browseControlsActive && "bg-surface-2 text-fg",
-              )}
+              className="relative shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
             >
               <ListFilterIcon className="size-3.5" />
               {browseControlsActive ? (
@@ -2717,6 +2732,10 @@ export function SessionList() {
                       : undefined
                   }
                   onToggleProjectPin={onToggleProjectPin}
+                  onRenameProject={(project) => {
+                    setProjectRenameDraft(project.name);
+                    setProjectPendingRename(project);
+                  }}
                   onDeleteProject={setProjectPendingDelete}
                   draggedProjectId={draggedProjectId}
                   dragOverProjectId={dragOverProjectId}
@@ -2850,6 +2869,18 @@ export function SessionList() {
         )}
       </div>
       <ChannelCreateDialog
+        key={projectPendingRename?.id ?? "rename-project"}
+        mode="rename"
+        open={projectPendingRename !== null}
+        name={projectRenameDraft}
+        busy={channelsQuery.mutating}
+        onNameChange={setProjectRenameDraft}
+        onOpenChange={(open) => {
+          if (!open) setProjectPendingRename(null);
+        }}
+        onSubmit={() => void submitRenameProject()}
+      />
+      <ChannelCreateDialog
         open={channelDialogOpen}
         name={channelNameDraft}
         busy={channelsQuery.mutating}
@@ -2982,6 +3013,7 @@ function SessionGroup(props: {
   allowNewSession?: boolean;
   project?: Channel;
   onToggleProjectPin?: (project: Channel) => void;
+  onRenameProject?: (project: Channel) => void;
   onDeleteProject?: (project: Channel) => void;
   draggedProjectId?: string | null;
   dragOverProjectId?: string | null;
@@ -3117,6 +3149,10 @@ function SessionGroup(props: {
                 </button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" side="right">
+                <DropdownMenuItem onSelect={() => props.onRenameProject?.(props.project!)}>
+                  <PencilIcon aria-hidden="true" className="size-3.5" />
+                  Rename project
+                </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => props.onToggleProjectPin?.(props.project!)}>
                   <PinIcon
                     aria-hidden="true"
@@ -4060,6 +4096,21 @@ export function CollapsedSessionsButton() {
   const tooltip = failed ? "Session history is unavailable" : "Sessions";
   return (
     <div className="flex flex-1 flex-col items-center gap-1 px-2 pt-1">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Search sessions"
+            onClick={() => requestSessionSearch(rail.workspaceId)}
+            className="text-fg-muted hover:text-fg"
+          >
+            <SearchIcon className="size-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="right">Search sessions</TooltipContent>
+      </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>
           <Button

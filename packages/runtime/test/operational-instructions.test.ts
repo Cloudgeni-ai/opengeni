@@ -19,6 +19,42 @@ describe("provider-neutral operational instructions", () => {
     expect(guidance.length).toBeLessThan(1000);
   });
 
+  test("asks about out-of-scope architecture without blocking authorized choices", () => {
+    const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
+      "Decide the design before building it.",
+    );
+    const end = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("# Destructive Actions", start);
+    const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(guidance).toContain("check whether OpenGeni already provides the capability natively");
+    expect(guidance).toContain(
+      "a Site reaches the model and workspace tools through the host bridge",
+    );
+    expect(guidance).toContain(
+      "Follow the project's established architecture and choices the user has already authorized or delegated",
+    );
+    expect(guidance).toContain(
+      "Ask before making a new external commitment or materially departing from the established architecture beyond the authorized scope",
+    );
+    expect(guidance).toContain("do not start parallel work that assumes the unresolved choice");
+    expect(guidance).toContain("The absence of a native path alone does not require a question");
+    expect(guidance).not.toContain(
+      "Do not commit to a host, provider, or credential the user did not name",
+    );
+    expect(guidance.length).toBeLessThan(1000);
+  });
+
+  test("allows Connect cards for established or delegated designs", () => {
+    const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("# Integration setup");
+    const end = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("# Session coordination", start);
+    const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
+    expect(guidance).toContain(
+      "A card is for an integration required by the authorized design, including established or delegated choices",
+    );
+    expect(guidance).toContain("Resolve out-of-scope architecture choices before requesting setup");
+  });
+
   test("separates command observation from conversation and diagnostic reads concisely", () => {
     const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
       "Use `session_events` for conversation history",
@@ -42,6 +78,10 @@ describe("provider-neutral operational instructions", () => {
       "prefer the connection-bound native client even if an older `ogtool` is installed",
     );
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("OPENGENI_CODEMODE_NATIVE_CLIENT");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("OPENGENI_CODEMODE_CLIENT_MODULE");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "do not import the older image-baked package",
+    );
   });
 
   test("does not carry Codex-only runtime language", () => {

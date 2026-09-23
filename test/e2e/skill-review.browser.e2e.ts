@@ -96,4 +96,33 @@ describe("exact Skill review browser acceptance", () => {
       await page.close();
     }
   }, 30_000);
+  test("desktop removal review names irreversible deletion and submits only the explicit choice", async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    try {
+      await page.goto(`${baseUrl}/?remove=1`);
+      await page.locator("pre").first().waitFor();
+      expect(
+        await page
+          .getByText("Permanently delete this Skill and all its stored revisions?", { exact: true })
+          .count(),
+      ).toBe(1);
+      expect(await page.getByText(/This cannot be undone/).count()).toBeGreaterThan(0);
+      expect(
+        await page
+          .getByText("Saving activates these exact files. No additional review is required.", {
+            exact: true,
+          })
+          .count(),
+      ).toBe(0);
+      expect(await page.getByRole("radio", { name: "Save", exact: true }).count()).toBe(0);
+      await page.screenshot({ path: "/tmp/qa-skill-remove-1280.png", fullPage: true });
+      await page.getByRole("radio", { name: "Permanently delete", exact: true }).check();
+      await page.getByRole("button", { name: "Send answers", exact: true }).click();
+      expect(await page.evaluate(() => (window as any).skillReviewFixture.responses)).toEqual([
+        { outcome: "answered", answers: [{ questionId: "skill:revision", values: ["save"] }] },
+      ]);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
 });

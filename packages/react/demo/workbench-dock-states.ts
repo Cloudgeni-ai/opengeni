@@ -566,6 +566,21 @@ export type DockState = {
 };
 
 export const DOCK_STATES: Record<string, DockState> = {
+  "capture-unavailable": {
+    label: "Cold · saved changes preview unavailable",
+    capabilities: capsCold(),
+    capture: {
+      available: false,
+      degradedReason: "repository_read_unavailable",
+      revision: 8,
+      capturedAt: CAPTURED_AT,
+      turnId: "turn-8",
+      leaseEpoch: 1,
+    },
+    machines: fleet(machine({ state: "offline", active: false })),
+    gitStatus: statusClean,
+    gitDiff: [],
+  },
   "live-file-wake-recovery": {
     label: "Live file · failed wake recovery",
     capabilities: capsCold(),

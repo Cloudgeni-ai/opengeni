@@ -1,8 +1,8 @@
 # Capability Catalog
 
-OpenGeni exposes a workspace-level Capabilities control-plane read model for Packs, external MCP/API integrations, Skills, and Plugins. Capability is a UI and discovery umbrella, not one runtime type or one generic enable/disable lifecycle.
+OpenGeni exposes a workspace-level Capabilities control-plane read model for external MCP/API integrations, Skills, and Plugins. Capability is a UI and discovery umbrella, not one runtime type or one generic enable/disable lifecycle.
 
-Capability, Plugin, Pack, Skill, API Integration, and Integration Facet mutations
+Capability, Plugin, Skill, API Integration, and Integration Facet mutations
 require the narrow `capabilities:manage` permission. Shared-workspace admins
 satisfy it through the existing admin wildcard; a managed human receives it
 directly for their private personal workspace without receiving the broader
@@ -10,14 +10,13 @@ member-management or API-key-delegation powers of `workspace:admin`.
 
 The catalog merges:
 
-- built-in and workspace-registered Packs
 - immutable, reviewed curated skill-library entries (`source: "library"`)
 - external MCP servers managed through `OPENGENI_MCP_SERVERS`
 - manual remote MCP entries added through the API or web app
 - reviewed integrations.sh snapshot imports stored as global `source: "registry"` catalog rows
 - public remote MCP servers discovered from the official MCP Registry
 
-Native OpenGeni product surfaces are deliberately absent from the installable catalog. The internal `opengeni`, `files`, and `docs` MCP carriers, Documents, Scheduled Tasks, GitHub repository resources, Rigs, and Sandboxes remain available through their owning runtime and product surfaces; they are never manufactured as enabled catalog rows. Agent discovery may return a separate native connection recommendation, such as GitHub owner consent, without adding that recommendation to the workspace catalog.
+Native OpenGeni product surfaces are deliberately absent from the installable catalog. The internal `opengeni`, `files`, and `docs` MCP carriers, Documents, Scheduled Tasks, GitHub repository resources, Sandbox Environments, and Sandboxes remain available through their owning runtime and product surfaces; they are never manufactured as enabled catalog rows. Agent discovery may return a separate native connection recommendation, such as GitHub owner consent, without adding that recommendation to the workspace catalog.
 
 Every catalog item includes a typed `lifecycle` projection and a bounded list of supported `actions` (`install`, `connect`, `configure`, `update`, `repair`, `disconnect`, `uninstall`, or `inspect`). The legacy `enabled` fields remain a compatibility projection while clients migrate; provenance such as `built_in` never implies lifecycle state. External configured MCPs are reported as deployment-managed and inspect-only.
 
@@ -52,7 +51,7 @@ Its search, open-page, and find-in-page response items settle from their own
 provider status and render before the answer they informed; they do not wait for
 a separate function-tool output event.
 
-MCP tool refs are strict by default. A newly submitted bare `{ "kind": "mcp", "id": "docs" }` must name a server configured for this deployment, and a runtime connect/list failure fails closed when the turn demands that server's catalog or a tool. Startup eagerness is independent: only an exact session ref with `"eager": true` makes connection and schema admission a first-model-request barrier. A client or pack can mark a ref `{ "kind": "mcp", "id": "context7", "optional": true }` to make it portable: if the deployment does not configure that server the ref is skipped during validation, and if the server is configured but unavailable at runtime it is skipped for that turn with a warning. Persisted refs have a separate turn-time safety rule: if a previously valid server is later disconnected, disabled, or removed from the runtime registry, OpenGeni preserves that selection in the session's effective-policy audit projection but omits it from executable tools for the turn. The model receives a bounded system notice naming the unavailable server and must not claim to have read or updated it, so one disappearing integration cannot trap every later chat turn in an `Unknown MCP server id` failure loop.
+MCP tool refs are strict by default. A newly submitted bare `{ "kind": "mcp", "id": "docs" }` must name a server configured for this deployment, and a runtime connect/list failure fails closed when the turn demands that server's catalog or a tool. Startup eagerness is independent: only an exact session ref with `"eager": true` makes connection and schema admission a first-model-request barrier. A client can mark a ref `{ "kind": "mcp", "id": "context7", "optional": true }` to make it portable: if the deployment does not configure that server the ref is skipped during validation, and if the server is configured but unavailable at runtime it is skipped for that turn with a warning. Persisted refs have a separate turn-time safety rule: if a previously valid server is later disconnected, disabled, or removed from the runtime registry, OpenGeni preserves that selection in the session's effective-policy audit projection but omits it from executable tools for the turn. The model receives a bounded system notice naming the unavailable server and must not claim to have read or updated it, so one disappearing integration cannot trap every later chat turn in an `Unknown MCP server id` failure loop.
 
 An optional connection-backed MCP whose credential is unavailable during
 `initialize` or `tools/list` is setup availability, not proof that the user
@@ -88,7 +87,7 @@ The probe runs with those headers, and on success the values are stored encrypte
 Registry entries that declare required headers are tagged `requires-credentials` and cannot be enabled until the declared headers are supplied.
 
 The generic `capability_catalog_items` and `capability_installations` tables are
-MCP-only. Skills, Plugins, Integration Definitions, and Packs are projected
+MCP-only. Skills, Plugins, and Integration Definitions are projected
 from their dedicated authoritative ledgers, and their mutations use their
 type-specific preview/install/configure/uninstall flows. Clients must not infer
 one universal Enable action from catalog membership.
@@ -123,7 +122,7 @@ Authenticated Integrations require an existing active Connection for the exact
 provider domain. The selected Connection's Personal/workspace ownership and
 required scopes are checked during install; caller-supplied ownership cannot
 relabel it. Connections remain independently managed and are never deleted by
-Integration uninstall. Direct, Plugin, Pack, and migration ownership records
+Integration uninstall. Direct, Plugin and migration ownership records
 share the normalized component ledger, so uninstall preview identifies whether
 the runtime adapter will actually disappear. Mutation uses the Plugin
 installation version as an optimistic-concurrency fence.
@@ -258,7 +257,7 @@ remove use caller UUID idempotency plus exact binding-version OCC. The public
 projection includes the effective owner ledger plus an exact `directlyOwned`
 decision for the requested capability/instance/facet identity; clients must not
 infer current control from the presence of some unrelated `direct` owner. A
-Pack-, Plugin-, migration-, or other-direct-owned binding is read-only in the
+Plugin-, migration-, or other-direct-owned binding is read-only in the
 direct Integration controls. Removing a direct owner reports when another
 owner retains the binding instead of presenting the shared facet as deleted.
 The projection reports only whether a provider cursor exists; page tokens,
@@ -304,7 +303,7 @@ New X and Reddit policies use provider-scoped first-party tool identities
 (`x_*` and `reddit_*`). Each tool binds the provider namespace and requires an
 exact matching connection before provider I/O; aggregate
 `social_connections_list`, `social_posts_recent`, and
-`social_daily_analysis_context` remain available for cross-provider Pack flows.
+`social_daily_analysis_context` remain available for cross-provider analysis.
 Legacy generic live/write `social_*` aliases remain compatibility-only during
 rolling migration. The public capability kind remains the compatible `api`
 contract value while item metadata and the web label identify the surface as an
@@ -313,7 +312,7 @@ Integration.
 The web route keeps orchestration separate from catalog presentation.
 `capability-catalog-sections.tsx` owns the typed discovery controls, Enabled
 section, Browse states, registry fallback, and incremental window sentinel;
-provider, source-package, Pack, and connection workflows remain in their owning
+provider, source-package and connection workflows remain in their owning
 components/hooks. The whole workspace-scoped data load lives in
 `use-capabilities-catalog.tsx`, which fences every response on the exact client
 and workspace it was requested for, so switching workspaces mid-flight can never
@@ -360,7 +359,7 @@ runtime. Retrying the exact request with the same idempotency key resumes the
 operation; reusing the key for a different request is rejected. Workspace-local
 component advisory locks make concurrent Plugins converge on one child
 identity. Multiple owners may share the same exact version, but a divergent
-version is rejected while another direct, Plugin, Pack, or migration owner is
+version is rejected while another direct, Plugin, or migration owner is
 still pinned to the current version.
 
 An update records a new immutable Plugin version, computes added/removed/
@@ -425,7 +424,7 @@ status, and timestamps. The SDK mirrors these as `listInstalledPlugins`,
 
 ## Curated skill library
 
-The default sandbox carries no Terraform, Checkov, social-marketing, or other domain methodology guidance. Those Skills live in the immutable curated library under `packages/runtime/src/curated_skill_library/` and are discoverable but uninstalled until explicitly installed through the normal Skill lifecycle, selected for an exact session, or acquired through a Pack. The initial reviewed set is Checkov, Refactor Module, Social Media Marketing, Terraform Search and Import, Terraform Stacks, Terraform Style Guide, Terraform Test, and Azure Verified Modules.
+The default sandbox carries no Terraform, Checkov, social-marketing, or other domain methodology guidance. Those Skills live in the immutable curated library under `packages/runtime/src/curated_skill_library/` and are discoverable but uninstalled until explicitly installed through the normal Skill lifecycle, selected for an exact session. The initial reviewed set is Checkov, Refactor Module, Social Media Marketing, Terraform Search and Import, Terraform Stacks, Terraform Style Guide, Terraform Test, and Azure Verified Modules.
 
 - `id` is stable (`skill:azure-verified-modules` in the catalog).
 - `metadata.libraryId`, `metadata.version`, `metadata.contentSha256`, `metadata.sourceCommit`, `metadata.sourceUrl`, `metadata.provenance`, `metadata.license`, `metadata.documentationUrl`, `metadata.compatibility`, and `metadata.upgrade` make provenance inspectable. `contentSha256` is a canonical whole-artifact digest over sorted normalized relative paths and the exact bytes of every recursively materialized regular file, not only `SKILL.md`.
@@ -443,24 +442,21 @@ curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/skills/library/a
 
 The resulting catalog row reports an installed lifecycle. Updating requires the
 previewed installation version, and uninstall removes only the direct owner;
-the Skill remains active when a Plugin or Pack still owns the same exact
+the Skill remains active when a Plugin still owns the same exact
 artifact.
 
 ### Skill source precedence
 
 The runtime keeps these sources inspectable and separate:
 
-1. active immutable workspace Skill components, whether owned directly, by a Plugin, by a v2 Pack, or by a curated-library selection;
-2. legacy pre-v2 Pack inline Skills;
-3. inline per-session Skills;
-4. repository-local `.agents/skills` or `.claude/skills` discovered at their real mounted path; and
-5. native tool-bound Skills: Site authoring after the frozen attempt catalog can
-   create a Site or perform the complete source-read/publish edit workflow;
-   editable documents, spreadsheets, and presentations after the complete
-   canonical editable-artifact catalog is present; and video generation only
-   when its executable provider surface is available.
+1. active workspace Skills, with direct, Plugin, or curated-library provenance;
+2. inline per-session Skills;
+3. repository-local Skills discovered at their real mounted path; and
+4. native tool-bound Skills, included only when their required executable tools
+   are present in the frozen attempt catalog.
 
-V2 Pack installation resolves names before mutation: identical case-insensitive name plus exact content is one shareable Skill component, while different content under an effective name is a blocking mismatch. It therefore never relies on runtime shadowing. Legacy Pack inline Skills retain their historical precedence only for installations with no frozen manifest snapshot/digest. The effective runtime selection reports source, version, hash, and reason without exposing secrets.
+The effective runtime selection reports source, version, hash, and reason
+without exposing secrets.
 
 Self-hosted/Connected Machine deployments may omit the curated artifact from their runtime image. Such a deployment omits the entry from discovery and cannot activate it; it does not download, substitute, or silently route the turn to Azure-hosted inference.
 
@@ -470,7 +466,7 @@ Skill-library installation is workspace-scoped through the authoritative
 Plugin/Skill-Facet installation. Existing session rows do not contain a
 per-session library pin, so resumed and newly created sessions use the
 workspace's active exact-pinned Skill installations plus their
-Pack/session/repository sources. This deliberately removes the former
+session/repository sources. This deliberately removes the former
 deployment-default domain Skills rather than silently retaining methodology a
 workspace never selected. A future per-session pin migration can preserve
 historical library context for long-lived sessions if product requirements call
@@ -499,7 +495,7 @@ FORCE RLS. Runtime materialization revalidates the stored artifact and digest
 before adding it to the same lazy `.agents/` Skill index as other active
 workspace components, session, repository, and native tool-bound Skills. Uninstall is previewed and
 optimistic-concurrency fenced: removing the direct owner retains the Skill when
-a Plugin or Pack still owns it, and only the final owner removes it from later
+a Plugin still owns it, and only the final owner removes it from later
 turns. Migration `0233_skill_and_integration_authority_cutover.sql` preserves
 exact active curated selections in this ledger, deletes every generic Skill
 projection, and constrains the generic catalog/install tables to MCP rows.
@@ -631,9 +627,8 @@ it does not mutate connector-policy rows directly.
   viewer at the Connected accounts block above instead of an ambiguous
   whole-row Reconnect/Disconnect). The locked sentence defaults to "A
   workspace admin looks after this integration. You do not need to connect
-  anything."; an adapter may supply a truthful variant instead (e.g.
-  personal-only Slack tells a member that connection management permission is
-  required, because no admin can connect it for them). Provider limited-use
+  anything."; an adapter may supply a truthful variant when the account
+  needs its owner to reconnect. Provider limited-use
   disclosures (Google's OAuth disclosures) render in a fixed place above the
   footer, and the connect/publish affordances reference them via
   `aria-describedby`.
@@ -653,19 +648,17 @@ it does not mutate connector-policy rows directly.
   `quick-connect-dialog.tsx` component exists for the two authKind cases that
   do need a screen (`api_key`: one field, no scope bullet list; unreviewed
   `oauth2`: one line naming the domain), and is reused by account actions.
-  Gmail is not a multi-account provider: it is a single personal-only
-  Connector, not an API integration definition (see the Gmail section below).
+  Gmail uses a catalog Connector rather than an API integration definition (see the Gmail section below).
 
 **Connectors** are MCP servers from the catalog, plus workspace-defined Custom
 APIs (OpenAPI/GraphQL) - there is no third bucket. The existing `authKind`
 field (`"none" | "oauth2" | "api_key" | "unknown"`) already carries every
 behavioral difference the connect flow needs, so Custom API connectors use the
 same single-row setup treatment as any other Connector.
-Connection setup defaults to workspace-owned; a personal connection requires
-the explicit **Only me** choice (official Gmail and Slack's hosted MCP are the
-personal-only exceptions). The shared setup dialog explains that workspace
-sharing uses the account or credentials the human authorizes, not a new
-workspace identity. It preserves provider-specific ownership rules and stores
+Connection setup defaults to workspace ownership, with personal defaults for
+mail, calendar, contacts and drive integrations. Both **This workspace** and
+**Only me** remain selectable. The shared setup dialog explains that workspace
+sharing uses the account or credentials the human authorizes. It stores
 API-key credentials under each field's **wire header name**, never its human
 label. Connecting does not silently install bundled Skills.
 Inside that section a **Featured** strip of tiles driven by curated
@@ -679,9 +672,9 @@ The Connectors search and kind filters are scoped to Connectors. The catalog is
 narrowed to `kind: "mcp"` and `kind: "api"` items once
 (`isConnectorCatalogItem` in `apps/web/src/lib/capabilities.ts`) before the
 Featured, Enabled, Browse, and count projections are derived, so no Skill,
-Plugin, or Pack row can appear in any of them and the chip counts describe what
+or Plugin row can appear in any of them and the chip counts describe what
 that grid can actually show. `CAPABILITY_FILTERS` therefore offers exactly
-`All`, `MCP servers`, and `APIs`. Skills, Plugins, and Packs have their own
+`All`, `MCP servers`, and `APIs`. Skills and Plugins have their own
 search in the Bundles section below.
 Catalog rows omit routine badges and technical metadata; provenance remains
 available in details. Every tile uses the same single-action shared row as an
@@ -700,7 +693,6 @@ citizens, to avoid touching unrelated `kind: "api"` catalog-builder behavior.
 Open the **Capabilities** view in the web app to:
 
 - filter and search the local catalog
-- review, install/update/repair, and ownership-safely uninstall role Packs with explicit Rig/Variable Set selection, and register a Pack manifest of your own
 - add and enable public MCP Registry results
 - add and connect manual MCP integrations through the MCP-only catalog form
 - detect, review, authenticate, and install custom OpenAPI or GraphQL APIs
@@ -709,71 +701,21 @@ Open the **Capabilities** view in the web app to:
 - install Plugin manifests through immutable manifest/component review, bind each credentialed component to one exact active Connection, inspect update diffs, and remove only Plugin-owned components
 - select enabled custom MCPs in the agent composer
 
-**Bundles** are Skills, Plugins, and Packs: a named collection of tools and
-instructions, not a live connection to anything. Install one and everything
-inside it becomes available together. They render in one section
-(`bundles-section.tsx`) with one heading, one bundle-scoped search with a
-count, and one uniform row - the same `IntegrationRow` the Integrations list
-uses, so the whole list scans as one thing. A row is never given the
-quick-connect fast path: installing a Bundle always needs at least a
-confirmation, so the trailing state indicator stays decorative. The bundle
-chip vocabulary is the widened closed set in `integration-view-model.ts`
-(`Installed`, `Not installed`, `Update available`, `Installing`, plus
-`Needs attention`); a Bundle is never labelled `Connected`.
+**Bundles** are Skills and Plugins: installable guidance and tools, distinct
+from live Connections. The catalog uses the same IntegrationRow and detail
+sheet patterns as the rest of the page, with search and installed-state chips.
+Curated Skills identify their reviewed library source; imported Skills and
+Plugins show immutable source provenance. Unknown provenance is not guessed.
 
-Three provenances coexist in structured details and accessible row names;
-the visible row description contains only the actual description:
+Imported items open the IntegrationSheet with pinned identity, update review,
+and removal actions. Catalog Skills use the library detail sheet. Viewers see
+the permission explanation instead of inactive administration buttons.
 
-- **Curated by OpenGeni** - the reviewed curated Skill library, and the Pack
-  manifests OpenGeni ships (`source: "built_in"` catalog rows).
-- **Registered in this workspace** - a Pack manifest any workspace admin
-  registered through **Add manifest** (`registerPackManifest`; the entry point
-  is a paste-JSON dialog in the section header, `source: "manual"` catalog
-  rows).
-- **Imported from source** - a Skill imported from GitHub/skills.sh, or a
-  Plugin installed from a reviewed manifest URL.
-
-A Pack's provenance is read from its `pack:<id>` catalog row, and Packs and the
-catalog load independently, so "no matching row yet" resolves to *unknown*
-rather than `built_in`: no provenance is claimed before the catalog arrives. The row's
-`aria-label` replaces its own contents, so each row also supplies an
-`accessibleDetail` ("Pack, curated by OpenGeni") that `IntegrationRow` speaks
-between the name and the state - it renders whatever string it is given and
-branches on no kind. The bundle search matches name, description, category,
-tags, and source, plus the kind word itself as a discrete token, so narrowing
-to `pack` cannot also return every Plugin whose text contains "package".
-
-Only the detail differs, and only where it genuinely must. An imported Skill or
-Plugin opens the same four-block `IntegrationSheet` an Integration does, with
-its immutable pinned identity as **Connection** facts and an `actions` footer
-(`Check for update` / `Review update`, and `Remove`); a viewer without
-workspace-administrator authority gets the locked sentence instead of inert
-buttons. A catalog Skill keeps the catalog detail sheet
-(`capability-detail-sheet.tsx`), which already owns its reviewed library
-identity, install/update/remove, and immutable provenance panel. A Pack opens
-`PackDetailDialog` (`pack-dialogs.tsx`), because choosing a Rig and a Variable
-Set, reviewing an exact component plan, and uninstall/unregister do not
-compress into four blocks. Opening a Pack row *is* the review request, so the
-plan resolves immediately rather than behind a second button. That dialog names
-the installed identity a repair or a version comparison turns on - manifest
-version, role, category, the installed manifest digest, and the Pack's own
-description - under its header, because the title only ever carries a name.
-
-No `kind: "plugin"` catalog item is produced anywhere today, and both catalog
-Skills and Packs are scoped out of the Connectors projections by kind rather
-than by a per-row filter, so the same installation never appears twice and the
-Connectors grid cannot silently start showing a Bundle if the catalog builder
-changes. Closing and reopening an in-progress source dialog retains its input
-and error state; Plugin mutation retries retain one stable idempotency key,
-while every changed Connection binding must be re-previewed before the final
-install/update action becomes available. Connection-list load failure is shown
-as unavailable data, not misreported as an empty account inventory. A footer
-action that opens the import stepper or a removal confirmation closes the sheet
-first: one modal surface at a time.
-
-`/workspaces/:workspaceId/packs` redirects to `capabilities?section=packs`,
-which now scrolls the Bundles section into view instead of selecting a kind
-filter the Connectors grid no longer offers.
+Skills and Plugins are excluded from Connector projections. Dialog inputs and
+errors survive closing and reopening; mutation retries retain their exact
+idempotency key. Changed Connection bindings require a new preview. A failed
+Connection-list request is not treated as an empty inventory. Opening an import
+or removal dialog closes the detail sheet so only one modal is active.
 
 The official MCP Registry is public metadata. Evaluate any server and its endpoint before enabling it in a workspace with sensitive data.
 
@@ -848,15 +790,11 @@ is omitted from Google's authorization, token, and refresh requests. The MCP
 resource remains stored in the encrypted bundle and bound to the runtime
 connection.
 
-Gmail is personal-only. Enabling the capability makes Gmail available in the
-workspace catalog, but it does not share a mailbox: each member must authorize
-their own Google account. Personal connection rows and identifiers are hidden
-from other members, and a turn can execute Gmail only through the initiating
-member's frozen personal delegation. OpenGeni rejects workspace-owned Gmail
-OAuth and capability bindings at the API boundary. Gmail content that a user
-asks the agent to quote, summarize, or otherwise add to a session follows that
-session's visibility; connection privacy does not turn a shared session into a
-private one.
+Gmail defaults to personal ownership; users may instead connect it for the workspace.
+Personal account selection is frozen for the initiating user's accepted work,
+and another participant cannot borrow that account. A workspace connection
+uses the explicitly shared mailbox. Gmail content added to a conversation
+follows that conversation's visibility; account ownership does not change it.
 
 Gmail is the single connector path for the provider: the catalog row's
 `gmailmcp.googleapis.com/mcp/v1` resource is the connection and consent

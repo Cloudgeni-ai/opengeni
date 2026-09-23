@@ -78,7 +78,7 @@ export type IntegrationFacetRemovalResult = {
   status: "not_configured" | "removed" | "retained_by_other_owners";
   binding: IntegrationFacetBindingSummary | null;
   remainingOwners: {
-    kind: "direct" | "plugin" | "pack" | "migration";
+    kind: "direct" | "plugin" | "migration";
     id: string;
     removable: boolean;
   }[];
@@ -691,10 +691,7 @@ function capabilityComponentOwners(value: unknown): IntegrationFacetBindingOwner
     const owner = recordValue(entry);
     if (
       !owner ||
-      (owner.kind !== "direct" &&
-        owner.kind !== "plugin" &&
-        owner.kind !== "pack" &&
-        owner.kind !== "migration") ||
+      (owner.kind !== "direct" && owner.kind !== "plugin" && owner.kind !== "migration") ||
       typeof owner.id !== "string" ||
       typeof owner.removable !== "boolean"
     ) {

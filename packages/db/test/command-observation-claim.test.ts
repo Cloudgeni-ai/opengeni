@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
-  addSessionSystemUpdate,
+  submitHumanPromptInTransaction,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
@@ -32,7 +32,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture() {
+async function fixture(command = "printf output") {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -67,7 +67,7 @@ async function fixture() {
     insertConnectedMachineSessionBackgroundCommandInTransaction(db, {
       ...identity,
       ...provider,
-      command: "printf output",
+      command,
     }),
   );
   await settleConnectedMachineSessionBackgroundCommand(client.db, {
@@ -77,27 +77,44 @@ async function fixture() {
     exitCode: 0,
     reason: "process exited",
   });
-  return { identity, sessionInput };
+  return { identity, sessionInput, grant };
 }
 
+test("command reads preserve exact text and safely bound unicode previews", async () => {
+  for (const command of ["printf 'two  spaces'\n\tprintf done", `printf '${"😀".repeat(300)}'`]) {
+    const { identity } = await fixture(command);
+    const stored = await getSessionBackgroundCommand(client.db, identity);
+    expect(stored?.commandText).toBe(command);
+    expect(stored!.commandPreview.length).toBeLessThanOrEqual(512);
+    if (command.length > 512) {
+      expect(stored!.commandPreview.endsWith("…")).toBe(true);
+      expect(stored!.commandPreview).not.toMatch(/[\uD800-\uDBFF]…$/);
+    } else {
+      expect(stored!.commandPreview).toBe(command);
+    }
+  }
+});
+
 test("terminal reads preserve notification and history delivered by the ordinary claim API", async () => {
-  const { identity } = await fixture();
+  const { identity, grant } = await fixture();
   // The terminal notice rides eligible new input; it does not itself wake idle.
-  await addSessionSystemUpdate(client.db, {
-    accountId: identity.accountId,
-    workspaceId: identity.workspaceId,
-    sessionId: identity.sessionId,
-    kind: "agent_message",
-    classification: "info",
-    sourceId: crypto.randomUUID(),
-    dedupeKey: crypto.randomUUID(),
-    summary: "Inspect the command result",
-    payload: {
-      type: "agent_message",
-      text: "Inspect the command result",
-      operationId: crypto.randomUUID(),
-    },
-  });
+  await withWorkspaceSessionActivityRls(client.db, identity.workspaceId, (db) =>
+    db.transaction((tx) =>
+      submitHumanPromptInTransaction(tx as unknown as typeof db, {
+        accountId: identity.accountId,
+        workspaceId: identity.workspaceId,
+        sessionId: identity.sessionId,
+        subjectId: grant.subjectId,
+        actor: { type: "human", subjectId: grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text: "Inspect the command result",
+        resources: [],
+        source: "user",
+        reasoningEffortFallback: "medium",
+      }),
+    ),
+  );
   const claim = await claimSessionWorkForAttempt(client.db, identity.workspaceId, {
     sessionId: identity.sessionId,
     workflowId: `session-${identity.sessionId}`,

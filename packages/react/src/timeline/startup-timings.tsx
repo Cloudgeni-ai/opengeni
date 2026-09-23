@@ -3,7 +3,7 @@ import type { StartupPhaseItem } from "./types";
 const LABELS: Record<StartupPhaseItem["phase"], string> = {
   queue: "Worker queue",
   sandbox: "Sandbox",
-  rig: "Rig",
+  rig: "Sandbox Environment",
   repository: "Repository",
   files: "Files",
   tools: "Tools",

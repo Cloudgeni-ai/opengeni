@@ -688,7 +688,7 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     await rendered.unmount();
   });
 
-  test("a repository-read degraded capture reports the truthful live fallback", async () => {
+  test("a degraded capture stays quiet until Changes needs the missing preview", async () => {
     const notifications: Array<{ kind: string; message: string }> = [];
     const { client, spy } = coldClient({
       getWorkspaceCapture: async () => ({
@@ -708,6 +708,7 @@ describe("workbench prewarm gating (Refinement 1)", () => {
           events={[]}
           primary={<div>chat</div>}
           autoSaveId="og.test.prewarm.repository-read-degraded"
+          initialTab={WORKBENCH_TAB_FILES}
           onNotify={(notification) => notifications.push(notification)}
         />,
       ),
@@ -715,14 +716,84 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     await flush(60);
 
     expect(spy.attachCalls).toBe(0);
-    expect(notifications).toEqual([
-      {
-        kind: "error",
-        message:
-          "Workspace capture is incomplete because repository changes could not be read. Live files remain authoritative.",
-      },
-    ]);
-    expect(rendered.container.textContent).toContain("Workspace is resting");
+    expect(notifications).toEqual([]);
+    expect(rendered.container.textContent).not.toContain("Saved changes preview is unavailable");
+
+    const clickButton = async (label: string) => {
+      const button = Array.from(rendered.container.querySelectorAll("button")).find(
+        (candidate) =>
+          !candidate.closest("[hidden]") &&
+          (candidate.textContent?.trim() === label ||
+            candidate.getAttribute("aria-label") === label),
+      );
+      expect(button).toBeDefined();
+      await act(async () => button!.click());
+      await flush(60);
+    };
+    await clickButton("Changes");
+    expect(rendered.container.textContent).toContain("Saved changes preview is unavailable");
+    expect(rendered.container.textContent).toContain(
+      "Open the live workspace to view current changes.",
+    );
+    await clickButton("Uncommitted");
+    expect(rendered.container.textContent).toContain("Saved changes preview is unavailable");
+    await clickButton("Staged");
+    expect(rendered.container.textContent).not.toContain("Saved changes preview is unavailable");
+    expect(rendered.container.textContent).toContain("Wake the sandbox to inspect staged changes.");
+    await clickButton("Branch");
+    expect(rendered.container.textContent).toContain("Saved changes preview is unavailable");
+    expect(notifications).toEqual([]);
+    expect(spy.attachCalls).toBe(0);
+    expect(
+      Array.from(
+        rendered.container.querySelectorAll('[role="tabpanel"]:not([hidden]) button'),
+      ).filter((button) => button.textContent?.includes("Open live workspace")),
+    ).toHaveLength(1);
+    await clickButton("Open live workspace");
+    expect(spy.attachCalls).toBe(1);
+    await rendered.unmount();
+  });
+
+  test("a successful capture replaces the missing preview without a notification", async () => {
+    const notifications: Array<{ kind: string; message: string }> = [];
+    let response: GetWorkspaceCaptureResponse = {
+      available: false,
+      degradedReason: "repository_read_unavailable",
+    };
+    const { client, spy } = coldClient({ getWorkspaceCapture: async () => response });
+    const view = (events: UseSandboxWorkspaceTabsOptions["events"] = []) =>
+      withProvider(
+        client,
+        <SandboxWorkspace
+          sessionId={SESSION_ID}
+          events={events}
+          primary={<div>chat</div>}
+          initialTab={WORKBENCH_TAB_CHANGES}
+          autoSaveId="og.test.prewarm.capture-recovery"
+          onNotify={(notification) => notifications.push(notification)}
+        />,
+      );
+    const rendered = await renderComponent(view());
+    await flush(60);
+    expect(rendered.container.textContent).toContain("Saved changes preview is unavailable");
+    const working = Array.from(rendered.container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Uncommitted",
+    );
+    await act(async () => working!.click());
+    response = captureAvailable(fakeManifest(1));
+    await rendered.rerender(
+      view([
+        fakeEvent(1, "workspace.revision.captured", {
+          revision: 3,
+          stats: { fileCount: 1 },
+        }),
+      ]),
+    );
+    await flush(60);
+    expect(rendered.container.textContent).not.toContain("Saved changes preview is unavailable");
+    expect(rendered.container.textContent).toContain("app.py");
+    expect(notifications).toEqual([]);
+    expect(spy.attachCalls).toBe(0);
     await rendered.unmount();
   });
 

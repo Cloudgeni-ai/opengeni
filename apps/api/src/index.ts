@@ -17,6 +17,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   assertRuntimeDatabasePosture,
+  isRetryableRuntimeDatabaseStartupError,
   createDb,
   markSessionWorkflowWakeDelivered,
   runtimeDatabaseReadyCheck,
@@ -29,7 +30,6 @@ import {
   type Observability,
 } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
-import { createNativeRemoteMcpCredentialsPort } from "@opengeni/core/remote-mcp-credentials";
 import { isArtifactRuntimeConfigured } from "@opengeni/artifact-tool/runtime/development";
 import {
   resolveCatalogSettings,
@@ -272,7 +272,7 @@ export async function createTemporalWorkflowClient(
     startRigVerification: async ({ workspaceId, changeId, versionId, workflowId }) => {
       const targetId = changeId ?? versionId;
       if (!targetId) {
-        throw new Error("rig verification requires changeId or versionId");
+        throw new Error("sandbox environment verification requires changeId or versionId");
       }
       try {
         await temporal.workflow.start("rigVerificationWorkflow", {
@@ -390,7 +390,7 @@ export async function startApi(options: StartApiOptions = {}) {
     await retryStartupDependency(
       "PostgreSQL runtime posture",
       () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
-      { ...retryOptions, onRetry },
+      { ...retryOptions, onRetry, shouldRetry: isRetryableRuntimeDatabaseStartupError },
     );
     const resolvedCatalog = await retryStartupDependency(
       "model catalog",
@@ -449,7 +449,6 @@ export async function startApi(options: StartApiOptions = {}) {
   const { app, routeDeps } = createAppComposition({
     ...startApiSessionAuthorizationOverride(options),
     settings,
-    connectionCredentials: createNativeRemoteMcpCredentialsPort(settings, dbClient.db),
     db: dbClient.db,
     bus,
     workflowClient: workflowClient.client,

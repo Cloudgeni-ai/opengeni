@@ -310,7 +310,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
         body: JSON.stringify({
           expectedRevision: savedDraft.revision,
           ...draftPayload,
-          model: "codex/gpt-5.6-sol",
+          model: "codex/gpt-6-sol",
         }),
       },
     );
@@ -320,7 +320,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
       revision: savedDraft.revision + 1,
       text: draftPayload.text,
       resources: draftPayload.resources,
-      model: "codex/gpt-5.6-sol",
+      model: "codex/gpt-6-sol",
     });
     const retryIdempotencyKey = crypto.randomUUID();
     const retried = await app.request(workspacePath(fixture.workspaceId, "/sessions"), {
@@ -343,7 +343,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
       resources: unknown[];
     };
     expect(created).toMatchObject({
-      model: "codex/gpt-5.6-sol",
+      model: "codex/gpt-6-sol",
       resources: [{ kind: "file", fileId: crashed.fileId }],
     });
     expect(await admissionCounts()).toEqual({
@@ -366,7 +366,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
       {
         session_resources: draftPayload.resources,
         turn_resources: draftPayload.resources,
-        turn_model: "codex/gpt-5.6-sol",
+        turn_model: "codex/gpt-6-sol",
       },
     ]);
     expect((await storage.getObjectBytes(crashed.objectKey))?.bytes).toEqual(image);
@@ -379,7 +379,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
       revision: codexDraft.revision + 1,
       text: "",
       resources: [],
-      model: "codex/gpt-5.6-sol",
+      model: "codex/gpt-6-sol",
       reasoningEffort: "xhigh",
     });
 

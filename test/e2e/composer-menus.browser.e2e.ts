@@ -152,6 +152,7 @@ describe("consistent production composer menus", () => {
     await page.setViewportSize({ width: 1000, height: 800 });
     await page.goto(url, { waitUntil: "networkidle" });
     await open("Connectors");
+    await page.getByRole("switch", { name: "Customize connectors", exact: true }).click();
     await page.getByRole("menuitemcheckbox", { name: "Slack", exact: true }).click();
     expect((await state()).connectors).toContain("files");
     expect((await state()).connectors).not.toContain("connector-1");

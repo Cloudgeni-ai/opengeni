@@ -69,7 +69,7 @@ const SECTION_COPY: Record<WorkspaceSettingsSection, { title: string; descriptio
   },
   plugins: {
     title: "Capabilities",
-    description: "Manage connectors, skills, and packs available to your workspace.",
+    description: "Manage Plugins, Skills, and integrations for your workspace.",
   },
   models: {
     title: "Models",
@@ -111,7 +111,7 @@ const WORKSPACE_PAGE_GROUPS = [
       },
       {
         to: "/workspaces/$workspaceId/rigs" as const,
-        label: "Rigs",
+        label: "Sandbox Environments",
         icon: BoxIcon,
       },
       {

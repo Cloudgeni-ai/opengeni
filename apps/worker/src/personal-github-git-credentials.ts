@@ -329,7 +329,6 @@ function exactPersonalGitHubDelegation(
     delegation.providerDomain !== "github.com" ||
     delegation.kind !== "oauth2" ||
     !delegation.originWorkspaceId ||
-    !delegation.userDelegation ||
     !delegation.personalGitHubRepositorySelection
   ) {
     throw new Error("personal GitHub Git delegation is unavailable");

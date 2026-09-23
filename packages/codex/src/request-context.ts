@@ -60,6 +60,8 @@ export type CodexModelRequestEvent = {
   providerRequestId?: string;
   status?: number;
   willRetry?: boolean;
+  /** Only true for a successful response with substantive assistant/tool output. */
+  meaningfulOutput?: boolean;
 };
 
 export type CodexRequestOpaqueArtifacts = {

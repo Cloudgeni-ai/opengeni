@@ -95,6 +95,27 @@ async function runningGoalFixture(
     typeof options.personalConnectionDelegations === "function"
       ? options.personalConnectionDelegations(grant.subjectId)
       : (options.personalConnectionDelegations ?? []);
+  if (personalConnectionDelegations.length) {
+    await shared.admin`insert into organization_memberships
+      (account_id, subject_id, status, personal_workspace_id)
+      values (${grant.accountId}, ${grant.subjectId}, 'active', ${grant.workspaceId!})
+      on conflict (account_id, subject_id) do nothing`;
+    await shared.admin`insert into workspace_memberships (account_id, workspace_id, subject_id)
+      values (${grant.accountId}, ${grant.workspaceId!}, ${grant.subjectId})
+      on conflict (workspace_id, subject_id) do nothing`;
+    for (const connection of personalConnectionDelegations) {
+      connection.originWorkspaceId = grant.workspaceId!;
+      await shared.admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${grant.accountId}, true),
+          set_config('opengeni.workspace_id', ${grant.workspaceId!}, true),
+          set_config('opengeni.subject_id', ${grant.subjectId}, true)`;
+        await tx`insert into connections
+          (id, account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+          values (${connection.connectionId}, ${grant.accountId}, ${grant.workspaceId!},
+            ${grant.subjectId}, ${connection.providerDomain}, ${connection.kind!}, 'fixture-ciphertext')`;
+      });
+    }
+  }
   const ancestor = options.withAncestor
     ? await createSession(client.db, {
         accountId: grant.accountId,
@@ -962,6 +983,15 @@ describe("durable active-goal wake", () => {
         connectionId: crypto.randomUUID(),
       },
     ];
+    await shared.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id', ${ctx.grant.accountId}, true),
+        set_config('opengeni.workspace_id', ${ctx.grant.workspaceId!}, true),
+        set_config('opengeni.subject_id', ${ctx.grant.subjectId}, true)`;
+      await tx`insert into connections
+        (id, account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted)
+        values (${replacementDelegations[0]!.connectionId}, ${ctx.grant.accountId},
+          ${ctx.grant.workspaceId!}, ${ctx.grant.subjectId}, 'linear.app', 'oauth2', 'fixture-ciphertext')`;
+    });
     await withWorkspaceSubjectRls(client.db, ctx.grant.workspaceId!, ctx.grant.subjectId, (db) =>
       db.transaction((tx) =>
         submitHumanPromptInTransaction(tx as unknown as typeof db, {
@@ -1641,7 +1671,7 @@ describe("durable active-goal wake", () => {
     ).toMatchObject({ state: "running", reason: "goal_turn_running" });
   });
 
-  test("keeps coalesced machine context inside the canonical user-role continuation", async () => {
+  test("keeps unrelated agent-message authority out of the canonical goal continuation", async () => {
     const ctx = await runningGoalFixture();
     await settleIdle(ctx);
     expect((await materialize(ctx)).action).toBe("continue");
@@ -1681,8 +1711,13 @@ describe("durable active-goal wake", () => {
         and turn_id = ${claimed.turn.id}`;
     expect(history?.item).toMatchObject({ type: "message", role: "user" });
     const input = JSON.stringify(history?.item);
-    expect(input).toContain("[Application context attached to this user message]");
-    expect(input).toContain("New execution evidence");
+    expect(input).not.toContain("New execution evidence");
+    const pending = await listOutstandingSessionSystemUpdates(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    expect(pending.map((update) => update.id)).toContain(contextUpdate.update.id);
     expect(input).toContain("continue Finish the durable wake proof (1)");
     expect(input).not.toContain("goal_continuation");
   });

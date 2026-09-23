@@ -48,6 +48,12 @@ export type RuntimeMetricsHooks = {
     outcome: "put" | "put_failed" | "deleted_unpublished";
     backend: string;
   }) => void;
+  /** Physical capture plus publication; emitted at settlement, not caller timeout. */
+  onWorkspaceCapture?: (input: {
+    backend: string;
+    outcome: "completed" | "failed";
+    durationSeconds: number;
+  }) => void;
   /**
    * One physical MCP tools/call invocation. The closed outcome enum deliberately
    * excludes server, tool, tenant, request, and error-content labels.

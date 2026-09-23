@@ -215,8 +215,8 @@ session. There is no organization-wide Skill registry or Skill inheritance in
 this integration contract. See the canonical guide for the complete route map,
 security boundary, and delivery checklist.
 
-Installed Pack Skills normally remain workspace-managed. A Pack may instead
-mark guidance as `session_selected`; installation then exposes it to no agent
+Installed Skills can be workspace-managed or marked `session_selected`.
+Session-selected guidance is exposed to no agent
 until `createSession` names the reviewed immutable component in
 `installedSkillIds`. OpenGeni copies that exact artifact into the new session,
 so omitting the field from customer-facing creates is a real contamination
@@ -286,6 +286,35 @@ the advisory UI without changing stored evidence or API authority. See
 [`docs/work-discovery.md`](../../docs/work-discovery.md) for ranking, bounds,
 claim lifecycle, and rollout semantics.
 
+## Full-history message search
+
+`searchSessionMessages(workspaceId, { query, sessionId?, groupBy?, archiveStatus?, limit?,
+cursor? }, { signal? })` searches durable user and **completed assistant** text,
+including unloaded history. It returns every non-overlapping literal occurrence,
+not tools, reasoning, model context, or delta-only assistant output.
+
+Each match has a durable `eventId`/`sequence`, a UTF-16 `messageMatchOffset`, and
+`snippet: { text, matchStart, matchEnd }` with original-text UTF-16 offsets.
+Results include `nextCursor`, `hasMore`, cumulative `matchedMessageCount` and
+`matchedOccurrenceCount`, `scannedMessages`, and `countIsExact`. Keep following
+cursors even on empty pages while `hasMore` is true; counts are provisional until
+exhaustion. Cancel superseded searches with the third argument's AbortSignal.
+This is a live, authorized traversal rather than a frozen snapshot; restart to
+refresh after concurrent history or visibility changes.
+
+For workspace search, `groupBy: "session"` returns the first hit per matching
+session and skips that session's remaining history, keeping prolific messages
+from filling multiple picker pages. It cannot be combined with `sessionId`.
+In grouped mode both matched counters count session representatives, not full
+per-session message/occurrence totals; `scannedMessages` counts only visited
+messages. Cursors bind the grouping mode. Omit it for every-occurrence Find.
+
+The method and types are exported from the ordinary SDK and browser entry.
+Use `listEventPage` around the hit's sequence for bounded context, and use the
+returned search snippet when a large source message's ordinary projection does
+not include the hit. Never download complete history to perform Find locally.
+See [the API contract and bounds](../../docs/session-message-search.md).
+
 ## Session visibility and forks
 
 For organizations with session-tenancy activation, a canonical managed-cookie
@@ -321,49 +350,33 @@ user decision. A quiescence conflict identifies the stable blocker after live
 turns, goals, realtime, schedules, workspace writers, retained processes, and
 sandbox access have been settled. Forks copy exact same-workspace durable
 conversation content but no live turn, goal, credential, Connection/delegation,
-personal grant, Variable Set, Rig, MCP server configuration, process, sandbox
+personal grant, Variable Set, Sandbox Environment, MCP server configuration, process, sandbox
 identity, pin, or workflow. Destination visibility and acknowledgement are
 idempotency-bound.
 
-## Personal-resource grants
+## Connected accounts
 
-The same canonical managed-cookie owner can manage explicit personal-resource
-delegations after organization activation. Pages are bounded to one exact kind;
-the server derives the only valid action and returns the full credential-free
-delegation to attach through the resource's ordinary session API.
+Authenticated messages use the initiating user's eligible connected accounts.
+Conversation visibility does not share account access. Queued work, retries and
+child work retain the initiating user. No per-conversation connection grant is
+required. Multiple eligible accounts require an explicit account choice:
 
 ```ts
-const page = await browserClient.listUserResourceAuthorities(workspaceId, {
-  resourceKind: "connection",
-  limit: 50,
-});
-const authority = page.authorities[0];
-if (!authority) throw new Error("No personal Connection is available");
-
-const issued = await browserClient.issueUserResourceGrant(workspaceId, authority.authorityId, {
-  scope: "user",
-  resourceKind: "connection",
-  mode: "session",
-  context: "workspace_shared",
-  sessionId,
-  expectedAuthorityEpoch: current.tenancy.authorityEpoch,
-  workspaceSharedAcknowledged: true,
-});
-
-await browserClient.revokeUserResourceGrant(workspaceId, issued.grant.grantId);
+const accounts = await browserClient.listOwnConnectionAccounts(workspaceId);
+// When choosing among multiple accounts, use the exact eligible server/account pair.
+const selection = { serverId: "mail", connectionId: accounts[0]!.id };
 ```
 
-The SDK deliberately exposes only exact-session and standing (`always`) grant
-management. It does not expose standalone `once`, custom expiry, scheduled or
-cross-workspace authority, or an atomic create-session-and-attach workflow.
-Revocation prevents future reads but cannot retract output already shared.
+General personal-resource grants for documents, variable sets and other resource
+kinds remain available through the root/core SDK. They do not authorize native
+connected accounts.
 
-## Scheduled connection authority
+## Personal schedules
 
-Agent schedules may carry explicit personal Connection authority. The public
-request contains only the credential-free server, Connection, and common-user
-grant tuple returned by the authority-selection API; the SDK never receives or
-stores provider credentials:
+A schedule created by an authenticated human or their active agent records that
+human as its immutable owner. Only that owner or their verified agent may edit,
+run, pause or delete it. Each occurrence resolves the owner's current accounts;
+accepted retries retain their original identity and account selection.
 
 ```ts
 const task = await client.createScheduledTask(workspaceId, {
@@ -371,18 +384,15 @@ const task = await client.createScheduledTask(workspaceId, {
   schedule: { type: "calendar", hour: 8, minute: 0, timeZone: "Europe/Oslo" },
   runMode: "reusable_session",
   agentConfig: { prompt: "Triage the new support issues" },
-  connectionAuthorities: [selection],
+  connectionAccounts: [selection],
 });
 ```
 
-PATCH semantics are deliberate: omit `connectionAuthorities` to preserve the
-exact prior immutable selection, pass `[]` to clear it, or pass a non-empty
-array to replace and revalidate it. Execution-changing edits that preserve
-personal authority must be made by the same causal human; use an explicit fresh
-selection when authority should move. `once` grants are consumed by the durable
-scheduled occurrence, not by an activity attempt, so retries reuse the same run
-receipt. `listScheduledTaskRuns` exposes terminal occurrence state while private
-Connection ids, subjects, and authority snapshots stay server-side.
+Account selections narrow eligible accounts; they never transfer ownership.
+Omitting `connectionAccounts` on update preserves the selection. Passing an
+empty array clears explicit account choices without changing the schedule owner.
+Service-owned schedules retain service execution and do not acquire a human's
+personal accounts. Run history remains credential-free.
 
 Deleting a task is externally idempotent and immediately removes it from live
 lists and quota, but the server retains a tombstone plus run/session/turn audit
@@ -817,6 +827,36 @@ await client.cancelSession(workspaceId, sessionId, {
 await client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision: "approve" });
 ```
 
+## Retry a failed session without changing its intent
+
+Try again is separate from Pause/Resume and `sendMessage`. Retain the request
+across an ambiguous transport response; never synthesize a continuation prompt:
+
+```ts
+const retryRequest = {
+  clientEventId: crypto.randomUUID(),
+  failureEventId, // the current durable turn.failed event id
+  model: selectedModel,
+  reasoningEffort: "high" as const,
+  latencyMode: "standard" as const,
+};
+const retry = await client.retrySession(workspaceId, sessionId, retryRequest);
+// { outcome: "accepted" | "replayed", turnId, failureEventId }
+```
+
+Requires `sessions:control` and session access. Recovery keeps the logical turn,
+original question, frozen authority, and completed history/tool results; it
+does not create a user message. Omitted policy fields retain the failed turn's
+selection. The selected policy is revalidated for new admission. A duplicate
+operation replays its receipt even after execution advances.
+
+HTTP 409 codes distinguish `RETRY_STALE_FAILURE`, `RETRY_EXECUTION_UNRESOLVED`,
+`RETRY_PAUSED`, `RETRY_UNSUPPORTED_FAILURE`, and `IDEMPOTENCY_KEY_REUSED`.
+Unresolved tool outcomes cannot be blindly replayed. A deliberate Pause must
+be resumed separately. Failure without a retained logical turn, a settled
+scheduled occurrence, and idle credit exhaustion are not supported retry
+boundaries. See [run lifecycle](../../docs/run-lifecycle.md).
+
 ## Session tool policy and native web search
 
 For standalone credential maintenance, use the dedicated operation rather than
@@ -987,7 +1027,6 @@ Every public endpoint group has typed methods:
 | Variable sets | `listVariableSets`, `createVariableSet`, `getVariableSet`, `updateVariableSet`, `deleteVariableSet`, `setVariableSetVariable`, `deleteVariableSetVariable`; generic reads are metadata-only, while dedicated permissioned exact-value reads are part of the held client train |
 | Files | `uploadFile`, `beginFileUpload`, `completeFileUpload`, `getFile`, `createFileDownloadUrl` |
 | Documents | `createDocumentBase`, `listDocumentBases`, `getDocumentBase`, `addDocument`, `listDocuments`, `reindexDocument`, `searchDocuments`, `searchKnowledge` (effective organization + workspace + immutable initiating-user personal scope) |
-| Packs | `listPacks`, `registerPack`, `getPack`, `enablePack`, `deletePack`, `listPackInstallations` |
 | Capabilities | `listCapabilities`, `createCapability`, `enableCapability`, `disableCapability`, `discoverMcpCapabilities` |
 | Plugin packages | `previewPlugin`, `installPlugin`, `previewPluginUninstall`, `uninstallPlugin` |
 | API Integrations | `listIntegrationDefinitions`, `listApiIntegrations`, `previewApiIntegration`, `startApiIntegrationOAuth`, `installApiIntegration`, `previewApiIntegrationUninstall`, `uninstallApiIntegration`, `listIntegrationFacets`, `configureIntegrationFacet`, `pauseIntegrationFacet`, `resumeIntegrationFacet`, `removeIntegrationFacet`, `browseGoogleDriveFacetSource`, `saveGoogleDriveFacetSource` |

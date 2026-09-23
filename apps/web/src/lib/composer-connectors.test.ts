@@ -1,4 +1,5 @@
 import { newSessionDraftToolPolicy } from "./session-tools";
+import { sessionPolicyPickerIds } from "./session-tools";
 import { describe, expect, test } from "bun:test";
 import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
 import {
@@ -6,6 +7,8 @@ import {
   connectorSelectionUpdate,
   changedConnectorExclusions,
   composerConnectorOptions,
+  followWorkspaceConnectorPolicy,
+  newSessionConnectorCustomizeState,
 } from "./composer-connectors";
 
 function item(id: string, overrides: Partial<CapabilityCatalogItem> = {}): CapabilityCatalogItem {
@@ -80,9 +83,95 @@ describe("composer connector inventory", () => {
       ),
     ).toEqual(["offline"]);
   });
+  test("a missing personal account needs initial setup, not reauthorization", () => {
+    const entry = item("personal", {
+      connectionRef: { providerDomain: "slack.com", kind: "oauth2", subjectScope: "subject" },
+    });
+    expect(composerConnectorOptions([], [entry], [], asset)[0]?.connectionStatus).toBe("connect");
+    expect(composerConnectorOptions([], [entry], null, asset)[0]?.connectionStatus).toBe("unknown");
+    const personal = { ...connection("needs_reauth"), subjectId: "user:viewer" };
+    expect(composerConnectorOptions([], [entry], [personal], asset)[0]?.connectionStatus).toBe(
+      "reconnect",
+    );
+    expect(
+      composerConnectorOptions([], [entry], [{ ...personal, status: "revoked" }], asset)[0]
+        ?.connectionStatus,
+    ).toBe("unavailable");
+    expect(
+      composerConnectorOptions([], [entry], [{ ...personal, status: "active" }], asset)[0]
+        ?.connectionStatus,
+    ).toBe("ready");
+  });
+  test("a missing workspace credential does not claim the viewer needs a personal account", () => {
+    const entry = item("workspace", {
+      connectionRef: { providerDomain: "slack.com", kind: "oauth2", connectionId: "missing" },
+    });
+    expect(composerConnectorOptions([], [entry], [], asset)[0]?.connectionStatus).toBe(
+      "unavailable",
+    );
+  });
 });
 
 describe("connector selection policy", () => {
+  test("all visible connectors off round-trips as exclusions, retaining builtins and future defaults", () => {
+    const defaults = ["files", "slack", "linear"];
+    const excluded = changedConnectorExclusions([], new Set(defaults), new Set(["files"]));
+    const persisted = JSON.parse(
+      JSON.stringify(
+        newSessionDraftToolPolicy({
+          selectedMcpServerIds: ["files"],
+          workspaceDefaultMcpServerIds: defaults,
+          catalogReady: true,
+          customizing: true,
+          explicit: false,
+          excludedMcpServerIds: excluded,
+        }),
+      ),
+    );
+    expect(persisted).toEqual({
+      tools: [],
+      toolsProvided: true,
+      excludedMcpServerIds: ["linear", "slack"],
+    });
+    expect(newSessionConnectorCustomizeState(persisted)).toEqual({
+      customizing: true,
+      explicit: false,
+    });
+    const future = [...defaults, "new-connector"];
+    expect(
+      sessionPolicyPickerIds(
+        {
+          tools: [],
+          toolPolicy: {
+            mode: "workspace_default",
+            inheritedFromSessionId: null,
+            excludedMcpServerIds: persisted.excludedMcpServerIds,
+          },
+          effectiveToolPolicy: undefined,
+        },
+        future,
+        future,
+      ),
+    ).toEqual(new Set(["files", "new-connector"]));
+    const fixed = newSessionDraftToolPolicy({
+      selectedMcpServerIds: [],
+      workspaceDefaultMcpServerIds: defaults,
+      catalogReady: true,
+      customizing: true,
+      explicit: true,
+    });
+    expect(fixed).toEqual({ tools: [], toolsProvided: true });
+    expect(newSessionConnectorCustomizeState(fixed)).toEqual({ customizing: true, explicit: true });
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: [],
+        workspaceDefaultMcpServerIds: defaults,
+        catalogReady: true,
+        customizing: false,
+        explicit: false,
+      }),
+    ).toEqual({ tools: [], toolsProvided: false });
+  });
   test("enabling outside defaults preserves effective and hidden choices without re-enabling exclusions", () => {
     const session = {
       toolPolicy: {
@@ -158,5 +247,42 @@ describe("connector selection policy", () => {
     });
     expect(addsConnectorOutsideDefaults(after, before, ["files"])).toBe(false);
     expect(addsConnectorOutsideDefaults(before, after, ["files", "slack"])).toBe(false);
+  });
+
+  test("customize without a pin keeps live defaults and remembers the switch", () => {
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: ["files"],
+        workspaceDefaultMcpServerIds: ["files", "slack"],
+        catalogReady: true,
+        customizing: false,
+        explicit: false,
+      }),
+    ).toEqual({ tools: [], toolsProvided: false });
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: ["files"],
+        workspaceDefaultMcpServerIds: ["files", "slack"],
+        catalogReady: true,
+        customizing: true,
+        explicit: false,
+        excludedMcpServerIds: ["slack"],
+      }),
+    ).toEqual({
+      tools: [],
+      toolsProvided: true,
+      excludedMcpServerIds: ["slack"],
+    });
+    expect(
+      newSessionConnectorCustomizeState({
+        toolsProvided: true,
+        tools: [],
+        excludedMcpServerIds: [],
+      }),
+    ).toEqual({ customizing: true, explicit: false });
+    expect(followWorkspaceConnectorPolicy({ toolPolicyVersion: 4 })).toEqual({
+      mode: "workspace_default",
+      expectedVersion: 4,
+    });
   });
 });

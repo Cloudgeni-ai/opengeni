@@ -1,7 +1,8 @@
 import { z } from "zod";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { SkillFile, type SkillWriteReceipt } from "@opengeni/contracts";
+import { SkillFile, SKILL_MAX_FILES, type SkillWriteReceipt } from "@opengeni/contracts";
+import { getSessionForSubject, readSkillRemovalScope } from "@opengeni/db";
 import {
   approveSkill,
   rejectSkill,
@@ -26,13 +27,14 @@ const saveRequest = z
     expectedScopeVersion: z.number().int().nonnegative(),
     scope: scopeSchema.default("workspace"),
     stableKey: z.string().min(1).max(96),
-    files: z.array(SkillFile).max(128),
-    deletions: z.array(z.string().min(1).max(512)).max(128).default([]),
+    files: z.array(SkillFile).max(SKILL_MAX_FILES),
+    deletions: z.array(z.string().min(1).max(512)).max(SKILL_MAX_FILES).default([]),
     reason: z.string().min(1).max(2000),
   })
   .strict();
 const revisionRequest = z
   .object({
+    removalOperationId: z.uuid().optional(),
     operationId: z.uuid(),
     revisionId: z.uuid(),
     expectedRevisionId: z.uuid().nullable(),
@@ -64,9 +66,20 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
       .object({
         limit: z.coerce.number().int().min(1).max(250).default(100),
         cursor: z.string().max(2048).optional(),
+        sessionId: z.uuid().optional(),
       })
       .safeParse(c.req.query());
     if (!query.success) throw new HTTPException(422, { message: "Invalid Skill list query" });
+    if (query.data.sessionId) {
+      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+      const session = await getSessionForSubject(
+        deps.db,
+        workspaceId,
+        query.data.sessionId,
+        grant.subjectId,
+      );
+      if (!session) throw new HTTPException(404, { message: "Session not found" });
+    }
     let after: { stableKey: string; id: string } | undefined;
     if (query.data.cursor !== undefined) {
       try {
@@ -81,7 +94,12 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
     const rows = await listSkills(
       deps.db,
       { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-      { limit: query.data.limit + 1, metadataOnly: true, ...(after ? { after } : {}) },
+      {
+        limit: query.data.limit + 1,
+        metadataOnly: true,
+        ...(after ? { after } : {}),
+        ...(query.data.sessionId ? { sessionId: query.data.sessionId } : {}),
+      },
     );
     const page = rows.slice(0, query.data.limit);
     const last = page.at(-1);
@@ -180,8 +198,22 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
         { accountId: access.grant.accountId, workspaceId, subjectId: access.grant.subjectId },
         skillId,
       );
-      if (!current) throw new HTTPException(404, { message: "Skill not found" });
-      authorizePreferenceRegistryScopeMutation(access, current.scope);
+      const scope =
+        current?.scope ??
+        (operation === "approve" && request.removalOperationId
+          ? await readSkillRemovalScope(
+              deps.db,
+              {
+                accountId: access.grant.accountId,
+                workspaceId,
+                subjectId: access.grant.subjectId,
+              },
+              skillId,
+              request.operationId,
+            )
+          : null);
+      if (!scope) throw new HTTPException(404, { message: "Skill not found" });
+      authorizePreferenceRegistryScopeMutation(access, scope);
       const apply =
         operation === "approve"
           ? approveSkill
@@ -214,7 +246,7 @@ async function skillMutation(run: () => Promise<SkillWriteReceipt>): Promise<Ski
     let current: unknown = error;
     for (let depth = 0; depth < 4 && current && typeof current === "object"; depth++) {
       const candidate = current as { code?: unknown; cause?: unknown };
-      if (candidate.code === "23505" || candidate.code === "40001")
+      if (candidate.code === "23505" || candidate.code === "40001" || candidate.code === "55P03")
         throw new HTTPException(409, {
           message:
             "Skill changed or this operation key was reused. Reload and reconcile the change.",

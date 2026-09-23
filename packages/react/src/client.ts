@@ -84,15 +84,6 @@ export type SessionClientLike = Pick<
   | "verifyRigChange"
   | "promoteRigChange"
   | "verifyRig"
-  // Packs
-  | "listPacks"
-  | "registerPack"
-  | "enablePack"
-  | "previewPackInstallation"
-  | "installPack"
-  | "previewPackUninstall"
-  | "uninstallPack"
-  | "deletePack"
   // Workspaces + billing
   | "listWorkspaces"
   | "createWorkspace"

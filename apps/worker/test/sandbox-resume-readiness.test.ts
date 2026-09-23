@@ -199,6 +199,60 @@ describe("sandbox exec readiness", () => {
 });
 
 describe("workspace snapshot cancellation", () => {
+  test("snapshot diagnostics retain only closed structured provider classifications", () => {
+    const sentinel = "private-provider-value";
+    const error = Object.assign(new Error(sentinel), {
+      name: "SandboxProviderError",
+      code: "provider_error",
+      retryable: true,
+      details: {
+        errorName: "ClientError",
+        errorCode: 4,
+        httpStatus: 504,
+        cause: sentinel,
+        requestId: sentinel,
+        responseBody: sentinel,
+      },
+    });
+    expect(safeSnapshotError(error)).toEqual({
+      errorClass: "SnapshotOperationError",
+      errorCode: "snapshot_operation_failed",
+      origin: "sandbox-resume",
+      causeName: "SandboxProviderError",
+      integrityCode: "provider_error",
+      providerErrorName: "ClientError",
+      providerGrpcCode: 4,
+      providerHttpStatus: 504,
+      providerRetryable: true,
+    });
+    expect(JSON.stringify(safeSnapshotError(error))).not.toContain(sentinel);
+    for (const value of [sentinel, "4", -1, 17, NaN, Infinity, {}, 4.5]) {
+      expect(
+        safeSnapshotError({ details: { errorName: "ClientError", errorCode: value } })
+          .providerGrpcCode,
+      ).toBeUndefined();
+    }
+    expect(
+      safeSnapshotError({ details: { errorName: sentinel, errorCode: 4 } }).providerErrorName,
+    ).toBeUndefined();
+    expect(
+      safeSnapshotError({ details: { errorName: sentinel, errorCode: 4 } }).providerGrpcCode,
+    ).toBeUndefined();
+    const hostile = new Proxy(
+      {},
+      {
+        get() {
+          throw Error(sentinel);
+        },
+      },
+    );
+    expect(() => safeSnapshotError({ details: hostile })).not.toThrow();
+    expect(() => safeSnapshotError(hostile)).not.toThrow();
+    const cycle: Record<string, unknown> = { errorName: "TimeoutError" };
+    cycle.cause = cycle;
+    expect(safeSnapshotError({ details: cycle }).providerErrorName).toBe("TimeoutError");
+  });
+
   test("public snapshot diagnostics omit exact provider content", () => {
     const sentinel = "synthetic-snapshot-provider-value-123456";
     const error = Object.assign(new Error(`snapshot failed: ${sentinel}`), {

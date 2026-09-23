@@ -100,6 +100,74 @@ function ctx(overrides: Partial<CodexRequestContext> = {}): CodexRequestContext 
   };
 }
 
+describe("Codex streaming EOF audit", () => {
+  test.each(["\n\n", "\n", "", "\r", "\r\n"])(
+    "successful terminal ending in %j settles exactly once after parsing",
+    async (suffix) => {
+      const events: CodexModelRequestEvent[] = [];
+      const terminal = {
+        type: "response.completed",
+        response: {
+          id: "synthetic-eof",
+          status: "completed",
+          output: [
+            { type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] },
+          ],
+        },
+      };
+      const response = await codexRequestStorage.run(
+        ctx({
+          onModelRequestEvent: (event) => {
+            events.push(event);
+          },
+        }),
+        () =>
+          codexSubscriptionFetch(
+            async () =>
+              new Response(`data: ${JSON.stringify(terminal)}${suffix}`, {
+                status: 200,
+                headers: { "content-type": "text/event-stream" },
+              }),
+          )("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ stream: true, input: [] }),
+          }),
+      );
+      expect(await response.text()).toContain("synthetic-eof");
+      expectExactlyOneTerminalPerAttempt(events, [{ transportAttempt: 1, phase: "completed" }]);
+      expect(events.at(-1)?.meaningfulOutput).toBe(true);
+    },
+  );
+
+  test.each([
+    'data: {"type":"response.created"}',
+    'data: {"type":"response.failed","response":{"status":"failed"}}',
+    'data: {"type":"response.completed","response":{"status":"incomplete"}}',
+  ])("invalid or failed trailing terminal stays failed: %s", async (body) => {
+    const events: CodexModelRequestEvent[] = [];
+    const response = await codexRequestStorage.run(
+      ctx({
+        onModelRequestEvent: (event) => {
+          events.push(event);
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(
+          async () =>
+            new Response(body, {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            }),
+        )("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ stream: true, input: [] }),
+        }),
+    );
+    await expect(response.text()).rejects.toThrow();
+    expectExactlyOneTerminalPerAttempt(events, [{ transportAttempt: 1, phase: "failed" }]);
+  });
+});
+
 describe("Codex encrypted artifact rejection classifier", () => {
   const markedError = (message: string, status = 400) => ({
     status,
@@ -116,6 +184,37 @@ describe("Codex encrypted artifact rejection classifier", () => {
       status: 400,
       kind: "encrypted_content_rejected",
     });
+  });
+
+  test("accepts the exact provider error code without a message match", () => {
+    // Production compaction requests were rejected with this code while the
+    // human-readable text did not match the sentence patterns above.
+    const coded = {
+      status: 400,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+      error: {
+        type: "invalid_request_error",
+        code: "invalid_encrypted_content",
+        message: "Invalid encrypted reasoning artifact",
+      },
+    };
+    expect(classifyCodexEncryptedArtifactRejection(coded)).toEqual({
+      status: 400,
+      kind: "encrypted_content_rejected",
+    });
+    expect(classifyCodexEncryptedArtifactRejection(new Error("wrapped", { cause: coded }))).toEqual(
+      { status: 400, kind: "encrypted_content_rejected" },
+    );
+    expect(classifyCodexEncryptedArtifactRejection({ ...coded, status: 500 })).toBeNull();
+    expect(
+      classifyCodexEncryptedArtifactRejection({
+        ...coded,
+        error: { ...coded.error, code: "invalid_value" },
+      }),
+    ).toBeNull();
+    expect(
+      classifyCodexEncryptedArtifactRejection({ ...coded, headers: new Headers() }),
+    ).toBeNull();
   });
 
   test.each([

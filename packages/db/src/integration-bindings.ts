@@ -8,7 +8,7 @@ import { effectiveCapabilityOwnerSql } from "./capability-components";
 import * as schema from "./schema";
 
 export type IntegrationFacetBindingOwner = {
-  kind: "direct" | "plugin" | "pack" | "migration";
+  kind: "direct" | "plugin" | "migration";
   id: string;
   removable: boolean;
 };
@@ -358,12 +358,7 @@ async function loadIntegrationFacetBindingOwnersForBindings(
       asc(schema.integrationFacetBindingOwners.ownerId),
     );
   for (const row of rows) {
-    if (
-      row.kind !== "direct" &&
-      row.kind !== "plugin" &&
-      row.kind !== "pack" &&
-      row.kind !== "migration"
-    ) {
+    if (row.kind !== "direct" && row.kind !== "plugin" && row.kind !== "migration") {
       throw new Error(`Unknown Integration instance owner kind: ${row.kind}`);
     }
     ownersByBindingId

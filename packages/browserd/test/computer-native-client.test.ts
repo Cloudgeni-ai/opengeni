@@ -10,7 +10,7 @@ describe("ComputerNativeClient", () => {
     });
     try {
       expect(client.handshake).toMatchObject({
-        protocolVersion: 2,
+        protocolVersion: 3,
         helperVersion: "fixture-1",
         platform: "linux",
       });
@@ -18,7 +18,12 @@ describe("ComputerNativeClient", () => {
       expect(targets[0]).toMatchObject({ id: "window-1", targetGeneration: "target-generation-1" });
       expect(capabilities.parallelApps).toBe(true);
       expect(await client.clipboard()).toEqual({ text: "fixture clipboard", truncated: false });
-      const frame = await client.capture("window-1");
+      const frame = await client.captureStill("window-1", {
+        format: "png",
+        quality: 75,
+        maxWidth: 1024,
+        maxHeight: 768,
+      });
       expect(new TextDecoder().decode(frame.data)).toBe("fixture-png");
       expect(frame).toMatchObject({ frameId: "frame-1", width: 10, height: 20 });
       await expect(client.observe("missing")).rejects.toMatchObject({

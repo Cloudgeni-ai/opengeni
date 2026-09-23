@@ -277,6 +277,15 @@ index = "index.html"
 api_bind_addr = "127.0.0.1:3903"
 {{- end -}}
 
+{{/* Release identity is non-secret and must survive ordinary Helm rendering,
+not exist only as a canary post-renderer mutation. */}}
+{{- define "opengeni.deploymentRevisionEnv" -}}
+{{- with .Values.config.OPENGENI_DEPLOYMENT_REVISION }}
+- name: OPENGENI_DEPLOYMENT_REVISION
+  value: {{ . | quote }}
+{{- end }}
+{{- end -}}
+
 {{- define "opengeni.generatedRuntimeEnv" -}}
 {{- $root := . -}}
 {{- $objectStorageEndpoint := "" -}}

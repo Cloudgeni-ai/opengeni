@@ -8,7 +8,10 @@ import {
   loadWorkspaceVercelAiGatewayCredentialLease,
   getExternalLinkTurnAuthorization,
   getSessionTurnForAttempt,
+  ensureSessionReasoningConfiguration,
+  ensureSessionSkillCatalog,
 } from "@opengeni/db";
+import { recoveryAwareSessionInstructions } from "./recovery-warning";
 import {
   formatSkillCatalog,
   type AttemptConnectorActionBinding,
@@ -24,7 +27,7 @@ import {
   resolveModelProvider,
   type Settings,
 } from "@opengeni/config";
-import { type CodexRequestContext } from "@opengeni/codex";
+import { type CodexRequestContext, supportsReasoningConfiguration } from "@opengeni/codex";
 import { executeXaiSubscriptionImageGeneration } from "../xai-image-generation";
 import { rigProviderImageContentHash, videoGenerationCapabilitiesForPolicy } from "@opengeni/core";
 import {
@@ -34,7 +37,7 @@ import {
   type VideoGenerationCredentialLease,
 } from "../video-generation-admission";
 import { VideoReferenceInputError } from "../video-reference-staging";
-import { rigProviderImageSourceImage } from "../packs";
+import { rigProviderImageSourceImage } from "../sandbox-images";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
@@ -76,6 +79,7 @@ import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 
 export type BuildTurnAgentDeps = {
   skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
+  mcpServers: Settings["mcpServers"];
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
   runtime: ActivityServices["runtime"];
@@ -136,6 +140,7 @@ export type BuildTurnAgentDeps = {
 
 export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   const {
+    mcpServers,
     input,
     db,
     runtime,
@@ -191,6 +196,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     codexContext,
   } = deps;
   const preparedTools = eventing.preparedTools!;
+  // Durable recovery truth is read for every attempt, including reconstruction
+  // after compaction. It is never inferred from transcript tool successes.
+  const sessionInstructions = await recoveryAwareSessionInstructions(
+    db,
+    input.workspaceId,
+    session,
+  );
 
   const missingSessionTitleHint = preparationIndependentToolNames.includes(
     SESSION_TITLE_MODEL_TOOL_NAME,
@@ -556,7 +568,15 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     turnExecutionPolicy.latencyMode,
   );
   const approvedToolCallId = approvedConnectorActionCallId(trigger);
-  const modelVisibleSkillCatalogText = formatSkillCatalog(deps.skillCatalog);
+  const modelVisibleSkillCatalogText = await ensureSessionSkillCatalog(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    expectedExecutionGeneration: turn.executionGeneration,
+    expectedAttemptId: input.attemptId,
+    catalog: formatSkillCatalog(deps.skillCatalog),
+  });
   try {
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
       buildCompanyBrainContributionReceiptFor(modelVisibleSkillCatalogText),
@@ -581,11 +601,31 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   );
   if (linkedToolAuthority && !linkedToolAuthority.authorized)
     throw new Error("Native identity link was revoked");
+  const useReasoningUpdates =
+    eventing.modelRunSettings.reasoningConfigurationUpdatesEnabled &&
+    resolvedModel?.provider.api === "responses" &&
+    (resolvedModel.provider.id === "codex" || resolvedModel.provider.id === "openai") &&
+    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort);
+  const requestReasoningEffort =
+    useReasoningUpdates &&
+    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort)
+      ? await ensureSessionReasoningConfiguration(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          expectedExecutionGeneration: turn.executionGeneration,
+          expectedAttemptId: input.attemptId,
+          effort: turn.reasoningEffort,
+        })
+      : turn.reasoningEffort;
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
     try {
-      return runtime.buildAgent(eventing.modelRunSettings, runtimeResources, {
+      // Approval policy must use the same accepted account identities as tool
+      // preparation. Keep the separately resolved model/sandbox settings intact.
+      return runtime.buildAgent({ ...eventing.modelRunSettings, mcpServers }, runtimeResources, {
         ...(linkedToolAuthority
           ? {
               authorizeAttemptExecution: async () => {
@@ -605,7 +645,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             }
           : {}),
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
-        reasoningEffort: turn.reasoningEffort,
+        reasoningEffort: requestReasoningEffort,
         latencyMode: turnExecutionPolicy.latencyMode,
         ...(serviceTier ? { serviceTier } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
@@ -707,6 +747,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             }),
         onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
         skillCatalog: deps.skillCatalog,
+        skillCatalogInHistory: true,
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
           : {}),
@@ -715,7 +756,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // Per-session persona tier (session > workspace > deployment default).
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.
-        ...(session.instructions ? { sessionInstructions: session.instructions } : {}),
+        ...(sessionInstructions ? { sessionInstructions } : {}),
         ...workspaceEnvironmentOption,
         // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
         // the frozen version carries a non-empty script), and the rig credential

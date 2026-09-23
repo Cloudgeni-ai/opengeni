@@ -3,7 +3,7 @@ import {
   ModalCommandControl,
   modalCommandAbortMiddleware,
   type ModalProviderCommand,
-} from "../src/sandbox/providers/modal-command-control";
+} from "../src/sandbox/providers/modal-legacy-command-control";
 
 const locator = (): ModalProviderCommand => ({
   kind: "modal-control-v1",

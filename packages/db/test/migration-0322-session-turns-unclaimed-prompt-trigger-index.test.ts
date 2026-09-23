@@ -12,7 +12,8 @@ beforeAll(async () => {
   shared = await acquireSharedTestDatabase("migration-0322-unclaimed-prompt-index");
 }, 180_000);
 
-afterAll(async () => shared?.release());
+// Releasing the holder can wait behind another process's migration-template build.
+afterAll(async () => shared?.release(), 180_000);
 
 describe("0322 session_turns unclaimed-prompt trigger index", () => {
   test("uses the governed rolling concurrent-index plan", async () => {

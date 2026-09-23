@@ -119,6 +119,144 @@ async function mount(node: React.ReactElement): Promise<HTMLElement> {
 }
 
 describe("ModelPolicyPicker", () => {
+  test("deployment branding overrides supplied row labels without mutating catalog truth", async () => {
+    const rows = projectClientModelRows([
+      {
+        ...MODELS[0]!,
+        id: "host/example",
+        provider: "openai",
+        source: "opengeni",
+        cost: "credits",
+      },
+    ]);
+    const catalogRows = rows.map((row) => ({
+      ...row,
+      catalog: {
+        ...row.catalog,
+        credentialReadiness: {
+          status: "ready" as const,
+          reason: null,
+          basis: "configuration" as const,
+          checkedAt: null,
+        },
+        availability: {
+          status: "available" as const,
+          selectable: true,
+          reason: null,
+          checkedAt: null,
+        },
+      },
+    }));
+    const before = JSON.stringify(catalogRows);
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        rows={catalogRows}
+        model="host/example"
+        effort="low"
+        latencyMode="standard"
+        groupPresentation={{
+          opengeni_credits: {
+            label: "Acme Assist",
+            description: "Workspace-provided models",
+            icon: <svg data-testid="acme-mark" />,
+          },
+        }}
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    expect(container.querySelector('section[aria-label="Acme Assist"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("OpenGeni");
+    expect(container.textContent).toContain("Workspace-provided models");
+    expect(container.querySelector('[data-testid="acme-mark"]')).not.toBeNull();
+    expect(JSON.stringify(catalogRows)).toBe(before);
+  });
+
+  test("host presentation replaces group branding and search without changing selection", async () => {
+    const selected: string[] = [];
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={MODELS}
+        model={MODELS[0]!.id}
+        effort="low"
+        latencyMode="standard"
+        groupPresentation={{
+          codex_subscription: {
+            label: "Acme models",
+            description: "Included with Acme",
+            icon: <svg data-testid="host-icon" />,
+          },
+        }}
+        onModelChange={(id) => selected.push(id)}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    expect(container.querySelector('section[aria-label="Acme models"]')).not.toBeNull();
+    expect(container.textContent).toContain("Included with Acme");
+    expect(container.textContent).not.toContain("ChatGPT / Codex plan");
+    expect(container.querySelector('[data-testid="host-icon"]')).not.toBeNull();
+    const input = container.querySelector<HTMLInputElement>("input")!;
+    input.value = "Acme";
+    const key = Object.keys(input).find((property) => property.startsWith("__reactProps$"))!;
+    await act(async () =>
+      (
+        input as unknown as Record<
+          string,
+          { onChange: (event: { target: HTMLInputElement }) => void }
+        >
+      )[key]!.onChange({ target: input }),
+    );
+    const choice = container.querySelector<HTMLButtonElement>(
+      `[data-testid="model-picker-choice-${MODELS[1]!.id}"]`,
+    )!;
+    expect(choice).not.toBeNull();
+    await act(async () => choice.click());
+    expect(selected).toEqual([MODELS[1]!.id]);
+  });
+
+  test("trigger branding uses the host label and icon", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        models={MODELS}
+        model={MODELS[0]!.id}
+        effort="low"
+        latencyMode="standard"
+        groupPresentation={{
+          codex_subscription: {
+            label: "Acme models",
+            icon: <svg data-testid="trigger-host-icon" />,
+          },
+        }}
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    expect(container.querySelector('[role="img"][aria-label="Acme models"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="trigger-host-icon"]')).not.toBeNull();
+  });
+
+  test("explicit null hides group icons and descriptions", async () => {
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={MODELS}
+        model={MODELS[0]!.id}
+        effort="low"
+        latencyMode="standard"
+        groupPresentation={{ codex_subscription: { icon: null, description: null } }}
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-codex_subscription"]'),
+    ).toBeNull();
+    expect(container.textContent).not.toContain("ChatGPT / Codex plan");
+  });
+
   test.each([false, true])(
     "renders usable Codex first without mutating selection (codexOnly=%s)",
     async (codexOnly) => {

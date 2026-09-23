@@ -17,6 +17,7 @@ import {
 } from "../src/sandbox/routing/routing-session";
 import { createSandboxClientForBackend } from "../src/index";
 import { testSettings } from "@opengeni/testing";
+import { markPendingCommandSupervised } from "../src/sandbox/provider-command-session";
 
 const runContext = {} as never;
 
@@ -180,8 +181,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const exec = functionTool("exec_command", async () => running(116, "ready\n"));
     const session = {
       hasRetainedProcess: (sessionId: number) => sessionId === 116,
-      adoptRetainedProcessAsBackgroundCommand: async (sessionId: number) => {
+      adoptRetainedProcessAsBackgroundCommand: async (sessionId: number, command?: string) => {
         expect(sessionId).toBe(116);
+        expect(command).toBe("long-task");
         adoptions += 1;
       },
     };
@@ -212,7 +214,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
           writeStdin: async () => (++reads === 1 ? running(117, "middle\n") : exited(0, "done\n")),
         },
       }),
-      adoptProcessAsBackgroundCommand: async () => {},
+      adoptProcessAsBackgroundCommand: async ({ command }) => {
+        expect(command).toBe("work");
+      },
       observeProcessTerminal: async () => {
         observations += 1;
       },
@@ -701,6 +705,39 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(retained).toBe(true);
   });
 
+  test("preserves the original command when an ambiguous launch is adopted by a later read", async () => {
+    const controller = createTurnToolCancellationController();
+    const command = "printf 'two  spaces\\n'\nbun run render --composition Intro";
+    const adopted: Array<string | undefined> = [];
+    const exec = functionTool("exec_command", async () => {
+      throw new RoutingMutationOutcomeUnknownError("execCommand", "promotion transaction lost", {
+        retainedProcess: {
+          id: "77777777-7777-4777-8777-777777777777",
+          providerSessionId: 34,
+        },
+      });
+    });
+    const session = {
+      hasRetainedProcess: (id: number) => id === 34,
+      writeStdinForProcessMutation: async () => running(34),
+      adoptRetainedProcessAsBackgroundCommand: async (_id: number, text?: string) => {
+        adopted.push(text);
+      },
+    };
+    const [wrappedExec, wrappedWrite] = controller.wrapTools(
+      [exec, functionTool("write_stdin", async () => running(34))],
+      session,
+    ) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+    await expect(
+      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: command, yield_time_ms: 0 })),
+    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    await wrappedWrite!.invoke(
+      runContext,
+      JSON.stringify({ session_id: 34, chars: "", yield_time_ms: 0 }),
+    );
+    expect(adopted).toEqual([command]);
+  });
+
   test("registers a durably promoted process even when stale authority rejects the exec output", async () => {
     const controller = createTurnToolCancellationController();
     let processAlive = true;
@@ -1061,6 +1098,56 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(cancellationCommands[0]).toContain(".cancelled");
     expect(cancellationCommands[0]).toContain("command kill -TERM");
     expect(cancellationCommands[0]).toContain("command kill -KILL");
+  });
+
+  test("native pending launch cancellation waits for its retained handoff without numeric helpers", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let resolveStart!: (value: string) => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const pending = new Promise<string>((resolve) => {
+      resolveStart = resolve;
+    });
+    let invocations = 0;
+    let retained = true;
+    let nativeCancels = 0;
+    const exec = functionTool("exec_command", async () => {
+      invocations++;
+      markPendingCommandSupervised();
+      entered();
+      return pending;
+    });
+    const [wrapped] = controller.wrapTools([exec], {
+      supportsPty: () => true,
+      hasRetainedProcess: () => retained,
+      cancelPendingExecCommand: async () => {
+        resolveStart(running(411));
+      },
+      cancelSupervisedCommand: async () => {
+        nativeCancels++;
+        return true;
+      },
+      writeStdinForProcessControl: async () => {
+        retained = false;
+        return exited(137);
+      },
+      execCommandForProcessControl: async () => {
+        throw new Error("numeric helper forbidden");
+      },
+    }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+    const invocation = wrapped!
+      .invoke(runContext, JSON.stringify({ cmd: "sleep 60", tty: false, yield_time_ms: 0 }))
+      .catch((error) => error);
+    await started;
+    abort.abort(new Error("stopped"));
+    await controller.waitForQuiescence();
+    await invocation;
+    expect(invocations).toBe(1);
+    expect(nativeCancels).toBe(1);
+    expect(retained).toBe(false);
   });
 
   test("abort also cancels a cleanup exec that stalls before provider yield", async () => {

@@ -123,7 +123,7 @@ test("preview does not silently preselect operations", async () => {
     },
     "preview",
   );
-  expect(html).toContain("Install selected operations");
+  expect(html).toContain("Add selected tools");
   expect(html).toContain("Write records");
   expect(html).not.toContain("checked");
 });

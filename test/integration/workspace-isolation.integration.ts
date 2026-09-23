@@ -181,7 +181,6 @@ describe("workspace isolation matrix", () => {
     );
     await expectStatus(app, authA, legacyRoute("scheduled-tasks", task.id), 404);
 
-    await expectStatus(app, authA, workspacePath(b.workspaceId, "/packs"), 403);
     await expectStatus(app, authA, workspacePath(b.workspaceId, "/capabilities"), 403);
     const connectionResponse = await app.request(
       workspacePath(a.workspaceId, "/social/connections"),

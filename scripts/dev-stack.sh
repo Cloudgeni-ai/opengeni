@@ -10,8 +10,7 @@ case "${1:-}" in
   shift
   ;;
 *)
-  opengeni_dev_stack_token="$(bun -e 'import { randomUUID } from "node:crypto"; process.stdout.write(randomUUID())')"
-  exec bash "$0" "--opengeni-dev-stack-token=${opengeni_dev_stack_token}" "$@"
+  exec bun "$(dirname "${BASH_SOURCE[0]}")/run-development-stack.ts" "$@"
   ;;
 esac
 
@@ -22,36 +21,31 @@ if [ ! -f .env ]; then
   echo "Created .env from .env.example. Configure model and sandbox credentials before running agent sessions."
 fi
 
-set -a
 # shellcheck disable=SC1091
-. ./.env
-set +a
+. ./scripts/dev-stack-backend.sh
+opengeni_load_dev_environment ./.env
 
 # Docker remains the preferred local infrastructure backend when its daemon is
 # reachable. Restricted sandboxes commonly have no daemon (or only a dead CLI),
 # so auto falls back to equivalent native processes without changing `bun run
 # dev`. An explicit Docker request still fails closed.
-# shellcheck disable=SC1091
-. ./scripts/dev-stack-backend.sh
 OPENGENI_DEV_BACKEND="$(opengeni_resolve_dev_backend)"
 export OPENGENI_DEV_BACKEND
 
-# A native infrastructure host cannot provide the Docker sandbox provider. The
-# in-process local provider preserves sandbox execution without credentials or a
-# daemon. Preserve explicit remote providers such as Modal/OpenSandbox.
+# `bun run dev` runs the agent on the host. An explicit docker, modal, or other
+# backend in .env is preserved. A native infrastructure host cannot provide the
+# Docker sandbox provider, so an explicit docker value is rewritten to local.
 if [ "$OPENGENI_DEV_BACKEND" = "native" ] &&
-  [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "docker" ]; then
+  [ "${OPENGENI_SANDBOX_BACKEND:-local}" = "docker" ]; then
   OPENGENI_SANDBOX_BACKEND=local
 fi
-OPENGENI_SANDBOX_BACKEND="${OPENGENI_SANDBOX_BACKEND:-docker}"
+OPENGENI_SANDBOX_BACKEND="${OPENGENI_SANDBOX_BACKEND:-local}"
 export OPENGENI_SANDBOX_BACKEND
 
-# Connected Machines are part of the normal localhost product surface. Keep the
-# deployment/config-library default fail-closed, but make `bun run dev`
-# self-contained even for an older copied .env that predates this setting. An
-# explicit false remains authoritative for local testing of the disabled state.
+# Connecting another computer is optional. A basic local stack does not need
+# relay binaries or enrollment credentials. Preserve an existing explicit opt-in.
 if [ -z "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-}" ]; then
-  OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true
+  OPENGENI_SANDBOX_SELFHOSTED_ENABLED=false
 fi
 export OPENGENI_SANDBOX_SELFHOSTED_ENABLED
 
@@ -154,6 +148,12 @@ if [ "$OPENGENI_INTEGRATIONS_ENABLED" = "true" ] &&
   } >>.env
   echo "Generated and persisted a local integration state secret in .env."
 fi
+
+# Managed-mode integration development uses the same organization-key/asUser
+# path as deployment. Persist signing secrets only for local/test environments;
+# deployed environments must continue to supply their own configuration.
+. ./scripts/dev-managed-auth.sh
+opengeni_ensure_local_managed_auth .env
 
 # Connected-machine enrollment and streaming are ordinary local-development
 # capabilities. A clean checkout must not require the operator to invent and
@@ -272,6 +272,7 @@ if [ -f .env.runtime ] &&
     OPENGENI_TEMPORAL_HOST_PORT \
     OPENGENI_TEMPORAL_UI_HOST_PORT \
     OPENGENI_GARAGE_HOST_PORT \
+    OPENGENI_GARAGE_RPC_HOST_PORT \
     OPENGENI_MINIO_HOST_PORT \
     OPENGENI_MINIO_CONSOLE_HOST_PORT \
     OPENGENI_API_PORT \
@@ -436,7 +437,8 @@ choose_port OPENGENI_NATS_MONITOR_HOST_PORT 8222
 choose_port OPENGENI_TEMPORAL_HOST_PORT 7233
 if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
   choose_port OPENGENI_TEMPORAL_UI_HOST_PORT 8233
-  OPENGENI_OBJECT_STORAGE_FIXTURE=minio
+  OPENGENI_OBJECT_STORAGE_FIXTURE="$(bun scripts/dev-native-storage.ts resolve \
+    "$(pwd)/.opengeni/native/${COMPOSE_PROJECT_NAME}" "${OPENGENI_OBJECT_STORAGE_FIXTURE:-}")"
 else
   OPENGENI_OBJECT_STORAGE_FIXTURE="${OPENGENI_OBJECT_STORAGE_FIXTURE:-garage}"
 fi
@@ -448,6 +450,9 @@ if [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
   object_s3_host_port="$OPENGENI_MINIO_HOST_PORT"
 elif [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "garage" ]; then
   choose_port OPENGENI_GARAGE_HOST_PORT 3900
+  if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
+    choose_port OPENGENI_GARAGE_RPC_HOST_PORT 3901
+  fi
   object_s3_host_port="$OPENGENI_GARAGE_HOST_PORT"
 else
   echo "OPENGENI_OBJECT_STORAGE_FIXTURE must be garage or minio." >&2
@@ -552,7 +557,9 @@ cleanup() {
     wait "$pid" >/dev/null 2>&1 || true
   done
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 dev_processes_running() {
   local index pid label status
@@ -958,6 +965,7 @@ fi
 
 # A clean checkout must establish the canonical workspace package links before
 # the generated facade is verified. The facade never searches alternate roots.
+echo "OpenGeni setup: installing pinned JavaScript dependencies."
 bun install --frozen-lockfile
 
 # Connected Machines use the real NATS auth-callout boundary in local development,
@@ -1052,6 +1060,7 @@ if [ -n "${OPENGENI_DEV_CARGO_TARGET_DIR:-}" ]; then
   artifact_kernel_cargo_env=("CARGO_TARGET_DIR=${OPENGENI_DEV_CARGO_TARGET_DIR}/artifact-kernel")
   relay_cargo_env=("CARGO_TARGET_DIR=${OPENGENI_DEV_CARGO_TARGET_DIR}/agent")
 fi
+echo "OpenGeni setup: preparing the source-matched artifact runtime."
 env "${artifact_kernel_cargo_env[@]+"${artifact_kernel_cargo_env[@]}"}" \
   bun scripts/prepare-development-artifact-runtime.ts \
   --repository-root "$(pwd)" \
@@ -1064,6 +1073,13 @@ export OPENGENI_ARTIFACT_OUTBOX_ENABLED=true
 export OPENGENI_ARTIFACT_LOCAL_DEVELOPMENT=true
 export OPENGENI_ARTIFACT_MATERIALIZER_UNSANDBOXED_DEVELOPMENT=true
 export OPENGENI_ARTIFACT_MATERIALIZER_HTTP_HOST=127.0.0.1
+
+# Finish an explicitly enabled relay's cold build before readiness monitoring.
+# Compiling beside the API/workers can otherwise exhaust a small fresh host.
+if [ "$start_local_relay" = "1" ]; then
+  echo "OpenGeni setup: preparing the optional Connected Machines relay."
+  (cd agent && env "${relay_cargo_env[@]+"${relay_cargo_env[@]}"}" cargo build --locked -p opengeni-relay)
+fi
 
 # Native agent skills require a source-matched Linux runtime inside the sandbox
 # image. Resolve only the exact clean-HEAD CI artifact; never reuse a stale
@@ -1119,6 +1135,9 @@ fi
     printf 'OPENGENI_MINIO_CONSOLE_HOST_PORT=%s\n' "${OPENGENI_MINIO_CONSOLE_HOST_PORT}"
   else
     printf 'OPENGENI_GARAGE_HOST_PORT=%s\n' "${OPENGENI_GARAGE_HOST_PORT}"
+    if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
+      printf 'OPENGENI_GARAGE_RPC_HOST_PORT=%s\n' "${OPENGENI_GARAGE_RPC_HOST_PORT}"
+    fi
   fi
   printf 'OPENGENI_API_PORT=%s\n' "${OPENGENI_API_PORT}"
   printf 'OPENGENI_WORKER_HTTP_PORT=%s\n' "${OPENGENI_WORKER_HTTP_PORT}"
@@ -1197,6 +1216,7 @@ fi
 echo "  artifact-materializer=http://127.0.0.1:${OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT}  artifact-outbox=http://127.0.0.1:${OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT}"
 echo "  Wrote .env.runtime (source it in sibling shells)."
 
+echo "OpenGeni setup: starting ${OPENGENI_DEV_BACKEND} infrastructure (${OPENGENI_OBJECT_STORAGE_FIXTURE})."
 if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
   bash scripts/dev-native-infra.sh start
 elif [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
@@ -1204,8 +1224,15 @@ elif [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
 else
   docker compose up -d postgres nats temporal garage garage-init
 fi
+echo "OpenGeni setup: applying database migrations and runtime roles."
 (cd packages/db && bun run migrate)
 (cd packages/db && bun run provision-roles)
+# Diagnose schema/role incompatibilities before expensive builds and before the
+# API's fatal-process boundary reduces the failure to structural telemetry.
+if ! (cd packages/db && bun run assert-runtime-posture); then
+  echo "Local runtime database posture is invalid. Check the diagnostic above and ensure migrations and roles match this checkout; see docs/deployment.md. Existing data has been preserved." >&2
+  exit 1
+fi
 # The sidecars need only their dedicated DSNs. Do not leak raw provisioning
 # passwords into API/web/worker child environments after role convergence.
 unset OPENGENI_ARTIFACT_MATERIALIZER_DATABASE_PASSWORD
@@ -1236,6 +1263,7 @@ else
   echo "Skipping local Docker sandbox image build (backend=${OPENGENI_SANDBOX_BACKEND:-docker})."
 fi
 
+echo "OpenGeni setup: starting application services."
 if [ "$start_local_relay" = "1" ]; then
   env "${relay_cargo_env[@]+"${relay_cargo_env[@]}"}" \
     bash scripts/run-development-relay.sh &
@@ -1271,6 +1299,7 @@ register_process "$!" "web"
 bun scripts/watch-development-schema.ts "$(pwd)" &
 register_process "$!" "database schema guard"
 
+echo "OpenGeni setup: waiting for aggregate application readiness."
 if ! wait_for_stack_readiness; then
   exit "$failed_process_status"
 fi

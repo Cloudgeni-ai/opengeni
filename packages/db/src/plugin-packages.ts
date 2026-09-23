@@ -1045,7 +1045,7 @@ export async function uninstallPluginPackage(
           ) ORDER BY p.id FOR UPDATE`);
         try {
           // Facet FK locks fence new owners; owner row locks fence releases by
-          // Packs/direct callers that do not use the Plugin publication lock.
+
           // Those paths may remove an owner before acquiring the child lock, so
           // fail for a refreshed preview rather than creating a lock-order cycle.
           await tx.execute(sql`SELECT fi.id FROM capability_facet_installations fi
@@ -1333,23 +1333,6 @@ async function pluginOwnedComponents(
             ),
           );
         name = stringValue(objectValue(named?.manifest).name) ?? name;
-      } else if (owner.kind === "pack") {
-        const [named] = await db
-          .select({
-            manifest: schema.packInstallations.manifestSnapshot,
-            packId: schema.packInstallations.packId,
-          })
-          .from(schema.packInstallations)
-          .where(
-            and(
-              eq(schema.packInstallations.workspaceId, workspaceId),
-              or(
-                sql`${schema.packInstallations.id}::text = ${owner.id}`,
-                eq(schema.packInstallations.packId, owner.id),
-              ),
-            ),
-          );
-        name = stringValue(objectValue(named?.manifest).name) ?? named?.packId ?? name;
       }
       if (!remainingOwners.some((item) => item.kind === owner.kind && item.name === name))
         remainingOwners.push({

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
+import { parseBrowserFrameMetadata, type BrowserFrameMetadata } from "@opengeni/sdk";
 import {
   BROWSER_CONTROL_MAX_JSON_BYTES,
   BROWSER_CONTROL_PORT,
@@ -164,6 +165,29 @@ export type ComputerControlFrame = {
   metadataHeader: string;
   metadata: ComputerControlFrameMetadata;
 };
+
+export type BrowserControlFrame = {
+  data: Uint8Array;
+  mediaType: "image/jpeg" | "image/png";
+  metadataHeader: string;
+  metadata: BrowserFrameMetadata;
+};
+
+type ExpectedBrowserFrameEvidence = {
+  browserSessionId: string;
+  controllerGeneration: string;
+  targetId: string;
+};
+
+type FrameRequest = {
+  method: "GET";
+  path: string;
+  token: string;
+  timeoutMs?: number;
+} & (
+  | { surface: "browser"; expectedFrameEvidence: ExpectedBrowserFrameEvidence }
+  | { surface: "computer"; expectedFrameEvidence: ExpectedComputerFrameEvidence }
+);
 
 export type ComputerControlFrameMetadata = {
   frameId: string;
@@ -947,7 +971,17 @@ export class BrowserControlClient {
     expectedFrameEvidence: ExpectedComputerFrameEvidence;
     timeoutMs?: number;
   }): Promise<ComputerControlFrame> {
-    return await this.requestBytes(input);
+    return (await this.requestBytes({ ...input, surface: "computer" })) as ComputerControlFrame;
+  }
+
+  async requestBrowserBytesForSession(input: {
+    method: "GET";
+    path: string;
+    token: string;
+    expectedFrameEvidence: ExpectedBrowserFrameEvidence;
+    timeoutMs?: number;
+  }): Promise<BrowserControlFrame> {
+    return (await this.requestBytes({ ...input, surface: "browser" })) as BrowserControlFrame;
   }
 
   private async requestJson(
@@ -1124,15 +1158,9 @@ export class BrowserControlClient {
   }
 
   private async requestBytes(
-    input: {
-      method: "GET";
-      path: string;
-      token: string;
-      expectedFrameEvidence: ExpectedComputerFrameEvidence;
-      timeoutMs?: number;
-    },
+    input: FrameRequest,
     retryNativeEndpoint = true,
-  ): Promise<ComputerControlFrame> {
+  ): Promise<ComputerControlFrame | BrowserControlFrame> {
     const requireHostFetch = this.session.requireHostFetchController === true;
     if (this.session.resolveExposedPort && !this.session.ensureBrowserControl) {
       try {
@@ -1247,10 +1275,10 @@ export class BrowserControlClient {
       const data = await readBytes(
         this.session,
         responsePath,
-        COMPUTER_SCREENSHOT_MAX_BYTES,
+        input.surface === "browser" ? 24 * 1024 * 1024 : COMPUTER_SCREENSHOT_MAX_BYTES,
         timeoutMs,
       );
-      return computerControlFrame(data, headers, input.expectedFrameEvidence);
+      return controllerImageFrame(data, headers, input);
     } catch (error) {
       if (
         error instanceof BrowserControlRequestError ||
@@ -1430,6 +1458,19 @@ export class BrowserControlSessionClient {
         token: this.viewToken,
       }),
     );
+  }
+
+  async capture(targetId: string): Promise<BrowserControlFrame> {
+    return await this.parent.requestBrowserBytesForSession({
+      method: "GET",
+      path: this.targetPath(targetId, "screenshot?format=jpeg&quality=55"),
+      token: this.viewToken,
+      expectedFrameEvidence: {
+        browserSessionId: this.reference.browserSessionId,
+        controllerGeneration: this.reference.controllerGeneration,
+        targetId: requireOpaqueId(targetId, "browser target id"),
+      },
+    });
   }
 
   async readClipboard(): Promise<BrowserClipboardValue> {
@@ -1840,15 +1881,9 @@ async function requestExposedController(
 
 async function requestExposedControllerBytes(
   endpoint: ExposedPortEndpoint,
-  input: {
-    method: "GET";
-    path: string;
-    token: string;
-    expectedFrameEvidence: ExpectedComputerFrameEvidence;
-    timeoutMs?: number;
-  },
+  input: FrameRequest,
   defaultTimeoutMs: number,
-): Promise<ComputerControlFrame> {
+): Promise<ComputerControlFrame | BrowserControlFrame> {
   const token = requireToken(input.token, "browser controller token");
   const timeoutMs = boundedTimeout(input.timeoutMs ?? defaultTimeoutMs);
   const streamUrl = exposedControllerUrl(endpoint, input.path);
@@ -1872,12 +1907,63 @@ async function requestExposedControllerBytes(
     throw new BrowserControlProtocolError("browser controller image response is invalid");
   }
   const declaredLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > COMPUTER_SCREENSHOT_MAX_BYTES) {
-    await response.body?.cancel("computer frame exceeds its byte bound").catch(() => undefined);
-    throw new RangeError("computer frame exceeds its byte bound");
+  const maxBytes = input.surface === "browser" ? 24 * 1024 * 1024 : COMPUTER_SCREENSHOT_MAX_BYTES;
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    await response.body?.cancel("frame exceeds its byte bound").catch(() => undefined);
+    throw new RangeError("frame exceeds its byte bound");
   }
   const data = new Uint8Array(await response.arrayBuffer());
-  return computerControlFrame(data, response.headers, input.expectedFrameEvidence);
+  return controllerImageFrame(data, response.headers, input);
+}
+
+function controllerImageFrame(
+  data: Uint8Array,
+  headers: { get(name: string): string | null | undefined },
+  input: FrameRequest,
+): ComputerControlFrame | BrowserControlFrame {
+  return input.surface === "browser"
+    ? browserControlFrame(data, headers, input.expectedFrameEvidence)
+    : computerControlFrame(data, headers, input.expectedFrameEvidence);
+}
+
+function browserControlFrame(
+  data: Uint8Array,
+  headers: { get(name: string): string | null | undefined },
+  expected: ExpectedBrowserFrameEvidence,
+): BrowserControlFrame {
+  if (data.byteLength < 1 || data.byteLength > 24 * 1024 * 1024) {
+    throw new RangeError("browser frame exceeds its byte bound");
+  }
+  const get = (name: string): string | null => headers.get(name.toLowerCase()) ?? null;
+  const mediaType = get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (mediaType !== "image/jpeg" && mediaType !== "image/png") {
+    throw new BrowserControlProtocolError("browser frame media type is invalid");
+  }
+  const metadataHeader = get("x-opengeni-browser-frame");
+  if (
+    !metadataHeader ||
+    metadataHeader.length > 64 * 1024 ||
+    !/^[A-Za-z0-9_-]+$/u.test(metadataHeader)
+  ) {
+    throw new BrowserControlProtocolError("browser frame metadata is invalid");
+  }
+  let metadata: BrowserFrameMetadata;
+  try {
+    metadata = parseBrowserFrameMetadata(
+      JSON.parse(Buffer.from(metadataHeader, "base64url").toString("utf8")),
+    );
+  } catch {
+    throw new BrowserControlProtocolError("browser frame metadata is invalid");
+  }
+  if (
+    metadata.browserSessionId !== expected.browserSessionId ||
+    metadata.controllerGeneration !== expected.controllerGeneration ||
+    metadata.targetId !== expected.targetId ||
+    metadata.mediaType !== mediaType
+  ) {
+    throw new BrowserControlProtocolError("browser frame evidence does not match its request");
+  }
+  return { data, mediaType, metadataHeader, metadata };
 }
 
 function computerControlFrame(

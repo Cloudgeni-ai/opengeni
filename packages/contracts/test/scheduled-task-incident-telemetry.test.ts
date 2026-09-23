@@ -52,6 +52,7 @@ describe("scheduled incident telemetry contract", () => {
       id: crypto.randomUUID(),
       accountId: crypto.randomUUID(),
       workspaceId: crypto.randomUUID(),
+      ownerSubjectId: null,
       name: "digest-bound task",
       status: "active",
       schedule: { type: "manual" },

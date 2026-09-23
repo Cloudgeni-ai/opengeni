@@ -5,6 +5,19 @@ import { actRun, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 
+test("pending logos show a neutral placeholder rather than temporary initials", async () => {
+  const rendered = await renderComponent(<ConnectionLogo src={null} name="Linear" loading />);
+  try {
+    const logo = rendered.container.querySelector<HTMLElement>(".og-connection-logo")!;
+    expect(logo.textContent).toBe("");
+    expect(logo.querySelector(".og-connection-skeleton-mark")).not.toBeNull();
+    await rendered.rerender(<ConnectionLogo src={null} name="Linear" loading={false} />);
+    expect(logo.textContent).toBe("L");
+  } finally {
+    await rendered.unmount();
+  }
+});
+
 test("connection logos preserve initials when no custom fallback is supplied", async () => {
   const rendered = await renderComponent(<ConnectionLogo src={null} name="Google Drive" />);
   try {

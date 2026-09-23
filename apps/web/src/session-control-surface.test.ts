@@ -93,6 +93,19 @@ describe("session control surface architecture", () => {
     expect(recoveryGate).not.toContain('"workspace:admin"');
   });
 
+  test("failed-session recovery uses an execution control, never a synthetic user message", async () => {
+    const route = await source("routes/session.tsx");
+    expect(route).not.toContain("FAILURE_CONTINUATION_MESSAGE");
+    expect(route).not.toContain("Continue from the last failure");
+    expect(route).toContain("context.client.retrySession(");
+    expect(
+      /retryFailedSession\(\s*props\.failure\.failureEventId,\s*composerPolicy,?\s*\)/u.test(route),
+    ).toBe(true);
+    expect(route).toContain('workspacePermissions.includes("sessions:control")');
+    expect(route).toContain('admissionControl.state === "paused"');
+    expect(route).toContain("context.client.resumeSession(");
+  });
+
   test("routes every markdown sandbox file reference into Files without implicit publication", async () => {
     const route = await source("routes/session.tsx");
     expect(route).toContain("onSandboxFile={props.onOpenSandboxFile}");
@@ -273,7 +286,7 @@ describe("session control surface architecture", () => {
     expect(route).toContain(
       "selectedRigDefaultVariableSetIds: selectedRigDefaultVariableSetIdsKey",
     );
-    expect(route).toContain("Couldn’t verify the selected Variable Set or Rig");
+    expect(route).toContain("Couldn’t verify the selected Variable Set or Sandbox Environment");
     expect(route).toContain("onRetry: () => void refreshPersonalResourceCatalogs()");
     expect(establishedRoute).toContain("<SessionVariableSetPicker");
     expect(establishedPicker).toContain("<VariableSetShortlistEditor");
@@ -296,7 +309,7 @@ describe("session control surface architecture", () => {
     expect(establishedPicker).toContain("props.canControl && props.canAttach");
     expect(
       establishedRoute.match(
-        /canControl=\{workspacePermissions\.includes\("sessions:control"\)\}/g,
+        /<SessionVariableSetPicker\s+session=\{props\.session\}\s+canControl=\{workspacePermissions\.includes\("sessions:control"\)\}/g,
       ),
     ).toHaveLength(1);
     expect(establishedRoute.match(/goalActive=\{props\.goal\.isActive\}/g)).toHaveLength(1);
@@ -474,10 +487,24 @@ describe("session control surface architecture", () => {
     expect(list).not.toContain("Filter by</DropdownMenuLabel>");
     expect(list).toContain("archiveStatus: browseStatus");
     expect(list).toContain("sortBy: browseSortBy");
-    expect(list).toContain("updateSearchDraft(event.target.value)");
+    expect(list).toContain("onClick={openSearchDialog}");
+    expect(list).toContain("() => requestSessionSearch(rail.workspaceId)");
     expect(list).not.toContain('"Selected"');
     expect(list).toContain("{ creatorLabels }");
     expect(list).toContain("sessionBrowseResultCount(browseSessions, hierarchyMode)");
+  });
+
+  test("the rail owns the lazy search dialog across conversation navigation", async () => {
+    const rail = await source("components/rail/rail-context.tsx");
+    expect(rail).toContain('lazy(() => import("@/components/session/session-search-dialog"))');
+    expect(rail).toContain("window.addEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
+    expect(rail).toContain("window.removeEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
+    expect(rail).toContain(".detail?.workspaceId !== workspaceId");
+    expect(rail.match(/<SessionSearchDialog\b/g)).toHaveLength(1);
+    expect(rail).toContain("key={`${appContext.accessContext.subjectId}:${workspaceId}`}");
+    expect(rail).toContain("workspaceId={workspaceId}");
+    expect(rail).toContain("open={searchOpen}");
+    expect(rail).toContain("onOpenChange={setSearchOpen}");
   });
 
   test("the retired client-side queue model is gone", async () => {

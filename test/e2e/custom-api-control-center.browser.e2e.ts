@@ -380,6 +380,8 @@ describe("custom API control center browser acceptance", () => {
       const addAccount = sheet.getByRole("button", { name: "+ Add account" });
       await expectVisible(addAccount);
       await addAccount.click();
+      await page.getByRole("radio", { name: "This workspace", exact: false }).check();
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
       const [consent] = await Promise.all([
         context.waitForEvent("page"),
         page.getByRole("button", { name: "Authorize connection" }).click(),
@@ -661,9 +663,7 @@ async function installApi(page: Page, state: UiState): Promise<void> {
         return json({ message: "Connection data unavailable" }, 503);
       return json({ connections: connections(state.dense) });
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({ packs: [], installations: [] });
-    }
+
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`)
       return json({ items: [], nextCursor: null });
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) return json({ skills: [] });

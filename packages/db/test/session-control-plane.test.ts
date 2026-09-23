@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { createHash } from "node:crypto";
 import {
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
@@ -5124,6 +5123,98 @@ describe("clean session control plane", () => {
     });
   });
 
+  test("paused provider recovery projects its quiesced receipt without an interruption row", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "provider recovery before pause");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
+    const predecessor = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId, workflowRunId, dispatchId },
+    );
+    expect(predecessor).not.toBeNull();
+    expect(
+      await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: predecessor!.id,
+        triggerEventId: predecessor!.triggerEventId,
+        attemptId,
+        reason: "provider_unavailable",
+        detail: { code: "provider_unavailable", retryable: true, continueDelayMs: 2_000 },
+      }),
+    ).toMatchObject({ action: "recovering" });
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+    });
+    await controlSession(grant, session.id, "pause");
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const interruptions = await db
+        .select()
+        .from(schema.sessionAttemptInterruptions)
+        .where(eq(schema.sessionAttemptInterruptions.attemptId, attemptId));
+      expect(interruptions).toHaveLength(0);
+      await db
+        .update(schema.sessions)
+        .set({ status: "recovering" })
+        .where(eq(schema.sessions.id, session.id));
+    });
+    const beforeControl = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      evaluateSessionControl(db, grant.workspaceId!, session.id),
+    );
+    expect(beforeControl.state).toBe("paused");
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "cancellation-wait",
+      attemptId,
+    });
+    const input = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+      activitySettled: true,
+    };
+    const result = await reconcileSessionAttemptQuiescence(client.db, input);
+    expect(result.action).toBe("quiesced");
+    expect(result.events.filter((e) => e.type === "session.status.changed")).toHaveLength(1);
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "idle",
+      activeTurnId: predecessor!.id,
+    });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, predecessor!.id)).toMatchObject({
+      status: "recovering",
+      activeAttemptId: null,
+    });
+    const afterControl = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      evaluateSessionControl(db, grant.workspaceId!, session.id),
+    );
+    expect(afterControl.controlEtag).toBe(beforeControl.controlEtag);
+    expect(afterControl.state).toBe("paused");
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "idle",
+    });
+    expect(await reconcileSessionAttemptQuiescence(client.db, input)).toEqual({
+      action: "quiesced",
+      events: [],
+    });
+    expect(
+      await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId),
+    ).toBeNull();
+  });
+
   test("an already-quiesced paused recovery repairs its stale public projection", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "run until the parked projection is repaired");
@@ -7498,56 +7589,6 @@ describe("clean session control plane", () => {
       executionAttemptId: resumedAttemptId,
       outcome: "retry_after_execution_started",
     });
-  });
-
-  // The `session-mcp:` prefix is the store's guarantee that a session-MCP approval
-  // never carries a connector connection row's id. A host that registers a local
-  // MCP server with its own connection identity used to hand that identity through
-  // verbatim and hit this refusal at the pause (a hyphenated-id host measured the
-  // turn failing instead of pausing); the runtime now hashes the host identity into
-  // the synthetic form. The store's invariant stays exactly as strict.
-  test("session MCP approval refuses a bare host connection identity and accepts the synthetic form", async () => {
-    const { grant, session } = await fixture();
-    await send(grant, session.id, "run one host-registered MCP action");
-    const attemptId = crypto.randomUUID();
-    const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
-      sessionId: session.id,
-      workflowId: `session-${session.id}`,
-      workflowRunId: crypto.randomUUID(),
-      dispatchId: crypto.randomUUID(),
-      attemptId,
-      trigger: { kind: "next" },
-    });
-    if (claim.action !== "claimed") throw new Error(`claim failed: ${claim.reason}`);
-    const identity = {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId!,
-      sessionId: session.id,
-      turnId: claim.turn.id,
-      attemptId,
-      executionGeneration: claim.turn.executionGeneration,
-      initiator: claim.turn.initiator,
-    };
-    const hostIdentity = `cendra-attempt:${attemptId}`;
-    const call = {
-      approvalId: "host-registered-mcp-call",
-      serverId: "cendra-pms",
-      toolName: "task_create",
-      arguments: { title: "exactly once" },
-      approvalMode: "session_mcp" as const,
-    };
-    await expect(
-      prepareConnectorActionApproval(client.db, identity, { ...call, connectionId: hostIdentity }),
-    ).rejects.toThrow("session MCP approval is missing its synthetic connection identity");
-    const synthetic = `session-mcp:cendra-pms:${createHash("sha256")
-      .update(hostIdentity, "utf8")
-      .digest("hex")}`;
-    expect(
-      await prepareConnectorActionApproval(client.db, identity, {
-        ...call,
-        connectionId: synthetic,
-      }),
-    ).toMatchObject({ managed: true, decision: "ask" });
   });
 
   test("a committed session control command replays before its stale control fence is checked", async () => {

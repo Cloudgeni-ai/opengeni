@@ -101,7 +101,7 @@ and the authenticated materialization diagnostic for exact current behavior.
 
 ### Private-registry sandbox images
 
-By default `OPENGENI_MODAL_IMAGE_REF` (and any pack `sandboxImage` that overrides it) is
+By default `OPENGENI_MODAL_IMAGE_REF` is
 pulled UNAUTHENTICATED — the Agents-extension backend calls `Image.fromRegistry(tag)` with
 no secret, so the image must be a PUBLIC registry tag. To run a PRIVATE image (a cloud-hosted
 ACR/ECR/GCR digest), set `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET` to the name of a Modal Secret
@@ -139,7 +139,6 @@ Common resource behavior:
 - File resources become object-storage-backed mounts, commonly under `files/<file-id>`.
 - Uploaded files are read-only. Agents should copy them before modifying.
 - Bundled infrastructure skills may be made available under `.agents/` through the Agents SDK skills capability.
-- Enabled capability packs may add skills to the same `.agents/` skill index and may declare a `sandboxImage` that overrides `OPENGENI_DOCKER_IMAGE`/`OPENGENI_MODAL_IMAGE_REF` for the workspace's sessions (one image-declaring pack per workspace; see `docs/packs.md`).
 
 Always trace resource flow end to end:
 

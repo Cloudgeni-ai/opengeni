@@ -29,9 +29,11 @@ import {
   getGlobalCatalogOAuthProfile,
   listConnectionsMetadata,
   loadIntegrationOAuthClient,
+  loadIntegrationOAuthPendingState,
   normalizeBearerScheme,
   replaceIntegrationOAuthClientIfCurrent,
   storeIntegrationOAuthClient,
+  storeIntegrationOAuthPendingState,
   updateConnection,
   withDatabaseStatementTimeout,
   type Database,
@@ -55,7 +57,7 @@ import {
   type McpProtectedResourceMetadata,
 } from "@opengeni/network";
 import { Buffer } from "node:buffer";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
 import {
   assertConnectionOwnershipAllowedForPrincipal,
@@ -73,7 +75,6 @@ import {
   builtInOAuthProfileByKey,
   assertAuthorizationServerNotReserved,
   assertAuthorizationServerPins,
-  assertOwnershipAllowed,
   builtInOAuthProfileFor,
   catalogMcpUrlKey,
   defaultOwnershipFor,
@@ -197,7 +198,8 @@ export type OAuthStartStage =
   | "mcp_challenge"
   | "protected_resource_metadata"
   | "authorization_server_metadata"
-  | "client_registration";
+  | "client_registration"
+  | "state_persist";
 
 class OAuthStartStageError extends Error {
   constructor(
@@ -464,12 +466,9 @@ async function startMcpOAuthWithinDeadline(
     })) ??
     DEFAULT_OAUTH_PROFILE;
   assertOAuthStartProfile(settings, context.payload, mcpUrl, profile);
-  // Personal-only resources default an omitted ownership to personal, matching
-  // the fence that existed before #1240; an explicit non-personal value is the
-  // only thing rejected. Everything else defaults to workspace as before.
+  // Catalog defaults are setup preferences; an explicit ownership always wins.
   const requestedOwnership: ConnectionOwnership =
     context.payload.ownership ?? defaultOwnershipFor(profile);
-  assertOwnershipAllowed(profile, requestedOwnership);
   const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
   const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
@@ -493,15 +492,11 @@ async function startMcpOAuthWithinDeadline(
   const ownership = existing
     ? ownershipForConnection(existing.subjectId, context.subjectId)
     : requestedOwnership;
-  // A reconnect of a legacy row must not renew an ownership the profile no
-  // longer allows (e.g. shared authority over one human's hosted-Slack grant).
-  assertOwnershipAllowed(profile, ownership);
   // Only a managed human can own a personal Connection: personal-authority
   // execution resolves through a delegation snapshot frozen on a human's causal
   // turn, and migration 0256 can mint the `user` authority scope only for a
-  // subject that holds an active organization membership. For a personal-only
-  // profile (Gmail, hosted Slack MCP) this refuses the whole flow rather than
-  // silently downgrading to the workspace ownership those profiles forbid.
+  // subject that holds an active organization membership. An explicit personal
+  // choice is never silently downgraded to workspace ownership.
   assertConnectionOwnershipAllowedForPrincipal(ownership, context.personalOwnershipAllowed);
 
   const discovery = await discoverMcpOAuth(mcpUrl, settings, deadline);
@@ -532,7 +527,7 @@ async function startMcpOAuthWithinDeadline(
     ),
   );
   const key = requireEnvironmentEncryption(settings);
-  const state = createSignedState(requireIntegrationsStateSecret(settings), {
+  const fullState = createSignedState(requireIntegrationsStateSecret(settings), {
     ...(context.integrationKey ? { integrationKey: context.integrationKey } : {}),
     ...(context.connectAttemptId ? { connectAttemptId: context.connectAttemptId } : {}),
     accountId: context.accountId,
@@ -582,6 +577,29 @@ async function startMcpOAuthWithinDeadline(
     returnPath,
     ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
   });
+  const expiresAt = new Date(Date.now() + oauthStateTtlMs);
+  let state = fullState;
+  if (settings.integrationsOauthShortStateEnabled) {
+    const stateId = randomUUID();
+    state = createSignedState(requireIntegrationsStateSecret(settings), {
+      kind: "mcp_oauth_reference",
+      id: stateId,
+      accountId: context.accountId,
+      workspaceId: context.workspaceId,
+    });
+    if (state.length > 512) {
+      throw new Error("MCP OAuth reference state exceeded its provider-safe length");
+    }
+    await deadline.run("state_persist", async () =>
+      storeIntegrationOAuthPendingState(db, {
+        id: stateId,
+        accountId: context.accountId,
+        workspaceId: context.workspaceId,
+        stateEncrypted: encryptEnvironmentValue(key, fullState),
+        expiresAt,
+      }),
+    );
+  }
   const authorizationUrl = buildAuthorizationUrl({
     endpoint: discovery.as.authorizationEndpoint,
     settings,
@@ -597,34 +615,8 @@ async function startMcpOAuthWithinDeadline(
   return OAuthStartResponse.parse({
     state,
     authorizationUrl,
-    expiresAt: new Date(Date.now() + oauthStateTtlMs).toISOString(),
+    expiresAt: expiresAt.toISOString(),
   });
-}
-
-/** Ownership fence for the official Gmail profile, keyed by exact MCP URL. */
-export function assertOfficialGmailPersonalOwnership(
-  mcpUrl: string,
-  ownership: ConnectionOwnership,
-): void {
-  const profile = builtInOAuthProfileFor({ mcpUrl });
-  if (profile?.key === "official-gmail") {
-    assertOwnershipAllowed(profile, ownership);
-  }
-}
-
-/**
- * Slack's hosted MCP issues user tokens only. Sharing one human's grant as
- * workspace authority made every shared agent act as a named employee; the
- * OpenGeni workspace bot owns shared Slack access instead (bot-token search
- * covers public channels, files, and users).
- */
-export function assertHostedSlackMcpPersonalOwnership(
-  hostedSlackMcp: boolean,
-  ownership: ConnectionOwnership,
-): void {
-  if (hostedSlackMcp) {
-    assertOwnershipAllowed(builtInOAuthProfileByKey("hosted-slack-mcp"), ownership);
-  }
 }
 
 export function isHostedSlackMcpTarget(providerDomain: string, mcpUrl: string): boolean {
@@ -735,19 +727,18 @@ async function completeMcpOAuthCallbackWithinDeadline(
     };
   }
   try {
-    state = readOAuthState(input.state, settings);
+    state = await resolveMcpOAuthState(db, settings, input.state, deadline);
     integrationKey = state.integrationKey ?? "custom:mcp";
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(db, state, state.connectAttemptId);
       // Native Gmail setup uses its own provider id, but shares this callback.
-      // Bind that id to the exact reviewed personal Gmail destination before
+      // Bind that id to the exact reviewed Gmail destination before
       // claiming an operation (including receipt replay), not to arbitrary MCP.
       const gmailAttemptMatches =
         stored.attempt.providerId === "gmail" &&
         state.mcpUrl === OFFICIAL_GMAIL_MCP_URL &&
         state.providerDomain === "gmailmcp.googleapis.com" &&
         builtInOAuthProfileFor(state)?.key === "official-gmail" &&
-        state.ownership === "personal" &&
         personalOwnerStateAccepted(state);
       if (
         (!["mcp-oauth", "slack-personal"].includes(stored.attempt.providerId) &&
@@ -776,21 +767,8 @@ async function completeMcpOAuthCallbackWithinDeadline(
       );
       if (claim.status === "replayed") return { redirectTo: stored.returnUrl, exactReturn: true };
     }
-    // Fence state minted by an older deployment too: a rolling update must not
-    // let a still-valid callback persist an ownership the target's profile no
-    // longer allows (workspace-owned Gmail or hosted Slack, for example).
-    const builtInCallbackProfile = builtInOAuthProfileFor({
-      mcpUrl: state.mcpUrl,
-      providerDomain: state.providerDomain,
-    });
-    if (builtInCallbackProfile) {
-      assertOwnershipAllowed(builtInCallbackProfile, state.ownership);
-    }
-    // Only a managed human may own a personal Connection. This callback has no
-    // live principal, so it enforces the signed start-time decision; a state
-    // minted before that fence existed carries no claim and is refused, which
-    // closes the in-flight window across a rolling deploy. The legacy
-    // `?? "personal"` decode above therefore cannot land a machine-owned row.
+    // The callback enforces the signed start-time principal decision.
+    // Workspace ownership requires no personal-owner claim.
     if (!personalOwnerStateAccepted(state)) {
       throw new OAuthCallbackStageError(
         "state_verify",
@@ -829,18 +807,6 @@ async function completeMcpOAuthCallbackWithinDeadline(
       db,
       async (scopedDb) => {
         await requireOAuthCallbackGrant(scopedDb, state!);
-        if (!builtInCallbackProfile) {
-          // Catalog-declared ownership fences get the same rolling-update
-          // treatment as the built-in ones.
-          const raw = await getGlobalCatalogOAuthProfile(
-            scopedDb,
-            state!.workspaceId,
-            catalogMcpUrlKey(state!.mcpUrl),
-          );
-          if (raw !== null) {
-            assertOwnershipAllowed(oauthProfileFromCatalog(state!.mcpUrl, raw), state!.ownership);
-          }
-        }
         return await consumeIntegrationOAuthStateNonce(scopedDb, {
           accountId: state!.accountId,
           workspaceId: state!.workspaceId,
@@ -1778,6 +1744,41 @@ export function buildAuthorizationUrl(input: {
   return url.toString();
 }
 
+async function resolveMcpOAuthState(
+  db: Database,
+  settings: Settings,
+  state: string,
+  deadline: OAuthCallbackDeadline,
+): Promise<OAuthStatePayload> {
+  const reference = readSignedState(state, requireIntegrationsStateSecret(settings)) as Record<
+    string,
+    unknown
+  > | null;
+  if (reference?.kind !== "mcp_oauth_reference") {
+    // In-flight grants from the previous release remain valid for their
+    // normal ten-minute lifetime during a rolling deployment.
+    return readOAuthState(state, settings);
+  }
+  const accountId = requiredString(reference.accountId, "state.accountId");
+  const workspaceId = requiredString(reference.workspaceId, "state.workspaceId");
+  const id = requiredString(reference.id, "state.id");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) {
+    throw new HTTPException(400, { message: "invalid OAuth state reference" });
+  }
+  const encrypted = await runCallbackDatabaseStage(deadline, "state_verify", db, (scopedDb) =>
+    loadIntegrationOAuthPendingState(scopedDb, { accountId, workspaceId, id }),
+  );
+  if (!encrypted) {
+    throw new HTTPException(400, { message: "invalid or expired OAuth state" });
+  }
+  const fullState = decryptEnvironmentValue(requireEnvironmentEncryption(settings), encrypted);
+  const resolved = readOAuthState(fullState, settings);
+  if (resolved.accountId !== accountId || resolved.workspaceId !== workspaceId) {
+    throw new HTTPException(400, { message: "OAuth state reference mismatch" });
+  }
+  return resolved;
+}
+
 function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   const payload = readSignedState(state, requireIntegrationsStateSecret(settings)) as Record<
     string,
@@ -1822,6 +1823,12 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   if (discoveryMode === "legacy_2025_03_26_metadata" && resourceParameterSupported) {
     throw new HTTPException(400, { message: "invalid legacy OAuth resource parameter state" });
   }
+  const ownership = connectionOwnership(payload.ownership);
+  if (!ownership) {
+    throw new HTTPException(400, {
+      message: "missing or invalid OAuth ownership; restart connection setup",
+    });
+  }
   const parsed = {
     accountId: requiredString(payload.accountId, "state.accountId"),
     workspaceId: requiredString(payload.workspaceId, "state.workspaceId"),
@@ -1844,9 +1851,7 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     ...(stringValue(payload.connectAttemptId)
       ? { connectAttemptId: requiredString(payload.connectAttemptId, "state.connectAttemptId") }
       : {}),
-    // OAuth states minted before ownership was explicit were always personal.
-    // Preserve that meaning for in-flight reconnects during a rolling deploy.
-    ownership: connectionOwnership(payload.ownership) ?? "personal",
+    ownership,
     // Absent on a legacy state, which therefore cannot land a personal owner.
     personalOwnerVerified: personalOwnerVerifiedInState(payload),
     ...(payload.integrationKey
@@ -2226,6 +2231,8 @@ function oauthStartStageLabel(stage: OAuthStartStage): string {
       return "authorization-server discovery";
     case "client_registration":
       return "OAuth client registration";
+    case "state_persist":
+      return "OAuth state persistence";
   }
 }
 

@@ -29,7 +29,6 @@ const legacyBrowserUnusedMethods = [
   "getEnvironment",
   "getLatestEventResult",
   "getLatestStartedTurn",
-  "getPack",
   "getPreferenceRegistryFullContent",
   "getPreferenceRegistrySummary",
   "getRetainedArtifactContent",
@@ -46,7 +45,6 @@ const legacyBrowserUnusedMethods = [
   "listDocuments",
   "listGoalRevisionPage",
   "listGoalRevisions",
-  "listPackInstallations",
   "listTranscriptionRecordings",
   "moveDocument",
   "openExternalBrowserAuthFlow",
@@ -65,6 +63,11 @@ const legacyBrowserUnusedMethods = [
   "updateOrganizationWorkspaceSettings",
   "verifyPersonalGitHubRepositorySelections",
 ];
+
+// The agent's browser still capture uses the same authenticated, bounded SDK
+// response transport as the existing computer capture method. It is intentionally
+// available to runtime callers even though the web UI does not call it.
+const agentInteractionMethods = ["captureBrowserTarget"];
 
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -105,6 +108,8 @@ describe("browser client runtime surface", () => {
 
     expect(browserSource).toContain("@opengeni/sdk/browser");
     expect(browserSource).not.toContain("@opengeni/sdk/core");
-    expect(browserUnusedMethods).toEqual(legacyBrowserUnusedMethods);
+    expect(browserUnusedMethods).toEqual(
+      [...legacyBrowserUnusedMethods, ...agentInteractionMethods].sort(),
+    );
   });
 });

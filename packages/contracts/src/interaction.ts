@@ -1816,6 +1816,18 @@ export const BrowserObservation = z
     frameId: opaqueGeneration.nullable(),
     semantic: z.union([InteractionSemanticSnapshot, InteractionSemanticDiff]).nullable(),
     screenshot: RetainedArtifactReferenceSchema.nullable(),
+    viewport: z
+      .object({
+        width: z.number().int().positive(),
+        height: z.number().int().positive(),
+        visualWidth: z.number().positive(),
+        visualHeight: z.number().positive(),
+        deviceScaleFactor: z.number().positive(),
+        maxTouchPoints: z.number().int().nonnegative(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
     focusedRef: boundedOpaqueId.nullable(),
     changedRegions: z.array(InteractionRect).max(INTERACTION_MAX_CHANGED_NODES),
     diagnostics: InteractionDiagnosticSummary,
@@ -1942,6 +1954,17 @@ export type BrowserPermissionSetting = z.infer<typeof BrowserPermissionSetting>;
 
 const browserActionVariants = [
   z.object({ type: z.literal("navigate"), url: boundedUrl }).strict(),
+  z.object({ type: z.literal("history"), direction: z.enum(["back", "forward"]) }).strict(),
+  z.object({ type: z.literal("activate") }).strict(),
+  z
+    .object({
+      type: z.literal("viewport"),
+      width: z.number().int().min(240).max(4_096),
+      height: z.number().int().min(240).max(4_096),
+      mobile: z.boolean(),
+      deviceScaleFactor: z.number().min(0.5).max(4).optional(),
+    })
+    .strict(),
   z
     .object({
       type: z.literal("click"),

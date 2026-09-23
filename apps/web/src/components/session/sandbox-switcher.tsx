@@ -9,7 +9,7 @@ import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // `fleet.machines` is empty, so this falls back to a static compute label.
 import { MACHINES_SESSION_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import type { SandboxBackend } from "@opengeni/sdk";
-import { CheckIcon, ChevronDownIcon, Loader2Icon, ServerIcon } from "lucide-react";
+import { LaptopIcon, CheckIcon, ChevronDownIcon, Loader2Icon, ServerIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -23,6 +23,30 @@ import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 
 export const CLOUD_SANDBOX_LABEL = "Cloud sandbox";
 export const NO_SANDBOX_LABEL = "No sandbox";
+
+const SESSION_SANDBOX_LABELS: Partial<Record<SandboxBackend, string>> = {
+  local: "this computer",
+  docker: "Docker",
+  modal: "Modal",
+  daytona: "Daytona",
+  runloop: "Runloop",
+  e2b: "E2B",
+  blaxel: "Blaxel",
+  cloudflare: "Cloudflare",
+  vercel: "Vercel",
+  opensandbox: "OpenSandbox",
+};
+
+function sandboxFallbackLabel(backend: SandboxBackend): string {
+  if (backend === "none") return NO_SANDBOX_LABEL;
+  return SESSION_SANDBOX_LABELS[backend] ?? CLOUD_SANDBOX_LABEL;
+}
+
+function SandboxMark({ kind, backend }: { kind: string | undefined; backend: SandboxBackend }) {
+  const local = kind === "local" || (kind === undefined && backend === "local");
+  const Icon = local ? LaptopIcon : ServerIcon;
+  return <Icon className="size-3 shrink-0" />;
+}
 
 export function sessionSupportsFleetSwitching(_sandboxBackend: SandboxBackend): boolean {
   return true;
@@ -46,8 +70,7 @@ export function SessionSandboxSwitcher({
   const fleet = useWorkspaceMachines({ sessionId, pollIntervalMs: MACHINES_SESSION_POLL_MS });
   const machines = fleet.machines;
   const activeMachine = machines.find((machine) => machine.active) ?? null;
-  const activeName =
-    activeMachine?.name ?? (sandboxBackend === "none" ? NO_SANDBOX_LABEL : CLOUD_SANDBOX_LABEL);
+  const activeName = activeMachine?.name ?? sandboxFallbackLabel(sandboxBackend);
 
   // No machines to choose between (selfhosted off, or only the session box and
   // it is already active): render a static, non-interactive label.
@@ -56,7 +79,7 @@ export function SessionSandboxSwitcher({
   if (!hasChoices) {
     return (
       <span className="inline-flex min-w-0 items-center gap-1 truncate text-2xs text-fg-muted">
-        <ServerIcon className="size-3 shrink-0" />
+        <SandboxMark kind={activeMachine?.kind} backend={sandboxBackend} />
         <span className="shrink-0">on</span>
         <span className="truncate text-fg-muted">{activeName}</span>
       </span>
@@ -72,7 +95,7 @@ export function SessionSandboxSwitcher({
           size="sm"
           className="h-6 max-w-[12rem] gap-1 rounded-full border border-transparent px-1.5 text-2xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg"
         >
-          <ServerIcon className="size-3 shrink-0" />
+          <SandboxMark kind={activeMachine?.kind} backend={sandboxBackend} />
           {/* Natural-language "on {target}" — semantic without the colon-label
               grammar; "Run on" remains the dropdown menu's label. */}
           <span className="shrink-0">on</span>

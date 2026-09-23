@@ -35,6 +35,7 @@ export function formatSkillCatalog(descriptors: readonly SkillCatalogDescriptor[
     "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
   ].join("\n");
   const lines = [header];
+  if (ordered.length === 0) lines.push("No configured Skills are currently available.");
   let bytes = Buffer.byteLength(header, "utf8");
   let included = 0;
   for (const entry of ordered) {

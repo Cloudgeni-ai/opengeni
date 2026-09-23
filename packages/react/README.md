@@ -88,6 +88,77 @@ and `ChatComposer` with the session hooks. These use the normal SDK through
 your authenticated host routes. For custom or compatible frontends, the backend
 `@opengeni/sdk/chat` adapters provide the `createChatHandler` protocol.
 
+### Exact conversation search navigation
+
+`useSessionEvents(sessionId).jumpToSequence(sequence)` replaces the current
+window with at most two bounded cursor reads around an exact durable event.
+It resolves `true` only when that event is retained, `false` for a missing or
+superseded target, and rejects current request errors. `loadingTarget` exposes
+the pending state. New targets supersede older targets/pages; session/client
+changes fence stale results. Search enters history mode; use the existing
+`loadOlder`, `loadNewer`, and `jumpToLatest` controls to navigate onward. It does
+not download the intervening session history.
+Pass `jumpToSequence(sequence, { signal })` to cancel one navigation: an
+aborted signal fences the pending jump before its fetched window is applied
+(the underlying reads may still complete), resolves `false`, and settles
+`loadingTarget` without disturbing any newer navigation that superseded it.
+
+Pass the selected hit to `MessageTimeline` independently of loading:
+
+```tsx
+const history = useSessionEvents(sessionId);
+const [target, setTarget] = useState<TimelineSearchTarget | null>(null);
+
+function selectHit(hit: { sequence: number; eventId: string }, query: string, occurrence = 0) {
+  setTarget({ ...hit, query, occurrence });
+  void history.jumpToSequence(hit.sequence);
+}
+
+<MessageTimeline events={history.events} items={history.timeline} searchTarget={target} />;
+```
+
+The host owns search results, error handling, next/previous controls and query
+state. `TimelineSearchTarget` is exported from the root and `session-ui` entry:
+`{ sequence: number; eventId?: string; query: string; occurrence?: number; offset?: number }`.
+Matching is literal, case-insensitive, non-overlapping; `occurrence` is zero-based
+within the message, defaulting to zero. When the backend all-occurrence search
+returns `messageMatchOffset`, pass it as `offset`: the zero-based UTF-16 position
+of the match in the original message text. An explicit `offset` takes precedence
+over `occurrence` and is validated against the query, so a stale offset simply
+produces no highlight. `buildTimeline` supplies `sourceEvents`
+identities so completed assistant events remain addressable when the renderer
+keeps a first-delta ID. Hosts supplying their own items should preserve those
+identities (or the canonical `annotationSource`).
+
+The active message's group and long-user disclosure open persistently. Setting
+`searchTarget={null}` removes the active highlight without collapsing content or
+restoring a former scroll position. The package mounts its complete bounded
+window. The default Markdown renderer shows a labeled, bounded **message source**
+excerpt for the active match, including Markdown syntax and link destinations;
+closing find removes the highlight but retains that excerpt and its layout.
+An explicit **Show formatted message** action restores the full body; this can
+expand a huge message, so it is never done automatically on closing Find.
+Raw UTF-16 offsets are never applied
+to rendered Markdown text. Custom hosts can use
+`<Markdown searchTarget={searchTarget}>{text}</Markdown>` for the same behavior.
+A custom virtualized renderer receives
+`renderMessageText(text, item, { searchTarget })` and must materialize the exact
+occurrence when that context is non-null. Existing two-argument renderers remain
+compatible. If previous occurrences are omitted from the virtualized DOM, wrap
+the materialized match in an element with `data-og-search-occurrence` (zero-based
+index), `data-og-search-sequence` and `data-og-search-query`, each set from the
+target; when the target carries an `offset`, set `data-og-search-offset` to it
+alongside `data-og-search-occurrence` (which can be zero). This lets navigation
+identify that exact occurrence without recounting an incomplete DOM. Keep the
+materialized window when the context clears to
+preserve position. Navigation waits for the mounted text and highlights the active
+DOM range using the CSS Custom Highlight API, without rewriting React-owned
+text. Explicit source-offset targets require this marker: matching characters
+at the same rendered offset are not proof of source identity. A custom renderer
+that omits source text or puts it in an opaque iframe must reveal that text
+itself. Existing renderers without this mapping remain render-compatible but
+cannot provide exact source-offset navigation.
+
 ## Editable Office artifacts
 
 The optional artifact workbench is isolated from the ordinary session and
@@ -610,6 +681,10 @@ state remains application-owned; durable draft and session state remain in
   callback return type. Custom loaders can use `createOlderHistoryLoadReceipt`
   and call `markCommitted` immediately before publishing their accepted older
   window.
+- Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
+  and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
+  Live appends reuse the retained window's byte total, measuring only incoming
+  and evicted events. History still pages when either retention limit is reached.
 - Newer history uses `hasNewer`, `loadingNewer`, and `loadNewer`. A failed
   `loadNewer()` preserves the retained events and cursors, exposes the original
   failure through `error`, and still rejects for the caller to handle. Pass
@@ -669,8 +744,6 @@ state remains application-owned; durable draft and session state remain in
   reads and create/update/remove/set/delete operations. Dedicated permissioned
   exact-value reveal is part of the held React/UI train rather than an
   implicit field on ordinary reads.
-- `usePacks()` — capability packs + installations with
-  register/enable/remove and `installationFor(packId)`.
 - `useWorkspaces()` — the caller's workspaces with create/update (client-only;
   not bound to the provider's workspace).
 - `useBillingUsage({ accountId?, workspaceId? })` — credit balance + recent
@@ -917,6 +990,36 @@ The trigger renders immediately; the searchable popover loads when opened. Hosts
 can translate its search, current-selection, empty-result, attachment-warning, and
 thinking labels through `messages`, and override payment descriptions through
 `messages.billingHints`.
+
+Hosts can rebrand the full picker without replacing its interaction logic:
+
+```tsx
+<ModelPolicyPicker
+  {...pickerProps}
+  groupPresentation={{
+    opengeni_credits: {
+      label: "Acme Assist",
+      icon: <AcmeMark aria-hidden="true" />,
+      description: "Provided by your workspace",
+    },
+    codex_subscription: { description: null },
+  }}
+/>
+```
+
+`groupPresentation` is a partial map keyed by `PickerBillingClass`. Labels apply
+to group headings, search, and trigger-icon accessibility. Icons apply to both
+the menu and trigger; supply decorative, non-interactive content (SVG or image)
+that fits the existing 14px slot. Explicit `null` hides an icon or description;
+omitted fields retain defaults. Descriptions override `messages.billingHints`,
+can also be shown for the deployment-provided group, and are searchable. Existing
+`rows[].billingClassLabel` remains the fallback when no label override is supplied.
+This is presentation only: model IDs, billing, ordering, availability and callbacks
+are unchanged. The type `ModelPolicyPickerGroupPresentation` is exported from
+both `@opengeni/react` and `@opengeni/react/composer`. The native `ModelPicker`
+is a separate control; this API targets the full `ModelPolicyPicker` shown above.
+
+For a rendered example, open the composer-responsive demo with `?branding=host`.
 
 Subscription descriptions appear once per provider group. Free models carry a
 Free badge. Pass `hasImageAttachments` for the current draft to show an image

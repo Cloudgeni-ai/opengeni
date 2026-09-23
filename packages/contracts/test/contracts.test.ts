@@ -7,9 +7,6 @@ import {
   CreateBillingPortalResponse,
   CapabilityCatalogResponse,
   evaluateWorkspaceModelPolicy,
-  CapabilityPack,
-  InstallPackRequest,
-  PreviewPackInstallationRequest,
   ClientConfig,
   ClientModel,
   WorkspaceModelCatalogResponse,
@@ -29,7 +26,6 @@ import {
   CreateSessionRequest,
   DocumentSearchRequest,
   DocumentSearchResponse,
-  EnablePackRequest,
   ErrorEnvelope,
   GitCredentialBindingId,
   gitCredentialBindingIdForRepository,
@@ -39,7 +35,6 @@ import {
   gitRemoteUriAliases,
   KnowledgeMemorySearchRequest,
   KnowledgeSearchResponse,
-  MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
   MODEL_CONTEXT_LABEL,
   SESSION_GOAL_CONTEXT_LABEL,
@@ -70,7 +65,6 @@ import {
   SteerSessionMessageRequest,
   SubmitHumanInputResponseRequest,
   TerminalPtyExitedPayload,
-  UninstallPackRequest,
   DraftTimelineAnnotations,
   SubmittedTimelineAnnotations,
   renderTimelineAnnotationsForModel,
@@ -963,7 +957,7 @@ describe("contracts", () => {
     expect(
       CreateSessionRequest.safeParse({
         startMode: "realtime",
-        connectionAuthorities: [
+        connectionAccounts: [
           {
             serverId: "example",
             connectionId: "00000000-0000-4000-8000-000000000001",
@@ -1044,7 +1038,7 @@ describe("contracts", () => {
   });
 
   test("accepts only unique installed Skill selections", () => {
-    const capabilityId = "skill:pack-inline/session-selected/implementation@abc";
+    const capabilityId = "skill:session-selected/implementation@abc";
     expect(
       CreateSessionRequest.parse({
         initialMessage: "implement the integration",
@@ -2150,18 +2144,6 @@ describe("contracts", () => {
     ).toThrow();
   });
 
-  test("accepts pack enable and marketing daily analysis defaults", () => {
-    expect(EnablePackRequest.parse({})).toEqual({ metadata: {} });
-    const payload = MarketingDailyAnalysisTaskRequest.parse({
-      connectionIds: ["00000000-0000-4000-8000-000000000020"],
-      timeZone: "Europe/Oslo",
-    });
-    expect(payload.hour).toBe(9);
-    expect(payload.minute).toBe(0);
-    expect(payload.runMode).toBe("new_session_per_run");
-    expect(payload.overlapPolicy).toBe("skip");
-  });
-
   test("accepts social connector and post payloads", () => {
     const connection = CreateSocialConnectionRequest.parse({
       provider: "linkedin",
@@ -2670,7 +2652,7 @@ describe("contracts", () => {
 
   test("mergeToolRefs: strict beats optional for the same server", () => {
     // A server that is both optional and strict must end up STRICT. This keeps
-    // explicit strict selections fail-loud when they collide with optional pack
+    // explicit strict selections fail-loud when they collide with optional Skill
     // refs or auto-attached capability MCP defaults.
     expect(
       mergeToolRefs(
@@ -2700,241 +2682,6 @@ describe("contracts", () => {
         [{ kind: "mcp", id: "cap-notebook", optional: true }],
       ),
     ).toEqual([{ kind: "mcp", id: "cap-notebook", eager: true }]);
-  });
-});
-
-describe("capability pack runtime manifest fields", () => {
-  const baseManifest = {
-    id: "infra-runtime",
-    name: "Infra runtime",
-    description: "Infrastructure operations pack.",
-    role: "infrastructure",
-    category: "infrastructure",
-    version: "0.1.0",
-  };
-  const skill = {
-    name: "infra-ops",
-    files: [
-      {
-        path: "SKILL.md",
-        content: "---\nname: infra-ops\ndescription: Operate infra.\n---\n# Infra ops\n",
-      },
-      { path: "references/runbook.md", content: "Runbook." },
-    ],
-  };
-
-  test("packs without runtime fields keep their existing shape", () => {
-    const pack = CapabilityPack.parse(baseManifest);
-    expect(pack.sandboxImage).toBeUndefined();
-    expect(pack.sandboxProviderImages).toBeUndefined();
-    expect(pack.skills).toEqual([]);
-  });
-
-  test("accepts a sandbox image ref and inline skills", () => {
-    const pack = CapabilityPack.parse({
-      ...baseManifest,
-      sandboxImage:
-        "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      skills: [skill],
-    });
-    expect(pack.sandboxImage).toContain("@sha256:");
-    expect(pack.skills).toHaveLength(1);
-    expect(pack.skills[0]?.files.map((file) => file.path)).toEqual([
-      "SKILL.md",
-      "references/runbook.md",
-    ]);
-  });
-
-  test("binds a digest-pinned logical image to an immutable Modal image ID", () => {
-    const pack = CapabilityPack.parse({
-      ...baseManifest,
-      sandboxImage:
-        "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      sandboxProviderImages: {
-        modal: { imageId: "im-1234567890123456789012" },
-      },
-    });
-    expect(pack.sandboxProviderImages?.modal?.imageId).toBe("im-1234567890123456789012");
-  });
-
-  test("rejects a Modal image ID without digest-pinned logical provenance", () => {
-    for (const sandboxImage of [undefined, "example.com/infra-sandbox:latest"]) {
-      expect(() =>
-        CapabilityPack.parse({
-          ...baseManifest,
-          ...(sandboxImage ? { sandboxImage } : {}),
-          sandboxProviderImages: {
-            modal: { imageId: "im-1234567890123456789012" },
-          },
-        }),
-      ).toThrow();
-    }
-  });
-
-  test("requires every skill to include a top-level SKILL.md", () => {
-    expect(() =>
-      CapabilityPack.parse({
-        ...baseManifest,
-        skills: [
-          {
-            name: "infra-ops",
-            files: [{ path: "references/runbook.md", content: "Runbook." }],
-          },
-        ],
-      }),
-    ).toThrow();
-  });
-
-  test("rejects unsafe skill file paths", () => {
-    for (const path of [
-      "../escape.md",
-      "/absolute.md",
-      "a//b.md",
-      "./SKILL.md",
-      "refs/../SKILL.md",
-      "refs\\windows.md",
-    ]) {
-      expect(() =>
-        CapabilityPack.parse({
-          ...baseManifest,
-          skills: [
-            {
-              name: "infra-ops",
-              files: [
-                { path: "SKILL.md", content: "x" },
-                { path, content: "x" },
-              ],
-            },
-          ],
-        }),
-      ).toThrow();
-    }
-  });
-
-  test("rejects skill names that are not a single safe path segment", () => {
-    for (const name of ["infra/ops", "..", ".hidden", "-leading", ""]) {
-      expect(() =>
-        CapabilityPack.parse({
-          ...baseManifest,
-          skills: [{ name, files: [{ path: "SKILL.md", content: "x" }] }],
-        }),
-      ).toThrow();
-    }
-  });
-
-  test("rejects duplicate skill names and duplicate file paths", () => {
-    expect(() =>
-      CapabilityPack.parse({
-        ...baseManifest,
-        skills: [skill, { ...skill, description: "duplicate" }],
-      }),
-    ).toThrow();
-    expect(() =>
-      CapabilityPack.parse({
-        ...baseManifest,
-        skills: [
-          {
-            name: "infra-ops",
-            files: [
-              { path: "SKILL.md", content: "a" },
-              { path: "SKILL.md", content: "b" },
-            ],
-          },
-        ],
-      }),
-    ).toThrow();
-  });
-
-  test("pins component references and explicit Rig requirements", () => {
-    const pack = CapabilityPack.parse({
-      ...baseManifest,
-      components: [
-        {
-          key: "skills/terraform",
-          kind: "skill",
-          capabilityId: "skill:terraform",
-          contentSha256: "a".repeat(64),
-        },
-        {
-          key: "integrations/github",
-          kind: "integration",
-          capabilityId: "integration:github",
-          instanceKey: "primary",
-          revisionId: "revision-1",
-          contentSha256: "b".repeat(64),
-          required: false,
-        },
-      ],
-      rig: {
-        rigId: "11111111-1111-4111-8111-111111111111",
-        requireVerified: true,
-      },
-    });
-    expect(pack.components.map((component) => component.required)).toEqual([true, false]);
-    expect(pack.rig).toEqual({
-      rigId: "11111111-1111-4111-8111-111111111111",
-      required: true,
-      requireVerified: true,
-    });
-  });
-
-  test("rejects duplicate and inline-generated component keys", () => {
-    expect(() =>
-      CapabilityPack.parse({
-        ...baseManifest,
-        components: [
-          {
-            key: "skills/terraform",
-            kind: "skill",
-            capabilityId: "skill:a",
-            contentSha256: "a".repeat(64),
-          },
-          {
-            key: "skills/terraform",
-            kind: "skill",
-            capabilityId: "skill:b",
-            contentSha256: "b".repeat(64),
-          },
-        ],
-      }),
-    ).toThrow();
-    expect(() =>
-      CapabilityPack.parse({
-        ...baseManifest,
-        components: [
-          {
-            key: "inline-skill/infra-ops",
-            kind: "skill",
-            capabilityId: "skill:external",
-            contentSha256: "c".repeat(64),
-          },
-        ],
-        skills: [skill],
-      }),
-    ).toThrow();
-  });
-
-  test("bounds Pack identities and validates lifecycle request fences", () => {
-    expect(() => CapabilityPack.parse({ ...baseManifest, id: "Uppercase" })).toThrow();
-    expect(() => CapabilityPack.parse({ ...baseManifest, id: "x".repeat(101) })).toThrow();
-    expect(
-      PreviewPackInstallationRequest.parse({
-        rigId: "11111111-1111-4111-8111-111111111111",
-      }),
-    ).toEqual({ rigId: "11111111-1111-4111-8111-111111111111" });
-    expect(
-      InstallPackRequest.parse({
-        expectedManifestDigest: "d".repeat(64),
-        expectedInstallationVersion: 3,
-        idempotencyKey: "22222222-2222-4222-8222-222222222222",
-      }),
-    ).toMatchObject({ expectedInstallationVersion: 3 });
-    expect(
-      UninstallPackRequest.parse({
-        expectedInstallationVersion: 4,
-        idempotencyKey: "33333333-3333-4333-8333-333333333333",
-      }),
-    ).toMatchObject({ expectedInstallationVersion: 4 });
   });
 });
 

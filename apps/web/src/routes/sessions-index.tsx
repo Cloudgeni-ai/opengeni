@@ -7,6 +7,7 @@ import {
   addsConnectorOutsideDefaults,
   changedConnectorExclusions,
   defaultConnectorSelection,
+  newSessionConnectorCustomizeState,
 } from "@/lib/composer-connectors";
 // The sessions index: the centered "Start a session" composer. The form is
 // organised top-down — (A) message + model/tools/repos pills → (B) WHERE SHOULD
@@ -93,6 +94,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
+import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
@@ -107,6 +109,7 @@ import {
 } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
 import { displayModel } from "@/lib/format";
+import { preferredConnectedModelId } from "@/lib/model-access-onboarding";
 import {
   isMachineComputeSelectable,
   resolveSelectableMachineSandboxId,
@@ -114,6 +117,7 @@ import {
 import {
   effortOptionsForModel,
   findPickerRow,
+  defaultEffortForModel,
   modelUsesCredits,
   runnableLatencyModesForModel,
   type PickerModelRow,
@@ -153,6 +157,7 @@ import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
   selectableSessionMcpServerIds,
+  unavailableSessionMcpServerIds,
   newSessionDraftToolPolicy,
   rehydrateRepositoryResources,
   repositorySelectionFromResources,
@@ -207,6 +212,15 @@ function SessionsIndexRouteContent({
   launch: ComposerLaunchSearch;
 }) {
   const context = useAppContext();
+  const connectionAccounts = useConnectionAccounts(
+    context.client,
+    {
+      id: "new-session",
+      workspaceId,
+      selectedIds: [...context.selectedCapabilityToolIds],
+    },
+    context.workspaceCapabilityCatalog,
+  );
   const repositoryCatalogRefresh = useRepositoryCatalogRefresh(workspaceId, context);
   const firstPartyMcpToolPolicy = useMemo(
     () => clientFirstPartyMcpToolPolicy(context.clientConfig),
@@ -585,8 +599,21 @@ function SessionsIndexRouteContent({
     },
   );
   const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
+  const [connectorCustomizing, setConnectorCustomizing] = useState(false);
   const [connectorExclusions, setConnectorExclusions] = useState<string[]>([]);
+  const followWorkspaceConnectors = () => {
+    connectionAccounts.resetEmptyChoices();
+    setConnectorCustomizing(false);
+    setToolSelectionExplicit(false);
+    setConnectorExclusions([]);
+    context.setSelectedCapabilityToolIds(
+      defaultConnectorSelection(context.workspaceDefaultToolIds, []),
+    );
+  };
   const changeConnectorSelection = (selection: SessionToolSelection) => {
+    // Choosing accounts is also an explicit connector customization. Apply it
+    // in this event, rather than waiting for the header switch to re-render.
+    if (!connectorCustomizing) setConnectorCustomizing(true);
     if (
       !toolSelectionExplicit &&
       addsConnectorOutsideDefaults(
@@ -715,6 +742,7 @@ function SessionsIndexRouteContent({
         selectedMcpServerIds: context.selectedCapabilityToolIds,
         workspaceDefaultMcpServerIds: context.workspaceDefaultToolIds,
         catalogReady: context.workspaceMcpCatalogReady,
+        customizing: connectorCustomizing,
         explicit: toolSelectionExplicit,
         ...(!toolSelectionExplicit ? { excludedMcpServerIds: connectorExclusions } : {}),
       }),
@@ -723,6 +751,7 @@ function SessionsIndexRouteContent({
       context.workspaceMcpCatalogReady,
       context.workspaceDefaultToolIds,
       toolSelectionExplicit,
+      connectorCustomizing,
       connectorExclusions,
     ],
   );
@@ -827,14 +856,20 @@ function SessionsIndexRouteContent({
       setModel(remote.model);
       setReasoningEffort(remote.reasoningEffort);
       setLatencyMode(remote.latencyMode);
-      setToolSelectionExplicit(remote.toolsProvided);
+      const customize = newSessionConnectorCustomizeState({
+        toolsProvided: remote.toolsProvided,
+        tools: remote.tools,
+        excludedMcpServerIds: remote.options.excludedMcpServerIds,
+      });
+      setConnectorCustomizing(customize.customizing);
+      setToolSelectionExplicit(customize.explicit);
       setConnectorExclusions(remote.options.excludedMcpServerIds ?? []);
       const selected = new Set(
-        remote.toolsProvided
+        customize.explicit
           ? remote.tools.map((tool) => tool.id)
           : defaultConnectorSelection(
               workspaceDefaultToolIdsForHydration,
-              remote.options.excludedMcpServerIds ?? [],
+              customize.customizing ? (remote.options.excludedMcpServerIds ?? []) : [],
             ),
       );
       setSelectedCapabilityToolIds(selectableSessionMcpServerIds(selected));
@@ -879,7 +914,10 @@ function SessionsIndexRouteContent({
   useEffect(() => {
     if (newSessionDraft.loading || !context.workspaceMcpCatalogReady || toolSelectionExplicit)
       return;
-    const next = defaultConnectorSelection(context.workspaceDefaultToolIds, connectorExclusions);
+    const next = defaultConnectorSelection(
+      context.workspaceDefaultToolIds,
+      connectorCustomizing ? connectorExclusions : [],
+    );
     setSelectedCapabilityToolIds((current) =>
       current.size === next.size && [...next].every((id) => current.has(id)) ? current : next,
     );
@@ -888,6 +926,7 @@ function SessionsIndexRouteContent({
     context.workspaceMcpCatalogReady,
     context.workspaceDefaultToolIds,
     setSelectedCapabilityToolIds,
+    connectorCustomizing,
     connectorExclusions,
     toolSelectionExplicit,
   ]);
@@ -904,10 +943,37 @@ function SessionsIndexRouteContent({
     (context.latencyMode === "standard" ||
       runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(context.latencyMode)),
   );
+  const noRunnableModel =
+    !modelCatalog.loading &&
+    modelCatalog.rows.length > 0 &&
+    !modelCatalog.rows.some((row) => row.selectable);
   const newSessionPolicyError =
-    !modelCatalog.loading && !newSessionPolicyValid
+    !modelCatalog.loading &&
+    !newSessionPolicyValid &&
+    !noRunnableModel &&
+    selectedPolicyRow?.selectable
       ? "Choose a supported model, reasoning level, and speed."
       : null;
+  useEffect(() => {
+    if (modelCatalog.loading || newSessionDraft.loading) return;
+    if (findPickerRow(modelCatalog.rows, context.model)?.selectable) return;
+    const nextId =
+      preferredConnectedModelId(modelCatalog.models) ??
+      modelCatalog.rows.find((row) => row.selectable)?.id ??
+      null;
+    if (!nextId || nextId === context.model) return;
+    const next = modelCatalog.models.find((model) => model.id === nextId);
+    setModel(nextId);
+    if (next) setReasoningEffort(defaultEffortForModel(next));
+  }, [
+    context.model,
+    modelCatalog.loading,
+    modelCatalog.models,
+    modelCatalog.rows,
+    newSessionDraft.loading,
+    setModel,
+    setReasoningEffort,
+  ]);
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&
@@ -979,14 +1045,39 @@ function SessionsIndexRouteContent({
           : "";
       if (
         busy ||
+        !context.workspaceMcpCatalogReady ||
         newSessionDraft.loading ||
         newSessionDraft.conflict ||
         !newSessionPolicyValid ||
         privateCreateUnavailable ||
         personalResourceCatalogRefreshPending ||
+        (!realtimeModel &&
+          createdSessionAuthority === null &&
+          (connectionAccounts.loading ||
+            connectionAccounts.error !== null ||
+            connectionAccounts.requiresAccountChoice)) ||
         (createdSessionAuthority === null && !fixedResourceSelection.selectionResolved)
       )
         return false;
+      if (createdSessionAuthority === null) {
+        const unavailable = unavailableSessionMcpServerIds(
+          context.selectedCapabilityToolIds,
+          context.toolMcpServers,
+          context.workspaceMcpCatalogLoadedSuccessfully,
+        );
+        if (unavailable.length > 0) {
+          const removed = new Set(unavailable);
+          context.setSelectedCapabilityToolIds(
+            (current) => new Set([...current].filter((id) => !removed.has(id))),
+          );
+          setConnectorExclusions((current) => [...new Set([...current, ...unavailable])]);
+          toast.error("Some selected tools are no longer available", {
+            description:
+              "Removed them from this draft. Your message is still here; review the tools and send again.",
+          });
+          return false;
+        }
+      }
       if (realtimeModel && personalMachineSelected) {
         toast.error("Voice can't start on a personal Connected Machine", {
           description:
@@ -1095,6 +1186,7 @@ function SessionsIndexRouteContent({
                 reasoningEffort,
                 latencyMode,
                 ...submission.extras,
+                connectionAccounts: connectionAccounts.selections,
               },
               {
                 targetSandboxId: submission.options.targetSandboxId,
@@ -1248,6 +1340,10 @@ function SessionsIndexRouteContent({
       !newSessionDraft.conflict &&
       newSessionPolicyValid &&
       !personalResourceCatalogRefreshPending &&
+      (createdSessionAuthority !== null ||
+        (!connectionAccounts.loading &&
+          connectionAccounts.error === null &&
+          !connectionAccounts.requiresAccountChoice)) &&
       (createdSessionAuthority !== null || fixedResourceSelection.selectionResolved) &&
       (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
     pause: async () => {},
@@ -1361,6 +1457,17 @@ function SessionsIndexRouteContent({
             placeholder="Describe a task for the agent…"
             controlsLeading={
               <ComposerMobilePlus
+                connectorActions={{
+                  accountControls: {
+                    groups: connectionAccounts.availableAccountGroups,
+                    choices: connectionAccounts.accountChoices,
+                    onChoose: connectionAccounts.selectAccount,
+                    loading: connectionAccounts.loading,
+                    error: connectionAccounts.error,
+                    onRefresh: () => void connectionAccounts.refresh(),
+                    disabled: busy || newSessionDraft.loading,
+                  },
+                }}
                 menuSide="bottom"
                 draftChatSettings={{
                   workspaceId,
@@ -1380,6 +1487,11 @@ function SessionsIndexRouteContent({
                   firstPartyToolIds: draft.firstPartyMcpTools,
                 }}
                 toolsDisabled={busy || newSessionDraft.loading}
+                connectorCustomizing={connectorCustomizing}
+                onConnectorCustomizingChange={(next) => {
+                  if (next) setConnectorCustomizing(true);
+                  else followWorkspaceConnectors();
+                }}
                 onToolSelectionChange={(selection) => {
                   changeConnectorSelection(selection);
                 }}
@@ -1441,6 +1553,7 @@ function SessionsIndexRouteContent({
                   modelCatalog={modelCatalog}
                   policyError={newSessionPolicyError}
                   disabled={busy || newSessionDraft.loading}
+                  workspaceId={workspaceId}
                 />
               </div>
             }
@@ -1493,6 +1606,33 @@ function SessionsIndexRouteContent({
               />
             }
           />
+
+          {connectionAccounts.loading ||
+          connectionAccounts.error ||
+          connectionAccounts.accountChoiceMessage ? (
+            <div role={connectionAccounts.loading ? "status" : "alert"} className="mt-3">
+              <Notice
+                tone={connectionAccounts.loading ? "muted" : "waiting"}
+                action={
+                  connectionAccounts.error ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void connectionAccounts.refresh()}
+                    >
+                      Retry
+                    </Button>
+                  ) : undefined
+                }
+              >
+                {connectionAccounts.loading
+                  ? "Checking connected accounts…"
+                  : connectionAccounts.error
+                    ? "Couldn't check connected accounts. Retry to send your message."
+                    : connectionAccounts.accountChoiceMessage}
+              </Notice>
+            </div>
+          ) : null}
 
           <SessionVisibilityPicker
             id="new-session"
@@ -1715,11 +1855,13 @@ function SessionModelControl({
   modelCatalog,
   policyError,
   disabled,
+  workspaceId,
 }: {
   hasImageAttachments: boolean;
   modelCatalog: WorkspaceModelCatalogState;
   policyError: string | null;
   disabled: boolean;
+  workspaceId: string;
 }) {
   const context = useAppContext();
   return (
@@ -1733,6 +1875,7 @@ function SessionModelControl({
       loading={modelCatalog.loading}
       error={modelCatalog.error ?? policyError}
       menuSide="bottom"
+      connectModelsHref={`/workspaces/${encodeURIComponent(workspaceId)}/settings?section=models`}
       onModelChange={context.setModel}
       onEffortChange={context.setReasoningEffort}
       onLatencyModeChange={context.setLatencyMode}
@@ -2394,7 +2537,7 @@ function ManagedSandboxFields(props: {
           <Notice
             tone="failed"
             className="p-2.5 text-xs"
-            title="Couldn’t verify the selected Variable Set or Rig"
+            title="Couldn’t verify the selected Variable Set or Sandbox Environment"
             action={
               <Button
                 type="button"
@@ -2419,7 +2562,7 @@ function ManagedSandboxFields(props: {
         <div className="flex items-center justify-between gap-3 px-3 py-2">
           <Label className="flex shrink-0 items-center gap-1.5 text-xs">
             <ServerCogIcon className="size-3 shrink-0 text-fg-subtle" />
-            Rig
+            Sandbox Environment
           </Label>
           <Select
             value={draft.rigId}

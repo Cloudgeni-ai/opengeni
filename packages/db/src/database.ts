@@ -1,3 +1,4 @@
+import type { SessionAttachmentReadAccess } from "./session-file-attachments";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { eq, sql, type SQL } from "drizzle-orm";
 import type { PgDatabase, PgTransactionConfig } from "drizzle-orm/pg-core";
@@ -10,6 +11,7 @@ import {
 } from "./persistence-errors";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "./lossless-json";
 import * as schema from "./schema";
+import { startDatabaseTiming } from "./database-timing";
 
 // §7.7 driver widening (Step I). `Database` is the structural, cross-driver
 // query-layer port: every helper in this file accepts `db: Database` and uses
@@ -52,6 +54,8 @@ export type RlsContext = {
 };
 
 export type SessionRlsActorContext = {
+  /** Server-authorized session attachment scope; never taken from request JSON. */
+  sessionAttachmentReadAccess?: SessionAttachmentReadAccess;
   subjectId: string;
   /** Host-verified personal file ownership, never a request-supplied subject. */
   privateFileOwnerSubjectId?: string | null;
@@ -59,6 +63,9 @@ export type SessionRlsActorContext = {
 };
 
 const sessionRlsActorContext = new AsyncLocalStorage<SessionRlsActorContext>();
+export function currentSessionAttachmentReadAccess(): SessionAttachmentReadAccess | undefined {
+  return sessionRlsActorContext.getStore()?.sessionAttachmentReadAccess;
+}
 
 export async function withSessionRlsActorContext<T>(
   actor: SessionRlsActorContext,
@@ -469,32 +476,60 @@ export async function withRlsContext<T>(
   sessionTenancyFence: "shared" | "none" = "shared",
 ): Promise<T> {
   const restoreParentScope = isTransactionHandle(db);
-  return await db.transaction(async (tx) => {
-    const scoped = tx as unknown as Database;
-    const parentScope = restoreParentScope ? await readRlsContextSettings(scoped) : null;
-    await setRlsContext(scoped, context);
-    if (context.workspaceId && sessionTenancyFence === "shared") {
-      await scoped.execute(
-        sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`,
-      );
-    }
-    // Defense-in-depth: read the LOCAL GUC back on THIS backend BEFORE running
-    // the scoped query. The set_config and this read share one db.transaction,
-    // which a transaction pooler pins to a single backend — so a mismatch here
-    // means the context was genuinely lost (a torn transaction / pooler backend
-    // swap), not normal operation. Without this guard such an event runs the
-    // scoped read with an empty account_id and returns zero RLS-visible rows,
-    // manufacturing a phantom "no active subscription" from a credential that is
-    // in fact active. Convert that silent false into a loud, root-cause-bearing
-    // error so the caller can retry rather than permanently mis-decide.
-    await assertRlsContextApplied(scoped, context);
-    const value = await fn(scoped);
-    // A nested transaction is a savepoint, and SET LOCAL survives successful
-    // savepoint release. Restore only the tenant scope the nested helper owns;
-    // writer/protocol capabilities intentionally remain transaction-wide.
-    if (parentScope) await restoreRlsContextSettings(scoped, parentScope);
-    return value;
-  }, transactionConfig);
+  // Callback entry includes connection admission AND BEGIN/SAVEPOINT round-trip.
+  // This is deliberately not advertised as pure pool wait.
+  const admission = startDatabaseTiming(
+    restoreParentScope ? "savepoint_admission" : "transaction_admission",
+  );
+  try {
+    return await db.transaction(async (tx) => {
+      admission("completed");
+      const setup = startDatabaseTiming("rls_setup");
+      const scoped = tx as unknown as Database;
+      let parentScope: RlsContextSettings | null;
+      try {
+        parentScope = restoreParentScope ? await readRlsContextSettings(scoped) : null;
+        await setRlsContext(scoped, context);
+        if (context.workspaceId && sessionTenancyFence === "shared") {
+          await scoped.execute(
+            sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`,
+          );
+        }
+        // Defense-in-depth: read the LOCAL GUC back on THIS backend BEFORE running
+        // the scoped query. The set_config and this read share one db.transaction,
+        // which a transaction pooler pins to a single backend — so a mismatch here
+        // means the context was genuinely lost (a torn transaction / pooler backend
+        // swap), not normal operation. Without this guard such an event runs the
+        // scoped read with an empty account_id and returns zero RLS-visible rows,
+        // manufacturing a phantom "no active subscription" from a credential that is
+        // in fact active. Convert that silent false into a loud, root-cause-bearing
+        // error so the caller can retry rather than permanently mis-decide.
+        await assertRlsContextApplied(scoped, context);
+        setup("completed");
+      } catch (error) {
+        setup("failed");
+        throw error;
+      }
+      const callback = startDatabaseTiming("scoped_callback");
+      let value: T;
+      try {
+        value = await fn(scoped);
+        callback("completed");
+      } catch (error) {
+        callback("failed");
+        throw error;
+      }
+      // A nested transaction is a savepoint, and SET LOCAL survives successful
+      // savepoint release. Restore only the tenant scope the nested helper owns;
+      // writer/protocol capabilities intentionally remain transaction-wide.
+      if (parentScope) await restoreRlsContextSettings(scoped, parentScope);
+      return value;
+    }, transactionConfig);
+  } catch (error) {
+    // No-op after callback entry; only admission failures are counted here.
+    admission("failed");
+    throw error;
+  }
 }
 
 /**

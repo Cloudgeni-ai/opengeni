@@ -1,4 +1,5 @@
 import { searchKnowledgeEntries } from "@opengeni/core";
+import type { Settings } from "@opengeni/config";
 import { KnowledgeEntryListRequest } from "@opengeni/contracts";
 import type { DocumentServices } from "@opengeni/documents";
 import {
@@ -17,7 +18,7 @@ export function buildDocumentsMcpServer(
   accountId: string,
   workspaceId: string,
   documentServices: DocumentServices,
-  options: { knowledge: KnowledgeContext },
+  options: { knowledge: KnowledgeContext; settings?: Settings },
 ): McpServer {
   const context = options.knowledge;
   if (context.accountId !== accountId || context.workspaceId !== workspaceId)
@@ -39,7 +40,13 @@ export function buildDocumentsMcpServer(
         {
           type: "text",
           text: JSON.stringify(
-            await searchKnowledgeEntries(db, context, input, () => documentServices.embedder),
+            await searchKnowledgeEntries(
+              db,
+              context,
+              input,
+              () => documentServices.embedder,
+              options.settings,
+            ),
           ),
         },
       ],

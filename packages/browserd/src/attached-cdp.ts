@@ -53,7 +53,11 @@ export async function createAttachedChromeTransport(options: AttachedChromeDrive
   };
 }
 
-class AttachedChromeRunner implements BrowserCommandRunner {
+export class AttachedChromeRunner implements BrowserCommandRunner {
+  async terminate(): Promise<void> {
+    await this.connection.shutdown();
+  }
+
   readonly run = async <T = unknown>(args: readonly string[]): Promise<T> => {
     if (args[0] === "get" && args[1] === "cdp-url" && args.length === 2) {
       return { cdpUrl: "opengeni-attached://local" } as T;
@@ -286,7 +290,13 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.cursor = initial.cursor;
     while (!this.stopped) {
       const batch = await this.pollEvents(this.cursor);
-      if (batch.truncated) {
+      // Older extensions also mark a full continuation page as truncated.
+      // The sequence boundary is the authoritative proof of actual loss.
+      const firstSequence = batch.events[0]?.sequence;
+      if (
+        (firstSequence !== undefined && firstSequence !== this.cursor + 1) ||
+        (batch.truncated && firstSequence === undefined)
+      ) {
         throw new CdpTransportError("attached Chrome debugger event history was truncated");
       }
       for (const event of batch.events) this.emit(event);
@@ -310,8 +320,13 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     }
     const cursor = boundedInteger(value.cursor, 0, Number.MAX_SAFE_INTEGER, "debugger cursor");
     const events = value.events.map(parseDebuggerEvent);
-    if (events.some((event, index) => event.sequence <= (events[index - 1]?.sequence ?? 0))) {
-      throw new CdpTransportError("attached Chrome debugger events are not monotonic");
+    if (
+      events.some((event, index) => index > 0 && event.sequence !== events[index - 1]!.sequence + 1)
+    ) {
+      throw new CdpTransportError("attached Chrome debugger event history has a sequence gap");
+    }
+    if (events.length > 0 && cursor !== events.at(-1)!.sequence) {
+      throw new CdpTransportError("attached Chrome debugger cursor does not match its event batch");
     }
     return { events, cursor, truncated: value.truncated };
   }

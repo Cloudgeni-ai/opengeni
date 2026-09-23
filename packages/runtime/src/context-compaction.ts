@@ -22,9 +22,17 @@ import {
   FileResourceRef,
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_REFS_FIELD,
+  latestSkillCatalogContext,
+  readSkillCatalogContext,
 } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
+
+import {
+  latestReasoningConfiguration,
+  reasoningConfigurationItem,
+  readReasoningConfiguration,
+} from "@opengeni/codex";
 
 export type CompactionItem = Record<string, unknown>;
 
@@ -1253,22 +1261,88 @@ export class CompactionProviderResponseError extends Error {
   readonly status?: number;
   readonly code?: string;
   readonly type?: string;
+  /** Provider-named request field that was rejected (`error.param`), bounded. */
+  readonly param?: string;
   override readonly cause?: unknown;
 
   constructor(diagnostics: Record<string, unknown> = {}, cause?: unknown) {
     const compact = JSON.stringify(diagnostics).slice(0, 2_000);
+    const rejection = compactionProviderRejectionFromDiagnostics(diagnostics);
     super(
-      `Compaction provider request failed; active history was preserved${compact ? ` (${compact})` : ""}`,
+      `${
+        rejection
+          ? `Compaction provider request was rejected (${describeCompactionProviderRejection(rejection)})`
+          : "Compaction provider request failed"
+      }; active history was preserved${compact ? ` (${compact})` : ""}`,
     );
     this.name = "CompactionProviderResponseError";
     this.diagnostics = diagnostics;
     if (typeof diagnostics.httpStatus === "number") this.status = diagnostics.httpStatus;
     if (typeof diagnostics.code === "string") this.code = diagnostics.code;
     if (typeof diagnostics.type === "string") this.type = diagnostics.type;
+    if (typeof diagnostics.param === "string") this.param = diagnostics.param;
     if (cause !== undefined) {
       Object.defineProperty(this, "cause", { value: cause, enumerable: false });
     }
   }
+}
+
+/**
+ * Closed, content-free description of a definitive provider rejection of the
+ * compaction request. Every field is a bounded provider-owned identifier
+ * (status, error type/code, rejected parameter path, request id); the provider
+ * message is never carried because it can quote conversation input.
+ */
+export type CompactionProviderRejection = {
+  httpStatus: number;
+  type: string | null;
+  code: string | null;
+  param: string | null;
+  requestId: string | null;
+};
+
+/**
+ * HTTP statuses that prove the provider parsed and refused the exact request.
+ * Repeating the same request cannot succeed; only changed input can.
+ */
+const DEFINITIVE_PROVIDER_REJECTION_STATUSES = new Set([400, 413, 422]);
+
+export function compactionProviderRejectionFromDiagnostics(
+  diagnostics: Record<string, unknown>,
+): CompactionProviderRejection | null {
+  const httpStatus = diagnostics.httpStatus;
+  if (typeof httpStatus !== "number" || !DEFINITIVE_PROVIDER_REJECTION_STATUSES.has(httpStatus)) {
+    return null;
+  }
+  const text = (value: unknown): string | null =>
+    typeof value === "string" && value.length > 0 ? value : null;
+  return {
+    httpStatus,
+    type: text(diagnostics.type),
+    code: text(diagnostics.code),
+    param: text(diagnostics.param),
+    requestId: text(diagnostics.requestId),
+  };
+}
+
+export function compactionProviderRejection(error: unknown): CompactionProviderRejection | null {
+  return error instanceof CompactionProviderResponseError
+    ? compactionProviderRejectionFromDiagnostics(error.diagnostics)
+    : null;
+}
+
+/** Human-readable, content-free summary such as `HTTP 400 invalid_request_error; param input[3].encrypted_content`. */
+export function describeCompactionProviderRejection(
+  rejection: CompactionProviderRejection,
+): string {
+  const parts = [
+    `HTTP ${rejection.httpStatus}${rejection.type ? ` ${rejection.type}` : ""}${
+      rejection.code ? ` ${rejection.code}` : ""
+    }`,
+  ];
+  if (rejection.param) parts.push(`param ${rejection.param}`);
+  if (rejection.requestId) parts.push(`request ${rejection.requestId}`);
+  return parts.join("; ");
 }
 
 export function findCompactionNeededError(
@@ -1556,10 +1630,13 @@ export function buildCompactionReplacementHistory(
     }
     remaining -= textTokens + nonTextTokens;
   }
-  const history = retainedReversed.reverse();
+  const currentCatalog = latestSkillCatalogContext(items);
+  const history = [...(currentCatalog ? [currentCatalog] : []), ...retainedReversed.reverse()];
   const attachmentCatalog = buildAttachmentCatalogItem(items, history);
   if (attachmentCatalog) history.push(attachmentCatalog);
   history.push(buildSummaryItem(summaryBody));
+  const reasoning = latestReasoningConfiguration(items);
+  if (reasoning) history.push(reasoningConfigurationItem(reasoning));
   return history;
 }
 
@@ -1603,6 +1680,7 @@ export function buildRemoteV2ReplacementHistory(
   let remaining = REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET;
   for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
     const item = items[index]!;
+    if (readSkillCatalogContext(item) !== null) continue;
     if (!isRetainedRemoteV2Message(item)) continue;
     const textTokens = estimateTextTokens(messageText(item));
     const chargeTokens = Math.max(1, retainedItemTokens(item));
@@ -1617,7 +1695,8 @@ export function buildRemoteV2ReplacementHistory(
     remaining = 0;
     break;
   }
-  const history = retainedReversed.reverse();
+  const currentCatalog = latestSkillCatalogContext(items);
+  const history = [...(currentCatalog ? [currentCatalog] : []), ...retainedReversed.reverse()];
   const attachmentCatalog = buildAttachmentCatalogItem(items, history);
   if (attachmentCatalog) history.push(attachmentCatalog);
   history.push({
@@ -1625,6 +1704,8 @@ export function buildRemoteV2ReplacementHistory(
     encrypted_content: compactionItem.encrypted_content,
     ...(typeof compactionItem.summary === "string" ? { summary: compactionItem.summary } : {}),
   });
+  const reasoning = latestReasoningConfiguration(items);
+  if (reasoning) history.push(reasoningConfigurationItem(reasoning));
   return history;
 }
 
@@ -1734,7 +1815,9 @@ export function latestCompactionReplacementFingerprint(
 ): string | null {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     if (isCompactionSummary(items[index])) {
-      return compactionReplacementFingerprint(items.slice(0, index + 1));
+      const end =
+        items[index + 1] && readReasoningConfiguration(items[index + 1]!) ? index + 2 : index + 1;
+      return compactionReplacementFingerprint(items.slice(0, end));
     }
   }
   return null;

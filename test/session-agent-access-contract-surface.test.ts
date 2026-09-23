@@ -20,6 +20,17 @@ import { FIRST_PARTY_TOOL_AUTHORIZATION } from "../apps/api/src/mcp/first-party-
 const repo = join(import.meta.dir, "..");
 const SESSION_ROUTES = "apps/api/src/routes/sessions.ts";
 const SESSION_ID = "11111111-1111-4111-8111-111111111111";
+test("checkpoint preview and consent are session-control surfaces, not agent recovery tools", () => {
+  for (const method of ["GET", "POST"]) {
+    expect(
+      sessionAuthorizationOperationForHttp(
+        method,
+        `/v1/workspaces/${SESSION_ID}/sessions/${SESSION_ID}/sandbox-recovery`,
+        SESSION_ID,
+      ),
+    ).toBe("session.control");
+  }
+});
 const ROUTE_PATTERN = /app\.(get|post|put|patch|delete)\(\s*"([^"]+)"/gu;
 
 /**
@@ -118,6 +129,43 @@ function samplePathname(path: string): string {
 }
 
 describe("agent-access scope stays enforced at every session entry point", () => {
+  test("message search is an authorized list projection even when narrowed to one session", async () => {
+    const source = await read(SESSION_ROUTES);
+    const start = source.indexOf('app.get("/v1/workspaces/:workspaceId/session-message-search"');
+    const end = source.indexOf('app.get("/v1/workspaces/:workspaceId/sessions"', start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const route = source.slice(start, end);
+    for (const marker of [
+      "requireAccessGrantAuthorization(",
+      '"sessions:read"',
+      "requireSessionAuthorizationListScope(",
+      "SessionMessageSearchRequest.safeParse(",
+      "searchSessionMessagesForSubject(",
+      "subjectId: grant.subjectId",
+      "authorizationScope",
+      "hasVerifiedOwningUserAuthorization(authorization)",
+      "signal: c.req.raw.signal",
+    ]) {
+      expect(route).toContain(marker);
+    }
+    const db = await read("packages/db/src/index.ts");
+    const helper = db.slice(
+      db.indexOf("export async function searchSessionMessagesForSubject("),
+      db.indexOf("export async function listSessionsForSubject("),
+    );
+    for (const marker of [
+      "withWorkspaceSubjectRls(",
+      "lockSessionPersonalStateShared(",
+      "subjectHasLiveWorkspaceAuthorityInScope(",
+      "SessionListAccessError",
+      "sessionFilters(",
+      "scanSessionMessages(",
+      "withDatabaseStatementTimeout(",
+    ])
+      expect(helper).toContain(marker);
+  });
+
   test("the HTTP session module fences every /sessions/:sessionId route through the middleware or an explicit seam path", async () => {
     const source = await read(SESSION_ROUTES);
     const middlewareAt = source.indexOf(
@@ -129,6 +177,9 @@ describe("agent-access scope stays enforced at every session entry point", () =>
     );
     const routes = sessionRoutes(source);
     expect(routes.length).toBeGreaterThan(60);
+    expect(
+      routes.some((route) => route.method === "GET" && route.path.endsWith("/codex-accounts")),
+    ).toBe(true);
     for (const route of routes) {
       expect(
         route.index,

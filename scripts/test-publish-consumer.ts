@@ -774,7 +774,7 @@ try {
         "",
         "  return (",
         "    <section>",
-        '      <SessionChrome queue={queueState} agentsSignal={{ count: 2, detail: "1 running" }} readOnly />',
+        '      <SessionChrome queue={queueState} agentsSignal={{ count: 2, detail: "1 running" }} agentsPanel={<p>1 running</p>} defaultActive="agents" readOnly />',
         '      <MessageTimeline items={[{ kind: "tool-call", id: "tool-proof", turnId: "turn-proof", callId: "call-proof", name: "host.entity", arguments: { entityId: "entity-proof" }, output: { updated: true }, raw: null, status: "complete", occurredAt: "2026-07-23T00:00:00.000Z" }]} toolRegistry={toolRegistry} />',
         "      <QueueSurface queue={queueState} readOnly onRequestComposerFocus={requestComposerFocus} />",
         "      <ApprovalSurface",

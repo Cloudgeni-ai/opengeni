@@ -25,15 +25,12 @@ import {
   enableCapabilityInstallation,
   getActiveSessionHistoryItems,
   getBillingBalance,
-  getCapabilityInstallation,
   getSession,
-  getPackInstallation,
   getScheduledTask,
   getSessionGoal,
   getVariableSetValuesForRun,
   listGitHubInstallationAccessForWorkspace,
   initializeSessionStartAtomically,
-  listInstalledPortableSkills,
   listSessionEvents,
   listScheduledTasks,
   listOutstandingSessionSystemUpdates,
@@ -84,7 +81,7 @@ import {
   waitFor,
   type TestServices,
 } from "@opengeni/testing";
-import { prepareAgentTools } from "@opengeni/runtime";
+import { prefixedMcpToolName, prepareAgentTools } from "@opengeni/runtime";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { buildTimeline } from "../../packages/react/src/timeline";
 import { submitTestHumanPrompt } from "./helpers/session-control";
@@ -1844,7 +1841,7 @@ describe("API component integration", () => {
     });
   });
 
-  test("managed credit gate blocks document indexing before enqueueing work", async () => {
+  test("managed credit gate accepts a document before embedding funds are available", async () => {
     const delegationSecret = "test-managed-document-credit-secret";
     const app = createApp({
       settings: {
@@ -1859,11 +1856,7 @@ describe("API component integration", () => {
       db: dbClient.db,
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
-      documentIndexer: {
-        indexDocument: async () => {
-          throw new Error("document indexer should not run without credits");
-        },
-      },
+      documentIndexer: { indexDocument: async () => undefined },
     });
     const access = await bootstrapWorkspace(dbClient.db, {
       accountExternalSource: "test:managed-document-credit",
@@ -1894,16 +1887,45 @@ describe("API component integration", () => {
     expect(baseResponse.status).toBe(201);
     const base = (await baseResponse.json()) as { id: string };
 
-    const blocked = await app.request(
+    const content = "document awaiting embedding funds";
+    const begin = await app.request(workspacePath(workspaceId, "/files/uploads"), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({
+        filename: "pending-funds.txt",
+        contentType: "text/plain",
+        sizeBytes: new TextEncoder().encode(content).byteLength,
+      }),
+    });
+    expect(begin.status).toBe(201);
+    const upload = (await begin.json()) as {
+      fileId: string;
+      uploadId: string;
+      putUrl: string;
+      requiredHeaders: Record<string, string>;
+    };
+    const put = await fetch(upload.putUrl, {
+      method: "PUT",
+      body: content,
+      headers: upload.requiredHeaders,
+    });
+    expect(put.ok).toBe(true);
+    const complete = await app.request(
+      workspacePath(workspaceId, `/files/uploads/${upload.uploadId}/complete`),
+      { method: "POST", headers },
+    );
+    expect(complete.status).toBe(200);
+
+    const accepted = await app.request(
       workspacePath(workspaceId, `/document-bases/${base.id}/documents`),
       {
         method: "POST",
         headers: { "content-type": "application/json", ...headers },
-        body: JSON.stringify({ fileId: crypto.randomUUID() }),
+        body: JSON.stringify({ fileId: upload.fileId }),
       },
     );
-    expect(blocked.status).toBe(402);
-    expect(await blocked.text()).toContain("insufficient OpenGeni credits");
+    expect(accepted.status).toBe(201);
+    expect((await accepted.json()) as { status: string }).toMatchObject({ status: "queued" });
   });
 
   test("managed credit gate allows schedule creation but blocks manual trigger without credits", async () => {
@@ -3221,7 +3243,11 @@ describe("API component integration", () => {
       const prepared = await prepareAgentTools(runtimeSettings, [{ kind: "mcp", id: mcpServerId }]);
       try {
         const tools = await prepared.mcpServers[0]!.listTools();
-        expect(tools.map((tool) => tool.name)).toContain(`${mcpServerId}__search_documents`);
+        expect(tools.map((tool) => tool.name).sort()).toEqual(
+          ["search_documents", "fetch_document"]
+            .map((name) => prefixedMcpToolName(mcpServerId, name))
+            .sort(),
+        );
       } finally {
         await prepared.close();
       }
@@ -3395,11 +3421,17 @@ describe("API component integration", () => {
           subjectScope: "workspace",
         });
         const tools = await prepared.mcpServers[0]!.listTools();
-        expect(tools.map((tool) => tool.name)).toContain(`${mcpServerId}__search_documents`);
-        const result = await prepared.mcpServers[0]!.callTool(`${mcpServerId}__search_documents`, {
-          query: "broker",
-        });
+        expect(tools.map((tool) => tool.name).sort()).toEqual(
+          ["search_documents", "fetch_document"]
+            .map((name) => prefixedMcpToolName(mcpServerId, name))
+            .sort(),
+        );
+        const result = await prepared.mcpServers[0]!.callTool(
+          prefixedMcpToolName(mcpServerId, "search_documents"),
+          { query: "broker" },
+        );
         expect(JSON.stringify(result)).toContain("found document for broker");
+        expect(mcp.calls.at(-1)).toEqual({ tool: "search_documents", args: { query: "broker" } });
       } finally {
         await prepared.close();
       }
@@ -3739,622 +3771,6 @@ describe("API component integration", () => {
       since: startOfUtcMonth(),
     });
     expect(after).toBe(before);
-  });
-
-  test("creates marketing social scheduled tasks from connected accounts only", async () => {
-    workflow = new FakeWorkflowClient();
-    const app = createApp({
-      settings: firstPartyMcpSettings(services.databaseUrl),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: workflow,
-    });
-    const suffix = crypto.randomUUID();
-    const workspaceId = await defaultWorkspaceId(app);
-
-    const enabled = await app.request(
-      workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/enable"),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(enabled.status).toBeLessThan(300);
-
-    const activeResponse = await app.request(workspacePath(workspaceId, "/social/connections"), {
-      method: "POST",
-      body: JSON.stringify({
-        provider: "linkedin",
-        accountHandle: `active-${suffix}`,
-        accountName: "Active Company",
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(activeResponse.status).toBe(201);
-    const activeConnection = (await activeResponse.json()) as { id: string };
-
-    const disabledResponse = await app.request(workspacePath(workspaceId, "/social/connections"), {
-      method: "POST",
-      body: JSON.stringify({
-        provider: "linkedin",
-        accountHandle: `disabled-${suffix}`,
-        accountName: "Disabled Company",
-        status: "disabled",
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(disabledResponse.status).toBe(201);
-    const disabledConnection = (await disabledResponse.json()) as {
-      id: string;
-    };
-
-    const created = await app.request(
-      workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/scheduled-tasks"),
-      {
-        method: "POST",
-        body: JSON.stringify({
-          connectionIds: [],
-          documentBaseIds: [],
-          timeZone: "UTC",
-          hour: 9,
-          minute: 0,
-        }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    const createdBody = await created.text();
-    expect(created.status, createdBody).toBe(201);
-    const task = JSON.parse(createdBody) as {
-      metadata: Record<string, unknown>;
-      agentConfig: { metadata: Record<string, unknown> };
-    };
-    expect(task.metadata.socialConnectionIds).toEqual([activeConnection.id]);
-    expect(task.agentConfig.metadata.socialConnectionIds).toEqual([activeConnection.id]);
-    expect(task.metadata.socialConnectionIds).not.toContain(disabledConnection.id);
-    expect(workflow.synced).toHaveLength(1);
-  });
-
-  test("registers workspace packs from manifests and installs them", async () => {
-    const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        environmentsEncryptionKey: environmentsTestKey,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-    const packId = `infra-test-${crypto.randomUUID().slice(0, 8)}`;
-    const manifest = {
-      id: packId,
-      name: "Infra test pack",
-      description: "Registered from a manifest payload in tests.",
-      role: "infrastructure",
-      category: "deployment",
-      version: "0.1.0",
-      scheduledTaskTemplates: [
-        {
-          id: "drift-daily",
-          name: "Daily drift check",
-          description: "Compare expected state against live state.",
-          defaultSchedule: {
-            type: "calendar",
-            timeZone: "UTC",
-            hour: 6,
-            minute: 0,
-          },
-          defaultRunMode: "new_session_per_run",
-          defaultOverlapPolicy: "skip",
-          prompt: "Run the daily drift check.",
-        },
-      ],
-      environment: {
-        description: "Cloud credentials for substrate work.",
-        requiredVariables: ["CLOUD_TOKEN"],
-        required: true,
-      },
-    };
-
-    const registered = await app.request(workspacePath(workspaceId, "/packs"), {
-      method: "POST",
-      body: JSON.stringify(manifest),
-      headers: { "content-type": "application/json" },
-    });
-    expect(registered.status).toBe(201);
-    const registeredBody = (await registered.json()) as {
-      pack: { id: string; scheduledTaskTemplates: Array<{ prompt?: string }> };
-    };
-    expect(registeredBody.pack.id).toBe(packId);
-    expect(registeredBody.pack.scheduledTaskTemplates[0]?.prompt).toBe(
-      "Run the daily drift check.",
-    );
-
-    const replaced = await app.request(workspacePath(workspaceId, "/packs"), {
-      method: "POST",
-      body: JSON.stringify({ ...manifest, version: "0.1.1" }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(replaced.status).toBe(200);
-
-    const builtInCollision = await app.request(workspacePath(workspaceId, "/packs"), {
-      method: "POST",
-      body: JSON.stringify({
-        ...manifest,
-        id: "marketing-social-daily-analysis",
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(builtInCollision.status).toBe(409);
-
-    const listed = await app.request(workspacePath(workspaceId, "/packs"));
-    expect(listed.status).toBe(200);
-    const listedBody = (await listed.json()) as {
-      packs: Array<{ id: string; version: string }>;
-    };
-    expect(listedBody.packs.map((pack) => pack.id)).toContain(packId);
-    expect(listedBody.packs.find((pack) => pack.id === packId)?.version).toBe("0.1.1");
-
-    const enabledWithoutEnvironment = await app.request(
-      workspacePath(workspaceId, `/packs/${packId}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(enabledWithoutEnvironment.status).toBe(422);
-
-    const environmentResponse = await app.request(workspacePath(workspaceId, "/environments"), {
-      method: "POST",
-      body: JSON.stringify({
-        name: `cloud-${crypto.randomUUID().slice(0, 8)}`,
-        variables: [{ name: "OTHER_TOKEN", value: "value-1" }],
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(environmentResponse.status).toBe(201);
-    const environment = (await environmentResponse.json()) as { id: string };
-
-    const enabledMissingVariable = await app.request(
-      workspacePath(workspaceId, `/packs/${packId}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({ environmentId: environment.id }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(enabledMissingVariable.status).toBe(422);
-    expect(await enabledMissingVariable.text()).toContain("CLOUD_TOKEN");
-
-    const genericPackEnable = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(genericPackEnable.status).toBe(409);
-    expect(await genericPackEnable.text()).toContain("Pack installation preview flow");
-
-    const setVariable = await app.request(
-      workspacePath(workspaceId, `/environments/${environment.id}/variables/CLOUD_TOKEN`),
-      {
-        method: "PUT",
-        body: JSON.stringify({ value: "cloud-token-value" }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(setVariable.status).toBeLessThan(300);
-
-    const enabled = await app.request(workspacePath(workspaceId, `/packs/${packId}/enable`), {
-      method: "POST",
-      body: JSON.stringify({ environmentId: environment.id }),
-      headers: { "content-type": "application/json" },
-    });
-    expect(enabled.status).toBe(201);
-    const installation = (await enabled.json()) as {
-      status: string;
-      metadata: Record<string, unknown>;
-    };
-    expect(installation.status).toBe("active");
-    expect(installation.metadata.packVersion).toBe("0.1.1");
-    expect(installation.metadata.variableSetId).toBe(environment.id);
-
-    const catalogResponse = await app.request(workspacePath(workspaceId, "/capabilities"));
-    expect(catalogResponse.status).toBe(200);
-    const catalog = (await catalogResponse.json()) as {
-      items: Array<{
-        id: string;
-        kind: string;
-        source: string;
-        enabled: boolean;
-      }>;
-    };
-    expect(catalog.items.find((item) => item.id === `pack:${packId}`)).toMatchObject({
-      kind: "pack",
-      source: "manual",
-      enabled: true,
-    });
-
-    // Pack lifecycle remains owned by the dedicated Pack route even after the
-    // Pack is active; the generic capability path cannot mutate the install.
-    const capabilityEnable = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(capabilityEnable.status).toBe(409);
-    expect(await capabilityEnable.text()).toContain("Pack installation preview flow");
-    const installationAfterCapabilityEnable = await getPackInstallation(
-      dbClient.db,
-      workspaceId,
-      packId,
-    );
-    expect(installationAfterCapabilityEnable?.metadata.variableSetId).toBe(environment.id);
-
-    const deletedBuiltIn = await app.request(
-      workspacePath(workspaceId, "/packs/marketing-social-daily-analysis"),
-      { method: "DELETE" },
-    );
-    expect(deletedBuiltIn.status).toBe(409);
-
-    // Once the required variable disappears, the dedicated Pack enable path
-    // re-validates the stored attachment and refuses.
-    const removeVariable = await app.request(
-      workspacePath(workspaceId, `/environments/${environment.id}/variables/CLOUD_TOKEN`),
-      { method: "DELETE" },
-    );
-    expect(removeVariable.status).toBeLessThan(300);
-    const capabilityEnableMissingVariable = await app.request(
-      workspacePath(workspaceId, `/packs/${packId}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(capabilityEnableMissingVariable.status).toBe(422);
-    expect(await capabilityEnableMissingVariable.text()).toContain("CLOUD_TOKEN");
-
-    const deleted = await app.request(workspacePath(workspaceId, `/packs/${packId}`), {
-      method: "DELETE",
-    });
-    expect(deleted.status).toBe(204);
-    const missing = await app.request(workspacePath(workspaceId, `/packs/${packId}`));
-    expect(missing.status).toBe(404);
-    const installationAfterDelete = await getPackInstallation(dbClient.db, workspaceId, packId);
-    expect(installationAfterDelete?.status).toBe("disabled");
-    // Pack lifecycle is dedicated. The MCP-only generic installation ledger
-    // must not retain a shadow Pack row after uninstall.
-    const capabilityInstallationAfterDelete = await getCapabilityInstallation(
-      dbClient.db,
-      workspaceId,
-      `pack:${packId}`,
-    );
-    expect(capabilityInstallationAfterDelete).toBeNull();
-  });
-
-  test("installs platform-base Packs through explicit Rigs and shares identical inline Skills", async () => {
-    const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        environmentsEncryptionKey: environmentsTestKey,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-    const suffix = crypto.randomUUID().slice(0, 8);
-    const skillName = `infra-ops-${suffix}`;
-    const packManifest = (id: string) => ({
-      id,
-      name: `Pack ${id}`,
-      description: "Pack with an explicit Rig on the deployment platform base.",
-      role: "infrastructure",
-      category: "infrastructure",
-      version: "0.1.0",
-      skills: [
-        {
-          name: skillName,
-          description: "Operate infrastructure with the pack runbook.",
-          files: [
-            {
-              path: "SKILL.md",
-              content: `---\nname: ${skillName}\ndescription: Operate infrastructure with the pack runbook.\n---\n# Infra ops\n`,
-            },
-            { path: "references/runbook.md", content: "Runbook." },
-          ],
-        },
-      ],
-      metadata: {
-        sandboxImage: "example.invalid/spoofed:latest",
-        sandboxProviderImages: {
-          modal: { imageId: "im-abcdefghijklmnopqrstuv" },
-        },
-        skills: ["spoofed-skill"],
-      },
-    });
-    const packA = `img-a-${suffix}`;
-    const packB = `img-b-${suffix}`;
-    for (const packId of [packA, packB]) {
-      const registered = await app.request(workspacePath(workspaceId, "/packs"), {
-        method: "POST",
-        body: JSON.stringify(packManifest(packId)),
-        headers: { "content-type": "application/json" },
-      });
-      expect(registered.status, await registered.text()).toBe(201);
-    }
-
-    // Packs that compose runtime components cannot use the legacy enable
-    // paths. This test selects an explicit Rig through the installation flow.
-    const legacyEnableA = await app.request(workspacePath(workspaceId, `/packs/${packA}/enable`), {
-      method: "POST",
-      body: JSON.stringify({}),
-      headers: { "content-type": "application/json" },
-    });
-    expect(legacyEnableA.status).toBe(409);
-    expect(await legacyEnableA.text()).toContain("Pack installation flow");
-    const capabilityEnableB = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packB}`)}/enable`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(capabilityEnableB.status).toBe(409);
-
-    const previewWithoutRig = await app.request(
-      workspacePath(workspaceId, `/packs/${packA}/installation-preview`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(previewWithoutRig.status).toBe(200);
-    expect(await previewWithoutRig.json()).toMatchObject({
-      ready: true,
-      rig: { required: false, status: "not_required" },
-      legacyInlineSkillCount: 1,
-      legacySandboxImage: null,
-    });
-
-    const createRig = async (name: string): Promise<{ id: string }> => {
-      const response = await app.request(workspacePath(workspaceId, "/rigs"), {
-        method: "POST",
-        body: JSON.stringify({
-          name,
-          setupScript: "true",
-          checks: [],
-          credentialHooks: [],
-          defaultVariableSetIds: [],
-        }),
-        headers: { "content-type": "application/json" },
-      });
-      const body = await response.text();
-      expect(response.status, body).toBe(201);
-      return JSON.parse(body) as { id: string };
-    };
-    const [rigA, rigB] = await Promise.all([
-      createRig(`Pack A ${suffix}`),
-      createRig(`Pack B ${suffix}`),
-    ]);
-
-    const previewPack = async (
-      packId: string,
-      rigId: string,
-    ): Promise<{
-      manifestDigest: string;
-      installationVersion: number | null;
-      ready: boolean;
-      components: Array<{
-        key: string;
-        kind: string;
-        status: string;
-        resolvedId: string | null;
-      }>;
-    }> => {
-      const response = await app.request(
-        workspacePath(workspaceId, `/packs/${packId}/installation-preview`),
-        {
-          method: "POST",
-          body: JSON.stringify({ rigId }),
-          headers: { "content-type": "application/json" },
-        },
-      );
-      const body = await response.text();
-      expect(response.status, body).toBe(200);
-      return JSON.parse(body) as {
-        manifestDigest: string;
-        installationVersion: number | null;
-        ready: boolean;
-        components: Array<{
-          key: string;
-          kind: string;
-          status: string;
-          resolvedId: string | null;
-        }>;
-      };
-    };
-    const installPack = async (
-      packId: string,
-      rigId: string,
-      preview: Awaited<ReturnType<typeof previewPack>>,
-    ): Promise<{ status: string; selectedRigId: string | null; version: number }> => {
-      const response = await app.request(workspacePath(workspaceId, `/packs/${packId}/install`), {
-        method: "POST",
-        body: JSON.stringify({
-          expectedManifestDigest: preview.manifestDigest,
-          ...(preview.installationVersion === null
-            ? {}
-            : { expectedInstallationVersion: preview.installationVersion }),
-          rigId,
-          idempotencyKey: crypto.randomUUID(),
-        }),
-        headers: { "content-type": "application/json" },
-      });
-      const body = await response.text();
-      expect(response.status, body).toBe(preview.installationVersion === null ? 201 : 200);
-      return JSON.parse(body) as {
-        status: string;
-        selectedRigId: string | null;
-        version: number;
-      };
-    };
-
-    const previewA = await previewPack(packA, rigA.id);
-    expect(previewA).toMatchObject({ ready: true, installationVersion: null });
-    expect(previewA.components).toEqual([
-      expect.objectContaining({
-        key: `inline-skill/${skillName}`,
-        kind: "inline_skill",
-        status: "ready",
-      }),
-    ]);
-    const installedA = await installPack(packA, rigA.id, previewA);
-    expect(installedA).toMatchObject({ status: "active", selectedRigId: rigA.id });
-
-    const previewB = await previewPack(packB, rigB.id);
-    expect(previewB).toMatchObject({ ready: true, installationVersion: null });
-    expect(previewB.components).toEqual([
-      expect.objectContaining({
-        key: `inline-skill/${skillName}`,
-        kind: "inline_skill",
-        status: "ready",
-      }),
-    ]);
-    expect(previewB.components[0]?.resolvedId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-    );
-    const installedB = await installPack(packB, rigB.id, previewB);
-    expect(installedB).toMatchObject({ status: "active", selectedRigId: rigB.id });
-    expect(
-      (await listInstalledPortableSkills(dbClient.db, workspaceId)).filter(
-        (skill) => skill.name === skillName,
-      ),
-    ).toHaveLength(1);
-
-    // The catalog surfaces skill names without accepting image metadata or
-    // leaking skill file content.
-    const catalogResponse = await app.request(workspacePath(workspaceId, "/capabilities"));
-    const catalog = (await catalogResponse.json()) as {
-      items: Array<{ id: string; metadata: Record<string, unknown> }>;
-    };
-    const packAItem = catalog.items.find((item) => item.id === `pack:${packA}`);
-    expect(packAItem?.metadata.sandboxImage).toBeUndefined();
-    expect(packAItem?.metadata.sandboxProviderImages).toBeUndefined();
-    expect(packAItem?.metadata.skills).toEqual([skillName]);
-    expect(JSON.stringify(packAItem?.metadata)).not.toContain("spoofed");
-    expect(JSON.stringify(packAItem?.metadata)).not.toContain("Runbook.");
-
-    // V2 Packs cannot be disabled or unregistered through legacy paths while
-    // their component ownership ledger is active.
-    const disabledA = await app.request(
-      workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packA}`)}/disable`),
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    expect(disabledA.status).toBe(409);
-    expect(await disabledA.text()).toContain("Pack uninstall preview flow");
-    const unregisterActiveA = await app.request(workspacePath(workspaceId, `/packs/${packA}`), {
-      method: "DELETE",
-    });
-    expect(unregisterActiveA.status).toBe(409);
-
-    const uninstallPreviewAResponse = await app.request(
-      workspacePath(workspaceId, `/packs/${packA}/uninstall-preview`),
-    );
-    expect(uninstallPreviewAResponse.status).toBe(200);
-    const uninstallPreviewA = (await uninstallPreviewAResponse.json()) as {
-      installed: boolean;
-      installationVersion: number;
-      components: Array<{
-        key: string;
-        kind: string;
-        retainedByOtherOwners: boolean;
-      }>;
-    };
-    expect(uninstallPreviewA).toMatchObject({ installed: true });
-    expect(uninstallPreviewA.components).toEqual([
-      expect.objectContaining({
-        key: `inline-skill/${skillName}`,
-        kind: "inline_skill",
-        retainedByOtherOwners: true,
-      }),
-    ]);
-    const uninstallAResponse = await app.request(
-      workspacePath(workspaceId, `/packs/${packA}/installation`),
-      {
-        method: "DELETE",
-        body: JSON.stringify({
-          expectedInstallationVersion: uninstallPreviewA.installationVersion,
-          idempotencyKey: crypto.randomUUID(),
-        }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    const uninstallABody = await uninstallAResponse.text();
-    expect(uninstallAResponse.status, uninstallABody).toBe(200);
-    expect(JSON.parse(uninstallABody)).toMatchObject({
-      packId: packA,
-      status: "uninstalled",
-    });
-    expect(
-      (await listInstalledPortableSkills(dbClient.db, workspaceId)).filter(
-        (skill) => skill.name === skillName,
-      ),
-    ).toHaveLength(1);
-
-    const unregisterA = await app.request(workspacePath(workspaceId, `/packs/${packA}`), {
-      method: "DELETE",
-    });
-    expect(unregisterA.status).toBe(204);
-
-    const uninstallPreviewBResponse = await app.request(
-      workspacePath(workspaceId, `/packs/${packB}/uninstall-preview`),
-    );
-    expect(uninstallPreviewBResponse.status).toBe(200);
-    const uninstallPreviewB = (await uninstallPreviewBResponse.json()) as {
-      installationVersion: number;
-      components: Array<{ retainedByOtherOwners: boolean }>;
-    };
-    expect(uninstallPreviewB.components).toEqual([
-      expect.objectContaining({ retainedByOtherOwners: false }),
-    ]);
-    const uninstallBResponse = await app.request(
-      workspacePath(workspaceId, `/packs/${packB}/installation`),
-      {
-        method: "DELETE",
-        body: JSON.stringify({
-          expectedInstallationVersion: uninstallPreviewB.installationVersion,
-          idempotencyKey: crypto.randomUUID(),
-        }),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    const uninstallBBody = await uninstallBResponse.text();
-    expect(uninstallBResponse.status, uninstallBBody).toBe(200);
-    expect(JSON.parse(uninstallBBody)).toMatchObject({
-      packId: packB,
-      status: "uninstalled",
-      retainedComponents: [],
-    });
-    expect(
-      (await listInstalledPortableSkills(dbClient.db, workspaceId)).filter(
-        (skill) => skill.name === skillName,
-      ),
-    ).toHaveLength(0);
   });
 
   test("keeps scheduled task persistence consistent when schedule sync fails", async () => {
@@ -9113,80 +8529,6 @@ describe("API component integration", () => {
     expect(noBase).toMatchObject({ installUrl: null, linkUrl: null });
   });
 
-  test("pack enable validates and stores environment attachments", async () => {
-    const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        environmentsEncryptionKey: environmentsTestKey,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: new FakeWorkflowClient(),
-    });
-    const workspaceId = await defaultWorkspaceId(app);
-    const environment = await createTestEnvironment(app, workspaceId, {});
-
-    const unknownAttachment = await app.request(
-      workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/enable"),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ environmentId: crypto.randomUUID() }),
-      },
-    );
-    expect(unknownAttachment.status).toBe(422);
-
-    const enabled = await app.request(
-      workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/enable"),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ environmentId: environment.id }),
-      },
-    );
-    expect([200, 201]).toContain(enabled.status);
-    const installation = (await enabled.json()) as {
-      metadata: Record<string, unknown>;
-    };
-    expect(installation.metadata.variableSetId).toBe(environment.id);
-
-    // Re-enabling without environmentId keeps the stored attachment.
-    const reenabled = await app.request(
-      workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/enable"),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
-      },
-    );
-    expect(reenabled.status).toBe(200);
-    const reenabledInstallation = (await reenabled.json()) as {
-      metadata: Record<string, unknown>;
-    };
-    expect(reenabledInstallation.metadata.variableSetId).toBe(environment.id);
-
-    // Back-compat: an installation enabled BEFORE the Variable Set rename stored
-    // the attachment under the legacy `metadata.environmentId` key. Simulate that
-    // legacy row, then re-enable empty and assert the attachment is still
-    // inherited (the environmentId fallback), not silently dropped.
-    await dbClient.db.execute(dbSql`
-      update pack_installations set metadata = ${JSON.stringify({ environmentId: environment.id })}::jsonb
-      where workspace_id = ${workspaceId} and pack_id = 'marketing-social-daily-analysis'`);
-    const reenabledLegacy = await app.request(
-      workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/enable"),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
-      },
-    );
-    expect(reenabledLegacy.status).toBe(200);
-    const reenabledLegacyInstallation = (await reenabledLegacy.json()) as {
-      metadata: Record<string, unknown>;
-    };
-    expect(reenabledLegacyInstallation.metadata.variableSetId).toBe(environment.id);
-  });
-
   test("file download MCP tool reports unconfigured object storage", async () => {
     const appSettings = testSettings({
       databaseUrl: services.databaseUrl,
@@ -9677,25 +9019,4 @@ function objectStorageSettings(databaseUrl: string, endpoint: string) {
 
 function startOfUtcMonth(date = new Date()): Date {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
-}
-
-function firstPartyMcpSettings(databaseUrl: string) {
-  return testSettings({
-    databaseUrl,
-    mcpServers: [
-      {
-        id: "opengeni",
-        name: "OpenGeni",
-        url: "http://127.0.0.1:8000/v1/mcp",
-        cacheToolsList: true,
-      },
-      {
-        id: "docs",
-        name: "Document Search",
-        url: "http://127.0.0.1:8000/v1/mcp/docs",
-        allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases"],
-        cacheToolsList: false,
-      },
-    ],
-  });
 }

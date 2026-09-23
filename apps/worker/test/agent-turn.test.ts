@@ -12,6 +12,7 @@ import { TurnExecutionPolicyV1, type ResourceRef } from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
 import * as opengeniDb from "@opengeni/db";
 import {
+  CODEX_TRANSPORT_ERROR_HEADER,
   codexRequestStorage,
   codexSubscriptionFetch,
   type CodexRequestContext,
@@ -39,6 +40,7 @@ import {
 import {
   CompactionNeededError,
   CompactionProviderResponseError,
+  compactionProviderFailureDiagnostics,
   EmptyCompactionSummaryError,
   SandboxConfigError,
   SandboxExecReadinessError,
@@ -128,6 +130,8 @@ import {
   shouldPrefetchManagedSandbox,
   shouldDeferNonEagerToolPreparation,
   shouldRecoverCompactionProviderFailure,
+  compactionFailureTurnEventPayload,
+  COMPACTION_PROVIDER_REJECTION_GUIDANCE,
   shouldRunTurnEndWorkspacePersistence,
   shouldStartPeriodicWorkspaceSnapshot,
   stableHumanInputRequestId,
@@ -154,7 +158,6 @@ import {
   SandboxSiblingWarmingTimeoutError,
   sandboxLeaseHolderIdForAttempt,
 } from "../src/sandbox-resume";
-import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 import { attachPendingUpdatesBeforePreparingModelInput } from "../src/activities/agent-turn/stream-attempt";
 
@@ -627,7 +630,28 @@ describe("turn exact-content boundaries", () => {
     expect(Object.hasOwn(rawItem.providerData, "optional")).toBe(true);
   });
 
-  test("does not register a hosted image as a pending function call", () => {
+  test.each(["image_generation_call", "web_search_call", "file_search_call"])(
+    "does not register completed hosted %s as a pending function call",
+    (name) => {
+      expect(
+        pendingToolCallFromSdkEvent({
+          type: "run_item_stream_event",
+          item: {
+            type: "tool_call_item",
+            rawItem: {
+              type: "hosted_tool_call",
+              id: "ig_1",
+              name,
+              status: "completed",
+              output: "opaque",
+            },
+          },
+        }),
+      ).toBeNull();
+    },
+  );
+
+  test("preserves hosted approval requests instead of treating them as completed provider work", () => {
     expect(
       pendingToolCallFromSdkEvent({
         type: "run_item_stream_event",
@@ -635,14 +659,14 @@ describe("turn exact-content boundaries", () => {
           type: "tool_call_item",
           rawItem: {
             type: "hosted_tool_call",
-            id: "ig_1",
-            name: "image_generation_call",
+            id: "approval_1",
+            name: "mcp_approval_request",
             status: "completed",
-            output: "opaque",
+            providerData: { type: "mcp_approval_request" },
           },
         },
-      }),
-    ).toBeNull();
+      })?.callId,
+    ).toBe("approval_1");
   });
 
   test("retains intentional screenshot and view-image outputs, not incidental action frames", () => {
@@ -866,16 +890,16 @@ describe("turn exact-content boundaries", () => {
     const failureSource = await Bun.file(
       new URL("../src/activities/agent-turn/failure-settlement.ts", import.meta.url),
     ).text();
-    const failureClassifier = failureSource.indexOf("let failure = agentRunFailurePayload(error");
-    const terminalFailureStart = failureSource.indexOf(
-      'control.activityStatus = "failed";',
-      failureClassifier,
-    );
+    const failureClassifier = failureSource.indexOf("const earlyDefinitionMismatch =");
+    // Early setup exhaustion has no event sink; inspect the final common
+    // eventing path rather than its earlier typed Temporal failure branch.
+    const terminalFailureStart = failureSource.lastIndexOf('control.activityStatus = "failed";');
     const terminalFailureEnd = failureSource.indexOf(
       'control.turnMetricOutcome = "failed";',
       terminalFailureStart,
     );
     const terminalFailureBlock = failureSource.slice(terminalFailureStart, terminalFailureEnd);
+    expect(failureClassifier).toBeGreaterThan(-1);
     expect(terminalFailureStart).toBeGreaterThan(failureClassifier);
     expect(terminalFailureEnd).toBeGreaterThan(terminalFailureStart);
     expect(terminalFailureBlock).toContain('type: "turn.failed"');
@@ -2923,27 +2947,6 @@ describe("turn-start pointer reconcile classification (issue #341 invariant B)",
 });
 
 describe("turn-time Modal private-registry warm", () => {
-  test("warms the pack-resolved Modal image ref before sandbox creation", async () => {
-    const packImage = "acr.example.com/cloudgeni/f4c-gecko@sha256:abc";
-    const runSettings = settingsWithPackSandboxImage(
-      testSettings({
-        sandboxBackend: "modal",
-        modalImageRef: undefined,
-        modalImageRegistrySecret: "acr-credentials-gecko",
-      }),
-      packImage,
-    );
-    const ensureRegistryImage = mock(async (_settings: Settings) => undefined);
-
-    await ensureTurnModalRegistryImage(runSettings, "modal", ensureRegistryImage);
-
-    expect(ensureRegistryImage).toHaveBeenCalledTimes(1);
-    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRef).toBe(packImage);
-    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRegistrySecret).toBe(
-      "acr-credentials-gecko",
-    );
-  });
-
   test("keeps non-modal or public-image turns on the no-op path", async () => {
     const ensureRegistryImage = mock(async (_settings: Settings) => undefined);
     await ensureTurnModalRegistryImage(
@@ -3299,10 +3302,6 @@ describe("lazy sandbox provisioner single-flight", () => {
       "Independent workspace reads after the personal-resource fence",
       authorize,
     );
-    const packRead = governanceSource.indexOf(
-      "resolveWorkspacePackRuntime(db, input.workspaceId)",
-      overlappedReads,
-    );
     const rigRead = governanceSource.indexOf(
       "await materializeRigVersionForAttempt(db",
       overlappedReads,
@@ -3322,8 +3321,7 @@ describe("lazy sandbox provisioner single-flight", () => {
     const gitAssert = credentialsSource.indexOf("assertGitHubResourcesRemainAuthorized(");
     expect(authorize).toBeGreaterThan(0);
     expect(overlappedReads).toBeGreaterThan(authorize);
-    expect(packRead).toBeGreaterThan(overlappedReads);
-    expect(rigRead).toBeGreaterThan(packRead);
+    expect(rigRead).toBeGreaterThan(overlappedReads);
     expect(policyRead).toBeGreaterThan(rigRead);
     expect(governanceCall).toBeGreaterThan(-1);
     expect(credentialsCall).toBeGreaterThan(governanceCall);
@@ -5342,7 +5340,15 @@ describe("transient provider error classifier", () => {
       database: { constraint: "session_turn_attempts_pkey" },
     });
     expect(preClaimAdmissionFailure(constraint)).toMatchObject({
-      details: [{ disposition: "retryable", code: "db_failure" }],
+      details: [
+        {
+          disposition: "blocked",
+          code: "db_failure",
+          sqlState: "23505",
+          reason: "database_claim_rejected",
+          retryPolicy: "explicit_recheck",
+        },
+      ],
     });
     const authorizationGuard = new SessionEventPersistenceError({
       code: "db_failure",
@@ -5355,8 +5361,41 @@ describe("transient provider error classifier", () => {
       database: {},
     });
     expect(preClaimAdmissionFailure(authorizationGuard)).toMatchObject({
-      details: [{ disposition: "retryable", code: "db_failure" }],
+      details: [
+        {
+          disposition: "blocked",
+          code: "db_failure",
+          sqlState: "42501",
+          reason: "database_claim_rejected",
+          retryPolicy: "explicit_recheck",
+        },
+      ],
     });
+    for (const [sqlState, reason] of [
+      ["P0002", "database_claim_rejected"],
+      ["OG001", "initiator_membership_required"],
+      ["OG002", "personal_resource_grant_required"],
+    ] as const) {
+      const failure = new SessionEventPersistenceError({ ...authorizationGuard.details, sqlState });
+      expect(preClaimAdmissionFailure(failure)).toMatchObject({
+        details: [{ disposition: "blocked", reason, sqlState }],
+      });
+      const unrelated = new SessionEventPersistenceError({
+        ...failure.details,
+        stage: "other_stage",
+      });
+      expect(preClaimAdmissionFailure(unrelated)).toMatchObject({
+        details: [{ disposition: "retryable", code: "db_failure" }],
+      });
+      expect(
+        preClaimAdmissionFailure(
+          new SessionEventPersistenceError({
+            ...failure.details,
+            retryOutcome: "exhausted",
+          }),
+        ),
+      ).toMatchObject({ details: [{ disposition: "retryable", code: "db_failure" }] });
+    }
     expect(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))).toMatchObject({
       type: "OpenGeniPreClaimFailure",
       nonRetryable: true,
@@ -5772,6 +5811,76 @@ describe("transient provider error classifier", () => {
       ),
     ).toBe(false);
     expect(shouldRecoverCompactionProviderFailure(new EmptyCompactionSummaryError())).toBe(false);
+  });
+
+  test("a Codex encrypted-content rejection of the compaction request recovers through artifact invalidation", () => {
+    const rejected = Object.assign(new Error("Invalid encrypted reasoning artifact"), {
+      status: 400,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+      error: {
+        type: "invalid_request_error",
+        code: "invalid_encrypted_content",
+        message: "Invalid encrypted reasoning artifact",
+      },
+    });
+    const wrapped = new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(rejected),
+      rejected,
+    );
+    expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(true);
+    // A generic invalid request on the same transport stays terminal.
+    const generic = Object.assign(new Error("Invalid value"), {
+      status: 400,
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+      error: { type: "invalid_request_error", code: "invalid_value", message: "Invalid value" },
+    });
+    expect(
+      shouldRecoverCompactionProviderFailure(
+        new CompactionProviderResponseError(compactionProviderFailureDiagnostics(generic), generic),
+      ),
+    ).toBe(false);
+  });
+
+  test("a definitive provider rejection names the field and drops the retry promise", () => {
+    const rejected = new CompactionProviderResponseError({
+      httpStatus: 400,
+      type: "invalid_request_error",
+      code: "unknown_parameter",
+      param: "input[12].encrypted_content",
+      requestId: "e63ad2c3-fab4-44e4-b458-3f5008f3c18f",
+    });
+    const payload = compactionFailureTurnEventPayload(rejected);
+    expect(payload).toEqual({
+      error: expect.stringContaining(
+        "the model provider rejected the compaction request (HTTP 400 invalid_request_error unknown_parameter; param input[12].encrypted_content; request e63ad2c3-fab4-44e4-b458-3f5008f3c18f)",
+      ),
+      code: "context_compaction_failed",
+      retryable: false,
+      recovery: "user_message",
+      compacted: false,
+      providerRejection: {
+        httpStatus: 400,
+        type: "invalid_request_error",
+        code: "unknown_parameter",
+        param: "input[12].encrypted_content",
+        requestId: "e63ad2c3-fab4-44e4-b458-3f5008f3c18f",
+      },
+    });
+    expect(payload.error).toContain(COMPACTION_PROVIDER_REJECTION_GUIDANCE);
+    expect(payload.error).not.toContain("Request it again");
+    // Transient and empty-summary failures keep the existing shape.
+    expect(
+      compactionFailureTurnEventPayload(
+        new CompactionProviderResponseError({ httpStatus: 503, code: "server_error" }),
+      ),
+    ).not.toHaveProperty("providerRejection");
+    expect(compactionFailureTurnEventPayload(null, { error: "custom" })).toEqual({
+      error: "custom",
+      code: "context_compaction_failed",
+      retryable: false,
+      recovery: "user_message",
+      compacted: false,
+    });
   });
 
   test("a 503 recovers the same turn after backpressure pacing, independent of goal state", () => {

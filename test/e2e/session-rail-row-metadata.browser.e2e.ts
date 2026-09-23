@@ -84,11 +84,11 @@ describe("Session rail row metadata in Chromium", () => {
     });
     expect(await Bun.file("test-results/compact-session-menu-desktop.png").exists()).toBe(true);
     await page.keyboard.press("Escape");
-    expect(
-      await page
-        .getByRole("button", { name: "Session view", exact: true })
-        .evaluate((el) => el === document.activeElement),
-    ).toBe(true);
+    // Radix restores trigger focus after the menu's close lifecycle completes.
+    await page
+      .getByRole("button", { name: "Session view", exact: true })
+      .and(page.locator(":focus"))
+      .waitFor();
   });
 
   test("shows scheduled work and overdue rechecks, then clears waiting on completion", async () => {

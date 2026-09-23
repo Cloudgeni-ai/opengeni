@@ -47,7 +47,7 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     to: "/workspaces/$workspaceId/plugins",
     icon: "plug",
     label: "Capabilities",
-    description: "Integrations, MCP servers, skills, and packs",
+    description: "Plugins, Skills, and integrations",
   },
   {
     to: "/workspaces/$workspaceId/state",
@@ -102,8 +102,8 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
       {
         to: "/workspaces/$workspaceId/rigs",
         icon: "server-cog",
-        label: "Rigs",
-        description: "Versioned sandbox machine definitions",
+        label: "Sandbox Environments",
+        description: "Custom sandbox setup and health checks",
       },
       {
         to: "/workspaces/$workspaceId/machines",

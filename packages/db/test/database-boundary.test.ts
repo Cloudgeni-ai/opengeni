@@ -54,6 +54,9 @@ describe("database foundation boundary", () => {
     expect(root.withWorkspaceRls).toBe(database.withWorkspaceRls);
     expect(root.withWorkspaceSubjectRls).toBe(database.withWorkspaceSubjectRls);
     expect(root.withWorkspaceUsageLock).toBe(database.withWorkspaceUsageLock);
+    expect(root.retryFailedSessionInTransaction).toBeFunction();
+    expect(root.retainedProviderCommandPersistence).toBeFunction();
+    expect(root).not.toHaveProperty("createRetryFailedSessionInTransaction");
 
     const typeParity: [
       Same<RootDatabase, FoundationDatabase>,

@@ -8,6 +8,7 @@ import type {
   TimelineAnnotationSource,
   ToolAuthNeededPayload,
   ToolRef,
+  ToolDisplayMetadata,
 } from "@opengeni/sdk";
 
 /* ----------------------------------------------------------------------------
@@ -129,6 +130,7 @@ export type ToolCallItem = {
   turnId: string | null;
   callId: string | null;
   name: string;
+  display?: ToolDisplayMetadata;
   arguments: unknown;
   output: unknown;
   truncation?: ToolCallTruncation | null;
@@ -383,9 +385,22 @@ export type ContextCompactionItem = {
   estimatedTokensBefore: number | null;
   estimatedTokensAfter: number | null;
   skipReason: string | null;
+  /**
+   * Present only for a `summarization_failed` skip where the provider
+   * definitively rejected the compaction request. Content-free identifiers.
+   */
+  providerRejection: ContextCompactionProviderRejection | null;
   /** Provider implementation id for debug disclosure only. */
   implementation: string | null;
   occurredAt: string;
+};
+
+export type ContextCompactionProviderRejection = {
+  httpStatus: number;
+  type: string | null;
+  code: string | null;
+  param: string | null;
+  requestId: string | null;
 };
 
 export type MachineInputMember = {
@@ -438,6 +453,9 @@ export type AuthNeededItem = {
   turnId: string | null;
   /** The runtime surface that requested recovery, when the event is an MCP auth signal. */
   serverId: string | null;
+  /** Explicit recovery identity; never inferred from an opaque execution alias. */
+  canonicalServerId?: string | null;
+  connectionSubjectScope?: "workspace" | "subject" | null;
   /** Durable event family that produced this notice. */
   source?: "tool" | "credential" | "capability" | undefined;
   /** The connection's registrable domain, e.g. "linear.app". */
@@ -473,7 +491,7 @@ export type TurnEndItem = {
   occurredAt: string;
 };
 
-export type TimelineItem =
+export type TimelineItem = (
   | UserMessageItem
   | HumanInputItem
   | AgentMessageItem
@@ -492,7 +510,11 @@ export type TimelineItem =
   | MemoryItem
   | KnowledgeItem
   | FleetDecisionItem
-  | TurnEndItem;
+  | TurnEndItem
+) & {
+  /** Durable identities, independent of renderer/reconciliation keys. */
+  sourceEvents?: readonly { eventId: string; sequence: number }[] | undefined;
+};
 
 /** Activity items cluster between chat messages (reasoning, tools, workers, sandbox, memory). */
 export type ActivityItem =

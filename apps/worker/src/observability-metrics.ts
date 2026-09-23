@@ -16,6 +16,7 @@ import {
   type RuntimeMetricsHooks,
   type SelfhostedOpObservation,
   type SelfhostedOpObserver,
+  type ToolPreparationPhaseMeasurement,
 } from "@opengeni/runtime";
 
 export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
@@ -119,6 +120,10 @@ export function runtimeMetricsHooksForObservability(
 ): RuntimeMetricsHooks {
   return {
     onModelCall: ({ provider, outcome, durationSeconds }) => {
+      completedOperationSpan(observability, "worker.model.call", durationSeconds, {
+        provider,
+        outcome,
+      });
       observability.incrementCounter({
         name: "opengeni_model_calls_total",
         help: "Total model calls by provider and outcome.",
@@ -172,6 +177,20 @@ export function runtimeMetricsHooksForObservability(
         labels: { outcome, port: String(port) },
       });
     },
+    onWorkspaceCapture: ({ backend, outcome, durationSeconds }) => {
+      if (!Number.isFinite(durationSeconds) || durationSeconds < 0) return;
+      const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+      completedOperationSpan(observability, "worker.workspace_capture", durationSeconds, {
+        backend: safeBackend,
+        outcome,
+      });
+      observability.observeHistogram({
+        name: "opengeni_workspace_capture_duration_seconds",
+        help: "Physical warm workspace capture and publication duration, including late settlement after caller timeout.",
+        labels: { backend: safeBackend, outcome },
+        value: durationSeconds,
+      });
+    },
     onWorkspaceArchiveObject: ({ outcome, backend }) => {
       observability.incrementCounter({
         name: "opengeni_workspace_archive_object_total",
@@ -180,6 +199,7 @@ export function runtimeMetricsHooksForObservability(
       });
     },
     onMcpToolCall: ({ outcome, durationSeconds }) => {
+      completedOperationSpan(observability, "worker.mcp.tool_call", durationSeconds, { outcome });
       observability.incrementCounter({
         name: "opengeni_mcp_tool_calls_total",
         help: "Total physical MCP tool calls by bounded structural outcome.",
@@ -1386,7 +1406,7 @@ export type TurnStartupPhase =
   | "history_generated_image_materialization"
   | "history_position_load"
   | "owned_sandbox_setup"
-  | "provider_dispatch"
+  | "runtime_stream_initialization"
   | "model_request_preparation"
   | "model_sdk_serialization"
   | "model_prepare_sandbox_agent_preparation"
@@ -1492,7 +1512,8 @@ export function turnStartupCountBucket(count: number | null): TurnStartupCountBu
 }
 
 /**
- * Measure the critical path from a durable turn start to provider dispatch.
+ * Measure startup operations, including nested and parallel work. These are
+ * not additive critical-path intervals; use milestones for elapsed latency.
  * Every label is a closed or configuration-derived enum; high-cardinality turn,
  * session, credential, connection, file, and model identifiers are forbidden.
  */
@@ -1506,8 +1527,19 @@ export function recordTurnStartupPhase(
     durationSeconds: number;
     count?: number | null;
     cache?: TurnStartupCache;
+    /** Trace-only lookup for the completed claim while its execution root is still open. */
+    executionCorrelationId?: string;
   },
 ): void {
+  completedOperationSpan(observability, `worker.prepare.${input.phase}`, input.durationSeconds, {
+    provider: input.provider,
+    backend: input.backend,
+    outcome: input.outcome,
+    ...(input.phase === "claim_and_policy" &&
+    /^turn_[0-9a-f]{32}$/.test(input.executionCorrelationId ?? "")
+      ? { correlationId: input.executionCorrelationId }
+      : {}),
+  });
   observability.observeHistogram({
     name: "opengeni_turn_startup_phase_duration_seconds",
     help: "Turn startup phase duration before the model response stream begins.",
@@ -1522,6 +1554,77 @@ export function recordTurnStartupPhase(
     },
     value: Math.max(0, input.durationSeconds),
   });
+}
+
+/** Background MCP preparation must not inflate startup phase distributions. */
+export function recordToolPreparationPhase(
+  observability: Observability,
+  input: ToolPreparationPhaseMeasurement & { provider: string; backend: string },
+): void {
+  if (input.execution === "blocking") {
+    recordTurnStartupPhase(observability, {
+      ...input,
+      phase: `tool_${input.phase}`,
+    });
+    return;
+  }
+  completedOperationSpan(
+    observability,
+    `worker.tool_prepare.${input.phase}`,
+    input.durationSeconds,
+    {
+      provider: input.provider,
+      backend: input.backend,
+      outcome: input.outcome,
+    },
+  );
+  observability.observeHistogram({
+    name: "opengeni_tool_background_preparation_duration_seconds",
+    help: "Nonblocking MCP preparation operations; may overlap startup and later execution.",
+    buckets: TURN_STARTUP_PHASE_BUCKETS,
+    labels: {
+      phase: input.phase,
+      provider: input.provider,
+      backend: input.backend,
+      outcome: input.outcome,
+    },
+    value: Math.max(0, input.durationSeconds),
+  });
+}
+
+/** Completed measurements become siblings under the scoped physical attempt.
+ * They never establish ambient ancestry for work which has already finished. */
+function completedOperationSpan(
+  observability: Observability,
+  name: string,
+  durationSeconds: number,
+  attributes: {
+    outcome: string;
+    provider?: string;
+    backend?: string;
+    correlationId?: string | undefined;
+  },
+): void {
+  if (!Number.isFinite(durationSeconds) || durationSeconds < 0) return;
+  try {
+    const failed = [
+      "failed",
+      "error",
+      "provider_declared_error",
+      "auth_needed",
+      "outcome_uncertain",
+      "timeout",
+      "thrown_transport_error",
+      "thrown_protocol_error",
+    ].includes(attributes.outcome);
+    observability
+      .startSpan(name, attributes, { startTimeMs: Date.now() - durationSeconds * 1_000 })
+      .end({
+        ...(failed ? { error: true } : {}),
+      });
+  } catch {
+    // Observers cannot change the completed model/tool/phase outcome.
+  }
 }
 
 /**

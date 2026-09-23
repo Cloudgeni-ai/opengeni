@@ -9,7 +9,7 @@ import {
   withProviderCommandHandle,
 } from "../src/sandbox/provider-command-session";
 import { installOpenGeniModalSnapshotPolicy } from "../src/sandbox/providers/modal";
-import { ModalCommandControl } from "../src/sandbox/providers/modal-command-control";
+import { ModalCommandControl } from "../src/sandbox/providers/modal-legacy-command-control";
 import { installModalCommandSession } from "../src/sandbox/providers/modal-command-session";
 import {
   type RoutingRetainedProcess,

@@ -9,13 +9,16 @@ export function SubscriptionConnectAction(props: {
   busy: boolean;
   onConnect: () => void;
   scopeControl?: ReactNode;
+  description?: string;
+  actionLabel?: string;
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3">
       <p className="flex-1 text-xs text-fg-subtle">
-        {props.count === 0
-          ? `No ${props.provider} subscriptions connected.`
-          : `${props.count} subscription${props.count === 1 ? "" : "s"} connected.`}
+        {props.description ??
+          (props.count === 0
+            ? `No ${props.provider} subscriptions connected.`
+            : `${props.count} subscription${props.count === 1 ? "" : "s"} connected.`)}
       </p>
       <div className="flex flex-wrap items-center gap-2">
         {props.scopeControl}
@@ -31,7 +34,7 @@ export function SubscriptionConnectAction(props: {
           ) : (
             <PlusIcon className="size-3.5" />
           )}
-          {props.count === 0 ? "Connect account" : "Connect another account"}
+          {props.actionLabel ?? (props.count === 0 ? "Connect account" : "Connect another account")}
         </Button>
       </div>
     </div>

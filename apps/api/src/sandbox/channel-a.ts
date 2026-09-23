@@ -22,6 +22,7 @@ import {
   hasGitCredentialRepositorySelection,
   hasGitHubRepositorySelection,
   sandboxLifecycleTransitionWaitMs,
+  sandboxWarmRateMicrosPerSecond,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
@@ -42,6 +43,7 @@ import {
   SandboxImageConflictError,
   SandboxProviderReadLockUnavailableError,
   SandboxRigConflictError,
+  SandboxPaidComputeAdmissionError,
   withSandboxProviderReadLock,
   type Database,
   type LeaseSnapshot,
@@ -51,6 +53,7 @@ import {
   recordTenancyCompatibilityLaneUse,
   sandboxLeaseTelemetryKey,
   sandboxOperationMetricObserver,
+  sandboxCaptureWaitMetricObserver,
   type Observability,
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
@@ -531,6 +534,9 @@ async function withChannelAOperation<T>(
   const onSandboxOperation = services.observability
     ? sandboxOperationMetricObserver(services.observability)
     : undefined;
+  const onSandboxCaptureWait = services.observability
+    ? sandboxCaptureWaitMetricObserver(services.observability)
+    : undefined;
   const { accountId, workspaceId, session } = ctx;
 
   if (session.sandboxBackend === "none") {
@@ -753,6 +759,7 @@ async function withChannelAOperation<T>(
           settings,
           bus,
           ...(onSandboxOperation ? { onSandboxOperation } : {}),
+          ...(onSandboxCaptureWait ? { onSandboxCaptureWait } : {}),
           ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
         },
         {
@@ -787,7 +794,7 @@ async function withChannelAOperation<T>(
 
   // One session has one logical runtime across turns and every API-direct
   // surface. Without this, Terminal/Files/Browser/Computer/viewers could rearm
-  // a stale deployment image after the worker had resolved a newer Pack/Rig or
+
   // deployment image for the same durable sandbox group.
   const sandboxRuntime = await resolveSessionSandboxRuntime(db, settings, session);
 
@@ -818,6 +825,10 @@ async function withChannelAOperation<T>(
       holderId,
       subjectId: session.id,
       backend: session.sandboxBackend,
+      warmBilling: {
+        mode: settings.sandboxWarmBillingMode,
+        rateMicrosPerSecond: sandboxWarmRateMicrosPerSecond(settings, session.sandboxBackend),
+      },
       os: session.sandboxOs,
       image: sandboxRuntime.image,
       rigVersionId: session.rigVersionId,
@@ -1060,6 +1071,7 @@ async function withChannelAOperation<T>(
           settings,
           bus,
           ...(onSandboxOperation ? { onSandboxOperation } : {}),
+          ...(onSandboxCaptureWait ? { onSandboxCaptureWait } : {}),
           ...(ctx.waitSignal ? { waitSignal: ctx.waitSignal } : {}),
         },
         {
@@ -1204,6 +1216,8 @@ async function withChannelAOperation<T>(
  *  already-HTTPException unchanged. */
 export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unknown {
   if (error instanceof HTTPException) return error;
+  if (error instanceof SandboxPaidComputeAdmissionError)
+    return new HTTPException(402, { message: error.message, cause: error });
   if (isChannelARequestCancellation(error, waitSignal))
     return new HTTPException(499 as never, {
       message: "request cancelled",

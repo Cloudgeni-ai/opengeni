@@ -120,11 +120,11 @@ describe("session capability preview parity in Chromium", () => {
             const action = (await card
               .getByRole("button", { name: scenario.open, exact: true })
               .boundingBox())!;
-            expect(
-              width > 600
-                ? Math.abs(note.y + note.height / 2 - action.y - action.height / 2)
-                : Math.abs(action.y - note.y - note.height - 6),
-            ).toBeLessThanOrEqual(1);
+            // The shared shell wraps only when content requires it, rather than
+            // imposing the old console-only viewport breakpoint.
+            const sameRow = Math.abs(note.y + note.height / 2 - action.y - action.height / 2) <= 1;
+            if (sameRow) expect(action.x).toBeGreaterThanOrEqual(note.x + note.width);
+            else expect(action.y).toBeGreaterThanOrEqual(note.y + note.height + 6);
             if (scenario.id === "skill") {
               expect(
                 await card
@@ -133,7 +133,7 @@ describe("session capability preview parity in Chromium", () => {
                   .locator('[aria-hidden="true"]')
                   .first()
                   .innerText(),
-              ).toBe("W");
+              ).toBe("WR");
               expect(await card.locator("img").count()).toBe(0);
             }
           }
@@ -214,7 +214,7 @@ describe("session capability preview parity in Chromium", () => {
             await opener.press("Enter");
             await dialog.waitFor();
             await page
-              .locator('[data-slot="dialog-overlay"]')
+              .locator(".og-session-capability-overlay")
               .click({ position: { x: width / 2, y: 10 } });
             await page.waitForFunction(
               (label) => document.activeElement?.textContent?.trim() === label,
@@ -258,7 +258,7 @@ describe("session capability preview parity in Chromium", () => {
             await page.keyboard.press("Escape");
             expect(await dialog.isVisible()).toBe(true);
             await page
-              .locator('[data-slot="dialog-overlay"]')
+              .locator(".og-session-capability-overlay")
               .click({ position: { x: width / 2, y: 10 } });
             expect(await dialog.isVisible()).toBe(true);
             // Explicitly settle the fixture request while the real modal makes the page inert.

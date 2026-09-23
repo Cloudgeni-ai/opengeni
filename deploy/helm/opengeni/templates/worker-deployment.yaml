@@ -66,6 +66,7 @@ spec:
             - secretRef:
                 name: {{ include "opengeni.secretName" . }}
           env:
+            {{- include "opengeni.deploymentRevisionEnv" . | nindent 12 }}
             - name: OPENGENI_WORKER_HTTP_PORT
               value: {{ .Values.worker.containerPort | quote }}
             - name: OPENGENI_WORKER_ROLE
@@ -77,11 +78,16 @@ spec:
             {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
             {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.objectStorageInternalEndpoint" .)) | nindent 12 }}
             {{- end }}
-          {{- if $opensandboxKubernetesInventoryEnabled }}
+          {{- if or $opensandboxKubernetesInventoryEnabled .Values.worker.extraVolumeMounts }}
           volumeMounts:
+            {{- if $opensandboxKubernetesInventoryEnabled }}
             - name: opensandbox-kubernetes-inventory
               mountPath: /var/run/secrets/opengeni.io/opensandbox-kubernetes-inventory
               readOnly: true
+            {{- end }}
+            {{- with .Values.worker.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
           {{- if (((.Values.worker).probes).readiness).enabled }}
           readinessProbe:
@@ -95,8 +101,9 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- if $opensandboxKubernetesInventoryEnabled }}
+      {{- if or $opensandboxKubernetesInventoryEnabled .Values.worker.extraVolumes }}
       volumes:
+        {{- if $opensandboxKubernetesInventoryEnabled }}
         - name: opensandbox-kubernetes-inventory
           projected:
             defaultMode: 0440
@@ -109,6 +116,10 @@ spec:
                   items:
                     - key: ca.crt
                       path: ca.crt
+        {{- end }}
+        {{- with .Values.worker.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
       {{- if ((.Values.worker).topologySpreadConstraints).enabled }}
       topologySpreadConstraints:

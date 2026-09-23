@@ -15,7 +15,6 @@ import {
   stableJson,
   assertOrganizationIntegrationAllowed,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
-  OPENGENI_PR_REVIEW_PACK_ID,
 } from "@opengeni/contracts";
 import {
   CORE_INTEGRATION_DEFINITIONS,
@@ -32,9 +31,8 @@ import {
   createConnection,
   updateConnection,
   encryptEnvironmentValue,
-  normalizedHostCredentialHeaders,
+  normalizedCredentialHeaders,
   listGitHubInstallationAccessForWorkspace,
-  getPackInstallation,
   listPrReviewAppRegistrations,
   listSocialConnections,
   getSocialConnection,
@@ -112,11 +110,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     const canWrite = hasPermission(authorization.grant.permissions, "connections:write");
     const personal = isPersonalConnectionOwnerPrincipal(authorization);
-    const lensPack = await getPackInstallation(
-      deps.db,
-      authorization.grant.workspaceId,
-      OPENGENI_PR_REVIEW_PACK_ID,
-    );
     let mcpConfigured = false;
     let credentialConfigured = false;
     try {
@@ -242,27 +235,27 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: "Gmail",
         family: "google",
         readiness:
-          !external || !canWrite || !personal
+          !external || !canWrite
             ? "unsupported"
             : mcpConfigured
               ? "available"
               : "needs_configuration",
-        ownership: personal ? ["personal"] : [],
+        ownership: personal ? ["workspace", "personal"] : ["workspace"],
         setup: ["oauth"],
       }),
       ConnectProvider.parse({
         id: "slack-personal",
-        label: "My Slack account",
+        label: "Slack account",
         family: "slack",
         readiness:
-          !external || !canWrite || !personal
+          !external || !canWrite
             ? "unsupported"
             : mcpConfigured &&
                 deps.settings.slackClientId?.trim() &&
                 deps.settings.slackClientSecret?.trim()
               ? "available"
               : "needs_configuration",
-        ownership: personal ? ["personal"] : [],
+        ownership: personal ? ["workspace", "personal"] : ["workspace"],
         setup: ["oauth"],
       }),
       ConnectProvider.parse({
@@ -305,7 +298,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           !hasPermission(authorization.grant.permissions, "secrets:write")
             ? "unsupported"
             : credentialConfigured &&
-                lensPack?.status === "active" &&
                 deps.settings.sandboxBackend !== "selfhosted" &&
                 prReviewGitHubAppMissingSettings(deps.settings).length === 0
               ? "available"
@@ -735,7 +727,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             await requireConnectOwnerAuthority(tx, scope, installationPermission, origin);
             if (before.providerId === "github-lens") {
               await requireConnectOwnerAuthority(tx, scope, "secrets:write", origin);
-              await requireGitHubLensConnect({ ...deps, db: tx }, workspaceId);
+              await requireGitHubLensConnect({ ...deps, db: tx });
             }
           },
           execute: async (attempt) =>
@@ -923,7 +915,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       try {
         credentialHeaders =
           "headers" in values
-            ? normalizedHostCredentialHeaders(
+            ? normalizedCredentialHeaders(
                 z.record(z.string(), z.string()).parse(JSON.parse(values.headers)),
               )
             : { authorization: `Bearer ${values.token}` };
@@ -1542,7 +1534,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             if (!hasPermission(authorization.grant.permissions, "secrets:write"))
               throw new HTTPException(403, { message: "secrets:write required" });
             await requireConnectOwnerAuthority(tx, scope, "secrets:write");
-            await requireGitHubLensConnect({ ...deps, db: tx }, workspaceId);
+            await requireGitHubLensConnect({ ...deps, db: tx });
           }
           const navigation = githubAppConnectNavigation(
             deps,
@@ -1670,14 +1662,6 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             "fiken-token",
           ].includes(input.providerId)
         ) {
-          if (input.providerId === "slack-personal" && input.ownership !== "personal")
-            throw new HTTPException(422, {
-              message: "Hosted Slack MCP requires personal ownership",
-            });
-          if (input.providerId === "gmail" && input.ownership !== "personal")
-            throw new HTTPException(422, {
-              message: "Gmail requires personal ownership; each user connects their own account",
-            });
           if (input.providerId === "fiken-token" && input.ownership !== "workspace")
             throw new HTTPException(422, { message: "Fiken is workspace-owned" });
           requireEnvironmentEncryption(deps.settings);

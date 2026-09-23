@@ -7,6 +7,10 @@ import {
 } from "./exec-banner";
 import { RoutingMutationOutcomeUnknownError } from "./routing/routing-session";
 import { sendCommandInput } from "./command-input";
+import {
+  withPendingCommandSupervision,
+  type PendingCommandSupervision,
+} from "./provider-command-session";
 
 const TURN_PROVIDER_YIELD_SLICE_MS = 250;
 const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
@@ -63,6 +67,8 @@ type ShellProcessIdentity = {
 
 type ActiveShellSession = {
   sessionId: number;
+  /** Original model command, before adding process-control shell wrappers. */
+  command?: string;
   markerPath: string | null;
   token: string | null;
   interactive: boolean;
@@ -93,8 +99,12 @@ type CommandCancellationSession = {
   /** Whether the provider locator remains controllable from another worker
    * process after this turn returns. */
   canAdoptRetainedProcessAsBackgroundCommand?(providerSessionId: number): boolean;
-  adoptRetainedProcessAsBackgroundCommand?(providerSessionId: number): Promise<void>;
+  adoptRetainedProcessAsBackgroundCommand?(
+    providerSessionId: number,
+    command?: string,
+  ): Promise<void>;
   retainedProcessIdentity?(providerSessionId: number): { id: string } | null;
+  cancelSupervisedCommand?(providerSessionId: number, reason: "explicit_stop"): Promise<boolean>;
   writeStdinForProcessRead?(args: {
     sessionId: number;
     chars?: string;
@@ -169,6 +179,7 @@ type ActiveRemoteExec = {
 };
 
 type PendingShellStart = {
+  supervision: PendingCommandSupervision;
   markerPath: string;
   cancellationPath: string;
   token: string;
@@ -861,7 +872,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       try {
         initialNative = await runWithToolCallCorrelation(
           correlationId,
-          async () => await invokeExecNative(commandInput),
+          async () =>
+            await withPendingCommandSupervision(pendingStart?.supervision, () =>
+              invokeExecNative(commandInput),
+            ),
           {
             onDurableOpOwnershipTransferStarted: (opId) =>
               remoteExec?.releaseCancellationAuthority(opId),
@@ -1167,7 +1181,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             try {
               output = await runWithToolCallCorrelation(
                 correlationId,
-                async () => await tool.invoke(runContext, cancellableInput, details),
+                async () =>
+                  await withPendingCommandSupervision(pendingStart?.supervision, () =>
+                    tool.invoke(runContext, cancellableInput, details),
+                  ),
                 {
                   onDurableOpOwnershipTransferStarted: (opId) =>
                     remoteExec?.releaseCancellationAuthority(opId),
@@ -1191,6 +1208,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 // invoke a helper through the mutable current route.
                 this.shellSessions.set(retainedProcess.providerSessionId, {
                   sessionId: retainedProcess.providerSessionId,
+                  command: parsed.cmd,
                   markerPath,
                   token,
                   interactive,
@@ -1220,6 +1238,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             if (sessionId !== null) {
               const state: ActiveShellSession = {
                 sessionId,
+                command: parsed.cmd,
                 markerPath: useRemoteOpCancellation ? null : markerPath,
                 token: useRemoteOpCancellation ? null : token,
                 interactive,
@@ -1469,7 +1488,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       return `${runningCommandBanner(state.sessionId, output)}\nThis process is turn-scoped; it will stop when this turn ends or is interrupted.\n`;
     }
     if (state.processSession?.adoptRetainedProcessAsBackgroundCommand) {
-      await state.processSession.adoptRetainedProcessAsBackgroundCommand(state.sessionId);
+      await state.processSession.adoptRetainedProcessAsBackgroundCommand(
+        state.sessionId,
+        state.command,
+      );
       this.shellSessions.delete(state.sessionId);
     }
     return runningCommandBanner(
@@ -1608,6 +1630,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     });
     const entry: PendingShellStart = {
       ...input,
+      supervision: { managed: false },
       cancellationPath: shellCancellationPath(input.markerPath),
       settled: false,
       settledPromise,
@@ -1643,6 +1666,15 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           await Promise.race([state.settledPromise, delay(SHELL_POLL_MS)]);
         }
       }
+    }
+
+    if (state.supervision.managed) {
+      // A native start is idle until durable retention. Its exact locator is
+      // handed to shellSessions even on ambiguous promotion/release; wait for
+      // that handoff, then the ordinary drain invokes pidfd supervision. Never
+      // select a numeric-PID helper for this invocation.
+      await state.settledPromise;
+      return;
     }
 
     // The transport can be cancelled after Modal accepted the process. Publish
@@ -1753,6 +1785,20 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 
   private async cancelShellSessionOnce(state: ActiveShellSession): Promise<void> {
+    // Native supervision is authoritative for supported commands. Never run a
+    // numeric PID/PGID helper against a supervised invocation, even when its
+    // original shell wrapper happened to create a legacy marker.
+    if (await state.processSession?.cancelSupervisedCommand?.(state.sessionId, "explicit_stop")) {
+      while (state.processSession?.hasRetainedProcess?.(state.sessionId) === true) {
+        if (await this.rawWrite(state, "", SHELL_POLL_MS)) {
+          await this.forgetShellSessionAfterExactSettlement(state);
+          return;
+        }
+        await delay(SHELL_POLL_MS);
+      }
+      this.shellSessions.delete(state.sessionId);
+      return;
+    }
     // A session inherited from an older/unwrapped invocation has no durable
     // process marker. Ctrl-C + provider completion is the only safe generic
     // authority available for that legacy shape.

@@ -181,10 +181,16 @@ body {
   textarea,
   [role="button"],
   [tabindex]:not([tabindex="-1"])
-):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]) {
+):focus-visible:not(.og-root textarea):not(.og-model-policy-search-input):not([data-slot="button"]):not(.connector-control) {
   outline: 2px solid color-mix(in oklch, var(--color-ring) 55%, transparent);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
+}
+
+/* Connector controls own a bounded inset ring, so adjacent actions never overlap. */
+.connector-control:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--color-ring) 55%, transparent);
+  outline-offset: -3px;
 }
 
 :where(button, a[href], [role="button"], [role="menuitem"], [role="option"], summary):not(:disabled, [aria-disabled="true"]) {

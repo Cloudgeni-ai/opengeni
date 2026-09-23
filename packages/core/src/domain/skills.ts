@@ -3,6 +3,7 @@ import type {
   SkillInstallInput,
   SkillRevisionInput,
   SkillSaveInput,
+  SkillRemoveInput,
 } from "@opengeni/contracts";
 import { validateSkillTextFiles } from "@opengeni/contracts";
 import { buildPortableSkillArtifact } from "@opengeni/runtime/skill-library";
@@ -30,6 +31,14 @@ export function skillBundleHash(files: readonly SkillFile[]): string {
 }
 
 export const listSkills = listSkillRecords;
+export async function removeSkill(db: Database, input: SkillRemoveInput) {
+  const { accountId, workspaceId, actor, ...request } = input;
+  return applySkillLifecycle(
+    db,
+    { accountId, workspaceId, actor },
+    { ...request, operation: "remove" },
+  );
+}
 export async function readSkill(
   db: Database,
   context: SkillReadContext,

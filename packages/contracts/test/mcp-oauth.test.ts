@@ -49,6 +49,20 @@ describe("MCP OAuth contracts", () => {
       scope: "mcp:access",
     });
     expect(
+      McpOAuthClientRegistrationRequest.parse({
+        redirect_uris: [
+          "cursor://anysphere.cursor-mcp/oauth/callback",
+          "http://localhost:8787/callback",
+        ],
+        client_name: "Desktop MCP client",
+        logo_uri: "https://client.example/logo.svg",
+        scope: "mcp:access",
+      }),
+    ).toMatchObject({
+      client_name: "Desktop MCP client",
+      scope: "mcp:access",
+    });
+    expect(
       McpOAuthTokenResponse.parse({
         access_token: "access-token",
         token_type: "Bearer",

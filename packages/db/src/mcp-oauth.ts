@@ -177,6 +177,32 @@ export async function deleteMcpOAuthAuthorizationRequest(
   );
 }
 
+export async function rebindMcpOAuthAuthorizationRequest(
+  db: Database,
+  input: {
+    requestHash: string;
+    subjectId: string;
+    accountId: string;
+    workspaceId: string;
+    permissions: AccessGrant["permissions"];
+    toolIdentities: Array<{ serverId: string; toolName: string }>;
+  },
+): Promise<boolean> {
+  const [row] = await rawRows<{ request_hash: string }>(
+    db,
+    sql`update mcp_oauth_authorization_requests
+      set account_id = ${input.accountId},
+          workspace_id = ${input.workspaceId},
+          permissions = ${JSON.stringify(input.permissions)}::jsonb,
+          tool_identities = ${JSON.stringify(input.toolIdentities)}::jsonb
+      where request_hash = ${input.requestHash}
+        and subject_id = ${input.subjectId}
+        and expires_at > clock_timestamp()
+      returning request_hash`,
+  );
+  return Boolean(row);
+}
+
 export async function consumeMcpOAuthAuthorizationRequest(
   db: Database,
   input: {

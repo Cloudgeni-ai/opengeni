@@ -4,7 +4,7 @@ import {
   ModalCommandControl,
   type ModalProviderCommand,
   type ModalProviderOutputPage,
-} from "../src/sandbox/providers/modal-command-control";
+} from "../src/sandbox/providers/modal-legacy-command-control";
 import { materializationVerificationDiagnostic } from "../src/sandbox/materialization-verification-error";
 import { RoutingSandboxSession } from "../src/sandbox/routing/routing-session";
 import { withSandboxProviderCapture } from "../src/sandbox/provider-operation-gate";

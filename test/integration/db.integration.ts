@@ -1412,13 +1412,13 @@ describe("DB integration", () => {
   // the provisioned runtime role in packages/db/test/unified-knowledge-postgres.test.ts.
   // Historical Memory behavior is exercised only against the pre-knowledge schema.
 
-  test("RLS policies isolate capability, pack, and social rows for a non-owner app role", async () => {
+  test("RLS policies isolate capability and social rows for a non-owner app role", async () => {
     const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
     const appDbClient = createDb(appRoleUrl);
     try {
       const grantA = await testGrant(dbClient.db);
       const grantB = await testGrant(dbClient.db);
-      await seedCapabilityPackAndSocialRows(dbClient.db, grantB);
+      await seedCapabilityAndSocialRows(dbClient.db, grantB);
 
       for (const table of newCapabilityTables) {
         const hidden = await appDbClient.db.execute(
@@ -1430,7 +1430,7 @@ describe("DB integration", () => {
       }
 
       await withRlsContext(appDbClient.db, grantA, async (db) => {
-        await seedCapabilityPackAndSocialRows(db, grantA);
+        await seedCapabilityAndSocialRows(db, grantA);
       });
 
       for (const table of newCapabilityTables) {
@@ -1450,8 +1450,8 @@ describe("DB integration", () => {
       await expect(
         withRlsContext(appDbClient.db, grantA, async (db) => {
           await db.execute(dbSql`
-          insert into pack_installations (account_id, workspace_id, pack_id)
-          values (${grantA.accountId}, ${grantB.workspaceId}, ${`mismatched-${crypto.randomUUID()}`})
+          insert into capability_installations (account_id, workspace_id, capability_id, kind)
+          values (${grantA.accountId}, ${grantB.workspaceId}, ${`mcp:mismatched-${crypto.randomUUID()}`}, 'mcp')
         `);
         }),
       ).rejects.toThrow();
@@ -1877,24 +1877,19 @@ async function insertHistoryMigrationFixture(
 }
 
 const newCapabilityTables = [
-  "pack_installations",
   "capability_catalog_items",
   "capability_installations",
   "social_connections",
   "social_posts",
 ];
 
-async function seedCapabilityPackAndSocialRows(
+async function seedCapabilityAndSocialRows(
   db: ReturnType<typeof createDb>["db"],
   grant: AccessGrant,
 ): Promise<void> {
   const suffix = crypto.randomUUID();
   const capabilityId = `mcp:rls-${suffix}`;
   const connectionId = crypto.randomUUID();
-  await db.execute(dbSql`
-    insert into pack_installations (account_id, workspace_id, pack_id)
-    values (${grant.accountId}, ${grant.workspaceId}, ${`pack-${suffix}`})
-  `);
   await db.execute(dbSql`
     insert into capability_catalog_items (id, account_id, workspace_id, kind, source, name, endpoint_url)
     values (${capabilityId}, ${grant.accountId}, ${grant.workspaceId}, 'mcp', 'manual', ${`RLS MCP ${suffix}`}, 'https://example.com/mcp')

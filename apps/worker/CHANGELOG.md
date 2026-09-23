@@ -1,5 +1,211 @@
 # @opengeni/worker-bundle
 
+## 2.0.1
+
+### Patch Changes
+
+- 701ea95: Preserve the original shell command when adopting background processes, so running command rows and completion notices show the command instead of execCommand. Keep long command rows ellipsized and expose their saved preview on hover and expansion.
+- a11d810: Allow Codex catalog entries to retire from new selection while retaining exact already-accepted execution under unchanged live authorization checks.
+- Updated dependencies [701ea95]
+- Updated dependencies [e9c4379]
+- Updated dependencies [a642885]
+- Updated dependencies [793a6c9]
+- Updated dependencies [d92af11]
+- Updated dependencies [f60ca2b]
+- Updated dependencies [56ddcfb]
+- Updated dependencies [a11d810]
+- Updated dependencies [86c710a]
+- Updated dependencies [38b9857]
+- Updated dependencies [ab3adb3]
+- Updated dependencies [2f8bc58]
+- Updated dependencies [a11d810]
+- Updated dependencies [90e089a]
+- Updated dependencies [a184108]
+- Updated dependencies [b1ad0c6]
+- Updated dependencies [a463199]
+- Updated dependencies [5fbb333]
+  - @opengeni/runtime@4.0.1
+  - @opengeni/codex@0.2.25
+  - @opengeni/config@2.1.0
+  - @opengeni/db@6.0.1
+  - @opengeni/contracts@5.1.0
+  - @opengeni/sdk@7.1.0
+  - @opengeni/core@4.0.1
+  - @opengeni/documents@0.8.32
+  - @opengeni/github@0.7.15
+  - @opengeni/storage@0.2.132
+  - @opengeni/events@0.4.30
+  - @opengeni/codemode@0.6.1
+  - @opengeni/observability@0.8.31
+  - @opengeni/tool-gateway@0.1.12
+
+## 2.0.0
+
+### Major Changes
+
+- 1bfb6a4: Remove Packs and their Workflow templates from the application, public clients,
+  runtime, and active database schema. Plugins, Skills, Connections, sandbox
+  environments, Knowledge, scheduled tasks, and event automations remain independent.
+
+  PR Review now has its own setup authority and fixed automation template. Generic
+  automation routes cannot mutate review-owned sources or triggers. The API contract
+  revision changes; deploy matching server and client versions together.
+
+  Migration 0482 is a destructive maintenance cutover: drain all API and worker
+  database clients, settle Pack-related operations and queued Pack automation work,
+  then apply migrations and provision roles before starting only matching binaries.
+  It removes Pack data without a compatibility layer or data-preservation migration.
+  Historical events mixing Pack and independent automation work block the cutover
+  for explicit operator resolution; independent execution history is never silently deleted.
+  Customized, shared, and re-scoped Skills, Connections, and session history are
+  preserved; source-only Skills lose their active distribution owner.
+
+### Minor Changes
+
+- 6d0a4de: Include opengeni-client in the default Skill catalog in local, self-hosted and
+  managed deployments. The repository guide is the sole authored source; generated
+  runtime assets include every reference and require no Pack, installation, network
+  fetch or sandbox to read. Explicit bundledSkillIds selections still narrow it.
+
+  Improve adaptive resource discovery, UI selection, runtime behavior, tool data
+  semantics, and outcome-based verification without prescribing a fixed product
+  architecture or answer format.
+
+- c64a94f: Support simultaneous authorized personal and workspace MCP account attachments with immutable account-qualified routing, sender isolation, and scheduled execution binding. Move attachment controls inside Connectors with readable ownership labels; keep account setup on the Capabilities page.
+
+### Patch Changes
+
+- a6d3e4a: Route persistent behavior to scoped workspace instructions or applicable Skills
+  instead of retrieval-only Knowledge. Make the routing and safe instruction-edit
+  guidance unconditional, reinforce it in save tools and Skill guidance, and retain
+  the existing scope and Agent learning controls.
+- 348e54d: Use Sandbox Environment terminology in user-facing controls, errors, tool descriptions, and runtime guidance. Existing rig routes, tool names, IDs, permissions, and stored definitions remain unchanged.
+- c6f98cc: Preserve bounded provider error classifications and opaque lease correlation for drain capture failures, without exposing provider messages or allowing logging failures to interrupt recovery cleanup.
+- fabf288: Make an active worker execution searchable through its completed claim span without exporting raw identifiers or adding metric cardinality.
+- c702159: Stop retrying permanent runtime database posture and configuration failures as
+  connection errors. Validate local startup prerequisites, prevent overlapping
+  launchers from rotating live database credentials, and check database posture
+  before building the development sandbox.
+- 9a7931c: Observe the fixed Modal materialization visibility probe through its own
+  cancelable provider cursor instead of borrowing the parent mutation's retained
+  command handle. Preserve actual failures and unconfirmed deadline evidence
+  without retrying materialization or agent work.
+- 8d918ed: Prepare operator compaction from canonical history without requiring a user message or internal update batch.
+- 9d5bb1c: Persist the periodic workspace capture attempt clock so failed snapshots respect the configured interval instead of blocking commands again on the next heartbeat. Forced recovery captures still bypass periodic cadence without bypassing ownership or active-capture fences.
+- 9d9b94b: Keep the published dependency closure aligned with the updated plugin removal
+  contracts. The SDK exposes named removal outcomes and optional preview-token
+  confirmation alongside the existing installation-version check.
+- 0a41330: Reuse the fully prepared model request for remote compaction, including sandbox instructions, filtered tools, and model settings. Prepare operator and pre-turn compaction through the same model boundary without sending ordinary inference. Capture compaction requests in model diagnostics.
+- f90d628: Add durable native supervision for supported stock Modal non-PTY commands. Retain
+  the idle invocation before provider dispatch and user-code release, verify native
+  capability on the exact warm instance, persist descendant-quiescence proof
+  before supervisor acknowledgment, and fence canonical settlement on provider exit
+  plus captured output. Deadline cancellation keeps a monotonic stdin fence without
+  cancelling ordinarily adopted background commands. Unsupported and legacy paths
+  remain explicit and cannot manufacture supervision proof.
+- a6251eb: Add isolated async trace context, parent/link export, bounded trace batching and
+  retry health, and opt-in protected failure diagnostics independent of the
+  application database. Preserve the public telemetry privacy projection.
+- a19f12f: Continue completed Connected Machine command output replay across partial batches using one integrity checkpoint, instead of repeatedly restarting before the terminal frame. Preserve capture failures, no-progress deferral, exact operation identity, and verified terminal settlement.
+- d3672c0: Measure workspace capture gate waits on every routed sandbox operation, including
+  mid-turn and API-direct operations, without changing provider-call accounting or
+  admission guarantees. Record physical warm capture and publication duration at
+  actual settlement, including captures that outlive the initiating caller.
+- d84b1a3: Preserve sandbox visibility-check command evidence in durable turn failures and
+  expose bounded, explained failure categories on the Runtime Failures dashboard.
+- e261718: Preserve bounded provider error classifications in workspace snapshot diagnostics without logging provider messages, request identifiers or payloads.
+- 04593f2: Keep compacted attachment catalogs stable across turns by avoiding duplicate current-file references in older history.
+- 23d4542: Allow repeatedly unobservable, explicitly stopping managed commands to enter the existing checkpoint-before-termination recovery after owner quiescence and idle grace. Preserve running commands, all other writer fences, failed-checkpoint recovery, and real late exit proof.
+- f90d628: Keep supervised commands out of legacy observation-error containment, including
+  stale enrollment, checkpoint publication and published-capture teardown retries.
+  Fence older control writers at the database boundary before enabling supervision.
+- 0ea365c: Route user-facing reports, including secondary audit outputs, to native document
+  Artifacts before authoring. Persist explicit report requirements and require
+  server-verified current-head inspection evidence at goal completion, preserving
+  ordinary chat, internal worker findings, code navigation and explicitly requested
+  local-file workflows. Keep unavailable or failed report delivery incomplete
+  instead of silently substituting sandbox links.
+- d854a61: Keep the worker heartbeat cleanup from releasing a closed turn's holder before its bounded warm capture settles, avoiding premature drain and cold restore.
+- b384b43: Record workflow wake transport and durable admission outcomes separately, with bounded blocker metrics and useful public log fields.
+- Updated dependencies [b1adc9f]
+- Updated dependencies [a6d3e4a]
+- Updated dependencies [4ddab4a]
+- Updated dependencies [6d0a4de]
+- Updated dependencies [59bad3f]
+- Updated dependencies [c64a94f]
+- Updated dependencies [c387603]
+- Updated dependencies [3b73fc0]
+- Updated dependencies [1c924ed]
+- Updated dependencies [c31a951]
+- Updated dependencies [f90d628]
+- Updated dependencies [348e54d]
+- Updated dependencies [c6f98cc]
+- Updated dependencies [aa09567]
+- Updated dependencies [d1ab270]
+- Updated dependencies [f90d628]
+- Updated dependencies [c3f1705]
+- Updated dependencies [9de8e51]
+- Updated dependencies [0bf014d]
+- Updated dependencies [c702159]
+- Updated dependencies [a74ea02]
+- Updated dependencies [3977932]
+- Updated dependencies [f90d628]
+- Updated dependencies [9a7931c]
+- Updated dependencies [c8bb974]
+- Updated dependencies [406a62e]
+- Updated dependencies [3fa175e]
+- Updated dependencies [332a02d]
+- Updated dependencies [132b945]
+- Updated dependencies [779b16b]
+- Updated dependencies [9d5bb1c]
+- Updated dependencies [1cb688d]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [0a41330]
+- Updated dependencies [621201d]
+- Updated dependencies [e261b39]
+- Updated dependencies [d9190f7]
+- Updated dependencies [f90d628]
+- Updated dependencies [a6251eb]
+- Updated dependencies [ac006ef]
+- Updated dependencies [1bfb6a4]
+- Updated dependencies [6f82814]
+- Updated dependencies [1641006]
+- Updated dependencies [f90d628]
+- Updated dependencies [d3672c0]
+- Updated dependencies [d84b1a3]
+- Updated dependencies [c9e2743]
+- Updated dependencies [7e2436a]
+- Updated dependencies [0bf014d]
+- Updated dependencies [6ed7dfb]
+- Updated dependencies [b0a5a54]
+- Updated dependencies [e261718]
+- Updated dependencies [bfc92c2]
+- Updated dependencies [1d6e49a]
+- Updated dependencies [bd6319b]
+- Updated dependencies [23d4542]
+- Updated dependencies [f90d628]
+- Updated dependencies [c2b66d5]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [c66ba31]
+- Updated dependencies [f7c9169]
+- Updated dependencies [0ea365c]
+- Updated dependencies [a74ea02]
+- Updated dependencies [b384b43]
+  - @opengeni/core@4.0.0
+  - @opengeni/runtime@4.0.0
+  - @opengeni/db@6.0.0
+  - @opengeni/contracts@5.0.0
+  - @opengeni/sdk@7.0.0
+  - @opengeni/codex@0.2.24
+  - @opengeni/observability@0.8.30
+  - @opengeni/config@2.0.0
+  - @opengeni/codemode@0.6.0
+  - @opengeni/documents@0.8.31
+  - @opengeni/events@0.4.29
+  - @opengeni/github@0.7.14
+  - @opengeni/storage@0.2.131
+  - @opengeni/tool-gateway@0.1.11
+
 ## 1.0.1
 
 ### Patch Changes

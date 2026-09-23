@@ -10,6 +10,7 @@ import {
   McpOAuthClientRegistrationResponse,
   McpOAuthProtectedResourceMetadata,
   McpOAuthTokenResponse,
+  type AccessContext,
   type AccessGrant,
   type ToolGatewayCatalog,
   type ToolGatewayIdentity,
@@ -19,15 +20,25 @@ import {
   createMcpOAuthAuthorizationRequest,
   deleteMcpOAuthAuthorizationRequest,
   exchangeMcpOAuthAuthorizationCode,
+  getManagedAccount,
   getMcpOAuthAuthorizationRequest,
   getMcpOAuthClient,
+  getWorkspace,
+  listSharedWorkspacesForAccount,
+  listWorkspacesForSubject,
   McpOAuthClientRegistrationRateLimitError,
+  rebindMcpOAuthAuthorizationRequest,
   registerMcpOAuthClient,
   resolveLiveMcpOAuthGrant,
   resolveMcpOAuthAccessToken,
   rotateMcpOAuthRefreshToken,
 } from "@opengeni/db";
-import { requireAccessGrantAuthorization, type ApiRouteDeps } from "@opengeni/core";
+import {
+  hasPermission,
+  requireAccessContext,
+  requireAccessGrantAuthorization,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { trustedRequestSourceAddress } from "./http/request-source";
@@ -148,10 +159,17 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     const query = new URL(c.req.url).searchParams;
     const client = await requireAuthorizationClient(deps, query);
     const resource = requireAuthorizationResource(deps, query);
+    const context = await requireAccessContext(c, deps);
+    const workspaces = await listConsentWorkspaces(deps, context);
+    if (workspaces.length === 0) {
+      throw new HTTPException(403, { message: "no workspace is available for MCP OAuth" });
+    }
+    const selectedWorkspace =
+      workspaces.find((workspace) => workspace.id === resource.workspaceId) ?? workspaces[0]!;
     const authorization = await requireAccessGrantAuthorization(
       c,
       deps,
-      resource.workspaceId,
+      selectedWorkspace.id,
       "workspace:read",
     );
     const grant = requireWorkspaceToolGatewayAuthorization(authorization);
@@ -175,42 +193,101 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     } finally {
       await prepared.close();
     }
+    const accounts = await consentAccountsForWorkspaces(deps, workspaces);
     c.header(
       "content-security-policy",
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+      "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
     );
     c.header("cache-control", "no-store");
-    return c.html(consentHtml(client.clientName ?? client.clientId, resource, requestToken));
+    return c.html(
+      renderMcpOAuthConsentPage({
+        clientName: client.clientName ?? "MCP client",
+        requestToken,
+        accounts,
+        workspaces: workspaces.map((workspace) => ({
+          id: workspace.id,
+          accountId: workspace.accountId,
+          name: workspace.name,
+          kind: workspace.kind,
+        })),
+        selectedWorkspaceId: grant.workspaceId,
+      }),
+    );
   });
 
   app.post("/oauth/authorize", async (c) => {
     requireMcpOAuthEnabled(deps);
     const form = new URLSearchParams(await c.req.text());
     const requestToken = form.get("request") ?? "";
-    if (!requestToken.startsWith(REQUEST_PREFIX)) return oauthError(c, "invalid_request", 400);
+    if (!requestToken.startsWith(REQUEST_PREFIX)) {
+      return oauthAuthorizeBrowserError(
+        c,
+        "This authorization request is missing or already used.",
+      );
+    }
     const request = await getMcpOAuthAuthorizationRequest(deps.db, tokenHash(requestToken));
-    if (!request) return oauthError(c, "invalid_request", 400);
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      request.workspaceId,
-      "workspace:read",
-    );
-    const grant = requireWorkspaceToolGatewayAuthorization(authorization);
-    if (grant.subjectId !== request.subjectId || grant.accountId !== request.accountId) {
-      throw new HTTPException(403, {
-        message: "OAuth consent authority changed",
-      });
+    if (!request) {
+      return oauthAuthorizeBrowserError(
+        c,
+        "This authorization request expired or was already approved.",
+      );
     }
     if (form.get("decision") !== "approve") {
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        request.workspaceId,
+        "workspace:read",
+      );
+      if (requireWorkspaceToolGatewayAuthorization(authorization).subjectId !== request.subjectId) {
+        throw new HTTPException(403, { message: "OAuth consent authority changed" });
+      }
       await deleteMcpOAuthAuthorizationRequest(deps.db, request.requestHash);
-      return c.redirect(
+      return completeAuthorizationRedirect(
+        c,
         authorizationRedirect(request.redirectUri, {
           error: "access_denied",
           iss: mcpOAuthIssuer(deps),
           ...(request.state ? { state: request.state } : {}),
         }),
       );
+    }
+    const selectedWorkspaceId = form.get("workspace_id") || request.workspaceId;
+    if (!isWorkspaceId(selectedWorkspaceId)) {
+      return oauthAuthorizeBrowserError(c, "Choose a workspace before authorizing this client.");
+    }
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      selectedWorkspaceId,
+      "workspace:read",
+    );
+    const grant = requireWorkspaceToolGatewayAuthorization(authorization);
+    if (grant.subjectId !== request.subjectId) {
+      throw new HTTPException(403, {
+        message: "OAuth consent authority changed",
+      });
+    }
+    if (grant.workspaceId !== request.workspaceId || grant.accountId !== request.accountId) {
+      const prepared = await prepareWorkspaceToolGateway(deps, authorization);
+      try {
+        const rebound = await rebindMcpOAuthAuthorizationRequest(deps.db, {
+          requestHash: request.requestHash,
+          subjectId: grant.subjectId,
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          permissions: grant.permissions,
+          toolIdentities: mcpOAuthConsentToolIdentities(prepared.toolGatewayCatalog),
+        });
+        if (!rebound) {
+          return oauthAuthorizeBrowserError(
+            c,
+            "This authorization request expired or was already approved.",
+          );
+        }
+      } finally {
+        await prepared.close();
+      }
     }
     const code = opaque(CODE_PREFIX);
     const consumed = await consumeMcpOAuthAuthorizationRequest(deps.db, {
@@ -219,8 +296,14 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
       codeHash: tokenHash(code),
       codeExpiresAt: expiresIn(MCP_OAUTH_AUTHORIZATION_CODE_TTL_SECONDS),
     });
-    if (!consumed) return oauthError(c, "invalid_request", 400);
-    return c.redirect(
+    if (!consumed) {
+      return oauthAuthorizeBrowserError(
+        c,
+        "This authorization request expired or was already approved.",
+      );
+    }
+    return completeAuthorizationRedirect(
+      c,
       authorizationRedirect(consumed.redirectUri, {
         code,
         iss: mcpOAuthIssuer(deps),
@@ -305,9 +388,11 @@ export async function resolveMcpOAuthRouteAccess(
     deps,
     `${mcpOAuthIssuer(deps)}${new URL(request.url).pathname}`,
   );
+  // The client URL is the resource indicator. Consent may bind a different
+  // workspace than the path UUID; the token grant is the authorized workspace.
   if (
     !access ||
-    access.workspaceId !== workspaceId ||
+    requestResource.workspaceId !== workspaceId ||
     access.resource !== requestResource.resource
   ) {
     throw new HTTPException(401, { message: "invalid MCP OAuth access token" });
@@ -441,17 +526,26 @@ async function exchangeAuthorizationCode(
   if (!code.startsWith(CODE_PREFIX) || !PKCE_VERIFIER.test(verifier)) return null;
   const redirectUri = form.get("redirect_uri");
   if (!redirectUri || !redirectUris.includes(redirectUri)) return null;
-  return await exchangeMcpOAuthAuthorizationCode(deps.db, {
-    codeHash: tokenHash(code),
-    clientId: input.clientId,
-    redirectUri,
-    resource: input.resource,
-    codeChallenge: pkceChallenge(verifier),
-    accessTokenHash: input.accessTokenHash,
-    refreshTokenHash: input.refreshTokenHash,
-    accessExpiresAt: input.accessExpiresAt,
-    refreshExpiresAt: input.refreshExpiresAt,
-  });
+  for (const candidate of mcpOAuthRedirectUriCandidates(redirectUris, redirectUri)) {
+    const access = await exchangeMcpOAuthAuthorizationCode(deps.db, {
+      codeHash: tokenHash(code),
+      clientId: input.clientId,
+      redirectUri: candidate,
+      resource: input.resource,
+      codeChallenge: pkceChallenge(verifier),
+      accessTokenHash: input.accessTokenHash,
+      refreshTokenHash: input.refreshTokenHash,
+      accessExpiresAt: input.accessExpiresAt,
+      refreshExpiresAt: input.refreshExpiresAt,
+    });
+    if (access) return access;
+  }
+  return null;
+}
+
+export function mcpOAuthRedirectUriCandidates(registered: string[], requested: string): string[] {
+  if (!registered.includes(requested)) return [];
+  return [requested, ...registered.filter((uri) => uri !== requested)];
 }
 
 async function rotateRefreshToken(
@@ -474,11 +568,37 @@ async function rotateRefreshToken(
   });
 }
 
+const BLOCKED_REDIRECT_PROTOCOLS = new Set([
+  "javascript:",
+  "data:",
+  "file:",
+  "about:",
+  "blob:",
+  "vbscript:",
+]);
+
+function isNativeAppRedirect(url: URL): boolean {
+  return (
+    /^[a-z][a-z0-9+.-]*:$/u.test(url.protocol) &&
+    !BLOCKED_REDIRECT_PROTOCOLS.has(url.protocol) &&
+    url.protocol !== "http:" &&
+    url.protocol !== "https:" &&
+    Boolean(url.hostname) &&
+    url.pathname.startsWith("/") &&
+    url.pathname !== "/"
+  );
+}
+
 function validateRedirectUri(value: string): string {
   const url = new URL(value);
   const loopback =
     url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-  if (url.username || url.password || url.hash || (url.protocol !== "https:" && !loopback)) {
+  if (
+    url.username ||
+    url.password ||
+    url.hash ||
+    (url.protocol !== "https:" && !loopback && !isNativeAppRedirect(url))
+  ) {
     throw new HTTPException(400, {
       message: "invalid public OAuth redirect URI",
     });
@@ -520,8 +640,190 @@ function authorizationRedirect(redirectUri: string, params: Record<string, strin
   return url.toString();
 }
 
-function consentHtml(clientName: string, resource: McpOAuthResource, requestToken: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize OpenGeni tools</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1.5rem;color:#18181b}main{border:1px solid #e4e4e7;border-radius:16px;padding:2rem}code{word-break:break-all;background:#f4f4f5;padding:.15rem .35rem;border-radius:4px}.actions{display:flex;gap:.75rem;margin-top:1.5rem}button{border:0;border-radius:8px;padding:.7rem 1rem;font:inherit;cursor:pointer}.approve{background:#18181b;color:white}.deny{background:#e4e4e7}</style></head><body><main><h1>Authorize workspace tools</h1><p><strong>${escapeHtml(clientName)}</strong> is requesting MCP access to this workspace.</p><p>Resource: <code>${escapeHtml(resource.resource)}</code></p><p>The grant is limited to the tools and permissions available now. OpenGeni rechecks live workspace authority on every request.</p><form method="post" action="/oauth/authorize"><input type="hidden" name="request" value="${escapeHtml(requestToken)}"><div class="actions"><button class="approve" name="decision" value="approve">Authorize</button><button class="deny" name="decision" value="deny">Deny</button></div></form></main></body></html>`;
+export function completeAuthorizationRedirect(c: Context, redirectTo: string) {
+  // Consent posts under CSP form-action 'self'. A 302 to the client's
+  // registered redirect_uri (loopback HTTP or a custom scheme) is blocked,
+  // so the waiter never receives the code. Return 200 HTML that navigates
+  // to the exact requested URI from script and Refresh.
+  c.header("cache-control", "no-store");
+  c.header(
+    "content-security-policy",
+    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'",
+  );
+  c.header("refresh", `0;url=${redirectTo}`);
+  return c.html(renderMcpOAuthContinuePage(redirectTo));
+}
+
+function oauthAuthorizeBrowserError(c: Context, message: string) {
+  c.header("cache-control", "no-store");
+  c.header("pragma", "no-cache");
+  c.header(
+    "content-security-policy",
+    "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+  );
+  return c.html(renderMcpOAuthExpiredPage(message), 400);
+}
+
+export type McpOAuthConsentAccount = {
+  id: string;
+  name: string;
+};
+
+export type McpOAuthConsentWorkspace = {
+  id: string;
+  accountId: string;
+  name: string;
+  kind: "personal" | "shared";
+};
+
+export function renderMcpOAuthConsentPage(input: {
+  clientName: string;
+  requestToken: string;
+  accounts: McpOAuthConsentAccount[];
+  workspaces: McpOAuthConsentWorkspace[];
+  selectedWorkspaceId: string;
+}): string {
+  const selectedWorkspace =
+    input.workspaces.find((workspace) => workspace.id === input.selectedWorkspaceId) ??
+    input.workspaces[0];
+  if (!selectedWorkspace) {
+    throw new Error("MCP OAuth consent requires at least one workspace");
+  }
+  const selectedAccountId = selectedWorkspace.accountId;
+  const accountOptions = input.accounts
+    .map(
+      (account) =>
+        `<option value="${escapeHtml(account.id)}"${account.id === selectedAccountId ? " selected" : ""}>${escapeHtml(account.name)}</option>`,
+    )
+    .join("");
+  const workspaceOptions = input.workspaces
+    .filter((workspace) => workspace.accountId === selectedAccountId)
+    .map(
+      (workspace) =>
+        `<option value="${escapeHtml(workspace.id)}"${workspace.id === selectedWorkspace.id ? " selected" : ""}>${escapeHtml(consentWorkspaceLabel(workspace))}</option>`,
+    )
+    .join("");
+  const workspacePayload = input.workspaces.map((workspace) => ({
+    id: workspace.id,
+    accountId: workspace.accountId,
+    label: consentWorkspaceLabel(workspace),
+  }));
+  const body = `<p class="lede"><strong>${escapeHtml(input.clientName)}</strong> wants MCP access to the organization and workspace you choose.</p>
+<form method="post" action="/oauth/authorize" onsubmit="var submitter=event.submitter;if(submitter&&submitter.name){var input=document.createElement('input');input.type='hidden';input.name=submitter.name;input.value=submitter.value;this.appendChild(input)}this.querySelectorAll('button').forEach(function(button){button.disabled=true})">
+<input type="hidden" name="request" value="${escapeHtml(input.requestToken)}">
+<label class="field"><span>Organization</span><select id="organization" name="organization" autocomplete="off">${accountOptions}</select></label>
+<label class="field"><span>Workspace</span><select id="workspace_id" name="workspace_id" autocomplete="off">${workspaceOptions}</select></label>
+<p class="note">The grant is limited to tools available in the workspace you authorize. OpenGeni rechecks live authority on every request.</p>
+<div class="actions"><button class="approve" name="decision" value="approve">Authorize</button><button class="deny" name="decision" value="deny">Deny</button></div>
+</form>
+<script type="application/json" id="mcp-oauth-workspaces">${jsonForScript(workspacePayload)}</script>
+<script>
+(function () {
+  var data = JSON.parse(document.getElementById("mcp-oauth-workspaces").textContent);
+  var account = document.getElementById("organization");
+  var workspace = document.getElementById("workspace_id");
+  function sync() {
+    var selected = workspace.value;
+    var items = data.filter(function (item) { return item.accountId === account.value; });
+    workspace.replaceChildren();
+    items.forEach(function (item) {
+      var option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = item.label;
+      workspace.appendChild(option);
+    });
+    if (items.some(function (item) { return item.id === selected; })) workspace.value = selected;
+  }
+  account.addEventListener("change", sync);
+})();
+</script>`;
+  return oauthDocument({
+    title: "Authorize MCP access",
+    heading: "Authorize this client",
+    body,
+  });
+}
+
+export function renderMcpOAuthContinuePage(redirectTo: string): string {
+  return oauthDocument({
+    title: "Returning to the app",
+    heading: "Returning to the app",
+    head: `<meta http-equiv="refresh" content="0;url=${escapeHtml(redirectTo)}">`,
+    body: `<p class="lede">Authorization succeeded. You can close this window.</p><script>(function (url) { try { location.replace(url); } catch (error) {} try { location.href = url; } catch (error) {} var frame = document.createElement("iframe"); frame.src = url; frame.style.display = "none"; document.body.appendChild(frame); })(${JSON.stringify(redirectTo)});</script>`,
+  });
+}
+
+export function renderMcpOAuthExpiredPage(message: string): string {
+  return oauthDocument({
+    title: "Authorization expired",
+    heading: "Authorization expired",
+    body: `<p class="lede">${escapeHtml(message)}</p><p class="note">Close this window and start authorization again from the client.</p>`,
+  });
+}
+
+async function listConsentWorkspaces(deps: ApiRouteDeps, context: AccessContext) {
+  const readableWorkspaceIds = [
+    ...new Set(
+      context.workspaceGrants
+        .filter((grant) => hasPermission(grant.permissions, "workspace:read"))
+        .map((grant) => grant.workspaceId),
+    ),
+  ];
+  const readableAccountIds = context.accountGrants
+    .filter((grant) => hasPermission(grant.permissions, "workspace:read"))
+    .map((grant) => grant.accountId);
+  const [fromGrants, memberships, shared] = await Promise.all([
+    Promise.all(readableWorkspaceIds.map((workspaceId) => getWorkspace(deps.db, workspaceId))),
+    listWorkspacesForSubject(deps.db, context.subjectId),
+    Promise.all(
+      readableAccountIds.map((accountId) => listSharedWorkspacesForAccount(deps.db, accountId)),
+    ),
+  ]);
+  const byId = new Map<string, NonNullable<(typeof fromGrants)[number]>>();
+  for (const workspace of [...fromGrants, ...memberships, ...shared.flat()]) {
+    if (workspace) byId.set(workspace.id, workspace);
+  }
+  return [...byId.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+async function consentAccountsForWorkspaces(
+  deps: ApiRouteDeps,
+  workspaces: Array<{ accountId: string }>,
+): Promise<McpOAuthConsentAccount[]> {
+  const accountIds = [...new Set(workspaces.map((workspace) => workspace.accountId))];
+  return (
+    await Promise.all(
+      accountIds.map(async (accountId) => {
+        const account = await getManagedAccount(deps.db, accountId);
+        return { id: accountId, name: account?.name.trim() || "Organization" };
+      }),
+    )
+  ).sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function consentWorkspaceLabel(workspace: McpOAuthConsentWorkspace): string {
+  const name = workspace.name.trim() || "Workspace";
+  return workspace.kind === "personal" ? `${name} (Personal)` : name;
+}
+
+function isWorkspaceId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value);
+}
+
+function oauthDocument(input: {
+  title: string;
+  heading: string;
+  body: string;
+  head?: string;
+}): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(input.title)}</title>${input.head ?? ""}<style>${OAUTH_PAGE_CSS}</style></head><body><main><p class="mark">OpenGeni</p><h1>${escapeHtml(input.heading)}</h1>${input.body}</main></body></html>`;
+}
+
+const OAUTH_PAGE_CSS =
+  'html,body{margin:0}body{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#f4f4f5;color:#18181b;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}main{width:min(100%,28rem);background:#fff;border:1px solid #e4e4e7;border-radius:20px;padding:24px}h1{margin:8px 0 0;font-size:22px;line-height:1.3;font-weight:650}p{margin:12px 0 0}strong{font-weight:600}.mark{margin:0;font-size:12px;font-weight:600;color:#71717a}.lede,.note{color:#52525b}.field{display:flex;flex-direction:column;gap:6px;margin-top:16px;font-size:13px;color:#71717a}select{width:100%;border:1px solid #e4e4e7;border-radius:10px;background:#f4f4f5;color:#18181b;padding:10px 12px;font:inherit}.actions{display:flex;gap:12px;margin-top:20px}button{flex:1;min-height:40px;border:0;border-radius:10px;padding:10px 16px;font:inherit;font-weight:600;cursor:pointer}.approve{background:#18181b;color:#fff}.deny{background:#fff;color:#18181b;border:1px solid #e4e4e7}button:disabled{opacity:0.6;cursor:wait}@media(prefers-color-scheme:dark){body{background:#09090b;color:#fafafa}main{background:#18181b;border-color:#3f3f46}h1{color:#fafafa}.mark{color:#a1a1aa}.lede,.note{color:#a1a1aa}select{background:#27272a;border-color:#3f3f46;color:#fafafa}.approve{background:#fafafa;color:#18181b}.deny{background:#27272a;color:#fafafa;border-color:#3f3f46}}';
+
+function jsonForScript(value: unknown): string {
+  return JSON.stringify(value).replace(/</gu, "\\u003c");
 }
 
 function escapeHtml(value: string): string {

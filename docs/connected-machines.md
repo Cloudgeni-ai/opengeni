@@ -18,6 +18,43 @@ generation, interruption state, and current machine selection immediately before
 the machine transport is used. Revocation advances the machine and common authority
 generation and invalidates existing grants.
 
+### Enrollment maintenance boundary
+
+Migration `0498_enrollment_membership_fence.sql` repairs user-owned device approval
+under a non-superuser, non-bypass migration owner. Stop every old API/control/turn
+worker and supply the exact application-role list before applying it; the migration
+refuses live listed connections. Start only the matching binaries afterward—do not
+restart pre-0498 approval writers. This is not a rolling or application-rollback-safe
+cutover, and preparing the migration does not authorize deployment.
+
+User approval takes the organization membership fence before RLS workspace-tenancy
+entry, pending-request locks, and enrollment writes. Both the public wrapper and
+SQL finalizer fail closed with `55P03` on fence contention rather than waiting while
+an unknown caller may hold a reverse-order lock. Retry the complete transaction
+after the membership change settles; no failed approval is automatically replayed.
+The finalizer rereads exact active organization membership under that fence and
+retains workspace membership `FOR KEY SHARE` to exclude direct runtime DELETEs.
+Direct workspace-removal preparation takes the same early nonblocking fence before
+downstream rows; its command keeps the existing organization/tenancy prefix.
+Legacy token enrollment retains its existing workspace-owned authority contract.
+
+Known separate boundary: `scoped_compute_actor_membership` still uses an
+organization-membership `FOR SHARE` that can be blinded by FORCE-RLS under this
+owner posture. Its list/rig/attach consumers—including `list_scoped_enrollments`,
+`get_scoped_sandbox`, and `authorize_scoped_sandbox_attach`—are not repaired here.
+Successful enrollment does not establish a complete Connected Machine availability
+fix or prove that those downstream paths work.
+
+Device-code lookup is another unresolved boundary: the migration-0025
+`opengeni_private.resolve_device_enrollment_request` SECURITY DEFINER resolver can
+return no row under the tested non-bypass owner/FORCE-RLS posture because it lacks
+the required context. Independent tests reproduced the same three
+`getDeviceEnrollmentRequestByDeviceCode` failures before and after 0498. The legacy
+suite's historical 0025 replay recreates this resolver through a superuser, so a
+pass after that replay does not validate non-bypass device-code lookup. The 0498
+approval/finalization tests do not certify end-to-end device-flow availability;
+this migration does not repair the resolver.
+
 This guide is embedder-facing: it shows how to create a session on a machine,
 discover the enrolled machines and their metrics, swap a session's active
 sandbox, connect a machine (zero-click token or the interactive device flow), and
@@ -601,6 +638,22 @@ authority.
 
 ### Zero-click token (fleet / headless)
 
+Agents with the existing `enrollments:manage` permission can call the first-party
+`connected_machine_enroll_token` MCP tool when it is selected for their session.
+It returns the same one-hour token and deployment-specific Unix/PowerShell install
+commands. `allowScreenControl` defaults to false. No additional approval flow is
+introduced. The workspace/account come from the caller's grant, not tool input.
+Run the command on the intended machine through an already-authorized execution
+path, then verify readiness with `sandboxes_list`. A token cannot execute the
+installer on a machine for which no access path exists.
+
+The token is returned to the agent in the tool result; never publish it in source
+code or unrelated logs. Missing `enrollments:manage`, an explicit tool selection
+that excludes it, or disabled Connected Machines means the tool is unavailable.
+This addition does not grant the permission to existing sessions. For interactive
+enrollment without this permission, `sandbox_provision` still returns human
+device-flow instructions.
+
 Mint a short-TTL enroll token and hand it to the machine's installer. The token
 is **secret** — surface it once with a copy-now warning; it cannot be re-read.
 
@@ -656,7 +709,7 @@ Approving lands an enrollment plus a `selfhosted` sandbox and unblocks the
 agent's poll; `sandboxId` is immediately usable as a `targetSandboxId` or a swap
 target. The managed consent page always asks for personal, workspace, or
 organization access and defaults to personal. Organization publication is
-available only to account administrators. Machines and Rigs display the
+available only to account administrators. Machines and Sandbox Environments display the
 resulting scope in their list cards so wider publication is never implicit.
 
 ## Large file edits
@@ -731,3 +784,31 @@ expecting transactional support. Changing transport limits is not required.
 - **`MachineStatusPill`** / **`ConnectionStatusPill`** — the status chips.
 
 See the [`@opengeni/react` README](../packages/react/README.md) for wiring.
+
+### Interaction runtime reliability
+
+Managed BrowserSessions own browser lifetime across tool calls. A browser daemon
+launched by a shell command remains subject to that command's containment and
+cleanup; repeating its CLI session name does not retain its process. Explicit
+Connected Machine interaction creation must match the source session's current
+placement. Move the session first; a creation mismatch is a 422, while an existing
+resource on a retired placement retains the terminal stale-resource fence.
+
+Attached Chrome is an explicit user-profile choice, never an automatic fallback
+for an unavailable managed browser. A new attached BrowserSession creates a new
+background tab rather than navigating an existing personal tab. Reuse honors
+explicit placement, identity, revision, network route and linked desktop choices.
+Debugger continuation pages are drained without treating a full page as lost
+history; actual sequence gaps still terminate the connection.
+
+Native computer protocol version 3 separates `capture_still` (including JPEG and
+size options) from reading an explicitly started live stream. macOS helpers use
+private, byte-identical executable copies for each process: concurrent
+ScreenCaptureKit clients sharing one executable path can otherwise route capture
+to the first process and leave another waiting. Copies retain their signatures
+and responsible-app permission checks, and are removed after process exit.
+
+Unexpected controller errors are retained in two owner-only, size-bounded
+`controller-errors.jsonl` files in the private controller state directory, as
+well as stderr. The agent forwards bounded controller stderr diagnostics;
+startup mismatch errors report both expected and received runtime build IDs.

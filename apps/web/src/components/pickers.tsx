@@ -1,4 +1,5 @@
 import { ChevronDownIcon, PlugIcon } from "lucide-react";
+import { lazy, Suspense } from "react";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 
 import { Button } from "@/components/ui/button";
@@ -50,9 +51,32 @@ export function visibleSessionToolSelection(
   };
 }
 
-export { SessionConnectorsMenuBody as SessionToolsMenuBody } from "@/components/session-connectors-menu-body";
-import { SessionConnectorsMenuBody as SessionToolsMenuBody } from "@/components/session-connectors-menu-body";
-import { COMPOSER_MENU_PANEL_CLASS } from "@/components/ui/composer-menu";
+import type { SessionConnectorsMenuProps } from "@/components/session-connectors-menu-body";
+import { COMPOSER_MENU_PANEL_CLASS, ComposerMenuHeader } from "@/components/ui/composer-menu";
+
+const LazySessionConnectorsMenuBody = lazy(() =>
+  import("@/components/session-connectors-menu-body").then((module) => ({
+    default: module.SessionConnectorsMenuBody,
+  })),
+);
+
+/** Secondary connector/account controls load only when their menu is opened. */
+export function SessionToolsMenuBody(props: SessionConnectorsMenuProps) {
+  return (
+    <Suspense
+      fallback={
+        <>
+          <ComposerMenuHeader title="Connectors" leading={props.leading} />
+          <p role="status" className="px-4 py-4 text-xs text-fg-muted">
+            Loading connectors…
+          </p>
+        </>
+      }
+    >
+      <LazySessionConnectorsMenuBody {...props} />
+    </Suspense>
+  );
+}
 
 export const SESSION_TOOLS_PANEL_CLASS = COMPOSER_MENU_PANEL_CLASS;
 
@@ -87,6 +111,8 @@ export function SessionToolPicker(props: {
   selection: SessionToolSelection;
   disabled?: boolean;
   saving?: boolean;
+  customizing?: boolean;
+  onCustomizingChange?: (customizing: boolean) => void;
   /** Prefer `bottom` on home/new-chat; `top` when composer is docked at bottom. */
   menuSide?: "top" | "bottom";
   /** Extra classes on the bar trigger (e.g. `max-sm:hidden` when opened from +). */
@@ -126,6 +152,8 @@ export function SessionToolPicker(props: {
           servers={props.servers}
           firstPartyTools={props.firstPartyTools}
           selection={props.selection}
+          customizing={props.customizing}
+          onCustomizingChange={props.onCustomizingChange}
           onChange={props.onChange}
         />
       </DropdownMenuContent>

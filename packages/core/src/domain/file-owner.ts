@@ -1,5 +1,9 @@
 import { requireLiveAgentAttemptAuthorization } from "../session-authorization";
-import { freezeAgentLearningPolicy, type SessionRlsActorContext } from "@opengeni/db";
+import {
+  freezeAgentLearningPolicy,
+  getSessionAuthorityProjection,
+  type SessionRlsActorContext,
+} from "@opengeni/db";
 import type { AccessGrant, Permission } from "@opengeni/contracts";
 import { requirePermission, type AccessGrantAuthorization } from "../access";
 import type { ApiRouteDeps } from "../dependencies";
@@ -44,7 +48,18 @@ export async function fileOwnerContextForAgent(
       executionGeneration: attempt.executionGeneration,
     },
   });
+  const sessionAuthority = await getSessionAuthorityProjection(
+    deps.db,
+    grant.workspaceId,
+    sessionId,
+  );
+  if (!sessionAuthority) throw new Error("File session authority unavailable");
   return {
+    sessionAttachmentReadAccess: {
+      sessionId,
+      authorityEpoch: sessionAuthority.authorityEpoch,
+      actor: attempt,
+    },
     subjectId: grant.subjectId,
     initiatingHumanSubjectId: attempt.initiatingHumanSubjectId,
     privateFileOwnerSubjectId: snapshot.defaultScope === "personal" ? snapshot.subjectId : null,

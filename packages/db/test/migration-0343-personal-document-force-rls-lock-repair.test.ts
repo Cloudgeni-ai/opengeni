@@ -61,6 +61,8 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     // the production shapes.
     await admin`
       alter table sessions
+      add column mcp_approval_policies jsonb not null default '{}'::jsonb,
+      add column admission_block jsonb,
       add column variable_set_ids jsonb not null default '[]'::jsonb,
       add column input_wait_turn_id uuid,
       add column input_wait_until timestamptz,
@@ -70,7 +72,15 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       add column scope_subject_id text,
       add column end_user_source text,
       add column end_user_id text,
-      add column memory_scope text not null default 'workspace'`;
+      add column memory_scope text not null default 'workspace',
+      add column execution_authority_epoch integer not null default 1,
+      add column initial_mcp_account_bindings jsonb`;
+    // Current session/claim adapters project 0494 receipts. Keep historical
+    // NULL semantics and install no account-binding runtime guards here: this
+    // fixture must still exercise the actual pre-0343 authority boundary.
+    await admin`alter table session_turns add column mcp_account_bindings jsonb`;
+    await admin`alter table session_system_updates add column mcp_account_bindings jsonb`;
+    await admin`alter table session_system_update_outbox add column mcp_account_bindings jsonb`;
     // The current claim adapter also reads timer fields under the workspace
     // fence. These temporary nullable fields are removed before 0420 runs.
     await admin`
@@ -265,7 +275,9 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       drop column timer_pause_revision`;
     await admin`
       alter table sessions
+      drop column admission_block,
       drop column variable_set_ids,
+      drop column mcp_approval_policies,
       drop column input_wait_turn_id,
       drop column input_wait_until,
       drop column input_wait_reason,
@@ -274,8 +286,21 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       drop column scope_subject_id,
       drop column end_user_source,
       drop column end_user_id,
-      drop column memory_scope`;
+      drop column memory_scope,
+      drop column execution_authority_epoch,
+      drop column initial_mcp_account_bindings`;
+    await admin`alter table session_turns drop column mcp_account_bindings`;
+    await admin`alter table session_system_updates drop column mcp_account_bindings`;
+    await admin`alter table session_system_update_outbox drop column mcp_account_bindings`;
     await migrate(ownerUrl);
+    // 0494 must recreate the real receipt columns after the temporary bridge
+    // is gone, retaining historical NULL rather than accepting an empty list.
+    const [historicalBindings] = await admin`
+      select s.initial_mcp_account_bindings as session_bindings,
+        t.mcp_account_bindings as turn_bindings
+      from sessions s join session_turns t on t.session_id = s.id
+      where s.id = ${session.id} and t.id = ${turn!.id}`;
+    expect(historicalBindings).toEqual({ session_bindings: null, turn_bindings: null });
     app = openApp();
 
     const afterDocument = crypto.randomUUID();

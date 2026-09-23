@@ -202,6 +202,14 @@ async function visibleCounts(
       from opengeni_private.visible_workspace_insights_usage_events(
         ${input.workspaceId}, ${input.since}, ${input.until}
       )`;
+    const [projected] = await tx<Array<{ count: number; quantity: number }>>`
+      select count(*)::int as count, coalesce(sum(quantity), 0)::int as quantity
+      from opengeni_private.visible_workspace_insights_usage_projection(
+        ${input.workspaceId}, ${input.since}, ${input.until},
+        array['model.cost', 'agent_run.created']::text[]
+      )`;
+    // Exercise the narrow seam under every actor posture in this authority suite.
+    expect(projected).toEqual(usage);
     return { models: models!, usage: usage! };
   });
 }
@@ -1053,5 +1061,132 @@ describe("migration 0359 Insights FORCE-RLS read capability", () => {
     } finally {
       await owner.end({ timeout: 5 });
     }
+  });
+
+  test("0484 narrow usage projection preserves ACLs, actor parity, failures and capability cleanup", async () => {
+    if (!owned || !app || !hostile || !intruder || !reporting) return;
+    const input = await seedFixture();
+    const signature =
+      "opengeni_private.visible_workspace_insights_usage_projection(uuid,timestamptz,timestamptz,text[])";
+    const [acl] = await owned.admin`
+      select p.prosecdef, p.provolatile,
+        has_function_privilege('opengeni_app', p.oid, 'EXECUTE') as app_execute,
+        has_function_privilege(${hostileRole!}, p.oid, 'EXECUTE') as hostile_execute,
+        has_function_privilege(${intruderRole!}, p.oid, 'EXECUTE') as intruder_execute,
+        has_function_privilege(${reportingRole!}, p.oid, 'EXECUTE') as reporting_execute,
+        exists (select 1 from aclexplode(p.proacl) a
+          where a.grantee=0 and a.privilege_type='EXECUTE') as public_execute
+      from pg_proc p where p.oid=${signature}::regprocedure`;
+    expect(acl).toEqual({
+      prosecdef: true,
+      provolatile: "v",
+      app_execute: true,
+      hostile_execute: false,
+      intruder_execute: false,
+      reporting_execute: false,
+      public_execute: false,
+    });
+    for (const denied of [hostile, intruder, reporting]) {
+      await expectSqlState(
+        () =>
+          denied!.begin(async (tx) => {
+            await setInsightsContext(tx, input, input.ownerSubjectId);
+            await tx`select * from opengeni_private.visible_workspace_insights_usage_projection(
+            ${input.workspaceId}, ${input.since}, ${input.until}, array['model.cost']::text[])`;
+          }),
+        "42501",
+      );
+    }
+
+    for (const [subjectId, human] of [
+      [input.ownerSubjectId, null],
+      ["user:unrelated-projection-reader", null],
+      ["agent:projection-reader", input.ownerSubjectId],
+      ["agent:projection-reader", null],
+      [null, null],
+    ]) {
+      await app.begin(async (tx) => {
+        await setInsightsContext(tx, input, subjectId!, human);
+        const [parity] = await tx`
+          with original as materialized (
+            select event_type, quantity, occurred_at, source_resource_id
+            from opengeni_private.visible_workspace_insights_usage_events(
+              ${input.workspaceId}, ${input.since}, ${input.until},
+              array['model.cost', 'agent_run.created']::text[])
+          ), projected as materialized (
+            select * from opengeni_private.visible_workspace_insights_usage_projection(
+              ${input.workspaceId}, ${input.since}, ${input.until},
+              array['model.cost', 'agent_run.created']::text[])
+          ) select not exists (
+            (select * from original except all select * from projected)
+            union all (select * from projected except all select * from original)
+          ) as equal`;
+        expect(parity!.equal).toBe(true);
+      });
+    }
+    for (const types of [null, [], ["model.cost", "model.cost"], [""], ["x".repeat(257)]]) {
+      await expectSqlState(
+        () =>
+          app!.begin(async (tx) => {
+            await setInsightsContext(tx, input, input.ownerSubjectId);
+            await tx`select * from opengeni_private.visible_workspace_insights_usage_projection(
+            ${input.workspaceId}, ${input.since}, ${input.until}, ${types}::text[])`;
+          }),
+        "22023",
+      );
+    }
+    await expectSqlState(
+      () =>
+        app!.begin(async (tx) => {
+          await setInsightsContext(tx, input, input.ownerSubjectId);
+          await tx`select * from opengeni_private.visible_workspace_insights_usage_projection(
+          ${crypto.randomUUID()}, ${input.since}, ${input.until}, array['model.cost']::text[])`;
+        }),
+      "42501",
+    );
+    const [cleanup] = await owned.admin`
+      select count(*)::int as count from opengeni_private.insights_fact_read_runtime_capabilities
+      where account_id=${input.accountId}`;
+    expect(cleanup!.count).toBe(0);
+  });
+
+  test("0484 reduces temporary writes for wide usage facts under real FORCE-RLS owner posture", async () => {
+    if (!owned || !app) return;
+    const input = await seedFixture();
+    // The unused initiator context shows why narrowing outside a SETOF
+    // function is too late. Keep work_mem low and assert I/O, not noisy timing.
+    await owned.admin`
+      insert into usage_events(account_id,workspace_id,event_type,quantity,unit,
+        session_id,idempotency_key,occurred_at,initiator_context)
+      select ${input.accountId},${input.workspaceId},'model.cost',1,'micros',
+        ${input.sharedSessionIds[0]!}, ${`projection-${crypto.randomUUID()}-`} || n,
+        ${new Date(input.since.getTime() + 1_000)},
+        jsonb_build_object('padding', repeat(md5(n::text), 120))
+      from generate_series(1,4096) g(n)`;
+    await app.begin(async (tx) => {
+      await setInsightsContext(tx, input, input.ownerSubjectId);
+      await tx`set local work_mem='64kB'`;
+      await tx`set local statement_timeout='30s'`;
+      const [wide] = await tx`
+        explain (analyze,buffers,format json)
+        select sum(quantity) from opengeni_private.visible_workspace_insights_usage_events(
+          ${input.workspaceId},${input.since},${input.until},array['model.cost']::text[])`;
+      const [narrow] = await tx`
+        explain (analyze,buffers,format json)
+        select sum(quantity) from opengeni_private.visible_workspace_insights_usage_projection(
+          ${input.workspaceId},${input.since},${input.until},array['model.cost']::text[])`;
+      const widePlan = wide!["QUERY PLAN"][0].Plan;
+      const narrowPlan = narrow!["QUERY PLAN"][0].Plan;
+      console.info("Insights usage projection fixture", {
+        rows: narrowPlan.Plans[0]["Actual Rows"],
+        wideTempWrittenBlocks: widePlan["Temp Written Blocks"],
+        narrowTempWrittenBlocks: narrowPlan["Temp Written Blocks"],
+        wideExecutionMs: wide!["QUERY PLAN"][0]["Execution Time"],
+        narrowExecutionMs: narrow!["QUERY PLAN"][0]["Execution Time"],
+      });
+      expect(widePlan["Temp Written Blocks"]).toBeGreaterThan(0);
+      expect(narrowPlan["Temp Written Blocks"]).toBeLessThan(widePlan["Temp Written Blocks"] / 4);
+      expect(narrowPlan.Plans[0]["Actual Rows"]).toBe(widePlan.Plans[0]["Actual Rows"]);
+    });
   });
 });

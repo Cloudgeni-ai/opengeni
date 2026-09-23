@@ -89,7 +89,11 @@ async function seedOwnerWithDriveConnection(): Promise<{
   );
   const legacyConnection = await createConnection(client.db, connectionInput(legacyWorkspaceId));
 
-  const delegationFor = (connectionId: string): McpPersonalConnectionDelegation => ({
+  const delegationFor = (
+    connectionId: string,
+    originWorkspaceId: string,
+  ): McpPersonalConnectionDelegation => ({
+    originWorkspaceId,
     serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
     connectionId,
     ownerSubjectId: subjectId,
@@ -103,8 +107,8 @@ async function seedOwnerWithDriveConnection(): Promise<{
     personalWorkspaceId: personalGrant.workspaceId,
     legacyWorkspaceId,
     subjectId,
-    delegation: delegationFor(personalConnection.id),
-    legacyDelegation: delegationFor(legacyConnection.id),
+    delegation: delegationFor(personalConnection.id, personalGrant.workspaceId),
+    legacyDelegation: delegationFor(legacyConnection.id, legacyWorkspaceId),
   };
 }
 
@@ -184,6 +188,7 @@ describe("Google Drive publication in a managed human's personal workspace", () 
     const plantedDelegation: McpPersonalConnectionDelegation = {
       serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
       connectionId: planted.id,
+      originWorkspaceId: owner.personalWorkspaceId,
       ownerSubjectId: intruder.subjectId,
       providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
       kind: "oauth2",

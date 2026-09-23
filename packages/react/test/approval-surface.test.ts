@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import { ApprovalSurface } from "../src";
+import { approvalsFromRequiresAction } from "../src/approvals";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 
 registerDom();
@@ -21,6 +22,41 @@ const approval = {
 };
 
 describe("ApprovalSurface", () => {
+  test("readable persisted account labels do not replace the exact approval identity", async () => {
+    const [pending] = approvalsFromRequiresAction({
+      approvals: [
+        {
+          id: "exact-call",
+          name: "a".repeat(64),
+          arguments: { recordId: "record-1" },
+          display: {
+            toolName: "update_record",
+            title: "Update record",
+            accountLabel: "Documents — Workspace: Team inbox",
+          },
+        },
+      ],
+    });
+    const seen: string[] = [];
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        approvals: [pending!],
+        onApprove: (value) => {
+          seen.push(value.id);
+        },
+        onReject: () => undefined,
+      }),
+    );
+    expect(mounted.container.textContent).toContain("Update record");
+    expect(mounted.container.textContent).toContain("Documents — Workspace: Team inbox");
+    expect(mounted.container.textContent).not.toContain("a".repeat(64));
+    const approve = [...mounted.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Approve",
+    );
+    await act(async () => approve!.click());
+    expect(seen).toEqual(["exact-call"]);
+    expect(pending?.name).toBe("a".repeat(64));
+  });
   test("shows bounded action arguments in the default approval presentation", async () => {
     mounted = await renderComponent(
       createElement(ApprovalSurface, {

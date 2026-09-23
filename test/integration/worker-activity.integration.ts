@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readSkillCatalogContext } from "@opengeni/contracts";
 import { generateKeyPairSync } from "node:crypto";
 import {
   addDocumentToBase,
@@ -31,9 +32,7 @@ import {
   dbSql,
   setSessionGoalStatusWithEvent,
   encryptEnvironmentValue,
-  enablePackInstallation,
   loadVariableSetForRun,
-  registerWorkspacePack,
   setVariableSetVariable,
   getSession,
   getSessionTurn,
@@ -1089,80 +1088,6 @@ describe("worker activities integration", () => {
     expect(request).not.toContain("input_image");
     expect(request).not.toContain("direct model vision context");
     expect(request).toContain(`files/${fileId}/large.png`);
-  });
-
-  test("fails the turn plainly when two enabled packs declare sandbox images", async () => {
-    const grant = await testGrant(dbClient.db);
-    const imagePack = (id: string, image: string) => ({
-      id,
-      name: `Pack ${id}`,
-      description: "Image-declaring pack for runtime composition tests.",
-      role: "infrastructure",
-      category: "infrastructure",
-      version: "0.1.0",
-      sandboxImage: image,
-      skills: [],
-      tools: [],
-      connectors: [],
-      knowledge: [],
-      scheduledTaskTemplates: [],
-      metadata: {},
-    });
-    for (const [packId, image] of [
-      ["img-a", "example.com/a@sha256:aaaa"],
-      ["img-b", "example.com/b@sha256:bbbb"],
-    ] as const) {
-      await registerWorkspacePack(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        pack: imagePack(packId, image),
-      });
-      await enablePackInstallation(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        packId,
-        metadata: {},
-      });
-    }
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "run",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await appendOwnedEvents(dbClient.db, grant, session.id, [
-      { type: "user.message", payload: { text: "run" } },
-    ]);
-    const activities = createWorkerActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([{ outputText: "should not run", chunks: ["never"] }]),
-      }),
-    });
-
-    const result = await activities.runAgentTurn({
-      attemptId: crypto.randomUUID(),
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      trigger: { kind: "next" },
-      workflowId: "workflow-pack-image-conflict",
-      workflowRunId: crypto.randomUUID(),
-    });
-    expect(result.status).toBe("failed");
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
-    const failure = events.find((event) => event.type === "turn.failed");
-    expect(failure).toBeDefined();
-    expect(JSON.stringify(failure!.payload)).toContain(
-      "Multiple enabled packs declare a sandbox image (img-a, img-b)",
-    );
-    expect(latestStatus(events)).toBe("failed");
   });
 
   test("marks session failed when scripted model throws", async () => {
@@ -2416,20 +2341,22 @@ describe("worker activities integration", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(sandboxExecCalls).toHaveLength(2);
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain(
+    expect(sandboxExecCalls).toHaveLength(3);
+    expect(String(sandboxExecCalls[0]?.cmd)).toContain("/workspace/.opengeni/codemode-clients/");
+    expect(String(sandboxExecCalls[0]?.cmd)).not.toContain("OPENGENI_CODEMODE_TOKEN_SEED");
+    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
       "OPENGENI_CODEMODE_TOKEN_FILE='/workspace/.opengeni/codemode-tokens/",
     );
-    expect(String(sandboxExecCalls[0]?.cmd)).toContain(
+    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
       'printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"',
     );
-    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
+    expect(String(sandboxExecCalls[2]?.cmd)).toContain(
       "start_repository_clone '/workspace/repos/github.com/Futhark-AS/aifilesearch.git'",
     );
-    expect(String(sandboxExecCalls[1]?.cmd)).toContain(
+    expect(String(sandboxExecCalls[2]?.cmd)).toContain(
       'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
     );
-    expect(String(sandboxExecCalls[1]?.cmd)).toContain("x-access-token");
+    expect(String(sandboxExecCalls[2]?.cmd)).toContain("x-access-token");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "sandbox.operation.started")).toBe(true);
     expect(events.some((event) => event.type === "sandbox.operation.completed")).toBe(true);
@@ -2731,10 +2658,13 @@ describe("worker activities integration", () => {
       session.id,
     );
     expect(itemsAfterTurn1.length).toBeGreaterThanOrEqual(2);
-    expect(itemsAfterTurn1.map((row) => row.position)).toEqual(
-      itemsAfterTurn1.map((_, index) => index),
+    expect(readSkillCatalogContext(itemsAfterTurn1[0]!.item)).not.toBeNull();
+    const conversation = itemsAfterTurn1.filter(
+      (row) => readSkillCatalogContext(row.item) === null,
     );
-    expect(JSON.stringify(itemsAfterTurn1[0]?.item)).toContain("remember the codeword zebra");
+    expect(conversation.map((row) => row.position)).toEqual(conversation.map((_, index) => index));
+    expect(itemsAfterTurn1[0]!.position).toBeLessThan(conversation[0]!.position);
+    expect(JSON.stringify(conversation[0]?.item)).toContain("remember the codeword zebra");
 
     // The follow-up reads conversation truth from the canonical items table.
     const itemsActivities = createWorkerActivities({
@@ -2772,6 +2702,10 @@ describe("worker activities integration", () => {
       session.id,
     );
     expect(itemsAfterTurn2.length).toBeGreaterThan(itemsAfterTurn1.length);
+    expect(itemsAfterTurn2.slice(0, itemsAfterTurn1.length)).toEqual(itemsAfterTurn1);
+    expect(
+      itemsAfterTurn2.filter((row) => readSkillCatalogContext(row.item) !== null),
+    ).toHaveLength(1);
     expect(await getLatestRunState(dbClient.db, grant.workspaceId, session.id)).toBeNull();
   });
 

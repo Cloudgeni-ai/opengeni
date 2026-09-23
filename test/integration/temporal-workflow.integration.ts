@@ -12,6 +12,8 @@ import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 import {
   POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
   POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
+  PRE_CLAIM_FAILURE_MESSAGE,
+  PRE_CLAIM_FAILURE_TYPE,
 } from "../../apps/worker/src/activities/types";
 
 // An ungraceful worker death cannot be faked by throwing a TimeoutFailure
@@ -309,6 +311,207 @@ describe("Temporal workflow integration", () => {
           retryDelayMs: 1_000,
         });
         expect(Date.now() - startedAt).toBeGreaterThanOrEqual(900);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "durable preclaim block closes without retry timers, idle settlement, or another turn dispatch",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const fence = { lastSequence: 8, controlVersion: 2 };
+      let blocked = false;
+      let attempts = 0;
+      let idleSettlements = 0;
+      const detail = {
+        disposition: "blocked",
+        code: "db_failure",
+        reason: "database_claim_rejected",
+        sqlState: "42501",
+        retryPolicy: "explicit_recheck",
+      };
+      const admission = createTurnAdmission([queuedTurn("event-1")], async () => {
+        attempts += 1;
+        throw ApplicationFailure.create({
+          message: PRE_CLAIM_FAILURE_MESSAGE,
+          type: PRE_CLAIM_FAILURE_TYPE,
+          nonRetryable: true,
+          details: [detail],
+        });
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        peekSessionWork: async () =>
+          blocked
+            ? { kind: "admission-blocked" as const }
+            : { kind: "runnable" as const, admissionFence: fence },
+        markSessionIdle: async () => {
+          idleSettlements += 1;
+        },
+        failSessionAttempt: async (input: {
+          preClaimFailure?: unknown;
+          admissionFence?: unknown;
+        }) => {
+          expect(input.preClaimFailure).toEqual(detail);
+          expect(input.admissionFence).toEqual(fence);
+          blocked = true;
+          return { action: "blocked" as const };
+        },
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `wf-${crypto.randomUUID()}`,
+          args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+        });
+        await handle.result();
+        expect(attempts).toBe(1);
+        expect(idleSettlements).toBe(0);
+        const history = await handle.fetchHistory();
+        expect(history.events?.filter((event) => event.timerStartedEventAttributes)).toHaveLength(
+          0,
+        );
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "safe control observations wait without settlement and re-read after a wake with replay-safe history",
+    async () => {
+      for (const kind of ["unavailable", "attempt-owned"] as const) {
+        const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+        const scope = workflowScope();
+        const workflowId = `wf-${crypto.randomUUID()}`;
+        let restored = false;
+        let peeks = 0;
+        let dispatched = 0;
+        let idle = 0;
+        const worker = await testWorker(nativeConnection, taskQueue, {
+          peekSessionWork: async (input: { observerAccountId?: string }) => {
+            expect(input.observerAccountId).toBe(scope.accountId);
+            peeks += 1;
+            if (restored) return { kind: "admission-blocked" as const };
+            return kind === "unavailable"
+              ? { kind }
+              : {
+                  kind,
+                  turnId: "owned-turn",
+                  attemptId: "owned-attempt",
+                  executionGeneration: 1,
+                  activityRef: {
+                    workflowId,
+                    workflowRunId: "owner-run",
+                    activityId: "owner-activity",
+                    quiesced: false,
+                  },
+                  ownerActivityState: "pending" as const,
+                };
+          },
+          runAgentTurn: async () => {
+            dispatched += 1;
+            throw new Error("Observer dispatched a successor");
+          },
+          markSessionIdle: async () => {
+            idle += 1;
+          },
+        });
+        const run = worker.run();
+        try {
+          const client = new Client({ connection });
+          const handle = await client.workflow.start("sessionWorkflow", {
+            taskQueue,
+            workflowId,
+            args: [{ ...scope, sessionId: crypto.randomUUID() }],
+          });
+          await waitFor(async () => {
+            const history = await handle.fetchHistory();
+            return history.events?.some((event) => !!event.timerStartedEventAttributes) ?? false;
+          });
+          const waitingHistory = await handle.fetchHistory();
+          const timer = waitingHistory.events?.find(
+            (event) => event.timerStartedEventAttributes,
+          )?.timerStartedEventAttributes;
+          expect(Number(timer?.startToFireTimeout?.seconds)).toBe(30);
+          expect(peeks).toBe(1);
+          expect(dispatched).toBe(0);
+          expect(idle).toBe(0);
+          restored = true;
+          // No restoration wake is guaranteed. Prove the unavailable observer
+          // refreshes on its timer; the owned path separately proves signal wake.
+          if (kind === "attempt-owned") await handle.signal("queueChanged");
+          await handle.result();
+          expect(peeks).toBe(2);
+          expect(dispatched).toBe(0);
+          expect(idle).toBe(0);
+          await Worker.runReplayHistory(
+            { workflowsPath: workflowDefinitionsPath },
+            await handle.fetchHistory(),
+            workflowId,
+          );
+        } finally {
+          worker.shutdown();
+          await run;
+        }
+      }
+    },
+    quiescenceReceiptTestTimeoutMs,
+  );
+
+  test(
+    "replays a pre-safe-observation peek without adding the new activity input",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const calls: unknown[] = [];
+      const worker = await Worker.create({
+        connection: nativeConnection,
+        namespace: "default",
+        taskQueue,
+        workflowsPath: new URL(
+          "../../apps/worker/test/fixtures/legacy-session-observer-workflow.ts",
+          import.meta.url,
+        ).pathname,
+        activities: {
+          peekSessionWork: async (input: unknown) => {
+            calls.push(input);
+            return { kind: "admission-blocked" };
+          },
+        },
+      });
+      const run = worker.run();
+      try {
+        const scope = { ...workflowScope(), sessionId: crypto.randomUUID() };
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [scope],
+        });
+        await handle.result();
+        expect(calls).toEqual([
+          {
+            workspaceId: scope.workspaceId,
+            sessionId: scope.sessionId,
+            includeAdmissionFence: true,
+          },
+        ]);
+        await Worker.runReplayHistory(
+          { workflowsPath: workflowDefinitionsPath },
+          await handle.fetchHistory(),
+          workflowId,
+        );
       } finally {
         worker.shutdown();
         await run;

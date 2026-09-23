@@ -1,120 +1,114 @@
 import type { ComposerSendBlocker } from "@/lib/composer-send-blocking";
+import type { FailedSessionRetryInput } from "@/lib/failed-session-retry";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import { useRef, useState } from "react";
+import { RotateCcwIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-type ContinuationBlocker = "draft" | "unsent" | "delivery" | "queued" | "loading";
-const CONTINUATION_REASONS: Record<ContinuationBlocker, string> = {
-  draft: "Send your draft below to continue.",
-  unsent: "Retry or remove the unsent message below before continuing.",
-  delivery: "A message is being delivered below. Check its delivery status.",
-  queued: "Work is already queued or running. Check the activity controls below.",
-  loading: "Wait for the composer to finish loading or sending.",
-};
+type RetryBlocker =
+  | "draft"
+  | "unsent"
+  | "delivery"
+  | "queued"
+  | "loading"
+  | "permission"
+  | "paused";
 
-/** Normal Send owns delivery and retry; this shortcut never replays a tool. */
+/** Retry is an execution control, never a new user message. */
 export function FailedSessionActions(props: {
   failureId?: string | null;
   composerBlocker?: ComposerSendBlocker | null;
-  repositoryError?: string | null;
-  onContinue: () => Promise<boolean>;
-  continuationBlocker: ContinuationBlocker | null;
-  onChooseModel: () => void;
-  modelDisabled: boolean;
+  onRetry: () => Promise<boolean>;
+  retryBlocker: RetryBlocker | null;
+  retryInput?: FailedSessionRetryInput | null;
 }) {
   const [identity, setIdentity] = useState(props.failureId ?? null);
   const [generation, setGeneration] = useState(0);
   if (props.failureId && props.failureId !== identity) {
     setIdentity(props.failureId);
     // Initial history hydration identifies the same failure. A later distinct
-    // boundary permits a new continuation even if React skipped the running state.
+    // boundary permits a new retry even if React skipped the running state.
     if (identity) setGeneration(generation + 1);
   }
   return <FailureActionsAttempt key={generation} {...props} />;
 }
 
 function FailureActionsAttempt({
-  onContinue,
+  onRetry,
   composerBlocker,
-  repositoryError,
-  continuationBlocker,
-  onChooseModel,
-  modelDisabled,
+  retryBlocker,
+  retryInput,
 }: {
-  onContinue: () => Promise<boolean>;
+  onRetry: () => Promise<boolean>;
   composerBlocker?: ComposerSendBlocker | null;
-  repositoryError?: string | null;
-  continuationBlocker: ContinuationBlocker | null;
-  onChooseModel: () => void;
-  modelDisabled: boolean;
+  retryBlocker: RetryBlocker | null;
+  retryInput?: FailedSessionRetryInput | null;
 }) {
-  const continueBlockedReason = composerBlocker
-    ? {
-        upload: "Wait for the upload below to finish, or remove it.",
-        repository: repositoryError || "Resolve repository access below.",
-        policy: "Choose a supported model, reasoning level and speed below.",
-        variable_sets: "Review the Variable Sets selection below.",
-        personal_decision: "Review the personal resource attachment below.",
-        personal_loading: "Wait for personal resource access to finish loading.",
-      }[composerBlocker]
-    : continuationBlocker
-      ? CONTINUATION_REASONS[continuationBlocker]
-      : null;
+  const retryBlockedReason = composerBlocker || retryBlocker;
   const pending = useRef(false);
   const accepted = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [rejected, setRejected] = useState(false);
   async function submit() {
-    if (pending.current || accepted.current || continueBlockedReason) return;
+    if (pending.current || accepted.current || retryBlockedReason || rejected) return;
     pending.current = true;
     setSubmitting(true);
     setError(null);
     try {
-      if (await onContinue()) {
+      if (await onRetry()) {
         accepted.current = true;
         setSubmitted(true);
-      } else setError("The follow-up could not be added. Check the composer below and try again.");
-    } catch {
-      setError("The follow-up could not be added. Check the composer below and try again.");
+      } else setError("Could not retry this session.");
+    } catch (failure) {
+      // Pause and unsettled execution are transient; each explicit retry still
+      // passes backend admission. Only a definitively unsafe failure is latched.
+      if (
+        failure instanceof OpenGeniApiError &&
+        !failure.outcomeUnknown &&
+        failure.code === "RETRY_UNSUPPORTED_FAILURE"
+      ) {
+        setRejected(true);
+      }
+      setError(
+        failure instanceof OpenGeniApiError && !failure.outcomeUnknown && failure.status < 500
+          ? failure.code === "RETRY_UNSUPPORTED_FAILURE"
+            ? "This failure cannot be retried safely."
+            : failure.code === "RETRY_EXECUTION_UNRESOLVED"
+              ? "Earlier work is still settling."
+              : failure.code === "RETRY_PAUSED"
+                ? "This session is paused."
+                : failure.status === 409
+                  ? "The session changed."
+                  : "Could not retry this session. Check your access and model."
+          : "Retry not confirmed.",
+      );
     } finally {
       pending.current = false;
       setSubmitting(false);
     }
   }
   return (
-    <div className="mt-3">
-      <div className="flex flex-wrap gap-2">
+    <span className="inline-flex flex-wrap items-center gap-2">
+      {!retryBlockedReason && !rejected && !submitted ? (
         <Button
           type="button"
           size="sm"
-          variant="secondary"
-          disabled={submitting || submitted || Boolean(continueBlockedReason)}
+          variant="ghost"
+          disabled={submitting}
           onClick={() => void submit()}
         >
-          {submitting ? "Adding follow-up…" : submitted ? "Continue requested" : "Continue"}
+          <RotateCcwIcon aria-hidden="true" className="size-3.5" />
+          {submitting ? "Retrying…" : retryInput ? "Check retry" : "Retry"}
         </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
-          disabled={modelDisabled}
-          onClick={onChooseModel}
-        >
-          Choose another model
-        </Button>
-      </div>
-      {submitted ? (
-        <p className="mt-2 text-xs text-fg-muted" role="status">
-          Follow-up added below. Its delivery status and retry controls appear with the message.
-        </p>
-      ) : continueBlockedReason ? (
-        <p className="mt-2 text-xs text-fg-muted">{continueBlockedReason}</p>
       ) : null}
+      {submitted ? <span role="status">Retry requested.</span> : null}
       {error ? (
-        <p className="mt-2 text-xs" role="alert">
+        <span className="text-xs" role="alert">
           {error}
-        </p>
+        </span>
       ) : null}
-    </div>
+    </span>
   );
 }

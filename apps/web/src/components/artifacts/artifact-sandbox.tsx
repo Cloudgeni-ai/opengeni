@@ -12,7 +12,7 @@ import {
   publishedHtmlArtifactDocument,
   type PublishedHtmlArtifactToolBridge,
 } from "@opengeni/react/artifacts";
-import { useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,16 +41,42 @@ export function ArtifactSandbox(props: {
 }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [focused, setFocused] = useState(false);
+  const frameRef = useRef<HTMLDialogElement>(null);
+  const modalRef = useRef(false);
+  useLayoutEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    if (focused) {
+      // A fixed child of the chat timeline is still clipped and layered by its
+      // scroll pane and the sibling workspace dock. The modal top layer escapes
+      // both while keeping the live Site iframe mounted in the same DOM node.
+      frame.close();
+      frame.showModal();
+      modalRef.current = true;
+    } else if (modalRef.current) {
+      frame.close();
+      frame.show();
+      modalRef.current = false;
+    }
+  }, [focused]);
   const reload = () => {
     setReloadKey((value) => value + 1);
   };
   return (
-    <section
+    <dialog
+      ref={frameRef}
+      open
+      aria-label={props.title}
+      onCancel={(event) => {
+        event.preventDefault();
+        setFocused(false);
+      }}
       className={cn(
-        "overflow-hidden rounded-2xl border border-border/80 bg-white shadow-sm",
-        focused && "fixed inset-0 z-50 flex flex-col rounded-none border-0 bg-surface shadow-none",
+        "static m-0 w-full max-h-none max-w-none overflow-hidden rounded-2xl border border-border/80 bg-white p-0 text-left shadow-sm",
         props.className,
         props.fill && "flex min-h-0 flex-col",
+        focused &&
+          "fixed inset-0 z-50 flex h-dvh w-dvw flex-col rounded-none border-0 bg-surface shadow-none",
       )}
     >
       <div className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-surface/95 px-3 sm:px-4">
@@ -155,6 +181,6 @@ export function ArtifactSandbox(props: {
           focused && "min-h-0 flex-1",
         )}
       />
-    </section>
+    </dialog>
   );
 }

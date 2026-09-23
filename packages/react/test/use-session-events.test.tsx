@@ -8,6 +8,7 @@ import {
   SESSION_EVENT_BROWSER_PENDING_MAX_BYTES,
   SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
   boundBrowserSessionEventWindow,
+  appendBrowserSessionEventWindow,
   type UseSessionEventsResult,
   useSessionEvents,
 } from "../src/hooks/use-session-events";
@@ -99,6 +100,280 @@ function scriptedClient(input: {
 }
 
 describe("useSessionEvents", () => {
+  test("an exact target supersedes the initial tail even when the client ignores abort", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const store = Array.from({ length: 3000 }, (_, i) => event(i + 1));
+    const { client } = scriptedClient({
+      store,
+      listEvents: async (options) => {
+        if (options.before === Number.MAX_SAFE_INTEGER) await gate;
+        return listPage(store, options);
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    expect(hook.result.current.initialLoading).toBe(true);
+    await actRun(async () => expect(await hook.result.current.jumpToSequence(50)).toBe(true));
+    release();
+    await flush(30);
+    expect(hook.result.current.events.some((item) => item.sequence === 50)).toBe(true);
+    expect(hook.result.current.events.at(-1)?.sequence).toBeLessThan(3000);
+    expect(hook.result.current.initialLoading).toBe(false);
+    expect(hook.result.current.loadingTarget).toBe(false);
+    await hook.unmount();
+  });
+
+  test("client replacement fences a pending target rejection without a session change", async () => {
+    let reject!: (reason: Error) => void;
+    const gate = new Promise<SessionEvent[]>((_resolve, rejectPromise) => {
+      reject = rejectPromise;
+    });
+    const store = [event(1000)];
+    const first = scriptedClient({
+      store,
+      listEvents: (options) => (options.limit === 128 ? gate : Promise.resolve(store)),
+    });
+    const second = scriptedClient({ store });
+    const hook = await renderHook(
+      ({ client }) => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      { client: first.client },
+    );
+    await flush(20);
+    let stale!: Promise<boolean>;
+    await actRun(async () => {
+      stale = hook.result.current.jumpToSequence(10);
+    });
+    await hook.rerender({ client: second.client });
+    reject(new Error("old client unauthorized"));
+    await actRun(async () => expect(await stale).toBe(false));
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.loadingTarget).toBe(false);
+    expect(hook.result.current.events).toEqual(store);
+    await hook.unmount();
+  });
+
+  test("exact far-old targets use two bounded reads and preserve adjacent paging", async () => {
+    const store = Array.from({ length: 12_000 }, (_, i) => event(i + 1));
+    const { client, listCalls, streamCalls } = scriptedClient({ store });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    const reads = listCalls.length;
+    const streams = streamCalls.length;
+    await actRun(async () => expect(await hook.result.current.jumpToSequence(1000)).toBe(true));
+    await flush(20);
+    expect(listCalls.slice(reads)).toEqual([
+      { before: 1001, limit: 128, compact: true, payloadMode: "full" },
+      { after: 1000, limit: 128, compact: true, direction: "after", payloadMode: "full" },
+    ]);
+    expect(hook.result.current.events.some((item) => item.sequence === 1000)).toBe(true);
+    expect(hook.result.current.events.length).toBeLessThanOrEqual(256);
+    expect(hook.result.current.lastSequence).toBe(12_000);
+    expect(hook.result.current.hasOlder).toBe(true);
+    expect(hook.result.current.hasNewer).toBe(true);
+    expect(streamCalls.length).toBe(streams);
+    await actRun(() => hook.result.current.loadOlder());
+    await actRun(() => hook.result.current.loadNewer());
+    const sequences = hook.result.current.events.map((item) => item.sequence);
+    expect(new Set(sequences).size).toBe(sequences.length);
+    expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+    expect(sequences).toContain(1000);
+    await hook.unmount();
+  });
+
+  test("rapid target switching ignores stale completion and latest supersedes a target", async () => {
+    const store = Array.from({ length: 5000 }, (_, i) => event(i + 1));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { client } = scriptedClient({
+      store,
+      listEvents: async (options) => {
+        if (options.before === 101 || options.after === 100) await gate;
+        return listPage(store, options);
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    let stale!: Promise<boolean>;
+    await actRun(async () => {
+      stale = hook.result.current.jumpToSequence(100);
+    });
+    expect(hook.result.current.loadingTarget).toBe(true);
+    await actRun(async () => expect(await hook.result.current.jumpToSequence(800)).toBe(true));
+    release();
+    await actRun(async () => expect(await stale).toBe(false));
+    expect(hook.result.current.events.some((item) => item.sequence === 800)).toBe(true);
+    expect(hook.result.current.loadingTarget).toBe(false);
+    await actRun(async () => {
+      stale = hook.result.current.jumpToSequence(100);
+      await hook.result.current.jumpToLatest();
+      expect(await stale).toBe(false);
+    });
+    await flush(20);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(5000);
+    await hook.unmount();
+  });
+
+  test("a pre-aborted signal returns false without disturbing the current view", async () => {
+    const store = Array.from({ length: 300 }, (_, i) => event(i + 1));
+    const { client, listCalls } = scriptedClient({ store });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    const reads = listCalls.length;
+    const controller = new AbortController();
+    controller.abort();
+    await actRun(async () =>
+      expect(await hook.result.current.jumpToSequence(50, { signal: controller.signal })).toBe(
+        false,
+      ),
+    );
+    await flush(10);
+    expect(listCalls.length).toBe(reads);
+    expect(hook.result.current.loadingTarget).toBe(false);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(300);
+    await hook.unmount();
+  });
+
+  test("closing Find during the fetch fences the window replacement and settles loadingTarget", async () => {
+    const store = Array.from({ length: 3000 }, (_, i) => event(i + 1));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { client } = scriptedClient({
+      store,
+      listEvents: async (options) => {
+        if (options.before === 101 || options.after === 100) await gate;
+        return listPage(store, options);
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    const controller = new AbortController();
+    let pending!: Promise<boolean>;
+    await actRun(async () => {
+      pending = hook.result.current.jumpToSequence(100, { signal: controller.signal });
+    });
+    expect(hook.result.current.loadingTarget).toBe(true);
+    // Find closes while the bounded reads are still in flight.
+    controller.abort();
+    release();
+    await actRun(async () => expect(await pending).toBe(false));
+    await flush(20);
+    // The fetched window was never published; the live tip is restored.
+    expect(hook.result.current.events.some((item) => item.sequence === 100)).toBe(false);
+    expect(hook.result.current.loadingTarget).toBe(false);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(3000);
+    await hook.unmount();
+  });
+
+  test("an aborted target does not disturb a newer navigation that superseded it", async () => {
+    const store = Array.from({ length: 5000 }, (_, i) => event(i + 1));
+    let releaseFirst!: () => void;
+    const gateFirst = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const { client } = scriptedClient({
+      store,
+      listEvents: async (options) => {
+        if (options.before === 101 || options.after === 100) await gateFirst;
+        return listPage(store, options);
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    const controller = new AbortController();
+    let stale!: Promise<boolean>;
+    await actRun(async () => {
+      stale = hook.result.current.jumpToSequence(100, { signal: controller.signal });
+    });
+    // A newer target supersedes the aborted one; only the newer window applies.
+    await actRun(async () => expect(await hook.result.current.jumpToSequence(800)).toBe(true));
+    controller.abort();
+    releaseFirst();
+    await actRun(async () => expect(await stale).toBe(false));
+    await flush(20);
+    expect(hook.result.current.events.some((item) => item.sequence === 800)).toBe(true);
+    expect(hook.result.current.events.some((item) => item.sequence === 100)).toBe(false);
+    expect(hook.result.current.loadingTarget).toBe(false);
+    await hook.unmount();
+  });
+
+  test("a target cannot cross session or client identity and invalid targets do not navigate", async () => {
+    const store = Array.from({ length: 3000 }, (_, i) => event(i + 1));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = scriptedClient({
+      store,
+      listEvents: async (options) => {
+        if (options.limit === 128) await gate;
+        return listPage(store, options);
+      },
+    });
+    const second = scriptedClient({ store: [event(9000)] });
+    const hook = await renderHook(
+      ({ client, sessionId }) => useSessionEvents(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      { client: first.client, sessionId: SESSION_ID },
+    );
+    await flush(20);
+    for (const invalid of [0, -1, NaN, Infinity, 1.5]) {
+      expect(await hook.result.current.jumpToSequence(invalid)).toBe(false);
+    }
+    let stale!: Promise<boolean>;
+    await actRun(async () => {
+      stale = hook.result.current.jumpToSequence(10);
+    });
+    await hook.rerender({ client: second.client, sessionId: SECOND_SESSION_ID });
+    release();
+    await actRun(async () => expect(await stale).toBe(false));
+    await flush(20);
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([9000]);
+    expect(hook.result.current.loadingTarget).toBe(false);
+    await hook.unmount();
+  });
+
+  test("oversized target stays exact and a missing sequence leaves the window intact", async () => {
+    const huge = event(3, "user.message", {
+      text: "x".repeat(SESSION_EVENT_BROWSER_MAX_BYTES + 100),
+    });
+    const store = [event(1), huge, event(4)];
+    const { client } = scriptedClient({ store });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    await actRun(async () => expect(await hook.result.current.jumpToSequence(3)).toBe(true));
+    expect(hook.result.current.events).toEqual([huge]);
+    expect(hook.result.current.hasNewer).toBe(true);
+    await actRun(async () => expect(await hook.result.current.jumpToSequence(2)).toBe(false));
+    expect(hook.result.current.events).toEqual([huge]);
+    await hook.unmount();
+  });
+
   test("a second older page survives the stream reconnect caused by the first", async () => {
     const store = Array.from({ length: 4000 }, (_, i) => event(i + 1));
     let release!: () => void;
@@ -994,11 +1269,11 @@ describe("useSessionEvents", () => {
         payloadMode: "full",
       },
     ]);
-    // The oldest-directed full window owns 1..10000. Reconnecting here would
+    // The oldest-directed full window owns the first max-count events. Reconnecting here would
     // immediately newest-bound it and evict the history the reader requested.
     expect(streamCalls).toEqual([0]);
     expect(hook.result.current.events[0]?.sequence).toBe(1);
-    expect(hook.result.current.events.at(-1)?.sequence).toBe(10_000);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT);
     expect(hook.result.current.lastSequence).toBe(streamed.length);
     expect(hook.result.current.hasOlder).toBeFalse();
     expect(hook.result.current.hasNewer).toBeTrue();
@@ -1011,7 +1286,7 @@ describe("useSessionEvents", () => {
     ).toBeTrue();
 
     await hook.unmount();
-  });
+  }, 30_000);
 
   test("flushes a synchronously yielded pending batch at its count high-water mark", async () => {
     let releaseStream!: () => void;
@@ -1263,8 +1538,8 @@ describe("useSessionEvents", () => {
     await flush(100);
 
     expect(hook.result.current.events[0]?.sequence).toBe(52);
-    expect(hook.result.current.events.at(-1)?.sequence).toBe(10_051);
-    expect(hook.result.current.lastSequence).toBe(10_051);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 51);
+    expect(hook.result.current.lastSequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 51);
 
     let automatic!: OlderHistoryLoadReceipt;
     await actRun(async () => {
@@ -1283,7 +1558,7 @@ describe("useSessionEvents", () => {
     expect(automatic.committed).toBe(false);
     expect(automatic.tailPreserved).toBe(true);
     expect(hook.result.current.events[0]?.sequence).toBe(52);
-    expect(hook.result.current.events.at(-1)?.sequence).toBe(10_051);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 51);
     expect(hook.result.current.hasNewer).toBe(false);
     expect(streamCalls).toEqual([0]);
     listCalls.length = 0;
@@ -1304,8 +1579,8 @@ describe("useSessionEvents", () => {
     // SSE here would newest-bound the browser window and evict them again.
     expect(streamCalls).toEqual([0]);
     expect(hook.result.current.events[0]?.sequence).toBe(20);
-    expect(hook.result.current.events.at(-1)?.sequence).toBe(10_019);
-    expect(hook.result.current.lastSequence).toBe(10_051);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 19);
+    expect(hook.result.current.lastSequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 51);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(hook.result.current.hasNewer).toBe(true);
     const sequences = hook.result.current.events.map((item) => item.sequence);
@@ -1314,10 +1589,10 @@ describe("useSessionEvents", () => {
     ).toBeTrue();
     expect(sequences).toContain(20);
     expect(sequences).not.toContain(1);
-    expect(sequences).toContain(10_001);
+    expect(sequences).toContain(SESSION_EVENT_BROWSER_MAX_COUNT + 1);
 
     await hook.unmount();
-  });
+  }, 30_000);
 
   test("loadOldest jumps to the durable start without walking the middle gap", async () => {
     const store = Array.from({ length: 5_000 }, (_, index) => event(index + 1));
@@ -1448,7 +1723,7 @@ describe("useSessionEvents", () => {
     await actRun(() => hook.result.current.loadOldest());
     expect(hook.result.current.error).toBeNull();
     await hook.unmount();
-  });
+  }, 30_000);
 
   test("late newer page rejection cannot publish into a replacement session", async () => {
     const store = Array.from({ length: 2000 }, (_, index) => event(index + 1));
@@ -1591,7 +1866,65 @@ describe("useSessionEvents", () => {
   });
 });
 
+describe("appendBrowserSessionEventWindow", () => {
+  test("matches full reduction across byte, count, oversized and multibyte boundaries", () => {
+    const events = Array.from({ length: 30 }, (_, index) =>
+      event(index + 1, "agent.toolCall.output", {
+        output: index % 7 === 0 ? "界🙂".repeat(3000) : `output-${index}`,
+      }),
+    );
+    for (const maxBytes of [1024, 5000, 100_000]) {
+      for (const maxCount of [1, 3, 100]) {
+        for (const batchSize of [1, 4, 30]) {
+          const options = { maxBytes, maxCount };
+          let current = boundBrowserSessionEventWindow([], options);
+          for (let index = 0; index < events.length; index += batchSize) {
+            const batch = events.slice(index, index + batchSize);
+            const expected = boundBrowserSessionEventWindow([...current.events, ...batch], options);
+            const next = appendBrowserSessionEventWindow(current, batch, options);
+            expect(next).toEqual({
+              ...expected,
+              truncated: current.truncated || expected.truncated,
+            });
+            current = next;
+          }
+        }
+      }
+    }
+  });
+
+  test("does not serialize retained payloads when appending below the limits", () => {
+    let reads = 0;
+    const retained = event(1, "agent.toolCall.output", {
+      get output() {
+        reads += 1;
+        return "existing payload";
+      },
+    });
+    const current = boundBrowserSessionEventWindow([retained]);
+    reads = 0;
+    const next = appendBrowserSessionEventWindow(current, [event(2)]);
+    expect(reads).toBe(0);
+    expect(next.events[0]).toBe(retained);
+    expect(next.bytes).toBe(new TextEncoder().encode(JSON.stringify(next.events)).byteLength);
+    expect(current.events).toHaveLength(1);
+  });
+});
+
 describe("boundBrowserSessionEventWindow", () => {
+  test("retains both ends beyond the former count and byte limits", () => {
+    const events = Array.from({ length: 10_100 }, (_, index) =>
+      event(index + 1, "agent.toolCall.output", { output: "x".repeat(1024) }),
+    );
+    for (const direction of ["oldest", "newest"] as const) {
+      const window = boundBrowserSessionEventWindow(events, { direction });
+      expect(window.bytes).toBeGreaterThan(8 * 1024 * 1024);
+      expect(window.events).toHaveLength(events.length);
+      expect(window.events[0]).toBe(events[0]);
+      expect(window.events.at(-1)).toBe(events.at(-1));
+      expect(window.truncated).toBeFalse();
+    }
+  });
   test("preserves complete multibyte message and tool content above the old event limit", () => {
     const text = `START-${"界🙂 middle ".repeat(30_000)}-END`;
     const events = [
@@ -1689,13 +2022,13 @@ describe("boundBrowserSessionEventWindow", () => {
     const events = Array.from({ length: 3_000 }, (_, index) =>
       event(index + 1, "agent.message.completed", { text: "x".repeat(4_000) }),
     );
-    const window = boundBrowserSessionEventWindow(events);
+    const window = boundBrowserSessionEventWindow(events, { maxBytes: 8 * 1024 * 1024 });
 
     expect(window.truncated).toBeTrue();
     expect(window.events.length).toBeLessThan(events.length);
     expect(window.events.at(-1)?.sequence).toBe(3_000);
     expect(window.events[0]!.sequence).toBe(3_001 - window.events.length);
-    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_MAX_BYTES);
+    expect(window.bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
     expect(new TextEncoder().encode(JSON.stringify(window.events)).byteLength).toBe(window.bytes);
   });
 
@@ -1705,12 +2038,13 @@ describe("boundBrowserSessionEventWindow", () => {
     );
     const window = boundBrowserSessionEventWindow(events, {
       direction: "oldest",
+      maxBytes: 8 * 1024 * 1024,
     });
 
     expect(window.truncated).toBeTrue();
     expect(window.events.length).toBeLessThan(events.length);
     expect(window.events[0]?.sequence).toBe(1);
     expect(window.events.at(-1)?.sequence).toBe(window.events.length);
-    expect(window.bytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_MAX_BYTES);
+    expect(window.bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
   });
 });

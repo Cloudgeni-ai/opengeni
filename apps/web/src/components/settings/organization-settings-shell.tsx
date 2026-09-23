@@ -103,6 +103,7 @@ export function OrganizationSettingsShell({
       </a>
       <SettingsSidebar
         workspaceId={workspaceId}
+        backToWorkspaceSettings
         label="Organization settings"
         currentPage={copy.title}
         identity={

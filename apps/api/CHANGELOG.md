@@ -1,5 +1,226 @@
 # @opengeni/api-router
 
+## 4.1.0
+
+### Minor Changes
+
+- 86c710a: Expose a first-party Connected Machine enrollment-token tool with existing enrollment-management authority, short-lived tokens and deployment-bound installer commands. Include agent guidance without introducing an additional approval flow.
+
+### Patch Changes
+
+- f60ca2b: Raise Skill folder limits eightfold to 1,024 files, 2 MiB per file, and 8 MiB total, while retaining bounded reads and existing validation.
+- 38b9857: Track child unread attention from meaningful content rather than housekeeping, and acknowledge complete parent-consumed results for the exact initiating human. Preserve newer unseen work and manual attention intent, decode retained evidence losslessly, and reconcile proven historical consumption conservatively. Requires maintenance migration 0503 before starting the matching attention-aware writers.
+- 90e089a: Add a rollout-gated short MCP OAuth state that stores encrypted, time-limited callback context in Postgres. Preserve legacy in-flight callbacks and one-use replay protection.
+- 58eb331: Trust successful immutable Site upload writes instead of requiring immediate read-after-write visibility. Observe conditional-write winners and editable source with the existing bounded missing-object retry policy, preserve provider errors, and never replay writes during read recovery.
+- 59682ac: Fix Slack workspace picker cards rejected with invalid_blocks by separating repeated action IDs into distinct provider blocks. Preserve existing operation receipts and click handles for safe retries and apply the same serialization to message updates.
+- b1ad0c6: Start Slack tasks with the initiating user's saved website repositories, variable sets, compute and tool selections in the destination workspace. Preserve draft content, explicit empty tools, and ordinary resource authorization.
+- Updated dependencies [701ea95]
+- Updated dependencies [e9c4379]
+- Updated dependencies [a642885]
+- Updated dependencies [793a6c9]
+- Updated dependencies [d92af11]
+- Updated dependencies [f60ca2b]
+- Updated dependencies [56ddcfb]
+- Updated dependencies [a11d810]
+- Updated dependencies [86c710a]
+- Updated dependencies [38b9857]
+- Updated dependencies [ab3adb3]
+- Updated dependencies [2f8bc58]
+- Updated dependencies [a11d810]
+- Updated dependencies [90e089a]
+- Updated dependencies [a184108]
+- Updated dependencies [b1ad0c6]
+- Updated dependencies [a463199]
+- Updated dependencies [5fbb333]
+  - @opengeni/runtime@4.0.1
+  - @opengeni/codex@0.2.25
+  - @opengeni/config@2.1.0
+  - @opengeni/db@6.0.1
+  - @opengeni/contracts@5.1.0
+  - @opengeni/core@4.0.1
+  - @opengeni/documents@0.8.32
+  - @opengeni/github@0.7.15
+  - @opengeni/storage@0.2.132
+  - @opengeni/events@0.4.30
+  - @opengeni/artifact-tool@0.3.31
+  - @opengeni/codemode@0.6.1
+  - @opengeni/observability@0.8.31
+  - @opengeni/tool-gateway@0.1.12
+
+## 4.0.0
+
+### Major Changes
+
+- 1bfb6a4: Remove Packs and their Workflow templates from the application, public clients,
+  runtime, and active database schema. Plugins, Skills, Connections, sandbox
+  environments, Knowledge, scheduled tasks, and event automations remain independent.
+
+  PR Review now has its own setup authority and fixed automation template. Generic
+  automation routes cannot mutate review-owned sources or triggers. The API contract
+  revision changes; deploy matching server and client versions together.
+
+  Migration 0482 is a destructive maintenance cutover: drain all API and worker
+  database clients, settle Pack-related operations and queued Pack automation work,
+  then apply migrations and provision roles before starting only matching binaries.
+  It removes Pack data without a compatibility layer or data-preservation migration.
+  Historical events mixing Pack and independent automation work block the cutover
+  for explicit operator resolution; independent execution history is never silently deleted.
+  Customized, shared, and re-scoped Skills, Connections, and session history are
+  preserved; source-only Skills lose their active distribution owner.
+
+### Minor Changes
+
+- 1c924ed: Add authorized, resumable literal search of saved user and completed assistant
+  messages, including unloaded history. Workspace search can return one
+  representative match per session; in-session Find returns every occurrence with
+  stable event identity and original-text UTF-16 offsets. Requests and browser
+  result batches remain bounded, with explicit continuation and provisional counts.
+
+  Expose bounded exact-sequence history navigation and message highlighting for
+  React hosts. The web console connects a contextual session-search dialog to
+  full-history Find, preserves search state across navigation, and keeps ended
+  conversations readable. Tool output, reasoning and unfinished delta-only
+  assistant messages are outside the initial searchable scope. Exact Markdown
+  matches use a labeled source excerpt that stays in place when Find closes;
+  readers can explicitly restore the formatted message.
+
+- 132b945: Add organization-owned integration acquisition policy with a discoverable catalog,
+  revisioned administration API and SDK, and organization settings. Enforce selected
+  provider and custom-protocol permissions on supported setup and installation paths
+  at preparation and persistence boundaries.
+
+  Preserve ordinary ownership and authorization, exact completed-request replay,
+  unchanged reconciliation, cancellation and other reducing operations. Existing
+  connection execution and credential refresh are not revoked by this policy.
+  Deployment-configured tools and embedding-host session-local MCP configuration
+  retain their existing admission rules; this is not a network or execution allowlist.
+
+  Apply the organization integration policy migration and matching role provisioning
+  with the matching runtime before enabling the setting. Older runtimes do not enforce
+  the new acquisition policy. See `docs/organization-integration-policy.md` for the
+  administration, identity, persistence and recovery contract.
+
+### Patch Changes
+
+- a6d3e4a: Route persistent behavior to scoped workspace instructions or applicable Skills
+  instead of retrieval-only Knowledge. Make the routing and safe instruction-edit
+  guidance unconditional, reinforce it in save tools and Skill guidance, and retain
+  the existing scope and Agent learning controls.
+- c64a94f: Support simultaneous authorized personal and workspace MCP account attachments with immutable account-qualified routing, sender isolation, and scheduled execution binding. Move attachment controls inside Connectors with readable ownership labels; keep account setup on the Capabilities page.
+- 348e54d: Use Sandbox Environment terminology in user-facing controls, errors, tool descriptions, and runtime guidance. Existing rig routes, tool names, IDs, permissions, and stored definitions remain unchanged.
+- 9de8e51: Route missing integration setup through provider-neutral catalog discovery and the shared human authorization card, with an explicit next action for every eligible catalog integration. Continue account selection and installation through owner authorization without an extra launch click, and open repository configuration in a separate tab.
+- c702159: Stop retrying permanent runtime database posture and configuration failures as
+  connection errors. Validate local startup prerequisites, prevent overlapping
+  launchers from rotating live database credentials, and check database posture
+  before building the development sandbox.
+- c45ce34: Return MCP OAuth clients through 200 HTML after consent, and keep the clicked Authorize or Deny decision when the form disables its buttons.
+- 3977932: Polish MCP OAuth consent for every client: shared OpenGeni chrome, organization and workspace pickers at authorize time, tokens that follow the chosen workspace, and token exchange that accepts any registered redirect URI.
+- 855f1dd: Use webview-safe OAuth consent CSS and return clients to the app automatically after approve, without a second Continue click.
+- c8bb974: Accept native MCP OAuth clients during dynamic registration: ignore extra RFC 7591 metadata, allow custom-scheme redirect URIs, and return a continue page after consent instead of a raw redirect that embedded browsers drop.
+- 9d9b94b: Keep the published dependency closure aligned with the updated plugin removal
+  contracts. The SDK exposes named removal outcomes and optional preview-token
+  confirmation alongside the existing installation-version check.
+- a6251eb: Add isolated async trace context, parent/link export, bounded trace batching and
+  retry health, and opt-in protected failure diagnostics independent of the
+  application database. Preserve the public telemetry privacy projection.
+- d3672c0: Measure workspace capture gate waits on every routed sandbox operation, including
+  mid-turn and API-direct operations, without changing provider-call accounting or
+  admission guarantees. Record physical warm capture and publication duration at
+  actual settlement, including captures that outlive the initiating caller.
+- 6ed7dfb: Give session-message search a dedicated bounded HTTP metric label so its request latency and failures can be distinguished from unknown routes without recording search text or workspace IDs.
+
+  The stock web app debounces committed search queries, keeps partial results on transient failures, and resumes failed scans from their last successful continuation instead of discarding progress. Authorization failures still clear retained content.
+
+  Reduce long-message search database work by reusing the already-authorized event identity and scoped transaction, and coalescing adjacent scalar windows within the existing per-request budget. Literal Unicode matching, lossless offsets, live visibility checks, and ordinary conversation slice bounds are preserved.
+
+- f7c9169: Support verified-email Google and GitHub sign-in linking and personal sign-in
+  method management. Preserve canonical user ownership and email-verification
+  checks, require recent authentication for sensitive changes, prevent removal of
+  the last usable method, and respect explicit provider disconnection until a
+  verified reconnect. Surface actionable callback feedback and security
+  notification outcomes without granting integration access.
+- 0ea365c: Route user-facing reports, including secondary audit outputs, to native document
+  Artifacts before authoring. Persist explicit report requirements and require
+  server-verified current-head inspection evidence at goal completion, preserving
+  ordinary chat, internal worker findings, code navigation and explicitly requested
+  local-file workflows. Keep unavailable or failed report delivery incomplete
+  instead of silently substituting sandbox links.
+- Updated dependencies [b1adc9f]
+- Updated dependencies [a6d3e4a]
+- Updated dependencies [4ddab4a]
+- Updated dependencies [6d0a4de]
+- Updated dependencies [59bad3f]
+- Updated dependencies [c64a94f]
+- Updated dependencies [c387603]
+- Updated dependencies [1c924ed]
+- Updated dependencies [c31a951]
+- Updated dependencies [f90d628]
+- Updated dependencies [348e54d]
+- Updated dependencies [c6f98cc]
+- Updated dependencies [aa09567]
+- Updated dependencies [d1ab270]
+- Updated dependencies [f90d628]
+- Updated dependencies [c3f1705]
+- Updated dependencies [9de8e51]
+- Updated dependencies [0bf014d]
+- Updated dependencies [c702159]
+- Updated dependencies [a74ea02]
+- Updated dependencies [3977932]
+- Updated dependencies [f90d628]
+- Updated dependencies [9a7931c]
+- Updated dependencies [c8bb974]
+- Updated dependencies [406a62e]
+- Updated dependencies [3fa175e]
+- Updated dependencies [332a02d]
+- Updated dependencies [132b945]
+- Updated dependencies [779b16b]
+- Updated dependencies [9d5bb1c]
+- Updated dependencies [1cb688d]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [0a41330]
+- Updated dependencies [621201d]
+- Updated dependencies [e261b39]
+- Updated dependencies [d9190f7]
+- Updated dependencies [f90d628]
+- Updated dependencies [a6251eb]
+- Updated dependencies [ac006ef]
+- Updated dependencies [1bfb6a4]
+- Updated dependencies [6f82814]
+- Updated dependencies [f90d628]
+- Updated dependencies [d3672c0]
+- Updated dependencies [d84b1a3]
+- Updated dependencies [7e2436a]
+- Updated dependencies [0bf014d]
+- Updated dependencies [6ed7dfb]
+- Updated dependencies [b0a5a54]
+- Updated dependencies [e261718]
+- Updated dependencies [bfc92c2]
+- Updated dependencies [1d6e49a]
+- Updated dependencies [bd6319b]
+- Updated dependencies [23d4542]
+- Updated dependencies [f90d628]
+- Updated dependencies [c2b66d5]
+- Updated dependencies [9d9b94b]
+- Updated dependencies [c66ba31]
+- Updated dependencies [f7c9169]
+- Updated dependencies [0ea365c]
+- Updated dependencies [a74ea02]
+- Updated dependencies [b384b43]
+  - @opengeni/core@4.0.0
+  - @opengeni/runtime@4.0.0
+  - @opengeni/db@6.0.0
+  - @opengeni/contracts@5.0.0
+  - @opengeni/codex@0.2.24
+  - @opengeni/observability@0.8.30
+  - @opengeni/config@2.0.0
+  - @opengeni/artifact-tool@0.3.30
+  - @opengeni/codemode@0.6.0
+  - @opengeni/documents@0.8.31
+  - @opengeni/events@0.4.29
+  - @opengeni/github@0.7.14
+  - @opengeni/storage@0.2.131
+  - @opengeni/tool-gateway@0.1.11
+
 ## 3.0.1
 
 ### Patch Changes

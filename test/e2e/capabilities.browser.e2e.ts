@@ -1063,9 +1063,6 @@ async function installCapabilityApi(
         binding: state.binding,
       });
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({ packs: [], installations: [] });
-    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) {
       return json([]);
     }
@@ -1216,9 +1213,6 @@ async function installLargeCatalogApi(
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
       return json({ plugins: [] });
     }
-    if (url.pathname === `/v1/workspaces/${workspaceId}/packs`) {
-      return json({ packs: [], installations: [] });
-    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/variable-sets`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/rigs`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/github/app`) {
@@ -1324,7 +1318,6 @@ async function installWorkspaceCatalogApi(
     if (resource === "skills") return json({ skills: [] });
     if (resource === "skills/content") return json({ skills: [], nextCursor: null });
     if (resource === "plugins") return json({ plugins: [] });
-    if (resource === "packs") return json({ packs: [], installations: [] });
     if (resource === "variable-sets" || resource === "rigs" || resource === "channels") {
       return json([]);
     }

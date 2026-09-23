@@ -9,6 +9,15 @@ import { InteractionControllerError } from "@opengeni/interaction";
 const START_TIMEOUT_MS = 10_000;
 const STOP_TIMEOUT_MS = 3_000;
 const MAX_START_LINE_BYTES = 4_096;
+const processStartupErrors = new WeakMap<ChildProcess, Error>();
+
+function trackProcess(processes: ChildProcess[], child: ChildProcess): void {
+  processes.push(child);
+  // Node-compatible spawn reports a missing executable asynchronously. Keep it
+  // inside allocation's cleanup path instead of crashing the controller and
+  // orphaning the display processes already started for this seat.
+  child.on("error", (error: Error) => processStartupErrors.set(child, error));
+}
 
 export type ComputerEnvironmentContext = {
   computerSessionId: string;
@@ -115,7 +124,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
           stdio: ["ignore", "ignore", "pipe", "pipe"],
         },
       );
-      processes.push(xvfb);
+      trackProcess(processes, xvfb);
       drain(xvfb.stderr);
       const displayPipe = xvfb.stdio[3];
       if (!displayPipe || !("readable" in displayPipe)) {
@@ -161,7 +170,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
           stdio: ["ignore", "pipe", "pipe"],
         },
       );
-      processes.push(dbus);
+      trackProcess(processes, dbus);
       drain(dbus.stderr);
       const busAddress = await readStartupLine(dbus.stdout, dbus, "D-Bus address");
       if (
@@ -179,7 +188,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
           env: sessionEnvironment,
           stdio: ["ignore", "ignore", "pipe"],
         });
-        processes.push(windowManager);
+        trackProcess(processes, windowManager);
         drain(windowManager.stderr);
         // XFWM must be ready before the first client maps. Otherwise a late
         // manager/client race can steal focus after the linked browser opens,
@@ -213,7 +222,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
           stdio: ["ignore", "ignore", "pipe"],
         },
       );
-      processes.push(terminal);
+      trackProcess(processes, terminal);
       drain(terminal.stderr);
       await assertStillRunning(terminal, "virtual desktop terminal");
 
@@ -262,7 +271,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
           stdio: ["ignore", "ignore", "pipe"],
         },
       );
-      processes.push(rfb);
+      trackProcess(processes, rfb);
       drain(rfb.stderr);
       await waitForLoopbackPort(rfbPort, rfb, "virtual RFB server");
 
@@ -368,6 +377,8 @@ async function waitForLoopbackPort(
 ): Promise<void> {
   const deadline = Date.now() + START_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    const startupError = processStartupErrors.get(child);
+    if (startupError) throw startupError;
     if (child.exitCode !== null || child.signalCode !== null) {
       throw new Error(`${label} exited before becoming ready`);
     }
@@ -480,6 +491,8 @@ async function readStartupLine(
 
 async function assertStillRunning(child: ChildProcess, label: string): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 100));
+  const startupError = processStartupErrors.get(child);
+  if (startupError) throw startupError;
   if (child.exitCode !== null || child.signalCode !== null) {
     throw new Error(`${label} exited during startup`);
   }
@@ -504,6 +517,7 @@ async function stopProcessGroups(processes: readonly ChildProcess[]): Promise<un
 async function stopProcessGroup(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const pid = child.pid;
+  if (!pid && processStartupErrors.has(child)) return;
   if (!pid || !Number.isSafeInteger(pid) || pid < 2) {
     throw new Error("computer environment process has no safe PID");
   }

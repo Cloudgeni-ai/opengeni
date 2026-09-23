@@ -221,6 +221,31 @@ test("published and pending searches reuse one query embedding", async () => {
   expect(calls).toBe(1);
 });
 
+test("a keyword fallback in the first view never retries an unfunded provider in the review view", async () => {
+  const searches: Array<{ mode: string | undefined; settingsProvided: boolean }> = [];
+  await prepareKnowledgeSave(
+    db,
+    context,
+    { query: "Acme renewal" },
+    () => {
+      throw new Error("An unfunded provider was called");
+    },
+    {
+      list: async () => ({ entries: [], nextCursor: null }),
+      get: async () => null,
+      search: async (_db, _context, request, _embedder, settings) => {
+        searches.push({ mode: request.mode, settingsProvided: !!settings });
+        return { entries: [], nextCursor: null, searchMode: "keyword" };
+      },
+    },
+    { documentEmbeddingProvider: "openai", documentEmbeddingBillingMode: "credits" } as never,
+  );
+  expect(searches).toEqual([
+    { mode: "keyword", settingsProvided: false },
+    { mode: "keyword", settingsProvided: false },
+  ]);
+});
+
 test("catalog rechecks current metadata after a collection changes", async () => {
   const old = group("Old name");
   const current = {

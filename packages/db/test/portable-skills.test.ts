@@ -281,7 +281,7 @@ describe("portable Skill persistence", () => {
     });
   }, 60_000);
 
-  test("removing a direct owner preserves a Skill still owned by a Pack", async () => {
+  test("removing a direct owner preserves a Skill with an independent owner", async () => {
     if (!available || !client || !shared) return;
     const input = skillInput("incident-responder");
     const installed = await installPortableSkill(client.db, input);
@@ -290,7 +290,7 @@ describe("portable Skill persistence", () => {
         (account_id, workspace_id, facet_installation_id, owner_kind, owner_id, removable)
       values
         (${first.accountId}, ${first.workspaceId}, ${installed.facetInstallationId},
-         'pack', 'pack:production-operations', false)
+         'migration', 'production-operations', false)
     `;
 
     const preview = await getPortableSkillUninstallPreview(
@@ -301,7 +301,7 @@ describe("portable Skill persistence", () => {
     expect(preview).toMatchObject({
       installed: true,
       installationVersion: 1,
-      remainingOwners: [{ kind: "pack", id: "pack:production-operations", removable: false }],
+      remainingOwners: [{ kind: "migration", id: "production-operations", removable: false }],
       removesRuntimeSkill: false,
     });
     expect(
@@ -314,7 +314,7 @@ describe("portable Skill persistence", () => {
     ).toEqual({
       capabilityId: input.capabilityId,
       status: "retained_by_other_owners",
-      remainingOwners: [{ kind: "pack", id: "pack:production-operations", removable: false }],
+      remainingOwners: [{ kind: "migration", id: "production-operations", removable: false }],
     });
     expect(await listInstalledPortableSkills(client.db, first.workspaceId)).toEqual([
       expect.objectContaining({ capabilityId: input.capabilityId }),

@@ -1,22 +1,21 @@
-import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
-import { FailureRecoveryBoundary } from "./failure-recovery-boundary";
 import { afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, type ReactNode } from "react";
+import { act, useMemo, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { FailedSessionActions } from "./failed-session-actions";
+import { FailureRecoveryBoundary } from "./failure-recovery-boundary";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
+import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 
 mock.module("@tanstack/react-router", () => ({
-  Link: ({ children }: { children: ReactNode }) => <a href="#models">{children}</a>,
+  Link: ({ children }: { children: ReactNode }) => <a href="#fixture">{children}</a>,
 }));
-
 const { FailedSessionBanner } = await import("./failed-session-banner");
-
 beforeAll(() => {
   try {
     GlobalRegistrator.register();
   } catch {
-    // Another web test in this process already installed Happy DOM.
+    /* shared DOM */
   }
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
@@ -25,233 +24,460 @@ afterEach(async () => {
   await act(async () => root?.unmount());
   document.body.replaceChildren();
 });
-async function render(props: Parameters<typeof FailedSessionActions>[0]) {
+async function render(children: ReactNode) {
   const container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
-  await act(async () => root!.render(<FailedSessionActions {...props} />));
+  await act(async () => root!.render(children));
   return container;
 }
-test("one Continue click sequence submits one visible follow-up and leaves delivery to its message", async () => {
-  let settle!: (accepted: boolean) => void;
-  const receipt = new Promise<boolean>((resolve) => {
-    settle = resolve;
-  });
+const failure = {
+  reason: "Connection interrupted.",
+  failedAt: null,
+  consecutiveRecoveryCount: null,
+};
+const actions = { onRetry: async () => true, retryBlocker: null };
+
+test("compact row offers one ghost Retry without duplicate controls or guidance", async () => {
+  const container = await render(<FailedSessionBanner failure={failure} actions={actions} />);
+  expect(container.querySelectorAll("button")).toHaveLength(1);
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+  expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
+  expect(container.querySelector("svg")).not.toBeNull();
+  expect(container.querySelector("details")).toBeNull();
+  expect(container.textContent).not.toMatch(/Choose another model|composer|preserved|Try again/);
+  expect(container.querySelector('[data-testid="failed-session-banner"]')!.className).not.toMatch(
+    /bg-|border|rounded/,
+  );
+});
+
+test("double clicks and accepted submissions never duplicate recovery", async () => {
+  let settle!: (value: boolean) => void;
   let sends = 0;
-  let modelOpens = 0;
-  const container = await render({
-    onContinue: async () => {
-      sends++;
-      return receipt;
-    },
-    continuationBlocker: null,
-    onChooseModel: () => {
-      modelOpens++;
-    },
-    modelDisabled: false,
-  });
-  const [continueButton, modelButton] = [...container.querySelectorAll("button")];
+  const container = await render(
+    <FailedSessionActions
+      {...actions}
+      onRetry={() => {
+        sends++;
+        return new Promise((resolve) => {
+          settle = resolve;
+        });
+      }}
+    />,
+  );
+  const button = container.querySelector("button")!;
   await act(async () => {
-    continueButton!.click();
-    continueButton!.click();
+    button.click();
+    button.click();
   });
   expect(sends).toBe(1);
-  expect(continueButton!.textContent).toBe("Adding follow-up…");
+  expect(button.textContent).toBe("Retrying…");
   await act(async () => settle(true));
-  await act(async () => continueButton!.click());
-  expect(sends).toBe(1);
-  expect(continueButton!.textContent).toBe("Continue requested");
-  expect(container.querySelector('[role="status"]')?.textContent).toContain("delivery status");
-  await act(async () => modelButton!.click());
-  expect(modelOpens).toBe(1);
-});
-test("failed local submission remains retryable and blocked drafts explain the reason", async () => {
-  let sends = 0;
-  const props = {
-    onContinue: async () => {
-      sends++;
-      return false;
-    },
-    continuationBlocker: null as "draft" | null,
-    onChooseModel: () => {},
-    modelDisabled: false,
-  };
-  const container = await render(props);
-  await act(async () => container.querySelector("button")!.click());
-  expect(container.querySelector('[role="alert"]')?.textContent).toContain("could not be added");
-  expect(container.querySelector("button")!.disabled).toBe(false);
-  await act(async () =>
-    root!.render(<FailedSessionActions {...props} continuationBlocker="draft" />),
-  );
-  expect(container.textContent).toContain("Send your draft below to continue.");
-  await act(async () => container.querySelector("button")!.click());
-  expect(sends).toBe(1);
+  expect(container.querySelector("button")).toBeNull();
+  expect(container.querySelector('[role="status"]')!.textContent).toBe("Retry requested.");
 });
 
-test("unavailable recovery options preserve the reason and usable composer", async () => {
+test("typed structural sandbox failure never exposes retry or model-switch remedies", async () => {
   const container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
-  function UnavailableOptions(): never {
-    throw new Error("fixture recovery chunk unavailable");
-  }
-  await act(async () =>
-    root!.render(
-      <>
-        <FailureRecoveryBoundary fallback={<p role="alert">Provider connection failed.</p>}>
-          <UnavailableOptions />
-        </FailureRecoveryBoundary>
-        <textarea aria-label="Message" defaultValue="My preserved draft" />
-      </>,
-    ),
-  );
-  expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-    "Provider connection failed.",
-  );
-  expect(container.querySelector("textarea")?.value).toBe("My preserved draft");
-});
-
-test("history hydration preserves a request while a distinct failure gets a fresh guard", async () => {
-  let settleFirst!: (accepted: boolean) => void;
-  let sends = 0;
-  const props = {
-    onContinue: () => {
-      sends++;
-      return sends === 1
-        ? new Promise<boolean>((resolve) => {
-            settleFirst = resolve;
-          })
-        : Promise.resolve(true);
-    },
-    continuationBlocker: null,
-    onChooseModel: () => {},
-    modelDisabled: false,
-  };
-  const container = await render({ ...props, failureId: null });
-  await act(async () => container.querySelector("button")!.click());
-  await act(async () =>
-    root!.render(<FailedSessionActions {...props} failureId="original-event" />),
-  );
-  expect(container.querySelector("button")!.textContent).toBe("Adding follow-up…");
-  await act(async () => root!.render(<FailedSessionActions {...props} failureId="next-event" />));
-  expect(container.querySelector("button")!.disabled).toBe(false);
-  await act(async () => settleFirst(true));
-  expect(container.querySelector("button")!.textContent).toBe("Continue");
-  await act(async () => container.querySelector("button")!.click());
-  expect(sends).toBe(2);
-  expect(container.querySelector("button")!.textContent).toBe("Continue requested");
-});
-
-test("credit exhaustion retains model selection without offering automatic Continue", async () => {
-  const container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-  let opened = 0;
   await act(async () =>
     root!.render(
       <FailedSessionBanner
+        failure={{
+          reason: "Checkpoint is older than workspace",
+          failedAt: null,
+          consecutiveRecoveryCount: null,
+          structuralSandboxFailure: true,
+        }}
+        actions={{
+          onRetry: async () => true,
+          retryBlocker: null,
+        }}
+      />,
+    ),
+  );
+  expect(container.textContent).not.toContain("Retry");
+  expect(container.textContent).not.toContain("Choose another model");
+  expect(container.textContent).toBe("Checkpoint is older than workspace");
+  expect(container.querySelectorAll("button")).toHaveLength(0);
+});
+test("all draft, delivery, work, permission and deliberate pause guards hide Retry", async () => {
+  let sends = 0;
+  const container = await render(null);
+  for (const retryBlocker of [
+    "draft",
+    "unsent",
+    "delivery",
+    "queued",
+    "loading",
+    "permission",
+    "paused",
+  ] as const) {
+    await act(async () =>
+      root!.render(
+        <FailedSessionActions
+          retryBlocker={retryBlocker}
+          onRetry={async () => {
+            sends++;
+            return true;
+          }}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    expect(container.textContent).toBe("");
+  }
+  for (const composerBlocker of [
+    "upload",
+    "repository",
+    "policy",
+    "variable_sets",
+    "personal_decision",
+    "personal_loading",
+  ] as const) {
+    await act(async () =>
+      root!.render(<FailedSessionActions {...actions} composerBlocker={composerBlocker} />),
+    );
+    expect(container.querySelector("button")).toBeNull();
+  }
+  expect(sends).toBe(0);
+});
+
+test("sandbox projection gates compact Retry and structural failures override billing", async () => {
+  const sandboxRecovery = {
+    workspaceId: "workspace-a",
+    sessionId: "session-a",
+    canControl: true,
+    client: {
+      getSandboxRecovery: async () => ({
+        version: 1 as const,
+        status: "unsupported" as const,
+        reason: null,
+        operationId: null,
+        checkpoint: null,
+      }),
+      recoverSandbox: async () => {
+        throw new Error("Rendering must not submit consent");
+      },
+    },
+  };
+  const container = await render(
+    <FailedSessionBanner failure={failure} actions={actions} sandboxRecovery={sandboxRecovery} />,
+  );
+  expect(container.querySelectorAll("button")).toHaveLength(1);
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        failure={{
+          ...failure,
+          reason: "Checkpoint is older than workspace",
+          structuralSandboxFailure: true,
+        }}
+        actions={actions}
+        sandboxRecovery={sandboxRecovery}
         creditExhausted
         workspaceId="workspace-a"
         canBuyCredits
         canConnectModel
-        failure={{
-          reason: "No credits available",
-          failedAt: null,
-          consecutiveRecoveryCount: null,
-        }}
-        actions={{
-          onContinue: async () => true,
-          continuationBlocker: null,
-          modelDisabled: false,
-          onChooseModel: () => {
-            opened++;
-          },
-        }}
+        canChooseModel
       />,
     ),
   );
-  expect(container.textContent).toContain("Buy organization credits or connect a model");
-  expect([...container.querySelectorAll("a")].map((link) => link.textContent)).toEqual([
-    "Buy credits",
-    "Connect a model",
-  ]);
-  expect([...container.querySelectorAll("button")].map((button) => button.textContent)).toEqual([
-    "Choose another model",
-  ]);
-  await act(async () => container.querySelector("button")!.click());
-  expect(opened).toBe(1);
-});
-
-test("credit exhaustion hides administrative recovery links from ordinary members", async () => {
-  const container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-  await act(async () =>
-    root!.render(
-      <FailedSessionBanner
-        creditExhausted
-        workspaceId="workspace-a"
-        failure={{
-          reason: "No credits available",
-          failedAt: null,
-          consecutiveRecoveryCount: null,
-        }}
-        actions={{
-          onContinue: async () => true,
-          continuationBlocker: null,
-          modelDisabled: false,
-          onChooseModel: () => undefined,
-        }}
-      />,
-    ),
-  );
+  expect(container.querySelectorAll('[data-testid="failed-session-banner"]')).toHaveLength(1);
   expect(container.querySelectorAll("a")).toHaveLength(0);
-  expect(container.textContent).toContain("Ask an organization owner or workspace admin");
-  expect(container.textContent).toContain("Choose another model");
+  expect(container.textContent).toContain("Checkpoint is older than workspace");
+  expect(container.textContent).not.toMatch(/Retry|Choose another|credits/);
+  expect(container.querySelector("button")!.textContent).toBe("Check recovery status");
 });
 
-test("shared composer blockers disable Continue and explain the actual unresolved choice", async () => {
-  const ready = {
-    uploadPending: false,
-    repositoryError: null,
-    policyValid: true,
-    variableSetBlocked: false,
-    personalDecision: false,
-    personalLoading: false,
-  };
-  let sends = 0;
-  const props = {
-    onContinue: async () => {
-      sends++;
-      return true;
-    },
-    continuationBlocker: "draft" as const,
-    onChooseModel: () => {},
-    modelDisabled: false,
-  };
-  const container = await render(props);
-  for (const [change, expected] of [
-    [{ uploadPending: true }, "upload"],
-    [{ repositoryError: "Repository access expired" }, "Repository access expired"],
-    [{ repositoryError: "" }, "repository access"],
-    [{ policyValid: false }, "supported model"],
-    [{ variableSetBlocked: true }, "Variable Sets"],
-    [{ personalDecision: true }, "personal resource attachment"],
-    [{ personalLoading: true }, "personal resource access"],
-  ] as const) {
-    const input = { ...ready, ...change };
+test.each(["restored", "connected_machine"] as const)(
+  "%s projection exposes only explicit compact Retry through the structural banner",
+  async (route) => {
+    let retries = 0;
+    const sandboxRecovery = {
+      workspaceId: "workspace-a",
+      sessionId: "session-a",
+      canControl: true,
+      client: {
+        getSandboxRecovery: async () => ({
+          version: 1 as const,
+          status: route === "restored" ? ("restored" as const) : ("unsupported" as const),
+          reason: route === "restored" ? null : "connected_machine_selected",
+          operationId: route === "restored" ? "durable-operation" : null,
+          checkpoint: null,
+        }),
+        recoverSandbox: async () => {
+          throw new Error("Current route must not submit consent");
+        },
+      },
+    };
+    const failureProps = { ...failure, structuralSandboxFailure: true };
+    const retryProps = {
+      ...actions,
+      onRetry: async () => {
+        retries++;
+        return true;
+      },
+    };
+    const container = await render(
+      <FailedSessionBanner
+        failure={failureProps}
+        actions={retryProps}
+        sandboxRecovery={sandboxRecovery}
+      />,
+    );
+    expect(retries).toBe(0);
+    expect(container.querySelectorAll("button")).toHaveLength(1);
+    expect(container.querySelector("button")!.textContent).toBe("Retry");
+    expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
+    expect(container.textContent).not.toContain("Choose another model");
     await act(async () =>
       root!.render(
-        <FailedSessionActions
-          {...props}
-          composerBlocker={getComposerSendBlocker(input)}
-          repositoryError={input.repositoryError}
+        <FailedSessionBanner
+          failure={failureProps}
+          actions={{ ...retryProps, retryBlocker: "paused" }}
+          sandboxRecovery={sandboxRecovery}
         />,
       ),
     );
-    expect(container.querySelector("button")!.disabled).toBe(true);
-    expect(container.textContent).toContain(expected);
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={{ ...failureProps, safetyRefusal: true }}
+          actions={retryProps}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={{ ...failureProps, reason: "The model is unavailable" }}
+          actions={retryProps}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={failureProps}
+          actions={retryProps}
+          sandboxRecovery={sandboxRecovery}
+        />,
+      ),
+    );
+    expect(retries).toBe(0);
     await act(async () => container.querySelector("button")!.click());
+    expect(retries).toBe(1);
+    expect(container.querySelector("button")).toBeNull();
+  },
+);
+
+test("local non-submission remains retryable", async () => {
+  const container = await render(<FailedSessionActions {...actions} onRetry={async () => false} />);
+  await act(async () => container.querySelector("button")!.click());
+  expect(container.querySelector('[role="alert"]')!.textContent).toContain("Could not retry");
+  expect(container.querySelector("button")!.disabled).toBe(false);
+});
+
+test("history hydration retains guards; a distinct failure resets them", async () => {
+  let settle!: (value: boolean) => void;
+  const props = {
+    ...actions,
+    onRetry: () =>
+      new Promise<boolean>((resolve) => {
+        settle = resolve;
+      }),
+  };
+  const container = await render(<FailedSessionActions {...props} />);
+  await act(async () => container.querySelector("button")!.click());
+  await act(async () => root!.render(<FailedSessionActions {...props} failureId="first" />));
+  expect(container.querySelector("button")!.textContent).toBe("Retrying…");
+  await act(async () => root!.render(<FailedSessionActions {...props} failureId="second" />));
+  await act(async () => settle(true));
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+});
+
+test("unknown outcome checks the identical frozen operation instead of a new retry", async () => {
+  const inputs: FailedSessionRetryInput[] = [];
+  function Recovery() {
+    const [retryInput, setRetryInput] = useState<FailedSessionRetryInput | null>(null);
+    const retry = useMemo(
+      () =>
+        createFailedSessionRetry(async (input) => {
+          inputs.push(input);
+          if (inputs.length === 1) throw new Error("Response lost");
+        }, setRetryInput),
+      [],
+    );
+    return (
+      <FailedSessionActions
+        {...actions}
+        retryInput={retryInput}
+        onRetry={() =>
+          retry("failure-a", {
+            model: "selected-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+          })
+        }
+      />
+    );
   }
-  expect(sends).toBe(0);
+  const container = await render(<Recovery />);
+  await act(async () => container.querySelector("button")!.click());
+  expect(container.querySelectorAll("button")).toHaveLength(1);
+  expect(container.querySelector("button")!.textContent).toBe("Check retry");
+  expect(container.textContent).not.toContain("Choose");
+  await act(async () => container.querySelector("button")!.click());
+  expect(inputs).toHaveLength(2);
+  expect(inputs[1]).toBe(inputs[0]);
+  expect(container.querySelector("button")).toBeNull();
+});
+
+test("definitive unsafe retry rejection removes the action", async () => {
+  const container = await render(
+    <FailedSessionActions
+      {...actions}
+      onRetry={async () => {
+        throw new OpenGeniApiError(409, "Unsupported failure", {
+          code: "RETRY_UNSUPPORTED_FAILURE",
+        });
+      }}
+    />,
+  );
+  await act(async () => container.querySelector("button")!.click());
+  expect(container.querySelector("button")).toBeNull();
+  expect(container.querySelector('[role="alert"]')!.textContent).toContain(
+    "cannot be retried safely",
+  );
+});
+
+for (const code of ["RETRY_PAUSED", "RETRY_EXECUTION_UNRESOLVED"] as const) {
+  test(`${code} allows explicit retry after the same failure's transient blocker clears`, async () => {
+    let sends = 0;
+    const onRetry = async () => {
+      if (++sends === 1) throw new OpenGeniApiError(409, "Blocked", { code });
+      return true;
+    };
+    const container = await render(
+      <FailedSessionActions failureId="same-failure" retryBlocker={null} onRetry={onRetry} />,
+    );
+    await act(async () => container.querySelector("button")!.click());
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe(
+      code === "RETRY_PAUSED" ? "This session is paused." : "Earlier work is still settling.",
+    );
+    await act(async () =>
+      root!.render(
+        <FailedSessionActions
+          failureId="same-failure"
+          retryBlocker={code === "RETRY_PAUSED" ? "paused" : "queued"}
+          onRetry={onRetry}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")).toBeNull();
+    await act(async () =>
+      root!.render(
+        <FailedSessionActions failureId="same-failure" retryBlocker={null} onRetry={onRetry} />,
+      ),
+    );
+    expect(sends).toBe(1);
+    await act(async () => container.querySelector("button")!.click());
+    expect(sends).toBe(2);
+    expect(container.querySelector("button")).toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+}
+
+test("unsupported model directs to existing picker; a changed model permits recovery", async () => {
+  const unavailable = {
+    ...failure,
+    reason: "The model `example` is not supported with this account.",
+  };
+  const container = await render(
+    <FailedSessionBanner failure={unavailable} actions={actions} canChooseModel />,
+  );
+  expect(container.textContent).toBe("This model isn’t available. Choose another below.");
+  expect(container.querySelector("button")).toBeNull();
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner failure={unavailable} actions={actions} canChooseModel={false} />,
+    ),
+  );
+  expect(container.textContent).toBe("This model isn’t available.");
+  expect(container.querySelector("button")).toBeNull();
+  await act(async () =>
+    root!.render(<FailedSessionBanner failure={unavailable} actions={actions} modelChanged />),
+  );
+  expect(container.querySelector("button")!.textContent).toBe("Retry");
+});
+
+test("safety refusal preserves draft and has no recovery action", async () => {
+  const container = await render(
+    <>
+      <FailedSessionBanner failure={{ ...failure, safetyRefusal: true }} actions={actions} />
+      <textarea defaultValue="My draft" />
+    </>,
+  );
+  expect(container.querySelector("button")).toBeNull();
+  expect(container.querySelector("textarea")!.value).toBe("My draft");
+});
+
+test("billing offers at most one authorized action and never Retry", async () => {
+  const container = await render(null);
+  for (const [canBuyCredits, canConnectModel, expected] of [
+    [true, true, "Buy credits"],
+    [false, true, "Connect a model"],
+    [false, false, null],
+  ] as const) {
+    await act(async () =>
+      root!.render(
+        <FailedSessionBanner
+          failure={failure}
+          creditExhausted
+          workspaceId="workspace-a"
+          canBuyCredits={canBuyCredits}
+          canConnectModel={canConnectModel}
+          actions={actions}
+        />,
+      ),
+    );
+    expect(container.querySelectorAll("a")).toHaveLength(expected ? 1 : 0);
+    expect(container.querySelector("a")?.textContent ?? null).toBe(expected);
+    expect(container.querySelector("button")).toBeNull();
+  }
+});
+
+test("unknown provider evidence never invents expiry, reset or connection classification", async () => {
+  const container = await render(
+    <FailedSessionBanner
+      failure={{ ...failure, reason: "Connection failed." }}
+      actions={actions}
+    />,
+  );
+  expect(container.textContent).toBe("Connection failed.Retry");
+  expect(container.textContent).not.toMatch(/Codex|expired|reset|reconnect/i);
+});
+
+test("unavailable recovery chunk preserves error and composer draft", async () => {
+  function Unavailable(): never {
+    throw new Error("fixture unavailable");
+  }
+  const container = await render(
+    <>
+      <FailureRecoveryBoundary fallback={<p role="alert">Connection failed.</p>}>
+        <Unavailable />
+      </FailureRecoveryBoundary>
+      <textarea defaultValue="My draft" />
+    </>,
+  );
+  expect(container.querySelector('[role="alert"]')!.textContent).toBe("Connection failed.");
+  expect(container.querySelector("textarea")!.value).toBe("My draft");
 });

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { randomBytes } from "node:crypto";
-import postgres from "postgres";
+import type postgres from "postgres";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   createDb,
@@ -22,22 +22,12 @@ import {
   type Database,
   type DbClient,
 } from "../src/index";
-import { migrate } from "../src/migrate";
 
 // Integration proof for the codex_subscription_credentials accessors: round-trip
 // decryption, secret-free status reads, refresh rotation, disconnect, multi-account
 // active selection, and RLS isolation — under a NON-superuser role so FORCE RLS is
-// genuinely enforced (a superuser bypasses RLS). Throwaway pg17.
-
-// Fixed Docker listeners stay above Linux's default ephemeral client-port range;
-// the container name binds the listener contract across worktrees.
-const PORT = 61444;
-const CONTAINER = `ogcodex-pg-creds-${PORT}`;
-const PASSWORD = "x";
-const APP_PASSWORD = "apppw";
-const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const APP_URL = `postgres://codex_app:${APP_PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const IMAGE = "pgvector/pgvector:pg17";
+// genuinely enforced (a superuser bypasses RLS). The shared fixture provisions
+// the canonical application role against the full migration ledger.
 
 const rawKey = randomBytes(32);
 const settings = { environmentsEncryptionKey: rawKey.toString("base64") } as unknown as Settings;
@@ -47,42 +37,14 @@ function encTokens(t: { access_token: string; refresh_token: string; id_token: s
   return encryptEnvironmentValue(key, JSON.stringify(t));
 }
 
-function docker(args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-}
-function removeContainer(): void {
-  try {
-    docker(["rm", "-f", "-v", CONTAINER]);
-  } catch {
-    /* gone */
-  }
-}
-async function waitForReady(): Promise<void> {
-  const deadline = Date.now() + 60_000;
-  while (true) {
-    try {
-      const probe = postgres(ADMIN_URL, { max: 1, connect_timeout: 2 });
-      try {
-        await probe`SELECT 1`;
-        return;
-      } finally {
-        await probe.end();
-      }
-    } catch (err) {
-      if (Date.now() > deadline)
-        throw new Error(`postgres not ready: ${String(err)}`, { cause: err });
-      await new Promise((r) => setTimeout(r, 500));
-    }
-  }
-}
-
 let available = true;
+let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
-  // Seeded as superuser (bypasses RLS) so the accessors below exercise RLS under codex_app.
+  // Seed as admin so the accessors below exercise RLS under the application role.
   const [a] = await admin<
     { id: string }[]
   >`insert into managed_accounts (name) values ('acct') returning id`;
@@ -120,56 +82,27 @@ async function connectAccount(
 }
 
 beforeAll(async () => {
-  try {
-    removeContainer();
-    docker([
-      "run",
-      "--rm",
-      "-d",
-      "-e",
-      `POSTGRES_PASSWORD=${PASSWORD}`,
-      "-p",
-      `${PORT}:5432`,
-      "--name",
-      CONTAINER,
-      IMAGE,
-    ]);
-  } catch (err) {
+  shared = await acquireSharedTestDatabase("codex-credentials");
+  if (!shared) {
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+      throw new Error("Codex credential regressions require a real PostgreSQL database");
+    }
     available = false;
-    console.warn(`[codex-credentials] docker unavailable, skipping: ${String(err)}`);
+    console.warn("[codex-credentials] postgres unavailable, skipping");
     return;
   }
-  await waitForReady();
-  await migrate(ADMIN_URL);
-  admin = postgres(ADMIN_URL, { max: 4 });
-  // A non-superuser login role so FORCE RLS on the table actually applies to it.
-  await admin.unsafe(
-    `DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='codex_app') THEN CREATE ROLE codex_app LOGIN PASSWORD '${APP_PASSWORD}'; END IF; END $$;`,
-  );
-  await admin.unsafe(
-    `GRANT USAGE ON SCHEMA public, opengeni_private TO codex_app;` +
-      ` GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO codex_app;` +
-      ` GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO codex_app;` +
-      ` GRANT EXECUTE ON FUNCTION public.session_reference_visible(uuid, uuid, uuid) TO codex_app;` +
-      ` GRANT EXECUTE ON FUNCTION public.get_workspace_kind(uuid, uuid) TO codex_app;` +
-      ` GRANT EXECUTE ON FUNCTION public.resolve_workspace_codex_subscription_source(uuid, uuid) TO codex_app;`,
-  );
-  client = createDb(APP_URL);
+  admin = shared.admin;
+  const appRole = decodeURIComponent(new URL(shared.appUrl).username);
+  const [posture] = await admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
+    select rolsuper, rolbypassrls from pg_roles where rolname = ${appRole}`;
+  expect(posture).toEqual({ rolsuper: false, rolbypassrls: false });
+  client = createDb(shared.appUrl);
   db = client.db;
 }, 180_000);
 
 afterAll(async () => {
-  try {
-    await client?.close();
-  } catch {
-    /* noop */
-  }
-  try {
-    await admin?.end();
-  } catch {
-    /* noop */
-  }
-  removeContainer();
+  await client?.close().catch(() => undefined);
+  await shared?.release();
 });
 
 describe("codex_subscription_credentials accessors", () => {

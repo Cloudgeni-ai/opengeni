@@ -294,6 +294,68 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     ).toBeLessThanOrEqual(observations[0]!.durationMs + 2);
   });
 
+  test("observes capture admission waits after startup without counting them as provider calls", async () => {
+    const backend = new FakeBackend("capture-wait");
+    const observations: Parameters<NonNullable<RoutingSandboxSessionDeps["onCaptureWait"]>>[0][] =
+      [];
+    let providerCalls = 0;
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async ({ onCaptureWait }) => {
+        onCaptureWait?.({ durationMs: 54_600, outcome: "completed" });
+        return "admitted";
+      },
+      afterMutation: async () => undefined,
+      onCaptureWait: (observation) => observations.push(observation),
+      onOperation: () => {
+        providerCalls += 1;
+      },
+    });
+    await proxy.exec({ cmd: "first" });
+    await proxy.exec({ cmd: "second" });
+    expect(observations.filter((o) => o.captureWaitStage === "admission")).toEqual([
+      {
+        backend: "modal",
+        op: "exec",
+        outcome: "ok",
+        durationMs: 54_600,
+        captureWaitStage: "admission",
+      },
+      {
+        backend: "modal",
+        op: "exec",
+        outcome: "ok",
+        durationMs: 54_600,
+        captureWaitStage: "admission",
+      },
+    ]);
+    expect(providerCalls).toBe(2);
+  });
+
+  test("failed capture wait and throwing observer preserve admission rejection", async () => {
+    let called = false;
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        session: new FakeBackend("blocked"),
+        sandboxId: null,
+        kind: "modal",
+      }),
+      beforeMutation: async ({ onCaptureWait }) => {
+        onCaptureWait?.({ durationMs: 100, outcome: "failed" });
+        throw new Error("capture gate rejected");
+      },
+      onCaptureWait: (observation) => {
+        called = true;
+        expect(observation).toMatchObject({ captureWaitStage: "admission", outcome: "failed" });
+        throw new Error("observer unavailable");
+      },
+    });
+    await expect(proxy.exec({ cmd: "never-run" })).rejects.toThrow("capture gate rejected");
+    expect(called).toBe(true);
+  });
+
   test("omits first-operation phases that never ran after route resolution fails", async () => {
     const observations: Parameters<
       NonNullable<RoutingSandboxSessionDeps["onFirstOperation"]>
@@ -1272,7 +1334,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(acknowledgment).toBeGreaterThan(events.lastIndexOf("capture:modal:179:5:8"));
   });
 
-  test("owner refresh captures exact adopted command without pointer lookup or observation", async () => {
+  test("owner refresh allows terminal delivery without pointer lookup or observation", async () => {
     let pointerReads = 0;
     let observed = 0;
     let providerReads = 0;
@@ -1288,7 +1350,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
         session: {
           execCommand: async () => "Process running with session ID 197\n\nOutput:\nstart",
           writeStdin: async (args) => {
-            expect(args).toEqual({ sessionId: 197, chars: "", yieldTimeMs: 1 });
+            expect(args).toEqual({ sessionId: 197, chars: "", yieldTimeMs: 250 });
             providerReads++;
             return "Process exited with code 0\n\nOutput:\ntail";
           },
@@ -1330,8 +1392,9 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       afterMutation: async () => {
         parentPromotions += 1;
       },
-      adoptProcessAsBackgroundCommand: async ({ process }) => {
+      adoptProcessAsBackgroundCommand: async ({ process, command }) => {
         expect(process.providerSessionId).toBe(175);
+        expect(command).toBe("bun run render --composition Intro");
         backgroundAdoptions += 1;
       },
     });
@@ -1340,7 +1403,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(parentPromotions).toBe(1);
     expect(backgroundAdoptions).toBe(0);
 
-    await proxy.adoptRetainedProcessAsBackgroundCommand(175);
+    await proxy.adoptRetainedProcessAsBackgroundCommand(175, "bun run render --composition Intro");
     await proxy.adoptRetainedProcessAsBackgroundCommand(175);
     expect(backgroundAdoptions).toBe(1);
   });
@@ -2267,6 +2330,66 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(replacement.calls).toEqual(["after"]);
     expect(reboundCalls).toBe(2);
   });
+
+  for (const preparationFails of [false, true]) {
+    test(`home repair joins client preparation before publication (${preparationFails ? "failure" : "success"})`, async () => {
+      const original = new FakeBackend("original");
+      const replacement = new FakeBackend("prepared-replacement");
+      const entered = Promise.withResolvers<void>();
+      const preparation = Promise.withResolvers<void>();
+      const ptr = mutablePointer();
+      let preparations = 0;
+      let fail = preparationFails;
+      const failure = new Error("client preparation failed");
+      const proxy = new RoutingSandboxSession({
+        defaultResolved: { session: original, sandboxId: null, kind: "modal" },
+        readPointer: ptr.read,
+        resolveActiveBackend: async (pointer) => {
+          if (pointer.activeEpoch === 0) {
+            return { session: original, sandboxId: null, kind: "modal" };
+          }
+          preparations += 1;
+          entered.resolve();
+          await preparation.promise;
+          if (fail) throw failure;
+          return { session: replacement, sandboxId: null, kind: "modal" };
+        },
+      });
+      await proxy.exec({ cmd: "before" });
+      ptr.swap(null);
+      const first = proxy.exec({ cmd: "first" });
+      const second = proxy.exec({ cmd: "second" });
+      const settled = Promise.allSettled([first, second]);
+      await entered.promise;
+      expect(preparations).toBe(1);
+      expect(replacement.calls).toEqual([]);
+      expect(proxy.state).toEqual(original.state);
+      preparation.resolve();
+      const results = await settled;
+      expect(preparations).toBe(1);
+      expect(original.calls).toEqual(["before"]);
+      if (preparationFails) {
+        expect(results).toEqual([
+          { status: "rejected", reason: failure },
+          { status: "rejected", reason: failure },
+        ]);
+        expect(replacement.calls).toEqual([]);
+        expect(proxy.state).toEqual(original.state);
+        // A failed resolution must not poison the epoch cache or leave a
+        // rejected single-flight entry behind. A new independent op can retry.
+        fail = false;
+        await proxy.exec({ cmd: "retry" });
+        expect(preparations).toBe(2);
+        expect(replacement.calls).toEqual(["retry"]);
+      } else {
+        expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+        expect(replacement.calls).toEqual(["first", "second"]);
+      }
+      await proxy.exec({ cmd: "cached" });
+      expect(preparations).toBe(preparationFails ? 2 : 1);
+      expect(proxy.state).toEqual(replacement.state);
+    });
+  }
 
   test("selfhosted target -> a SelfhostedSession bound to the enrollment agentId, fenced under active_epoch", async () => {
     const mock = new MockAgentResponder({ hostname: "the-laptop" });

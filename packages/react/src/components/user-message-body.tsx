@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { cn } from "../lib/cn";
+import { useTimelineSearchReveal } from "./timeline-search";
 
 const FALLBACK_LINE_THRESHOLD = 12;
 const FALLBACK_TEXT_THRESHOLD = 900;
@@ -268,6 +269,12 @@ export function UserMessageBody({
   const [expanded, setExpanded] = useState(
     () => disclosure?.expandedByMessageId.get(messageId) ?? false,
   );
+  const searchReveal = useTimelineSearchReveal();
+  useLayoutEffect(() => {
+    if (!searchReveal) return;
+    setExpanded(true);
+    disclosure?.expandedByMessageId.set(messageId, true);
+  }, [searchReveal, messageId, disclosure]);
   const collapsibleRef = useRef(userMessageLikelyNeedsDisclosure(text));
   const expandedRef = useRef(expanded);
   expandedRef.current = expanded;

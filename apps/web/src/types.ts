@@ -37,7 +37,6 @@ export type {
   CapabilityCatalogResponse,
   CapabilityInstallation,
   CapabilityKind,
-  CapabilityPack,
   CapabilitySource,
   Channel,
   ClientConfig,
@@ -98,10 +97,6 @@ export type {
   KnowledgeMemoryKind,
   KnowledgeMemoryStatus,
   KnowledgeSourceKind,
-  PackComponentResolution,
-  PackInstallation,
-  PackInstallationPreview,
-  PackUninstallPreview,
   PluginComponentPreview,
   PluginInstallationSummary,
   PluginPreview,
@@ -111,7 +106,7 @@ export type {
   Permission as SdkPermission,
   LatencyMode,
   ManagedOrganizationMembership,
-  McpConnectionAuthoritySelection,
+  McpConnectionAccountSelection,
   PersonalGitHubConnectionMetadata,
   PersonalGitHubConnectionStatusResponse,
   PersonalGitHubRepositoryCatalogItem,
@@ -214,7 +209,7 @@ export type TurnSubmission = {
   firstPartyMcpPermissions?: string[];
   firstPartyMcpTools?: import("@opengeni/sdk").FirstPartyMcpToolName[];
   personalResourceAttachment?: import("@opengeni/sdk").PersonalResourceAttachmentIntent;
-  connectionAuthorities?: import("@opengeni/sdk").McpConnectionAuthoritySelection[];
+  connectionAccounts?: import("@opengeni/sdk").McpConnectionAccountSelection[];
 };
 
 export type AuthSession = {

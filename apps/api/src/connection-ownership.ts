@@ -85,13 +85,7 @@ const RESERVED_MACHINE_SUBJECT_NAMESPACES = [
 export function isPersonalConnectionOwnerPrincipal(access: AccessGrantAuthorization): boolean {
   const { grant } = access;
   return (
-    // The anti-substitution invariant `requireConnectionAuthorityOwner` uses for
-    // the same question: every context grant agrees on principal kind, delegated
-    // flag and service flags, and the selected grant's account resolves to
-    // exactly one matching account grant. Without it a grant whose account has
-    // no matching account grant (a surviving membership row in an organization
-    // where the membership is no longer active) could mint a personal
-    // Connection that the sibling helper would refuse.
+    // Every context grant must agree on the authenticated principal and account.
     access.contextIntegrity &&
     access.authenticatedSubjectId === grant.subjectId &&
     grant.principalKind === "human_session" &&
@@ -132,8 +126,7 @@ export function personalOnlyConnectionPrincipalMessage(label: string): string {
  * rejects every reserved machine-subject namespace as defence-in-depth. The
  * sibling guards a self-service authority surface where the caller claims to
  * *be* the owner (403 "not you"), while this one rejects an ownership *value*
- * that is unavailable to the caller, alongside `assertOwnershipAllowed`'s
- * existing 422 convention.
+ * that is unavailable to the caller (422).
  */
 export function assertPersonalConnectionOwnerPrincipal(
   access: AccessGrantAuthorization,
