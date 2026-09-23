@@ -41365,89 +41365,113 @@ export async function registerPendingSessionToolCall(
   db: Database,
   input: PendingSessionToolCallInput,
 ): Promise<{ accepted: boolean; registered: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const fence = await lockTurnAttemptWriteFenceTx(tx, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: input.executionGeneration,
-          attemptId: input.attemptId,
-        });
-        if (!fence.allowed) return { accepted: false, registered: false };
-        const inserted = await tx
-          .insert(schema.sessionPendingToolCalls)
-          .values(
-            withLosslessContentWriteVersion(
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: input.turnId,
-                executionGeneration: input.executionGeneration,
-                attemptId: input.attemptId,
-                callId: input.callId,
-                callType: input.callType,
-                callItem: input.callItem,
-                modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
-              },
-              "callItem",
-              "callItemCodecVersion",
-            ),
-          )
-          .onConflictDoNothing({
-            target: [
-              schema.sessionPendingToolCalls.workspaceId,
-              schema.sessionPendingToolCalls.turnId,
-              schema.sessionPendingToolCalls.callId,
-            ],
-          })
-          .returning({ id: schema.sessionPendingToolCalls.id });
-        if (inserted.length === 0) {
-          const [pending] = await tx
-            .select({
-              id: schema.sessionPendingToolCalls.id,
-              modelToolOutputTruncationTokens:
-                schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
-            })
-            .from(schema.sessionPendingToolCalls)
-            .where(
-              and(
-                eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
-                eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
-                eq(schema.sessionPendingToolCalls.turnId, input.turnId),
-                eq(schema.sessionPendingToolCalls.callId, input.callId),
+  const registerOnce = () =>
+    withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (tx) => {
+          const fence = await lockTurnAttemptWriteFenceTx(tx, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            executionGeneration: input.executionGeneration,
+            attemptId: input.attemptId,
+          });
+          if (!fence.allowed) return { accepted: false, registered: false };
+          const inserted = await tx
+            .insert(schema.sessionPendingToolCalls)
+            .values(
+              withLosslessContentWriteVersion(
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: input.turnId,
+                  executionGeneration: input.executionGeneration,
+                  attemptId: input.attemptId,
+                  callId: input.callId,
+                  callType: input.callType,
+                  callItem: input.callItem,
+                  modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
+                },
+                "callItem",
+                "callItemCodecVersion",
               ),
             )
-            .for("update")
-            .limit(1);
-          if (!pending) {
-            throw new Error(
-              `Pending SDK tool call disappeared during registration: ${input.callId}`,
-            );
-          }
-          assertPendingToolOutputPolicyMatches(
-            pending.modelToolOutputTruncationTokens,
-            input.modelToolOutputTruncationTokens,
-            input.callId,
-          );
-          if (
-            pending.modelToolOutputTruncationTokens === null &&
-            input.modelToolOutputTruncationTokens !== undefined
-          ) {
-            await tx
-              .update(schema.sessionPendingToolCalls)
-              .set({
-                modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+            .onConflictDoNothing({
+              target: [
+                schema.sessionPendingToolCalls.workspaceId,
+                schema.sessionPendingToolCalls.turnId,
+                schema.sessionPendingToolCalls.callId,
+              ],
+            })
+            .returning({ id: schema.sessionPendingToolCalls.id });
+          if (inserted.length === 0) {
+            const [pending] = await tx
+              .select({
+                id: schema.sessionPendingToolCalls.id,
+                accountId: schema.sessionPendingToolCalls.accountId,
+                callType: schema.sessionPendingToolCalls.callType,
+                callItem: schema.sessionPendingToolCalls.callItem,
+                callItemCodecVersion: schema.sessionPendingToolCalls.callItemCodecVersion,
+                modelToolOutputTruncationTokens:
+                  schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
               })
-              .where(eq(schema.sessionPendingToolCalls.id, pending.id));
+              .from(schema.sessionPendingToolCalls)
+              .where(
+                and(
+                  eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+                  eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+                  eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+                  eq(schema.sessionPendingToolCalls.callId, input.callId),
+                ),
+              )
+              .for("update")
+              .limit(1);
+            if (
+              !pending ||
+              pending.accountId !== input.accountId ||
+              pending.callType !== input.callType ||
+              stableJson(
+                fromPostgresLosslessJson(pending.callItem, pending.callItemCodecVersion),
+              ) !== stableJson(input.callItem)
+            ) {
+              // A duplicate acknowledges only this exact call. It neither
+              // replaces the originating attempt nor authorizes effect replay.
+              throw new Error("Pending tool receipt conflicts with the registered call");
+            }
+            assertPendingToolOutputPolicyMatches(
+              pending.modelToolOutputTruncationTokens,
+              input.modelToolOutputTruncationTokens,
+              input.callId,
+            );
+            if (
+              pending.modelToolOutputTruncationTokens === null &&
+              input.modelToolOutputTruncationTokens !== undefined
+            ) {
+              await tx
+                .update(schema.sessionPendingToolCalls)
+                .set({
+                  modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+                })
+                .where(eq(schema.sessionPendingToolCalls.id, pending.id));
+            }
           }
-        }
-        return { accepted: true, registered: inserted.length === 1 };
-      }),
+          return { accepted: true, registered: inserted.length === 1 };
+        }),
+    );
+  // Only PostgreSQL-confirmed rollback is retryable. Re-enter RLS and acquire
+  // the complete attempt fence each time; never include inference or tools.
+  return await runIdempotentPersistenceTransaction(
+    {
+      stage: "pending_tool_registration",
+      maxAttempts: 3,
+      onRetry: async ({ attempt }) => {
+        await new Promise((resolve) => setTimeout(resolve, 25 * attempt));
+      },
+    },
+    registerOnce,
   );
 }
 
