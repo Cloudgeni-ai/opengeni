@@ -219,10 +219,7 @@ describe("stream control authorization", () => {
       },
     );
     expect(cell).not.toBeNull();
-    const claims = await verifyStreamToken(
-      resolveStreamTokenSecret(controlSettings)!,
-      cell!.token,
-    );
+    const claims = await verifyStreamToken(resolveStreamTokenSecret(controlSettings)!, cell!.token);
     expect(claims?.mode).toBe("control");
   });
 });

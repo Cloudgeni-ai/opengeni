@@ -881,8 +881,7 @@ export async function mintDesktopStream(
   const { db, settings, bus } = services;
   const { accountId, workspaceId, session } = input;
   const lease = input.lease;
-  const canControl =
-    input.canControl === true && settings.sandboxDesktopInteractive !== false;
+  const canControl = input.canControl === true && settings.sandboxDesktopInteractive !== false;
   // The scoped token's viewerId must be a UUID (StreamTokenPayload). The GET caps
   // handshake passes grant.subjectId, which is a non-UUID for an API-key principal
   // ("configured:key") — coerce it to a deterministic UUID so the mint never 500s
@@ -1524,8 +1523,7 @@ export async function mintSelfhostedStream(
       leaseEpoch: input.activeEpoch,
       streamTokenSecret: secret,
       port: input.port,
-      mode:
-        settings.streamControlEnabled && input.mode === "control" ? "control" : "view",
+      mode: settings.streamControlEnabled && input.mode === "control" ? "control" : "view",
       ...(input.viewerAuthority ?? {}),
     });
     return {

@@ -468,6 +468,49 @@ async fn authorized_desktop_control_forwards_only_typed_input() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn desktop_input_with_a_different_channel_id_is_dropped() {
+    let port = free_port().await;
+    let (base, _shutdown, _metrics) = start_relay_on(port, |config| {
+        config.stream_control_enabled = true;
+    })
+    .await;
+    let mut producer = RelayChannel::register(producer_config(&base, DESKTOP_STREAM_PORT))
+        .await
+        .expect("producer register");
+    let (mut viewer, ack) = Viewer::connect_with_mode(&base, DESKTOP_STREAM_PORT, 0, 0, "control")
+        .await
+        .expect("control viewer connect");
+    assert!(ack.accepted);
+
+    viewer
+        .socket
+        .send(WsMessage::Binary(
+            desktop_input("another-channel").encode(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), producer.recv())
+            .await
+            .is_err(),
+        "desktop input bound to a different channel must not reach the agent"
+    );
+
+    let input = desktop_input(&viewer.channel_id);
+    viewer
+        .socket
+        .send(WsMessage::Binary(input.encode()))
+        .await
+        .unwrap();
+    let received = tokio::time::timeout(Duration::from_secs(5), producer.recv())
+        .await
+        .expect("authorized desktop input timed out")
+        .expect("producer recv ok")
+        .expect("authorized desktop input");
+    assert_eq!(received.encode(), input.encode());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn desktop_input_is_rejected_on_pty_and_unknown_ports_even_with_control() {
     let port = free_port().await;
     let (base, _shutdown, _metrics) = start_relay_on(port, |config| {
@@ -541,6 +584,23 @@ async fn agent_desktop_input_is_rejected_but_frames_and_close_are_forwarded() {
                 .is_err(),
             "agent DesktopInput must be rejected on port {channel_port}"
         );
+        let wrong_channel_frame = RelayMessage::Frame(v1::StreamFrame {
+            channel_id: format!("forged-channel-{channel_port}"),
+            seq: 0,
+            data: b"forged channel frame".to_vec().into(),
+            ..Default::default()
+        });
+        producer
+            .socket
+            .send(WsMessage::Binary(wrong_channel_frame.encode()))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), next_msg(&mut viewer.socket))
+                .await
+                .is_err(),
+            "frames bound to another channel must not reach the viewer"
+        );
         producer.send_frame(0, b"agent output").await;
         let output = tokio::time::timeout(Duration::from_secs(5), viewer.recv_frame())
             .await
@@ -553,6 +613,21 @@ async fn agent_desktop_input_is_rejected_but_frames_and_close_are_forwarded() {
             channel_id: viewer.channel_id.clone(),
             ..Default::default()
         });
+        let wrong_channel_close = RelayMessage::Close(v1::StreamClose {
+            channel_id: format!("forged-channel-{channel_port}"),
+            ..Default::default()
+        });
+        viewer
+            .socket
+            .send(WsMessage::Binary(wrong_channel_close.encode()))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), next_msg(&mut producer.socket))
+                .await
+                .is_err(),
+            "a close bound to another channel must not tear down the attached channel"
+        );
         viewer
             .socket
             .send(WsMessage::Binary(close.encode()))

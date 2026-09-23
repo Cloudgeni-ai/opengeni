@@ -297,7 +297,13 @@ pub(crate) mod conn {
         match inbound {
             Some(Ok(WsMessage::Binary(bytes))) => match RelayMessage::decode(&bytes) {
                 Ok(msg) => {
-                    if !may_forward_message(est.key.port, est.role, est.can_control_desktop, &msg) {
+                    if !may_forward_message(
+                        &est.key.channel_id,
+                        est.key.port,
+                        est.role,
+                        est.can_control_desktop,
+                        &msg,
+                    ) {
                         tracing::debug!(port = est.key.port, role = ?est.role, "relay: dropping unauthorized input");
                         return true;
                     }
@@ -471,17 +477,24 @@ pub(crate) mod conn {
     /// PTY frames carry terminal typing, authorized by the API's terminal:attach
     /// check. Only typed desktop input uses the desktop-control claim and flag.
     fn may_forward_message(
+        channel_id: &str,
         port: u32,
         role: Role,
         can_control_desktop: bool,
         message: &RelayMessage,
     ) -> bool {
         match message {
-            RelayMessage::Frame(_) => role == Role::Agent || port == PTY_STREAM_PORT,
-            RelayMessage::DesktopInput(_) => {
-                role == Role::Client && port == DESKTOP_STREAM_PORT && can_control_desktop
+            RelayMessage::Frame(frame) => {
+                frame.channel_id == channel_id && (role == Role::Agent || port == PTY_STREAM_PORT)
             }
-            RelayMessage::Close(_) | RelayMessage::Open(_) | RelayMessage::OpenAck(_) => true,
+            RelayMessage::DesktopInput(input) => {
+                input.channel_id == channel_id
+                    && role == Role::Client
+                    && port == DESKTOP_STREAM_PORT
+                    && can_control_desktop
+            }
+            RelayMessage::Close(close) => close.channel_id == channel_id,
+            RelayMessage::Open(_) | RelayMessage::OpenAck(_) => true,
         }
     }
 
@@ -580,34 +593,84 @@ pub(crate) mod conn {
 
         #[test]
         fn forwarding_respects_port_role_and_desktop_control() {
-            let frame = RelayMessage::Frame(v1::StreamFrame::default());
-            let desktop_input = RelayMessage::DesktopInput(v1::DesktopInput::default());
+            let channel_id = "channel-a";
+            let frame = RelayMessage::Frame(v1::StreamFrame {
+                channel_id: channel_id.to_string(),
+                ..Default::default()
+            });
+            let wrong_channel_frame = RelayMessage::Frame(v1::StreamFrame {
+                channel_id: "channel-b".to_string(),
+                ..Default::default()
+            });
+            let desktop_input = RelayMessage::DesktopInput(v1::DesktopInput {
+                channel_id: channel_id.to_string(),
+                ..Default::default()
+            });
+            let wrong_channel_desktop_input = RelayMessage::DesktopInput(v1::DesktopInput {
+                channel_id: "channel-b".to_string(),
+                ..Default::default()
+            });
             let lifecycle = [
-                RelayMessage::Close(v1::StreamClose::default()),
+                RelayMessage::Close(v1::StreamClose {
+                    channel_id: channel_id.to_string(),
+                    ..Default::default()
+                }),
                 RelayMessage::Open(v1::StreamOpen::default()),
                 RelayMessage::OpenAck(v1::StreamOpenAck::default()),
             ];
+            let wrong_channel_close = RelayMessage::Close(v1::StreamClose {
+                channel_id: "channel-b".to_string(),
+                ..Default::default()
+            });
             for port in [PTY_STREAM_PORT, DESKTOP_STREAM_PORT, 9999] {
                 for role in [Role::Client, Role::Agent] {
                     for can_control_desktop in [false, true] {
                         assert_eq!(
-                            may_forward_message(port, role, can_control_desktop, &frame),
+                            may_forward_message(channel_id, port, role, can_control_desktop, &frame),
                             role == Role::Agent || port == PTY_STREAM_PORT,
                             "Frame on port {port}, role {role:?}, control {can_control_desktop}"
                         );
                         assert_eq!(
-                            may_forward_message(port, role, can_control_desktop, &desktop_input),
+                            may_forward_message(
+                                channel_id,
+                                port,
+                                role,
+                                can_control_desktop,
+                                &desktop_input
+                            ),
                             role == Role::Client && port == DESKTOP_STREAM_PORT && can_control_desktop,
                             "DesktopInput on port {port}, role {role:?}, control {can_control_desktop}"
                         );
+                        assert!(!may_forward_message(
+                            channel_id,
+                            port,
+                            role,
+                            can_control_desktop,
+                            &wrong_channel_frame
+                        ));
+                        assert!(!may_forward_message(
+                            channel_id,
+                            port,
+                            role,
+                            can_control_desktop,
+                            &wrong_channel_desktop_input
+                        ));
                         for message in &lifecycle {
                             assert!(may_forward_message(
+                                channel_id,
                                 port,
                                 role,
                                 can_control_desktop,
                                 message
                             ));
                         }
+                        assert!(!may_forward_message(
+                            channel_id,
+                            port,
+                            role,
+                            can_control_desktop,
+                            &wrong_channel_close
+                        ));
                     }
                 }
             }

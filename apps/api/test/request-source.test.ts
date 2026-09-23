@@ -30,7 +30,7 @@ describe("trusted request source address", () => {
     expect(await response.text()).toBe("10.0.0.10");
   });
 
-  test("selects from the trusted side so prepended caller values cannot rotate the source", async () => {
+  test("uses the client address appended by the trusted proxy, not caller-prepended values", async () => {
     const app = new Hono();
     app.get("/source", (context) => context.text(trustedRequestSourceAddress(context, 1)));
 

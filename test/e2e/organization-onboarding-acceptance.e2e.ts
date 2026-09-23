@@ -25,6 +25,7 @@ import {
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
+import { apiRequestBindingsForTransportPeer } from "../../apps/api/src/http/request-source";
 import {
   InMemoryManagedEmailTransport,
   type CapturedManagedEmail,
@@ -393,6 +394,8 @@ beforeAll(async () => {
   const settings = testSettings({
     environment: "test",
     productAccessMode: "managed",
+    // The SDK helper below models source addresses emitted by one trusted edge.
+    apiTrustedProxyHops: 1,
     databaseUrl,
     rlsStrategy: "force",
     runtimeDatabaseRole: "opengeni_app",
@@ -442,10 +445,13 @@ beforeAll(async () => {
     hostname: "127.0.0.1",
     port: Number(new URL(publicOrigin).port),
     idleTimeout: 60,
-    fetch: async (request) => {
+    fetch: async (request, server) => {
       const url = new URL(request.url);
       if (url.pathname.startsWith("/v1/") || url.pathname === "/healthz") {
-        return await api.fetch(request);
+        return await api.fetch(
+          request,
+          apiRequestBindingsForTransportPeer(server.requestIP(request)?.address),
+        );
       }
       const safePath = decodeURIComponent(url.pathname).replace(/^\/+/, "");
       const requested = safePath.includes("..") ? null : Bun.file(`${webDist}/${safePath}`);

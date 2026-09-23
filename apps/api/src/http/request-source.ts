@@ -16,8 +16,10 @@ export function apiRequestBindingsForTransportPeer(
 /**
  * Resolve a quota/audit source from the server-owned transport peer. Forwarded
  * values are considered only when the operator declares an exact trusted proxy
- * hop count; the chain is then walked from the server side so caller-prepended
- * values cannot replace the address inserted by the trusted edge.
+ * hop count. Each trusted proxy must append the address of its incoming peer,
+ * or overwrite the header with the original client address. Walking that many
+ * proxy-added values from the server side keeps caller-prepended values from
+ * replacing the client address observed by the trusted edge.
  */
 export function trustedRequestSourceAddress(c: Context, trustedProxyHops: number): string {
   const bindings = c.env as ApiRequestBindings | undefined;

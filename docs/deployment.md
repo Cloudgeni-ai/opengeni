@@ -248,9 +248,13 @@ removed. Use native OAuth connections; see [cutover notes](remote-mcp-credential
 Public API rate limits use the transport peer address reported by Bun and ignore
 `X-Forwarded-For` and `X-Real-IP` by default. To use a fixed trusted proxy chain,
 set `OPENGENI_API_TRUSTED_PROXY_HOPS=<count>` and block direct access to the API.
-Each trusted proxy must append or overwrite `X-Forwarded-For`; OpenGeni selects
-the address from the server side of that chain. Missing or short chains fall
-back to the transport peer.
+Each trusted proxy must append the address of the peer that connected to it, or
+overwrite `X-Forwarded-For` with the original client address. The hop count is
+the number of these trusted proxy observations. OpenGeni selects the address
+from the server side of that chain, so caller-prepended values cannot rotate the
+rate-limit bucket. A proxy that appends its own address instead must normalize
+the header to the client address before enabling this setting. Missing, short,
+or malformed chains fall back to the transport peer.
 
 ## Workspace MCP OAuth
 
@@ -285,10 +289,12 @@ caller-provided `X-Forwarded-For` and `X-Real-IP` by default. A deployment behin
 a fixed trusted proxy chain may set
 `OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS=<count>`; OpenGeni then walks
 `X-Forwarded-For` from the server side by exactly that many hops, so a caller
-cannot evade the quota by prepending values. Enable this only when firewall or
-network-policy rules prevent direct API access and every declared hop overwrites
-or appends the forwarding chain. A missing or shorter chain fails back to the
-server-owned transport peer.
+cannot evade the quota by prepending values. Each trusted proxy must append the
+address of its incoming peer or overwrite the header with the original client
+address; a proxy that appends its own address must normalize the header before
+it reaches OpenGeni. Enable this only when firewall or network-policy rules
+prevent direct API access. A missing, shorter, or malformed chain falls back
+to the server-owned transport peer.
 
 Current-human HTTP/SDK calls classified for human approval use the ordinary API
 database and require migration `0405_tool_gateway_approval_capabilities.sql`.
