@@ -10,7 +10,7 @@ test("reconnect retains provider, ownership, account identity and exact host ret
   };
   const source = new ConnectController(
     {
-      accounts: async () => [account],
+      accounts: async () => [{ ...account, status: "auth_needed" }],
       catalog: unused,
       pending: unused,
       get: unused,
@@ -83,7 +83,7 @@ function controller(
 }
 function button(container: HTMLElement, text: string) {
   const result = [...container.querySelectorAll("button")].find(
-    (node) => node.textContent === text,
+    (node) => (node.getAttribute("aria-label") ?? node.textContent) === text,
   );
   if (!result) throw new Error(`Missing button ${text}`);
   return result;
@@ -103,6 +103,8 @@ test("disconnect requires confirmation and forwards observed version then reload
   );
   const view = await renderComponent(<ConnectAccounts controller={source} />);
   try {
+    expect(view.container.querySelector("summary")?.textContent).toContain("My account");
+    expect(view.container.querySelector("summary")?.textContent).not.toContain("Manage");
     await actRun(() => button(view.container, "Disconnect My account").click());
     expect(calls).toBe(0);
     expect(view.container.textContent).toContain("does not revoke consent");

@@ -20,6 +20,45 @@ function validateDestination(url: string): void {
     throw new Error("Connect authorization requires an HTTPS destination without credentials");
 }
 
+/** Reserve the isolated window during the human's click, before asynchronous
+ * discovery. The caller must close it if setup fails before navigation. */
+export function reserveBrowserConnectNavigation(browser: ConnectBrowserWindow): {
+  navigation: ConnectNavigation;
+  close(): void;
+} {
+  const popup = browser.open("about:blank", "_blank", "popup,width=520,height=720");
+  if (!popup) throw new Error("Allow popups to connect your account, then try again.");
+  try {
+    popup.opener = null;
+    if (popup.opener !== null) throw new Error("Connect popup isolation failed");
+  } catch {
+    popup.close();
+    throw new Error("Connect popup could not open safely. Please try again.");
+  }
+  const close = () => {
+    try {
+      popup.close();
+    } catch {
+      /* Already closed. */
+    }
+  };
+  return {
+    close,
+    navigation: {
+      openPopup(url) {
+        validateDestination(url);
+        popup.location.replace(url);
+        return { close };
+      },
+      redirect(url) {
+        validateDestination(url);
+        close();
+        browser.location.assign(url);
+      },
+    },
+  };
+}
+
 /** Pass window from the host's browser entry point. Opens a fresh blank window
  * synchronously and severs its opener BEFORE any provider content can load.
  * Never uses a reusable named target or relies on provider window messages.

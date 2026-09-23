@@ -16,6 +16,7 @@ import {
   ensureManagedAccessForUser,
   forkSessionContent,
   getSession,
+  getRetainedScreenshotArtifact,
   getSessionForSubject,
   getSessionGoal,
   getSessionHistoryItems,
@@ -669,6 +670,90 @@ describe("migration 0303 session tenancy product activation", () => {
     } finally {
       await app.end();
     }
+  });
+
+  test("resolves only screenshot receipts actually copied into a fork, including nested forks", async () => {
+    if (!shared || !client) return;
+    const value = await sessionVisibilityFixture();
+    const workspaceId = value.ownerGrant.workspaceId;
+    const accountId = value.ownerGrant.accountId;
+    const artifacts: string[] = [];
+    const marker = (artifactId: string) => ({
+      type: "retained_artifact",
+      artifact: { available: true, artifactId },
+    });
+    for (let i = 0; i < 5; i++) {
+      const id = crypto.randomUUID();
+      artifacts.push(id);
+      await shared.admin`insert into files (id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,bucket,object_key,private_owner_subject_ids)
+        values (${id},${accountId},${workspaceId},'ready','screen.png','screen.png','image/png',100,'screens',${id},${i === 4 ? ["user:someone-else"] : null})`;
+      await shared.admin`insert into retained_screenshot_artifacts
+        (artifact_id,account_id,workspace_id,session_id,settlement_key,tool_call_id,tool_output_id,status,quota_state,media_type,size_bytes,sha256,width,height,retention_expires_at,ready_at)
+        values (${id},${accountId},${workspaceId},${value.session.id},${id},${id},${id},'ready','ready','image/png',100,${"a".repeat(64)},1,1,now()+interval '1 day',now())`;
+    }
+    const outputs = [
+      marker(artifacts[0]!),
+      [{ type: "input_image", image: marker(artifacts[1]!) }],
+      { content: [{ type: "input_image", image: marker(artifacts[2]!) }] },
+    ];
+    for (const [i, output] of outputs.entries()) {
+      await shared.admin`insert into session_history_items (account_id,workspace_id,session_id,position,item)
+        values (${accountId},${workspaceId},${value.session.id},${i + 2},${shared.admin.json({ type: "function_call_result", output })})`;
+    }
+    // A plain mention is not an image receipt.
+    await shared.admin`insert into session_history_items (account_id,workspace_id,session_id,position,item)
+      values (${accountId},${workspaceId},${value.session.id},5,${shared.admin.json({ type: "message", role: "user", content: artifacts[3] })})`;
+    // A copied receipt does not bypass an original file's private-owner RLS.
+    await shared.admin`insert into session_history_items (account_id,workspace_id,session_id,position,item)
+      values (${accountId},${workspaceId},${value.session.id},6,${shared.admin.json({ type: "function_call_result", output: marker(artifacts[4]!) })})`;
+    const fork = async (sourceSessionId: string) =>
+      await forkSessionContent(client!.db, {
+        sourceWorkspaceId: workspaceId,
+        sourceSessionId,
+        actorSubjectId: value.ownerSubjectId,
+        destinationWorkspaceId: workspaceId,
+        destinationVisibility: "workspace_shared",
+        workspaceSharedAcknowledged: false,
+        operationKey: crypto.randomUUID(),
+      });
+    const first = await fork(value.session.id);
+    const nested = await fork(first.sessionId);
+    const read = async (sessionId: string, id: string) =>
+      await withSessionRlsActorContext(
+        { subjectId: value.ownerSubjectId },
+        async () => await getRetainedScreenshotArtifact(client!.db, workspaceId, sessionId, id),
+      );
+    for (const id of artifacts.slice(0, 3)) {
+      expect((await read(first.sessionId, id))?.artifactId).toBe(id);
+      expect((await read(nested.sessionId, id))?.artifactId).toBe(id);
+    }
+    expect(await read(first.sessionId, artifacts[3]!)).toBeNull();
+    expect(await read(first.sessionId, artifacts[4]!)).toBeNull();
+    // A sibling/fresh session cannot resolve the artifact by guessing its ID.
+    const unrelated = await createSession(client.db, {
+      accountId,
+      workspaceId,
+      initialMessage: "unrelated",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    expect(await read(unrelated.id, artifacts[0]!)).toBeNull();
+    // Even an artifact from an ancestor must occur in the selected copied prefix.
+    await shared.admin`delete from session_history_items where session_id=${first.sessionId} and position=2`;
+    expect(await read(first.sessionId, artifacts[0]!)).toBeNull();
+    expect((await read(nested.sessionId, artifacts[0]!))?.artifactId).toBe(artifacts[0]!);
+    expect(
+      await getRetainedScreenshotArtifact(
+        client.db,
+        value.otherPersonalWorkspaceId,
+        nested.sessionId,
+        artifacts[0]!,
+      ),
+    ).toBeNull();
   });
 
   test("atomically forks shared destinations with acknowledgement, fresh authority, and no live state", async () => {

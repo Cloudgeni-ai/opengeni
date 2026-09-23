@@ -13,9 +13,7 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/index.ts",
-    "src/remote-mcp-credentials.ts",
     "src/canonical-human-identities.ts",
-    "src/domain/connection-authority.ts",
     "src/editable-artifacts.ts",
     "src/editable-artifact-live.ts",
     "src/managed-auth-session-sets.ts",

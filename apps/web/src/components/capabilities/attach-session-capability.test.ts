@@ -1,4 +1,5 @@
 import { expect, mock, test } from "bun:test";
+import { CapabilityCatalogItem as CapabilityCatalogItemSchema } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { CapabilityCatalogItem } from "@/types";
 import {
@@ -16,7 +17,12 @@ function harness(mode = "explicit", selectedIds = ["old"], idsTruncated = false)
       firstPartyMcpTools: ["session_pause"],
       toolPolicyVersion: 7,
       toolPolicy: { mode },
-      effectiveToolPolicy: { selectedIds, idsTruncated },
+      effectiveToolPolicy: {
+        selectedIds: mode === "workspace_default" ? [] : selectedIds,
+        effectiveIds: [...selectedIds, "opengeni"],
+        mandatoryIds: ["opengeni"],
+        idsTruncated,
+      },
     }),
     updateSessionToolPolicy,
   } as unknown as OpenGeniBrowserClient;
@@ -39,6 +45,41 @@ test("a default that already includes the new integration stays a default", asyn
   const h = harness("workspace_default", ["old", "new"]);
   await attachSessionCapability(h.client, "w", "s", item);
   expect(h.updateSessionToolPolicy).not.toHaveBeenCalled();
+});
+test("a lazily discovered integration attaches its installed server before reporting success", async () => {
+  const h = harness("workspace_default", ["old"]);
+  await attachSessionCapability(h.client, "w", "s", {
+    ...item,
+    tools: [],
+    runtime: { mcpServerId: "installed-server", available: true, notes: null },
+  } as CapabilityCatalogItem);
+  expect(h.updateSessionToolPolicy.mock.calls[0]?.[2]).toMatchObject({
+    tools: [
+      { kind: "mcp", id: "old" },
+      { kind: "mcp", id: "installed-server" },
+    ],
+    expectedVersion: 7,
+  });
+});
+test("mandatory runtime servers are not echoed into the explicit tool selection", async () => {
+  const h = harness();
+  const read = h.client.getSession;
+  h.client.getSession = async (...args) => {
+    const session = await read(...args);
+    return {
+      ...session,
+      tools: [...session.tools, { kind: "mcp", id: "opengeni" }],
+      effectiveToolPolicy: { ...session.effectiveToolPolicy!, mandatoryIds: ["opengeni"] },
+    };
+  };
+  await attachSessionCapability(h.client, "w", "s", item);
+  expect(h.updateSessionToolPolicy.mock.calls[0]?.[2]).toMatchObject({
+    mode: "explicit",
+    tools: [
+      { kind: "mcp", id: "old" },
+      { kind: "mcp", id: "new" },
+    ],
+  });
 });
 test("a restricted default is preserved when adding just the requested integration", async () => {
   const h = harness("workspace_default", ["allowed"]);
@@ -64,21 +105,25 @@ test("native OAuth return attaches freshly enabled tools and first-party names",
     ({
       installations: [],
       items: [
-        {
-          ...item,
-          id: "fiken",
+        CapabilityCatalogItemSchema.parse({
+          kind: "api",
+          id: "api:fiken",
+          name: "Fiken",
+          source: "built_in",
+          surfaceType: "first_party_fiken",
+          tools: [{ kind: "mcp", id: "opengeni" }],
           enabled: true,
-          metadata: { firstPartyMcpTools: ["fiken_list_companies"] },
-        },
+          metadata: { firstPartyMcpTools: ["fiken_companies_list", "fiken_invoices_list"] },
+        }),
       ],
     }) as Awaited<ReturnType<OpenGeniBrowserClient["listCapabilities"]>>;
-  await completeSessionCapabilityOAuth(h.client, "w", "s", "fiken");
+  await completeSessionCapabilityOAuth(h.client, "w", "s", "api:fiken");
   expect(h.updateSessionToolPolicy.mock.calls[0]?.[2]).toMatchObject({
     tools: [
       { kind: "mcp", id: "old" },
-      { kind: "mcp", id: "new" },
+      { kind: "mcp", id: "opengeni" },
     ],
-    firstPartyMcpTools: ["session_pause", "fiken_list_companies"],
+    firstPartyMcpTools: ["session_pause", "fiken_companies_list", "fiken_invoices_list"],
     expectedVersion: 7,
   });
 });

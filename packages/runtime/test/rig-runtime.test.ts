@@ -40,7 +40,7 @@ describe("rig doctrine block (M3)", () => {
 
   test("composeAgentInstructions renders the rig name + version and the propose-change guidance", () => {
     const composed = composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS, undefined, rig);
-    expect(composed).toContain('rig "dev-machine" (active version v3)');
+    expect(composed.includes('sandbox environment "dev-machine" (active version v3)')).toBe(true);
     expect(composed).toContain("EPHEMERAL FORK");
     expect(composed).toContain("rig_propose_change");
     expect(composed).toContain("rig_get");
@@ -54,7 +54,11 @@ describe("rig doctrine block (M3)", () => {
 
   test("the block is data-conditional through the agent builder (present iff options.rig)", () => {
     const withRig = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { rig });
-    expect(withRig.instructions).toContain('rig "dev-machine" (active version v3)');
+    expect(
+      String(withRig.instructions).includes(
+        'sandbox environment "dev-machine" (active version v3)',
+      ),
+    ).toBe(true);
     const without = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
     expect(without.instructions).not.toContain("rig_propose_change");
   });
@@ -192,7 +196,7 @@ describe("rigSetupScriptCommand (M3)", () => {
       const proc = Bun.spawn(["bash", "-lc", command], { stdout: "pipe", stderr: "pipe" });
       const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
       expect(exitCode).toBe(73);
-      expect(stderr).toContain("unable to create rig setup marker root");
+      expect(stderr).toContain("unable to create sandbox environment setup marker root");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -367,7 +371,7 @@ describe("runRigSetupHook (M3)", () => {
           events.push(event as any);
         },
       }),
-    ).rejects.toThrow(/did not finish within the rig setup timeout \(2000ms\)/);
+    ).rejects.toThrow(/did not finish within the sandbox environment setup timeout \(2000ms\)/);
     expect(events.at(-1)!.type).toBe("rig.setup.failed");
   });
 
@@ -382,7 +386,7 @@ describe("runRigSetupHook (M3)", () => {
           events.push(event as any);
         },
       }),
-    ).rejects.toThrow(/did not finish within the rig setup timeout \(2000ms\)/);
+    ).rejects.toThrow(/did not finish within the sandbox environment setup timeout \(2000ms\)/);
     expect(events.at(-1)!.type).toBe("rig.setup.failed");
   });
 

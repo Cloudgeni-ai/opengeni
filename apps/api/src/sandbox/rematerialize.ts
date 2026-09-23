@@ -162,7 +162,8 @@ export async function establishApiSandboxSpawner(input: {
   try {
     if (
       (input.acquiredLease.recovery.archive.status === "available" &&
-        input.acquiredLease.archiveComplete) ||
+        (input.acquiredLease.archiveComplete ||
+          input.acquiredLease.historicalRecoveryAuthorized === true)) ||
       (input.acquiredLease.recovery.archive.status === "none" && hasWorkspaceArchive(archiveSource))
     ) {
       const id = crypto.randomUUID();

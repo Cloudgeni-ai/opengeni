@@ -56,7 +56,7 @@ describe("stored Skill configuration maintenance", () => {
     ).toThrow("collision");
     expect(() =>
       convertLegacyConfigSkills(
-        [{ ...plain, files: [{ path: "SKILL.md", content: "x".repeat(256 * 1024) }] }],
+        [{ ...plain, files: [{ path: "SKILL.md", content: "x".repeat(2 * 1024 * 1024) }] }],
         "id",
       ),
     ).toThrow("exceeds");

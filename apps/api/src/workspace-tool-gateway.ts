@@ -22,7 +22,6 @@ import {
   ToolGatewayApprovalResponse,
   ToolGatewayDeclarationsResponse,
   type AccessGrant,
-  type McpGatewayCredentialAuthority,
   type ToolGatewayCatalog,
   type ToolGatewayIdentity,
   type ToolRef,
@@ -43,7 +42,6 @@ import {
 import {
   buildCodexTokenResolver,
   buildConnectionTokenResolver,
-  buildHostGatewayConnectionTokenResolver,
   lockActiveExternalOrganizationKey,
   withAccountRls,
   requireWorkspace,
@@ -187,16 +185,7 @@ export async function prepareWorkspaceToolGateway(
     routeDeps,
     grant,
     undefined,
-    reauthorize
-      ? {
-          authority: {
-            kind: external ? "external_user" : "organization_service",
-            subjectId: scope.subjectId,
-            permissions,
-          },
-          reauthorize,
-        }
-      : undefined,
+    reauthorize,
   );
   try {
     await reauthorize?.();
@@ -226,11 +215,36 @@ export async function prepareWorkspaceToolGatewayForGrant(
   return await prepareWorkspaceToolGatewayForGrantInternal(routeDeps, grant, allowedIdentities);
 }
 
+/** Keep live caller authority independent of native connection acquisition and refresh. */
+export function withWorkspaceConnectionAuthorization(
+  resolve: ReturnType<typeof buildConnectionTokenResolver>,
+  reauthorize?: () => Promise<void>,
+): ReturnType<typeof buildConnectionTokenResolver> {
+  if (!reauthorize) return resolve;
+  return async (input) => {
+    await reauthorize();
+    const result = await resolve(input);
+    await reauthorize();
+    if (result.status !== "ok") return result;
+    return {
+      ...result,
+      authorizeProviderRequest: async () => {
+        try {
+          await reauthorize();
+          return result.authorizeProviderRequest ? await result.authorizeProviderRequest() : true;
+        } catch {
+          return false;
+        }
+      },
+    };
+  };
+}
+
 async function prepareWorkspaceToolGatewayForGrantInternal(
   routeDeps: ApiRouteDeps,
   grant: AccessGrant,
   allowedIdentities?: readonly { serverId: string; toolName: string }[],
-  hostContext?: { authority: McpGatewayCredentialAuthority; reauthorize: () => Promise<void> },
+  reauthorize?: () => Promise<void>,
 ): Promise<PreparedWorkspaceToolGateway> {
   const catalogSourceSettings = routeDeps.catalogSourceSettings ?? routeDeps.settings;
   const resolvedCatalog = await resolveWorkspaceCatalogSettings(
@@ -256,24 +270,10 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   const gatewaySettings = workspaceToolGatewaySettingsForGrant(settings, grant, allowedIdentities);
   const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
   const deps = { ...routeDeps, catalogSourceSettings, settings: gatewaySettings };
-  const nativeResolveConnection = buildConnectionTokenResolver(routeDeps.db, gatewaySettings);
-  const hostPort = routeDeps.connectionCredentials?.mcpGatewayCredentials;
-  const hostResolveConnection =
-    hostContext && hostPort
-      ? buildHostGatewayConnectionTokenResolver(
-          hostPort,
-          {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId,
-            authority: hostContext.authority,
-          },
-          hostContext.reauthorize,
-        )
-      : undefined;
-  const resolveConnection: typeof nativeResolveConnection = async (input) =>
-    input.connectionRef.authoritySource === "host" && hostResolveConnection
-      ? await hostResolveConnection(input)
-      : await nativeResolveConnection(input);
+  const resolveConnection = withWorkspaceConnectionAuthorization(
+    buildConnectionTokenResolver(routeDeps.db, gatewaySettings),
+    reauthorize,
+  );
   const resolveCredential = async (
     input: ResolveConnectionCredentialInput,
   ): Promise<ResolveConnectionCredentialResult> =>
@@ -299,6 +299,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
               routeDeps.getDocumentServices(),
               {
                 knowledge: await knowledgeContextForGateway(routeDeps, grant),
+                settings: gatewaySettings,
               },
             ),
           ),

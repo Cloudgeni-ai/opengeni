@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { resolveFirstPartyDelegationSecret, resolveStreamTokenSecret } from "@opengeni/config";
+import {
+  resolveFirstPartyDelegationSecret,
+  resolveStreamTokenSecret,
+  sandboxWarmRateMicrosPerSecond,
+} from "@opengeni/config";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_PORT,
@@ -32,6 +36,7 @@ import {
   ComputerSessionNotFoundError,
   ComputerSessionOperationConflictError,
   ComputerSessionStateError,
+  SandboxPaidComputeAdmissionError,
   dispatchComputerSessionOperation,
   failComputerSessionOperation,
   findComputerSessionControlRecordByOperation,
@@ -1056,6 +1061,12 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             resolved.kind !== "selfhosted" ||
             resolved.sandboxId !== expectedPlacement.sandboxId
           ) {
+            if (operation === "computer.create") {
+              throw new HTTPException(422, {
+                message:
+                  "The requested Connected Machine is not this session's current placement. Move the session to that machine before creating an interaction resource.",
+              });
+            }
             return await throwComputerSourcePlacementChanged(
               grant,
               sourceSession.id,
@@ -1420,6 +1431,10 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       holderId: interactionHolderId(computerSessionId),
       subjectId: sourceSession.id,
       backend: placement.lease.backend,
+      warmBilling: {
+        mode: deps.settings.sandboxWarmBillingMode,
+        rateMicrosPerSecond: sandboxWarmRateMicrosPerSecond(deps.settings, placement.lease.backend),
+      },
       os: placement.lease.os,
       image: sandboxRuntime.image,
       rigVersionId: sourceSession.rigVersionId,
@@ -1875,6 +1890,8 @@ function computerRouteError(error: unknown): HTTPException {
   const connectedMachineError = interactionControlApiError(error, "computer");
   if (connectedMachineError) return connectedMachineError;
   if (error instanceof HTTPException) return error;
+  if (error instanceof SandboxPaidComputeAdmissionError)
+    return new HTTPException(402, { message: error.message, cause: error });
   if (error instanceof ComputerSessionNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });
   }

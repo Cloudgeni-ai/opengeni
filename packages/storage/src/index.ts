@@ -1,4 +1,4 @@
-import type { Settings } from "@opengeni/config";
+import type { ObjectStorageSettings } from "@opengeni/config";
 import { RETAINED_OUTPUT_MAX_PAGE_BYTES, type FileAsset } from "@opengeni/contracts";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -151,7 +151,7 @@ export type ObjectStorage = {
   deleteObject: (key: string) => Promise<void>;
 };
 
-export function createObjectStorage(settings: Settings): ObjectStorage | null {
+export function createObjectStorage(settings: ObjectStorageSettings): ObjectStorage | null {
   if (settings.objectStorageBackend === "azure-blob") {
     return createAzureBlobObjectStorage(settings);
   }
@@ -161,7 +161,7 @@ export function createObjectStorage(settings: Settings): ObjectStorage | null {
   return createS3CompatibleObjectStorage(settings);
 }
 
-function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | null {
+function createS3CompatibleObjectStorage(settings: ObjectStorageSettings): ObjectStorage | null {
   if (
     settings.objectStorageBackend === "s3-compatible" &&
     (!settings.objectStorageEndpoint ||
@@ -522,7 +522,7 @@ function isS3VersionMismatch(error: unknown): boolean {
   return metadata?.httpStatusCode === 412;
 }
 
-function createGcsObjectStorage(settings: Settings): ObjectStorage {
+function createGcsObjectStorage(settings: ObjectStorageSettings): ObjectStorage {
   const client = new GcsClient(gcsClientOptions(settings));
   const bucket = client.bucket(settings.objectStorageBucket);
   return {
@@ -706,7 +706,7 @@ function isGcsVersionMismatch(error: unknown): boolean {
   return Boolean(error) && typeof error === "object" && (error as { code?: unknown }).code === 412;
 }
 
-function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null {
+function createAzureBlobObjectStorage(settings: ObjectStorageSettings): ObjectStorage | null {
   const sharedKey = azureSharedKeyCredential(settings);
   const requestServiceClient = settings.objectStorageAzureConnectionString
     ? BlobServiceClient.fromConnectionString(settings.objectStorageAzureConnectionString)
@@ -814,9 +814,14 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
     },
     async putObjectStreamIfAbsent(args) {
       const blobClient = requestContainerClient.getBlockBlobClient(args.key);
+      // Azure's buffer scheduler expects Buffer chunks, not object-mode Uint8Arrays.
+      const source = Readable.from(args.chunks, {
+        objectMode: false,
+        highWaterMark: INTERNAL_STREAM_BUFFER_BYTES,
+      });
       try {
         await blobClient.uploadStream(
-          Readable.from(args.chunks),
+          source,
           INTERNAL_STREAM_BUFFER_BYTES,
           INTERNAL_STREAM_CONCURRENCY,
           {
@@ -830,6 +835,8 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
       } catch (error) {
         if (isAzureVersionMismatch(error)) return false;
         throw error;
+      } finally {
+        source.destroy();
       }
     },
     async headFile(file) {
@@ -929,7 +936,7 @@ function isAzureVersionMismatch(error: unknown): boolean {
   );
 }
 
-function azureSharedKeyCredential(settings: Settings): StorageSharedKeyCredential {
+function azureSharedKeyCredential(settings: ObjectStorageSettings): StorageSharedKeyCredential {
   if (settings.objectStorageAzureConnectionString) {
     const parsed = parseConnectionString(settings.objectStorageAzureConnectionString);
     if (parsed.AccountName && parsed.AccountKey) {
@@ -948,7 +955,7 @@ function azureSharedKeyCredential(settings: Settings): StorageSharedKeyCredentia
   );
 }
 
-function azureBlobServiceUrl(settings: Settings): string {
+function azureBlobServiceUrl(settings: ObjectStorageSettings): string {
   if (settings.objectStorageAzureEndpoint) {
     return settings.objectStorageAzureEndpoint.replace(/\/+$/, "");
   }
@@ -971,7 +978,7 @@ function parseConnectionString(value: string): Record<string, string> {
   );
 }
 
-function gcsClientOptions(settings: Settings): StorageOptions {
+function gcsClientOptions(settings: ObjectStorageSettings): StorageOptions {
   const options: StorageOptions = {
     ...(settings.objectStorageGcsProjectId
       ? { projectId: settings.objectStorageGcsProjectId }

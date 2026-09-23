@@ -1,4 +1,8 @@
-import type { SessionEvent } from "@opengeni/sdk";
+import {
+  parseToolDisplayMetadata,
+  type ToolDisplayMetadata,
+  type SessionEvent,
+} from "@opengeni/sdk";
 
 /* ----------------------------------------------------------------------------
    Pending-approvals projection
@@ -26,6 +30,7 @@ export type PendingApproval = {
   id: string;
   /** Tool/function name awaiting the decision. */
   name: string;
+  display?: ToolDisplayMetadata;
   arguments?: unknown;
   /** The raw approval entry from the `session.requiresAction` payload. */
   raw?: unknown;
@@ -49,11 +54,13 @@ export function approvalsFromRequiresAction(payload: unknown): PendingApproval[]
       raw.rawItem && typeof raw.rawItem === "object"
         ? (raw.rawItem as Record<string, unknown>)
         : {};
+    const display = parseToolDisplayMetadata(raw.display);
     return {
       // Mirror the runtime's canonical interruption identity before retaining
       // the legacy top-level callId fallback for already-normalized payloads.
       id: String(rawItem.callId ?? rawItem.id ?? raw.id ?? raw.callId ?? raw.name ?? index),
       name: String(raw.name ?? raw.toolName ?? rawItem.name ?? "approval"),
+      ...(display ? { display } : {}),
       arguments: raw.arguments ?? rawItem.arguments,
       raw: approval,
     };

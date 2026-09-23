@@ -19,8 +19,7 @@ export type RuntimeSkillArtifactFile = Readonly<{
 
 /**
  * One immutable Skill artifact that may be activated by an installation, a
- * Pack, or an exact session selection. The artifact itself is deliberately
- * acquisition-neutral: Packs do not own a second Skill representation.
+ * session selection. The artifact itself is acquisition-neutral.
  */
 export type RuntimeSkillArtifact = Readonly<{
   name: string;
@@ -37,13 +36,6 @@ export type InstalledSkillActivation = Readonly<{
   reason: string;
 }>;
 
-export type PackSkillActivation = Readonly<{
-  source: "pack";
-  id: string;
-  artifact: RuntimeSkillArtifact;
-  reason: string;
-}>;
-
 export type SessionSkillActivation = Readonly<{
   source: "session";
   id: string;
@@ -51,10 +43,7 @@ export type SessionSkillActivation = Readonly<{
   reason: string;
 }>;
 
-export type RuntimeSkillActivation =
-  | InstalledSkillActivation
-  | PackSkillActivation
-  | SessionSkillActivation;
+export type RuntimeSkillActivation = InstalledSkillActivation | SessionSkillActivation;
 
 export type NativeToolSkillSet = Readonly<{
   /** False when an embedding host owns the complete Skill catalog and reader. */
@@ -67,7 +56,7 @@ export type NativeToolSkillSet = Readonly<{
 export type EffectiveSkillSelection = Readonly<{
   id: string;
   name: string;
-  source: "installation" | "pack" | "session" | "native_tool";
+  source: "installation" | "session" | "native_tool";
   version: string | null;
   contentSha256: string | null;
   reason: string;
@@ -321,8 +310,6 @@ function activationPrecedence(source: RuntimeSkillActivation["source"]): number 
   switch (source) {
     case "installation":
       return 1;
-    case "pack":
-      return 2;
     case "session":
       return 3;
   }
@@ -369,7 +356,6 @@ function selectionForActivation({
         contentSha256,
         reason: activation.reason,
       });
-    case "pack":
     case "session":
       return Object.freeze({
         id: activation.id,

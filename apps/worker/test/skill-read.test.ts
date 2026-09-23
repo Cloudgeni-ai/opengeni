@@ -132,6 +132,7 @@ describe("skill_read gateway definition", () => {
 
   for (const [name, directory] of [
     ["opengeni-help", "bundled_default_skills"],
+    ["opengeni-client", "bundled_default_skills"],
     ["opengeni-projects", "bundled_project_skills"],
     ["opengeni-visualize", "bundled_default_skills"],
     ["document-parsing", "bundled_default_skills"],
@@ -247,8 +248,8 @@ describe("skill_read gateway definition", () => {
     expect(loads).toBe(0);
   });
 
-  test("inventory permits 128 files and rejects overflow, unsafe and duplicate paths", async () => {
-    const bounded = Array.from({ length: 128 }, (_, i) => ({ path: `ref-${i}.md`, content: "" }));
+  test("inventory permits 1024 files and rejects overflow, unsafe and duplicate paths", async () => {
+    const bounded = Array.from({ length: 1024 }, (_, i) => ({ path: `ref-${i}.md`, content: "" }));
     expect((await reader(async () => bounded)({ listFiles: true })).structuredContent).toEqual({
       paths: bounded.map(({ path }) => path).sort(),
     });

@@ -190,7 +190,7 @@ export type ApiIntegrationRuntime = {
 };
 
 export type ApiIntegrationOwner = {
-  kind: "direct" | "plugin" | "pack" | "migration";
+  kind: "direct" | "plugin" | "migration";
   id: string;
   removable: boolean;
 };
@@ -947,12 +947,6 @@ export async function listInstalledApiIntegrationServerIdsForDelegations(
   return [...byServerId];
 }
 
-/**
- * Read installed API Integrations from a transaction that already carries the
- * workspace RLS context. This is intentionally separate from the public
- * wrapper so compound Plugin/Pack lifecycle transactions never open a nested
- * transaction or lose their advisory locks.
- */
 export async function listInstalledApiIntegrationsInRlsContext(
   scopedDb: Database,
   workspaceId: string,
@@ -1893,12 +1887,7 @@ async function integrationOwners(
     );
   const owners = new Map<string, ApiIntegrationOwner>();
   for (const row of rows) {
-    if (
-      row.kind !== "direct" &&
-      row.kind !== "plugin" &&
-      row.kind !== "pack" &&
-      row.kind !== "migration"
-    ) {
+    if (row.kind !== "direct" && row.kind !== "plugin" && row.kind !== "migration") {
       throw new Error(`Unknown API Integration owner kind: ${row.kind}`);
     }
     const key = `${row.kind}\0${row.id}`;

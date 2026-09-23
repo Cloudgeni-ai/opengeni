@@ -74,6 +74,16 @@ export type AttemptToolAnnotations = z.infer<typeof AttemptToolAnnotations>;
 export const AttemptToolJsonSchema = jsonObject;
 export type AttemptToolJsonSchema = z.infer<typeof AttemptToolJsonSchema>;
 
+/** Presentation only; never parsed as execution or account authority. */
+export const ToolDisplayMetadata = z
+  .object({
+    toolName: toolIdentifier,
+    title: z.string().min(1).max(512).optional(),
+    accountLabel: z.string().min(1).max(1024).optional(),
+  })
+  .strict();
+export type ToolDisplayMetadata = z.infer<typeof ToolDisplayMetadata>;
+
 export const AttemptToolCatalogEntry = z
   .object({
     identity: AttemptToolIdentity,

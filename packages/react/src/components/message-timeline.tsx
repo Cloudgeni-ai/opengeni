@@ -1,9 +1,16 @@
 import { RollingActivity } from "../timeline/rolling-activity";
+import {
+  isTimelineSearchTarget,
+  TimelineSearchRevealContext,
+  useTimelineSearchNavigation,
+  type TimelineSearchTarget,
+} from "./timeline-search";
 import { GenieLoadingOptionsContext, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
 import { parseSandboxFileArtifactReceipt } from "@opengeni/sdk";
 import { unwrapMcpOutput } from "../timeline/parsers";
+import { compactionSkipSubtitle } from "../timeline/compaction-copy";
 import { isRetainedImageContentType } from "../timeline/retained-image";
 import { mcpToolLeaf } from "../timeline/tool-display-name";
 import type {
@@ -134,6 +141,8 @@ const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-sel
 const TimelineAnnotationMarkers = lazy(() => import("./timeline-annotation-markers"));
 
 export type MessageTimelineProps = {
+  /** Exact durable search hit; clearing it removes highlighting without moving the reader. */
+  searchTarget?: TimelineSearchTarget | null | undefined;
   /** Localized user-message disclosure actions, including custom UserMessageBody renderers. */
   userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
   /** Raw session events (projected internally) … */
@@ -146,7 +155,11 @@ export type MessageTimelineProps = {
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   /** Plug a markdown renderer for message bodies (e.g. streamdown). */
   renderMessageText?:
-    | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
+    | ((
+        text: string,
+        item: AgentMessageItem | UserMessageItem,
+        context: { searchTarget: TimelineSearchTarget | null },
+      ) => ReactNode)
     | undefined;
   /** Drill into a spawned worker session. */
   onOpenSession?: ((sessionId: string) => void) | undefined;
@@ -413,6 +426,7 @@ function cssEscapeAttribute(value: string): string {
  */
 export function MessageTimeline({
   userMessageDisclosureLabels,
+  searchTarget,
   events,
   items,
   status: _status,
@@ -457,6 +471,46 @@ export function MessageTimeline({
       (item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item),
     );
   }, [items, events, shouldRenderAuthNeeded]);
+  const searchItem = searchTarget
+    ? resolvedItems.find((item) => isTimelineSearchTarget(item, searchTarget))
+    : undefined;
+  const searchRevealKey =
+    searchItem && searchTarget
+      ? JSON.stringify([
+          searchItem.id,
+          searchTarget.query,
+          searchTarget.occurrence ?? 0,
+          searchTarget.offset ?? null,
+        ])
+      : null;
+  const searchTargetRef = useRef(searchTarget);
+  searchTargetRef.current = searchTarget;
+  const renderSearchableMessageText = useMemo(
+    () =>
+      renderMessageText
+        ? (text: string, item: AgentMessageItem | UserMessageItem) =>
+            renderMessageText(text, item, {
+              searchTarget: searchItem?.id === item.id ? (searchTarget ?? null) : null,
+            })
+        : (text: string, item: AgentMessageItem | UserMessageItem) => {
+            const body = (
+              <Markdown
+                searchTarget={searchItem?.id === item.id ? searchTarget : null}
+                streaming={item.kind === "agent-message" && item.streaming}
+              >
+                {text}
+              </Markdown>
+            );
+            return item.kind === "user-message" ? (
+              <UserMessageBody messageId={item.id} text={text}>
+                {body}
+              </UserMessageBody>
+            ) : (
+              body
+            );
+          },
+    [renderMessageText, searchItem?.id, searchTarget],
+  );
   // Event-window identity is independent of projected rows (partial messages
   // can acquire a different first-delta id when older text arrives).
   const sourceItems = events ?? items;
@@ -1005,7 +1059,7 @@ export function MessageTimeline({
       userMessageDisclosureContext,
       behavior: {
         renderMessageActions,
-        renderMessageText,
+        renderMessageText: renderSearchableMessageText,
         onOpenSession,
         onMemoryClick,
         onReconnect,
@@ -1028,13 +1082,26 @@ export function MessageTimeline({
       onReconnect,
       renderAuthNeeded,
       renderMessageActions,
-      renderMessageText,
+      renderSearchableMessageText,
       resolveProviderLogo,
       toolRegistry,
       genieLoading,
       turnSummary,
       userMessageDisclosureContext,
     ],
+  );
+
+  const releaseSearchPin = useCallback(() => {
+    applyPinned(false);
+    stopFollow();
+    setRevealed(true);
+  }, [applyPinned, stopFollow]);
+  useTimelineSearchNavigation(
+    scrollRef,
+    searchItem?.id,
+    searchTarget,
+    releaseSearchPin,
+    resolvedItems,
   );
 
   const requestOlderIfUnderfilled = useCallback(
@@ -1707,6 +1774,8 @@ export function MessageTimeline({
   // at what just became the live bottom — paging forward to the tip must not
   // strand them unpinned watching new content grow below.
   useEffect(() => {
+    // Closing find is paint-only; it must not trigger this history-to-tip rule.
+    if (searchTargetRef.current) return;
     if (hasNewer) {
       stopFollow();
       applyPinned(false);
@@ -2100,23 +2169,31 @@ export function MessageTimeline({
                           ) : null}
                           {groups.map(({ group, key, entranceEnabled }, index) => {
                             return (
-                              <TimelineGroupEntry
+                              <TimelineSearchRevealContext.Provider
                                 key={key}
-                                groupKey={key}
-                                group={group}
-                                nextGroup={groups[index + 1]?.group}
-                                startupDismissed={
-                                  group.kind === "activity" &&
-                                  group.items.some(
-                                    (item) => item.turnId && turnsWithOutput.has(item.turnId),
-                                  )
+                                value={
+                                  searchItem && timelineGroupItemIds(group).includes(searchItem.id)
+                                    ? searchRevealKey
+                                    : null
                                 }
-                                entranceEnabled={entranceEnabled}
-                                liveEntranceEnabled={
-                                  group.kind === "activity" ? !bulkRender : undefined
-                                }
-                                context={timelineGroupEntryContext}
-                              />
+                              >
+                                <TimelineGroupEntry
+                                  groupKey={key}
+                                  group={group}
+                                  nextGroup={groups[index + 1]?.group}
+                                  startupDismissed={
+                                    group.kind === "activity" &&
+                                    group.items.some(
+                                      (item) => item.turnId && turnsWithOutput.has(item.turnId),
+                                    )
+                                  }
+                                  entranceEnabled={entranceEnabled}
+                                  liveEntranceEnabled={
+                                    group.kind === "activity" ? !bulkRender : undefined
+                                  }
+                                  context={timelineGroupEntryContext}
+                                />
+                              </TimelineSearchRevealContext.Provider>
                             );
                           })}
                           {groups.length > 0 && trailingState ? (
@@ -2455,7 +2532,9 @@ type TimelineGroupEntryContext = {
 
 type TimelineGroupBehaviorProps = {
   renderMessageActions: MessageTimelineProps["renderMessageActions"];
-  renderMessageText: MessageTimelineProps["renderMessageText"];
+  renderMessageText:
+    | ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode)
+    | undefined;
   onOpenSession: MessageTimelineProps["onOpenSession"];
   onMemoryClick: MessageTimelineProps["onMemoryClick"];
   onReconnect: MessageTimelineProps["onReconnect"];
@@ -3260,7 +3339,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
     item.phase === "compacted"
       ? "Chat history above is unchanged"
       : item.phase === "skipped"
-        ? compactionSkipSubtitle(item.skipReason)
+        ? compactionSkipSubtitle(item.skipReason, item.providerRejection)
         : null;
   const pill =
     item.phase === "skipped" && item.skipReason === "summarization_failed"
@@ -3288,21 +3367,6 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
       </div>
     </div>
   );
-}
-
-function compactionSkipSubtitle(reason: string | null): string {
-  switch (reason) {
-    case "no_history":
-      return "No active history to compact";
-    case "replacement_not_smaller":
-      return "Checkpoint would not reduce memory size";
-    case "replacement_unchanged":
-      return "Checkpoint made no progress";
-    case "summarization_failed":
-      return "Request it again to retry. Chat history is unchanged.";
-    default:
-      return "Compaction was not needed. Chat history is unchanged.";
-  }
 }
 
 /** Hover-reveal clock beside the copy control (sent / finished). */
@@ -3355,7 +3419,10 @@ function UserMessageRow({
         >
           <div className={MESSAGE_BUBBLE_CLASS}>
             {item.text ? (
-              <div data-og-annotation-source-key={item.annotationSource?.eventId}>
+              <div
+                data-og-search-item={item.id}
+                data-og-annotation-source-key={item.annotationSource?.eventId}
+              >
                 {renderMessageText ? (
                   renderMessageText(item.text, item)
                 ) : (
@@ -3578,6 +3645,7 @@ function AgentMessageRow({
     >
       <div
         data-og-wide-table-message=""
+        data-og-search-item={item.id}
         data-og-annotation-source-key={item.annotationSource?.eventId}
       >
         {body}

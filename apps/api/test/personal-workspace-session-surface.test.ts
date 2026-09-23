@@ -50,7 +50,7 @@ import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerExternalIdentityLinkRoutes } from "../src/routes/external-identity-links";
 import { registerConnectRoutes } from "../src/routes/connect";
-import { registerHostMcpBindingRoutes } from "../src/routes/host-mcp-bindings";
+
 import { requireConnectOwnerAuthority } from "../src/integrations/connect-authority";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -135,7 +135,7 @@ function buildApp(
   registerApiKeyRoutes(hono, deps);
   registerExternalIdentityLinkRoutes(hono, deps);
   registerConnectRoutes(hono, deps);
-  registerHostMcpBindingRoutes(hono, deps);
+
   return hono;
 }
 
@@ -474,117 +474,6 @@ afterAll(async () => {
 }, 180_000);
 
 describe("managed-human session surface inside their own personal workspace", () => {
-  test("native owners manage independent host bindings while service keys cannot become their owner", async () => {
-    if (!shared || !client) throw new Error("real database required");
-    const human = await provisionManagedHuman();
-    await activateSessionTenancy(human);
-    const headers = { cookie: human.cookie, "content-type": "application/json" };
-    const base = `/v1/workspaces/${human.personalWorkspaceId}/host-mcp-bindings`;
-    const body = JSON.stringify({
-      operationId: crypto.randomUUID(),
-      definition: {
-        serverId: "product",
-        destinationUrl: "https://product.example/mcp",
-        connectionRef: {
-          authoritySource: "host",
-          connectionId: "product-user-account",
-          providerDomain: "product.example",
-        },
-      },
-    });
-    const created = await human.app.request(base, { method: "POST", headers, body });
-    expect(created.status).toBe(201);
-    const binding = (await created.json()) as {
-      id: string;
-      ownerSubjectId: string;
-      generation: number;
-    };
-    expect(binding.ownerSubjectId).toBe(human.subjectId);
-    expect((await human.app.request(`${base}/${binding.id}`, { headers })).status).toBe(200);
-    const delegationResponse = await human.app.request(
-      `/v1/workspaces/${human.personalWorkspaceId}/host-mcp-delegations`,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          operationId: crypto.randomUUID(),
-          bindingId: binding.id,
-          expectedBindingGeneration: 1,
-          grant: { scope: "user", mode: "always", context: "user_private" },
-        }),
-      },
-    );
-    expect(delegationResponse.status).toBe(201);
-    const delegation = (await delegationResponse.json()) as { id: string };
-    const sessionApp = buildApp(undefined, false, {
-      hostMcpAuthoritySourceAdmissionEnabled: true,
-      mcpServers: [
-        {
-          id: "product",
-          url: "https://product.example/mcp",
-          transport: "streamable_http",
-          connectionRef: {
-            authoritySource: "host",
-            connectionId: "product-user-account",
-            providerDomain: "product.example",
-            hostBinding: { bindingId: binding.id, generation: 1 },
-          },
-        },
-      ],
-    });
-    const started = await sessionApp.request(
-      `/v1/workspaces/${human.personalWorkspaceId}/sessions`,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          initialMessage: "Native host authority",
-          visibility: "private",
-          idempotencyKey: crypto.randomUUID(),
-          sandboxBackend: "none",
-          tools: [{ kind: "mcp", id: "product" }],
-          selectedHostMcpDelegations: [
-            { serverId: "product", delegationId: delegation.id, generation: 1 },
-          ],
-        }),
-      },
-    );
-    expect({ status: started.status, body: await started.clone().text() }).toMatchObject({
-      status: 202,
-    });
-    const captured =
-      await shared.admin`select canonical_snapshot from host_mcp_turn_authorities where delegation_id = ${delegation.id}`;
-    expect(captured).toHaveLength(1);
-    expect(captured[0]!.canonical_snapshot.ownerSubjectId).toBe(human.subjectId);
-    const token = crypto.randomUUID();
-    await createOrganizationApiKey(client.db, {
-      accountId: human.accountId,
-      name: "Not a human owner",
-      prefix: "test",
-      keyHash: createHash("sha256").update(token).digest("hex"),
-      permissions: ["workspace:read", "connections:write"],
-    });
-    expect(
-      (
-        await human.app.request(`/v1/workspaces/${human.legacyWorkspaceId}/host-mcp-bindings`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-          body,
-        })
-      ).status,
-    ).toBe(403);
-    const revoked = await human.app.request(`${base}/${binding.id}/revoke`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ expectedGeneration: binding.generation }),
-    });
-    expect(revoked.status).toBe(200);
-    expect(await revoked.json()).toMatchObject({
-      ownerSubjectId: human.subjectId,
-      status: "revoked",
-      generation: binding.generation + 1,
-    });
-  });
   test("a replacement external key cannot bypass a saved Connect origin revocation", async () => {
     if (!shared || !client) throw new Error("real database required");
     const human = await provisionManagedHuman();
@@ -2124,22 +2013,20 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
         id, account_id, organization_membership_id, resource_kind, resource_id,
         origin_workspace_id, generation, status
       ) values (
-        ${authorityId}, ${human.accountId}, ${membership.id}, 'connection',
+        ${authorityId}, ${human.accountId}, ${membership.id}, 'document',
         ${crypto.randomUUID()}, ${human.personalWorkspaceId}, 1, 'active'
       )`;
     const app = buildApp(undefined, true);
     const headers = { cookie: human.cookie, "content-type": "application/json" };
-    const issue = async (workspaceId: string, connectionWrapper = false): Promise<Response> =>
+    const issue = async (workspaceId: string): Promise<Response> =>
       await app.request(
-        `http://x/v1/workspaces/${workspaceId}/${
-          connectionWrapper ? "connection-authorities" : "user-resource-authorities"
-        }/${authorityId}/grants`,
+        `http://x/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
         {
           method: "POST",
           headers,
           body: JSON.stringify({
             scope: "user",
-            ...(connectionWrapper ? {} : { resourceKind: "connection" }),
+            resourceKind: "document",
             mode: "always",
             context: "user_private",
           }),
@@ -2155,7 +2042,7 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
       where id = ${first.grant.grantId}`;
 
     const listResponse = await app.request(
-      `http://x/v1/workspaces/${human.personalWorkspaceId}/user-resource-authorities?scope=user&resourceKind=connection`,
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/user-resource-authorities?scope=user&resourceKind=document`,
       { headers },
     );
     expect(listResponse.status).toBe(200);
@@ -2175,7 +2062,7 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
     const reissued = (await reissueResponse.json()) as { grant: { grantId: string } };
     expect(reissued.grant.grantId).not.toBe(first.grant.grantId);
 
-    const routeGrantResponse = await issue(human.legacyWorkspaceId, true);
+    const routeGrantResponse = await issue(human.legacyWorkspaceId);
     expect(routeGrantResponse.status).toBe(200);
     const routeGrant = (await routeGrantResponse.json()) as { grant: { grantId: string } };
     await shared.admin`
@@ -2186,7 +2073,7 @@ describe("managed personal-resource grant HTTP lifecycle", () => {
         and subject_id = ${human.subjectId}`;
 
     const revokeResponse = await app.request(
-      `http://x/v1/workspaces/${human.legacyWorkspaceId}/connection-authorities/grants/${routeGrant.grant.grantId}?scope=user`,
+      `http://x/v1/workspaces/${human.legacyWorkspaceId}/user-resource-authorities/grants/${routeGrant.grant.grantId}?scope=user`,
       { method: "DELETE", headers },
     );
     expect(revokeResponse.status).toBe(200);

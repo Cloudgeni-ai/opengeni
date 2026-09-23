@@ -9,10 +9,8 @@
 //       heartbeat — the list fn excludes turn_holders>0, so no double-meter).
 //   (2) the reaper sweep is idempotent — re-running it does not double-charge the
 //       same (group, epoch, tick).
-//   (3) a 0-balance workspace force-drains its VIEWER-ONLY box on the reaper tick
-//       while a TURN-HELD box in the same workspace SURVIVES, and the freshly
-//       drained box remains admission-fenced until one bounded scheduled sweep
-//       terminates it (CAS draining->cold).
+//   (3) a 0-balance workspace never force-drains a viewer or turn holder;
+//       only new priced compute is refused at lease admission.
 //
 // pgvector/pgvector:pg16 (0000_initial does CREATE EXTENSION vector). The package
 // fns connect as opengeni_app (non-superuser → FORCE RLS applies; the warm-lease
@@ -134,7 +132,10 @@ async function backdateMeterCursor(
   secondsAgo: number,
 ): Promise<void> {
   await admin`
-    update sandbox_leases set last_meter_at = now() - (${String(secondsAgo)} || ' seconds')::interval
+    update sandbox_leases set
+      last_meter_at = now() - (${String(secondsAgo)} || ' seconds')::interval,
+      resume_state = jsonb_set(resume_state, '{opengeniRecovery,restore,completedAt}',
+        to_jsonb((now() - (${String(secondsAgo)} || ' seconds')::interval)::text))
     where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
 }
 
@@ -168,6 +169,8 @@ async function seedBalance(accountId: string, micros: number): Promise<void> {
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("warm-meter-worker");
   if (!shared) {
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1")
+      throw new Error("Worker warm-meter verification requires PostgreSQL");
     available = false;
     // eslint-disable-next-line no-console
     console.warn("[warm-meter-worker] docker unavailable, skipping");
@@ -250,13 +253,14 @@ describe("P2.1 reaper-tick warm metering + force-drain (real lease + RLS, spied 
     expect(await warmSecondsCount(ws.workspaceId, group)).toBe(1);
   }, 90_000);
 
-  test("(3) a 0-balance workspace force-drains its VIEWER-ONLY box on the reaper tick; the TURN-HELD box survives and is terminated only at refcount 0", async () => {
+  test("(3) a 0-balance workspace keeps its active viewer and turn boxes warm", async () => {
     if (!available) return;
     const settings = testSettings({
       sandboxBackend: "local",
       sandboxOwnershipEnabled: true,
       webSearchEnabled: false,
-      billingMode: "stripe", // enable balance enforcement
+      billingMode: "stripe", // stripe alone must NOT enforce warm credit balance
+      sandboxWarmBillingMode: "credits", // explicit warm-cost balance enforcement
       sandboxIdleGraceMs: 0, // drain grace already elapsed once the next inventory runs
     });
     const spy = makeTerminateSpy();
@@ -273,21 +277,31 @@ describe("P2.1 reaper-tick warm metering + force-drain (real lease + RLS, spied 
 
     const result = await reapSandboxLeases();
 
-    // The viewer-only box is force-drained by post-dispatch maintenance. Its
-    // exact provider child starts on the next bounded inventory tick; the
-    // turn-held box remains untouched throughout.
-    // (result.forceDrained is a global-across-workspaces count; we assert on THIS
-    // workspace's specific boxes instead — the load-bearing invariant.)
-    expect(result.forceDrained).toBeGreaterThanOrEqual(1);
-    let viewerLiveness = await readLiveness(ws.workspaceId, viewerOnly);
-    expect(["draining", "cold"]).toContain(viewerLiveness);
-    for (let sweep = 0; sweep < 10 && viewerLiveness !== "cold"; sweep += 1) {
-      await reapSandboxLeases();
-      viewerLiveness = await readLiveness(ws.workspaceId, viewerOnly);
-    }
-    expect(spy.calls.map((c) => c.group)).toContain(viewerOnly);
+    expect(result.forceDrained).toBe(0);
+    expect(await readLiveness(ws.workspaceId, viewerOnly)).toBe("warm");
     expect(spy.calls.map((c) => c.group)).not.toContain(turnHeld);
-    expect(viewerLiveness).toBe("cold"); // bounded subsequent sweep: drained → terminated → cold
-    expect(await readLiveness(ws.workspaceId, turnHeld)).toBe("warm"); // SPARED — a paying turn is never killed
+    expect(spy.calls.map((c) => c.group)).not.toContain(viewerOnly);
+    expect(await readLiveness(ws.workspaceId, turnHeld)).toBe("warm");
+  }, 90_000);
+
+  test("stripe billing with usage_only leaves an unpriced, zero-balance viewer box warm", async () => {
+    if (!available) return;
+    const settings = testSettings({
+      sandboxBackend: "local",
+      sandboxOwnershipEnabled: true,
+      webSearchEnabled: false,
+      billingMode: "stripe",
+      sandboxWarmBillingMode: "usage_only",
+    });
+    const spy = makeTerminateSpy();
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(settings), {
+      terminateBox: spy.fn,
+    });
+    const ws = await freshWorkspace();
+    const group = crypto.randomUUID();
+    await warmGroup(ws, group, [{ kind: "viewer", holderId: "v1" }]);
+    await reapSandboxLeases();
+    expect(await readLiveness(ws.workspaceId, group)).toBe("warm");
+    expect(spy.calls).toHaveLength(0);
   }, 90_000);
 });

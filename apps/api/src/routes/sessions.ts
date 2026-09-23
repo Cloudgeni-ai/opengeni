@@ -1,7 +1,14 @@
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
+import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
+import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { scheduledSessionIds } from "@opengeni/db";
 import { withSiteSessionOrigin } from "@opengeni/core";
 import { resolveSiteSessionOrigin } from "../site-session-origin";
+import { SandboxRecoveryRequest } from "@opengeni/contracts";
+import { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } from "@opengeni/core";
+import { SandboxRecoveryConflictError } from "@opengeni/db";
+import { codexAccountJson } from "./codex";
+import { getSessionCodexAccounts } from "@opengeni/db";
 import {
   AcknowledgeStreamRequest,
   ApplySessionGoalRevisionRequest,
@@ -43,6 +50,7 @@ import {
   RenewSessionRealtimeRequest,
   SyncSessionRealtimeLedgerRequest,
   SessionControlRequest,
+  SessionRetryRequest,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SessionEventPayloadMode,
   SessionEventReadDirection,
@@ -257,6 +265,7 @@ import {
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { SessionRetryConflictError } from "@opengeni/db";
 import {
   attachViewer,
   detachViewer,
@@ -274,6 +283,7 @@ import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../co
 import {
   acceptSessionUserMessage,
   controlHumanSessionWorkstream,
+  retryFailedSession,
   createSessionForRequest,
   deleteHumanQueuePrompt,
   editHumanQueuePrompt,
@@ -310,6 +320,7 @@ import {
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 import { ApiHttpError } from "../http/api-error";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
+import { recordAcceptedApiAdmission } from "../admission-trace";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -677,6 +688,59 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           422,
         );
       }
+      throw error;
+    }
+  });
+
+  app.get("/v1/workspaces/:workspaceId/session-message-search", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
+    const grant = authorization.grant;
+    // A single-session filter is not authority: both searches use the complete
+    // live host/agent list scope, plus ordinary private/archive/RLS boundaries.
+    let authorizationScope;
+    try {
+      authorizationScope = await requireSessionAuthorizationListScope(deps, grant, "http");
+    } catch (error) {
+      throw sessionAuthorizationHttpError(error);
+    }
+    const raw = c.req.query();
+    const parsed = SessionMessageSearchRequest.safeParse({
+      ...raw,
+      ...(raw.limit !== undefined ? { limit: Number(raw.limit) } : {}),
+    });
+    if (!parsed.success)
+      throw new HTTPException(400, { message: "Invalid session message search request" });
+    try {
+      return c.json(
+        await searchSessionMessagesForSubject(
+          db,
+          workspaceId,
+          parsed.data,
+          {
+            subjectId: grant.subjectId,
+            ...(authorizationScope ? { authorizationScope } : {}),
+            personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
+          },
+          { signal: c.req.raw.signal },
+        ),
+      );
+    } catch (error) {
+      if (error instanceof SessionListAccessError)
+        throw new HTTPException(403, { message: error.message });
+      if (error instanceof SessionMessageSearchCursorError)
+        throw new HTTPException(400, { message: error.message });
+      // Clients are told to cancel superseded searches, so an abort here is a
+      // routine client disconnect, never a server failure. Match the existing
+      // client-gone convention (mcp/request-abort.ts): 499 with an empty body,
+      // which a departed client never reads and monitors never count as 5xx.
+      if (c.req.raw.signal.aborted || (error instanceof Error && error.name === "AbortError"))
+        return new Response(null, { status: 499 });
       throw error;
     }
   });
@@ -1946,6 +2010,31 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     });
   });
 
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/codex-accounts", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    // authorizeSessionHttp has already enforced private-session and agent scope.
+    const projection = await getSessionCodexAccounts(db, workspaceId, c.req.param("sessionId"));
+    if (!projection) throw new HTTPException(404, { message: "session not found" });
+    const activeAccountId = projection.rotation?.activeCredentialId ?? null;
+    return c.json({
+      accounts: projection.accounts.map((account) => codexAccountJson(account)),
+      activeAccountId,
+      settings: {
+        rotationEnabled: projection.rotation?.rotationEnabled ?? false,
+        rotationStrategy: "sharded",
+        activeCredentialId: activeAccountId,
+      },
+      currentSelection: projection.currentSelection,
+      currentAccount: projection.currentAccount
+        ? codexAccountJson(projection.currentAccount)
+        : null,
+      pinnedAccountId: projection.pinnedAccountId,
+      lastAccountId: projection.lastAccountId,
+    });
+  });
+
   // Pin (or unpin) the session's Codex account. body { target: "auto" | "<id>" }:
   // "auto" clears the pin (the session follows the workspace active pointer); a
   // uuid pins the session to that specific account. Overrides a capacity-blocked
@@ -3068,6 +3157,112 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/sandbox-recovery", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    try {
+      return c.json(
+        await getManagedHumanSandboxRecovery(
+          deps,
+          authorization,
+          workspaceId,
+          c.req.param("sessionId"),
+        ),
+      );
+    } catch (error) {
+      throw sessionTenancyHttpError(error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/sandbox-recovery", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+    const parsed = SandboxRecoveryRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid checkpoint consent" });
+    let consentCommitted = false;
+    try {
+      const receipt = await consentManagedHumanSandboxRecovery(
+        deps,
+        authorization,
+        workspaceId,
+        sessionId,
+        parsed.data,
+      );
+      consentCommitted = true;
+      const projection = await getManagedHumanSandboxRecovery(
+        deps,
+        authorization,
+        workspaceId,
+        sessionId,
+      );
+      if (
+        projection.operationId === receipt.operationId &&
+        projection.status === "consent_accepted"
+      ) {
+        // Establish/verify only. No failed-turn Retry, Send, tool callback or
+        // command replay. The ordinary cold->warming election owns creation.
+        const session = await getSession(db, workspaceId, sessionId);
+        if (session) {
+          try {
+            await withChannelARead(
+              channelAServices,
+              {
+                accountId: authorization.grant.accountId,
+                workspaceId,
+                session,
+                subjectId: authorization.grant.subjectId,
+              },
+              async () => undefined,
+            );
+          } catch {
+            // Consent committed. Never turn a provider failure into a false
+            // rejection of consent or leak native provider bindings/messages.
+          }
+        }
+      }
+      return c.json({
+        ...receipt,
+        recovery: await getManagedHumanSandboxRecovery(deps, authorization, workspaceId, sessionId),
+      });
+    } catch (error) {
+      if (consentCommitted) {
+        // A later authorization/read failure cannot revoke the committed
+        // receipt. Return no session state, checkpoint or provider details.
+        return c.json(
+          {
+            code: "upstream_unavailable",
+            message:
+              "Recovery status could not be confirmed. Check status without resubmitting consent.",
+            outcomeUnknown: true,
+            retryable: false,
+          },
+          503,
+        );
+      }
+      if (error instanceof SandboxRecoveryConflictError)
+        return c.json({ code: error.code, message: error.message }, 409);
+      if (error instanceof SessionCommandIdempotencyError) return commandConflictResponse(c, error);
+      throw sessionTenancyHttpError(error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/retry", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const parsed = SessionRetryRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid session retry request" });
+    try {
+      return c.json(
+        await retryFailedSession(deps, grant, workspaceId, c.req.param("sessionId"), parsed.data),
+      );
+    } catch (error) {
+      if (error instanceof SessionRetryConflictError)
+        return c.json({ code: error.code, message: error.message }, 409);
+      return commandConflictResponse(c, error);
+    }
+  });
+
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/control", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
@@ -3130,10 +3325,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         reasoningEffort: payload.reasoningEffort ?? null,
         latencyMode: payload.latencyMode ?? null,
         mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
-        connectionAuthorities: payload.connectionAuthorities,
-        ...(payload.selectedHostMcpDelegations
-          ? { selectedHostMcpDelegations: payload.selectedHostMcpDelegations }
-          : {}),
+        connectionAccounts: payload.connectionAccounts,
         ...(payload.personalResourceAttachment
           ? { personalResourceAttachment: payload.personalResourceAttachment }
           : {}),
@@ -3149,6 +3341,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     } catch (error) {
       return commandConflictResponse(c, error);
     }
+    recordAcceptedApiAdmission(deps.observability, result);
     return c.json(result, 202);
   });
 
@@ -3172,6 +3365,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     } catch (error) {
       return commandConflictResponse(c, error);
     }
+    recordAcceptedApiAdmission(deps.observability, result);
     return c.json(result, 202);
   });
 
@@ -3215,10 +3409,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           reasoningEffort: event.payload.reasoningEffort ?? null,
           latencyMode: event.payload.latencyMode ?? null,
           mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
-          connectionAuthorities: event.payload.connectionAuthorities,
-          ...(event.payload.selectedHostMcpDelegations
-            ? { selectedHostMcpDelegations: event.payload.selectedHostMcpDelegations }
-            : {}),
+          connectionAccounts: event.payload.connectionAccounts,
           ...(event.payload.personalResourceAttachment
             ? { personalResourceAttachment: event.payload.personalResourceAttachment }
             : {}),
@@ -3234,6 +3425,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       } catch (error) {
         return commandConflictResponse(c, error);
       }
+      recordAcceptedApiAdmission(deps.observability, result);
       return c.json(result.accepted, 202);
     }
 
@@ -4575,6 +4767,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
   if (suffix === "/background-commands" && verb === "GET") return "session.read";
   if (suffix === "/model-context" && verb === "GET") return "session.read";
+  if (suffix === "/codex-accounts" && verb === "GET") return "session.read";
   if (/^\/background-commands\/[^/]+$/.test(suffix) && verb === "DELETE") {
     return "session.control";
   }
@@ -4641,6 +4834,8 @@ export function sessionAuthorizationOperationForHttp(
   // acceptSessionUserMessageWithOutcome after the body is parsed.
   if (suffix === "/composer-draft/submit" && verb === "POST") return "session.append";
   if (suffix === "/control" && verb === "POST") return "session.control";
+  if (suffix === "/retry" && verb === "POST") return "session.control";
+  if (suffix === "/sandbox-recovery" && ["GET", "POST"].includes(verb)) return "session.control";
   if (suffix === "/steer" && verb === "POST") return "session.steer";
   if (suffix === "/human-input-requests" && verb === "GET") {
     return "session.human_input.read";

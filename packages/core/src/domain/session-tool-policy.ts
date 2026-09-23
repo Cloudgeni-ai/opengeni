@@ -188,9 +188,25 @@ export async function workspaceSessionToolPolicyDefaultServerIds(
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
     ...(subjectId ? { subjectId } : {}),
   });
-  const availableDefaults = defaultSessionMcpServerIds(runtimeSettings.mcpServers);
   const workspace = await requireWorkspace(db, workspaceId);
-  const configured = resolveWorkspaceSessionToolDefaults(workspace.settings);
+  return workspaceSessionToolPolicyDefaultServerIdsFor(
+    runtimeSettings.mcpServers,
+    workspace.settings,
+  );
+}
+
+/**
+ * The omitted-tools default for one resolved runtime registry and one
+ * workspace settings bag. Pure so a caller that already holds both never has
+ * to re-query the capability registry to agree with the worker and the
+ * composer on which connectors a `workspace_default` session executes with.
+ */
+export function workspaceSessionToolPolicyDefaultServerIdsFor(
+  runtimeMcpServers: Iterable<{ id: string }>,
+  workspaceSettings: unknown,
+): string[] {
+  const availableDefaults = defaultSessionMcpServerIds(runtimeMcpServers);
+  const configured = resolveWorkspaceSessionToolDefaults(workspaceSettings);
   if (!configured?.mcpServerIds) return availableDefaults;
   const available = new Set(availableDefaults);
   return sortedIds([

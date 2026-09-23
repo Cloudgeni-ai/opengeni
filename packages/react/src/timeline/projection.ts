@@ -1,5 +1,6 @@
 import {
   parseMediaGenerationResult,
+  parseToolDisplayMetadata,
   type HumanInputAnswer,
   type HumanInputQuestion,
   type HumanInputResponse,
@@ -610,6 +611,7 @@ export function buildTimeline(
 
       case "agent.toolCall.created": {
         const name = typeof payload.name === "string" ? payload.name : "tool";
+        const display = parseToolDisplayMetadata(payload.display);
         const callId = typeof payload.id === "string" ? payload.id : null;
         const args = payload.arguments ?? null;
         closeStreamingTail();
@@ -651,6 +653,7 @@ export function buildTimeline(
               (item): item is ToolCallItem => item.kind === "tool-call" && item.callId === callId,
             );
           if (existing) {
+            if (display) existing.display = display;
             if (args != null) {
               existing.arguments = args;
             }
@@ -667,6 +670,7 @@ export function buildTimeline(
           turnId,
           callId,
           name,
+          ...(display ? { display } : {}),
           arguments: args,
           output: undefined,
           truncation: null,
@@ -945,6 +949,7 @@ export function buildTimeline(
           estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
           estimatedTokensAfter: null,
           skipReason: null,
+          providerRejection: null,
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -962,6 +967,7 @@ export function buildTimeline(
           estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
           estimatedTokensAfter: numberOrNull(payload.estimatedTokensAfter),
           skipReason: null,
+          providerRejection: null,
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -979,6 +985,7 @@ export function buildTimeline(
           estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
           estimatedTokensAfter: null,
           skipReason: typeof payload.reason === "string" ? payload.reason : null,
+          providerRejection: compactionProviderRejection(payload),
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -1031,6 +1038,13 @@ export function buildTimeline(
           id: event.id,
           turnId,
           serverId: typeof payload.serverId === "string" ? payload.serverId : null,
+          canonicalServerId:
+            typeof payload.canonicalServerId === "string" ? payload.canonicalServerId : null,
+          connectionSubjectScope:
+            payload.connectionSubjectScope === "subject" ||
+            payload.connectionSubjectScope === "workspace"
+              ? payload.connectionSubjectScope
+              : null,
           source: capability
             ? "capability"
             : event.type === "tool.auth_needed"
@@ -1307,7 +1321,16 @@ export function buildTimeline(
     }
   }
 
+  const sourceEventsById = new Map(events.map((event) => [event.id, event]));
   for (const item of items) {
+    const source = sourceEventsById.get(item.id);
+    const canonical = "annotationSource" in item ? item.annotationSource : undefined;
+    item.sourceEvents = [
+      ...(source ? [{ eventId: source.id, sequence: source.sequence }] : []),
+      ...(canonical && canonical.eventId !== source?.id
+        ? [{ eventId: canonical.eventId, sequence: canonical.sequence }]
+        : []),
+    ];
     if (item.kind === "agent-message") {
       item.text = stripOpaqueCitationTokens(item.text);
     }
@@ -2126,6 +2149,29 @@ function numberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+/**
+ * Read the closed provider-rejection record a `summarization_failed` skip
+ * carries. Only bounded identifiers are accepted; a provider message is never
+ * part of the payload and would be ignored here anyway.
+ */
+function compactionProviderRejection(
+  payload: Record<string, unknown>,
+): ContextCompactionItem["providerRejection"] {
+  const record = asRecord(payload.providerRejection);
+  if (typeof record.httpStatus !== "number" || !Number.isFinite(record.httpStatus)) {
+    return null;
+  }
+  const text = (value: unknown): string | null =>
+    typeof value === "string" && value.trim() ? value : null;
+  return {
+    httpStatus: record.httpStatus,
+    type: text(record.type),
+    code: text(record.code),
+    param: text(record.param),
+    requestId: text(record.requestId),
+  };
+}
+
 function compactionTrigger(payload: Record<string, unknown>): ContextCompactionItem["trigger"] {
   const trigger = payload.trigger;
   return trigger === "auto" ||
@@ -2557,7 +2603,7 @@ function capabilityAuthorizationRequest(
   if (
     typeof record.id !== "string" ||
     typeof record.name !== "string" ||
-    !["pack", "mcp", "api", "skill", "plugin"].includes(String(kind)) ||
+    !["mcp", "api", "skill", "plugin"].includes(String(kind)) ||
     !["built_in", "library", "configured", "public_registry", "registry", "manual"].includes(
       String(source),
     ) ||

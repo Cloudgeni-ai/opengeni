@@ -1,13 +1,12 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import { stableJson, type PrReviewManagedGitHubSetup } from "@opengeni/contracts";
-import { getCapabilityPack, type ApiRouteDeps } from "@opengeni/core";
+import { type PrReviewManagedGitHubSetup } from "@opengeni/contracts";
+import { type ApiRouteDeps } from "@opengeni/core";
 import {
   bootstrapWorkspace,
   createDb,
   deleteWorkspace,
-  enablePackInstallation,
   listPrReviewAppRegistrations,
   listPrReviewRepositoryBindings,
   type DbClient,
@@ -70,17 +69,6 @@ beforeAll(async () => {
   workspaceId = grant.workspaceId;
   accountId = grant.accountId;
   subjectId = grant.subjectId;
-  const pack = getCapabilityPack("pr-review");
-  if (!pack) throw new Error("PR Review Pack is unavailable");
-  await enablePackInstallation(client.db, {
-    accountId,
-    workspaceId,
-    packId: pack.id,
-    manifestSnapshot: pack,
-    manifestDigest: createHash("sha256").update(stableJson(pack)).digest("hex"),
-    installedBySubjectId: subjectId,
-    metadata: {},
-  });
 }, 180_000);
 
 afterAll(async () => {

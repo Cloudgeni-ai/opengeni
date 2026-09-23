@@ -20,6 +20,10 @@ import {
   claimSessionWorkForAttempt,
   createConnection,
   createDb,
+  createVariableSet,
+  bindAuthorizedGitHubInstallationRepositories,
+  saveNewSessionDraftInTransaction,
+  withWorkspaceSubjectRls,
   encryptVariableSetValue,
   getLatestSessionModelForSubject,
   getOrCreateSlackInteraction,
@@ -161,6 +165,7 @@ function fakeSlack(
   } = {},
 ) {
   const posts: SlackPost[] = [];
+  const postAttempts: SlackPost[] = [];
   const homePublications: SlackHomePublication[] = [];
   const homeViewHashes = new Map<string, string>();
   const calls: SlackCall[] = [];
@@ -538,6 +543,15 @@ function fakeSlack(
         clientMessageId,
         timestamp,
       };
+      postAttempts.push(post);
+      for (const block of post.blocks ?? []) {
+        const value = block as { type: string; elements?: { action_id?: string }[] };
+        if (value.type !== "actions") continue;
+        const ids = (value.elements ?? []).map((element) => element.action_id).filter(Boolean);
+        if (new Set(ids).size !== ids.length) {
+          return Response.json({ ok: false, error: "invalid_blocks" });
+        }
+      }
       const paused = [...postPauses.entries()].find(([fragment]) => post.text.includes(fragment));
       if (paused) {
         const [fragment, gate] = paused;
@@ -589,6 +603,7 @@ function fakeSlack(
   return {
     fetch: fetch as typeof globalThis.fetch,
     posts,
+    postAttempts,
     homePublications,
     calls,
     reactionContexts,
@@ -994,6 +1009,185 @@ async function interactions(workspaceId: string) {
 }
 
 describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
+  for (const [trigger, retryShell] of [
+    ["app_mention", false],
+    ["reaction", false],
+    ["app_mention", true],
+    ["reaction", true],
+  ] as const) {
+    test(`${trigger} ${retryShell ? "recovers a pending shell with" : "inherits"} the actor's routed website selections without draft content`, async () => {
+      if (!available) return;
+      const value = await fixture({
+        slackWorkspaceRouting: true,
+        routedWorkspaceName: "Engineering",
+        ownerPermissions: [
+          "sessions:create",
+          "sessions:read",
+          "sessions:control",
+          "variable-sets:attach",
+          "variable-sets:use",
+          "github:use",
+        ],
+        grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, "reactions:read"],
+        slackReactionSummon: {
+          enabled: true,
+          emoji: "genie",
+          channelPolicy: { mode: "bot_member" },
+        },
+      });
+      const target = value.routed!;
+      const channelId = `C_DEFAULTS_${trigger.toUpperCase()}`;
+      await upsertSlackChannelRoute(client.db, value.owner, {
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        slackChannelId: channelId,
+        targetAccountId: target.accountId,
+        targetWorkspaceId: target.workspaceId,
+        decidedBySubjectId: value.owner.subjectId,
+        decidedBySlackUserId: value.ownerSlackUserId,
+        source: "admin",
+      });
+      const variables = await createVariableSet(client.db, {
+        ...target,
+        subjectId: value.owner.subjectId,
+        name: "Build credentials",
+      });
+      const checkedAt = new Date();
+      await bindAuthorizedGitHubInstallationRepositories(client.db, {
+        ...target,
+        installationId: 71,
+        githubAccountId: 7100,
+        accountLogin: "example-owner",
+        accountType: "User",
+        linkedBySubjectId: value.owner.subjectId,
+        githubActorId: 7100,
+        githubActorLogin: "example-owner",
+        authorityKind: "personal_owner",
+        authorityCheckedAt: checkedAt,
+        authorityExpiresAt: new Date(checkedAt.getTime() + 600000),
+        authorityNonce: crypto.randomUUID(),
+        repositoryIds: [42],
+      });
+      const repository = {
+        kind: "repository" as const,
+        uri: "https://github.com/example/project.git",
+        ref: "main",
+        githubInstallationId: 71,
+        githubRepositoryId: 42,
+      };
+      const save = (workspaceId: string, subjectId: string, resources: (typeof repository)[]) =>
+        withWorkspaceSubjectRls(client.db, workspaceId, subjectId, (db) =>
+          saveNewSessionDraftInTransaction(db, {
+            accountId: target.accountId,
+            workspaceId,
+            subjectId,
+            expectedRevision: 0,
+            text: "UNSENT PRIVATE DRAFT",
+            resources,
+            tools: [],
+            toolsProvided: true,
+            model: value.deps.settings.openaiModel,
+            reasoningEffort: "high",
+            latencyMode: "standard",
+            options: {
+              variableSetIds: [variables.id],
+              firstPartyMcpTools: [],
+              firstPartyMcpPermissions: ["sessions:read"],
+              goal: { text: "UNSENT GOAL", successCriteria: "never" },
+            },
+          }),
+        );
+      await save(target.workspaceId, value.owner.subjectId, [repository]);
+      // A different home draft must never win over the routed workspace.
+      await save(value.owner.workspaceId, value.owner.subjectId, []);
+      const timestamp = "1700000999.000001";
+      value.slack.reactionContexts.set(`${channelId}:${timestamp}`, {
+        messages: [{ user: value.ownerSlackUserId, ts: timestamp, text: "Fix the build" }],
+      });
+      const event =
+        trigger === "reaction"
+          ? reactionEvent({
+              teamId: value.teamId,
+              eventId: `E_DEFAULTS_${crypto.randomUUID()}`,
+              userId: value.ownerSlackUserId,
+              channelId,
+              timestamp,
+            })
+          : {
+              teamId: value.teamId,
+              eventId: `E_DEFAULTS_${crypto.randomUUID()}`,
+              event: {
+                type: "app_mention",
+                user: value.ownerSlackUserId,
+                channel: channelId,
+                ts: timestamp,
+                text: "Fix the build",
+              },
+            };
+      expect((await postEvent(value.app, event)).status).toBe(200);
+      if (retryShell) {
+        // Fail initial-event acceptance after the separately committed shell.
+        await shared!.admin.unsafe(
+          `CREATE FUNCTION fail_slack_defaults_initialization() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.workspace_id = '${target.workspaceId}'::uuid AND NEW.type = 'user.message' THEN RAISE EXCEPTION 'injected initialization failure'; END IF; RETURN NEW; END $$`,
+        );
+        await shared!.admin.unsafe(
+          "CREATE TRIGGER fail_slack_defaults_initialization BEFORE INSERT ON session_events FOR EACH ROW EXECUTE FUNCTION fail_slack_defaults_initialization()",
+        );
+        try {
+          await drainAll(value.deps);
+        } finally {
+          await shared!.admin.unsafe(
+            "DROP TRIGGER fail_slack_defaults_initialization ON session_events",
+          );
+          await shared!.admin.unsafe("DROP FUNCTION fail_slack_defaults_initialization()");
+        }
+        const shells = await shared!
+          .admin`select id from sessions where workspace_id = ${target.workspaceId}`;
+        expect(shells).toHaveLength(1);
+        expect((await interactions(target.workspaceId))[0]?.session_id).toBeNull();
+        // A new website selection must not alter the reserved create identity.
+        await withWorkspaceSubjectRls(client.db, target.workspaceId, value.owner.subjectId, (db) =>
+          saveNewSessionDraftInTransaction(db, {
+            accountId: target.accountId,
+            workspaceId: target.workspaceId,
+            subjectId: value.owner.subjectId,
+            expectedRevision: 1,
+            text: "CHANGED DRAFT",
+            resources: [],
+            tools: [],
+            toolsProvided: true,
+            model: value.deps.settings.openaiModel,
+            reasoningEffort: "low",
+            latencyMode: "standard",
+            options: {},
+          }),
+        );
+        await shared!
+          .admin`update slack_interaction_inbox set status = 'pending', retry_at = null, claim_holder_id = null, claim_expires_at = null where provider_event_id = ${event.eventId}`;
+      }
+      await drainAll(value.deps);
+      const [interaction] = await interactions(target.workspaceId);
+      expect(interaction?.session_id).toBeTruthy();
+      const [session] = await shared!
+        .admin`select resources, variable_set_ids, tools, first_party_mcp_tools, first_party_mcp_permissions, initial_message, reasoning_effort from sessions where id = ${interaction!.session_id}`;
+      expect(session!.resources).toEqual([expect.objectContaining(repository)]);
+      expect(session!.variable_set_ids).toEqual([variables.id]);
+      expect(session!.tools).toEqual([]);
+      expect(session!.first_party_mcp_tools).toEqual([]);
+      expect(session!.first_party_mcp_permissions).toEqual(["sessions:read"]);
+      expect(session!.reasoning_effort).toBe("high");
+      expect(session!.initial_message).toContain("Fix the build");
+      expect(session!.initial_message).not.toContain("UNSENT");
+      const [draft] = await shared!
+        .admin`select text, revision from new_session_drafts where workspace_id = ${target.workspaceId} and subject_id = ${value.owner.subjectId}`;
+      expect(draft).toMatchObject(
+        retryShell
+          ? { text: "CHANGED DRAFT", revision: "2" }
+          : { text: "UNSENT PRIVATE DRAFT", revision: "1" },
+      );
+    });
+  }
+
   test("App Home publishes only currently authorized tasks from the linked workspace", async () => {
     if (!available) return;
     const value = await fixture();
@@ -1337,6 +1531,85 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     // person's own bot DM, not the channel.
     const refusal = value.slack.posts.find((post) => post.text.includes("Finance"));
     expect(refusal?.text).toContain("No session was created.");
+  });
+
+  test("a rejected workspace picker retries the original request and post receipt", async () => {
+    if (!available) return;
+    const value = await fixture({ slackWorkspaceRouting: true, routedWorkspaceName: "Platform" });
+    const event = {
+      teamId: value.teamId,
+      eventId: `E_REJECTED_PICKER_${crypto.randomUUID()}`,
+      event: {
+        type: "app_mention",
+        user: value.ownerSlackUserId,
+        channel: "C_REJECTED_PICKER",
+        ts: "1700000690.0001",
+        text: "the original request",
+      },
+    };
+    value.slack.failuresByText.set("more than one workspace", { error: "invalid_blocks" });
+    expect((await postEvent(value.app, event)).status).toBe(200);
+    await drainAll(value.deps);
+    const [before] = await shared!.admin<
+      { message_operation_id: string; request_digest: string; request_text: string }[]
+    >`
+      select p.message_operation_id, o.request_digest, p.request_text
+      from slack_route_prompts p join slack_bot_post_operations o
+        on o.connection_id=p.connection_id and o.operation_id=p.message_operation_id
+      where p.connection_id=${value.connectionId}`;
+    expect(before?.request_text).toBe("the original request");
+    expect(value.slack.posts).toHaveLength(0);
+    // Seed the receipt written by the old release: one actions block containing
+    // every option, before the provider-only split. Never hash the wire blocks.
+    const attempted = value.slack.postAttempts.at(-1)!;
+    const wireBlocks = attempted.blocks as Array<Record<string, unknown>>;
+    const legacyBlocks = [
+      wireBlocks[0],
+      {
+        type: "actions",
+        block_id: "opengeni-route-choice",
+        elements: wireBlocks
+          .filter((block) => block.type === "actions")
+          .flatMap((block) => block.elements as unknown[]),
+      },
+      wireBlocks.at(-1),
+    ];
+    const legacyDigest = createHmac("sha256", environmentsEncryptionKeyBytes(value.deps.settings)!)
+      .update(
+        JSON.stringify({
+          operationId: before!.message_operation_id,
+          connectionId: value.connectionId,
+          targetKind: "user",
+          targetId: value.ownerSlackUserId,
+          threadTimestamp: null,
+          text: attempted.text,
+          blocks: legacyBlocks,
+        }),
+      )
+      .digest("hex");
+    expect(before!.request_digest).toBe(legacyDigest);
+    await shared!.admin`
+      update slack_bot_post_operations set request_digest=${legacyDigest}
+      where connection_id=${value.connectionId} and operation_id=${before!.message_operation_id}`;
+    value.slack.failuresByText.clear();
+    expect(
+      (
+        await postEvent(value.app, {
+          ...event,
+          eventId: `E_RETRY_PICKER_${crypto.randomUUID()}`,
+          event: { ...event.event, ts: "1700000690.0002", text: "retry" },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    expect(value.slack.posts).toHaveLength(1);
+    expect(value.slack.posts[0]!.clientMessageId).toBe(before!.message_operation_id);
+    const [after] = await shared!.admin<{ request_digest: string; status: string }[]>`
+      select request_digest,status from slack_bot_post_operations
+      where connection_id=${value.connectionId} and operation_id=${before!.message_operation_id}`;
+    expect(after).toMatchObject({ request_digest: before!.request_digest, status: "completed" });
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    expect(await interactions(value.routed!.workspaceId)).toHaveLength(0);
   });
 
   test("asks once, remembers the answer, and never asks that channel again", async () => {
@@ -4228,7 +4501,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       browserSession.id,
       {
         text: "Switch this session to my connected Codex model",
-        model: "codex/gpt-5.6-sol",
+        model: "codex/gpt-6-sol",
         clientEventId: `browser-model-switch-${crypto.randomUUID()}`,
       },
     );
@@ -4256,7 +4529,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       select model from sessions
       where workspace_id = ${value.owner.workspaceId}
         and id = ${route!.session_id}`;
-    expect(session!.model).toBe("codex/gpt-5.6-sol");
+    expect(session!.model).toBe("codex/gpt-6-sol");
   });
 
   test("subject model lookup orders turns across sessions, resolves ties, and falls back without turns", async () => {
@@ -4279,7 +4552,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       olderSession.id,
       {
         text: "Choose Codex later in the older session",
-        model: "codex/gpt-5.6-sol",
+        model: "codex/gpt-6-sol",
         clientEventId: `older-session-model-switch-${crypto.randomUUID()}`,
       },
     );
@@ -4302,7 +4575,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     await shared!.admin`
       update session_turns
       set created_at = case
-        when model = 'codex/gpt-5.6-sol' then '2026-08-02T13:00:00Z'::timestamptz
+        when model = 'codex/gpt-6-sol' then '2026-08-02T13:00:00Z'::timestamptz
         else '2026-08-02T10:00:00Z'::timestamptz
       end
       where workspace_id = ${value.owner.workspaceId}
@@ -4324,7 +4597,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         value.owner.workspaceId,
         value.owner.subjectId,
       ),
-    ).toBe("codex/gpt-5.6-sol");
+    ).toBe("codex/gpt-6-sol");
 
     await shared!.admin`
       update session_turns
@@ -4337,7 +4610,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         value.owner.workspaceId,
         value.owner.subjectId,
       ),
-    ).toBe("codex/gpt-5.6-sol");
+    ).toBe("codex/gpt-6-sol");
 
     const fallbackSession = await createSessionForRequest(
       value.deps,
@@ -4403,7 +4676,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       value.owner.workspaceId,
       {
         initialMessage: "Other subject Codex session",
-        model: "codex/gpt-5.6-sol",
+        model: "codex/gpt-6-sol",
         sandboxBackend: "none",
       },
     );
@@ -4424,7 +4697,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       crossWorkspaceGrant.workspaceId,
       {
         initialMessage: "Same subject in another workspace",
-        model: "codex/gpt-5.6-sol",
+        model: "codex/gpt-6-sol",
         sandboxBackend: "none",
       },
     );

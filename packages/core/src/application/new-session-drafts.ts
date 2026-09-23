@@ -19,6 +19,7 @@ import {
   publicNewSessionDraftOptions,
   requireFileForSubject,
   saveNewSessionDraftInTransaction,
+  reusableNewSessionRepositoryResource,
   withWorkspaceSubjectRls,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -332,4 +333,45 @@ export async function saveActorNewSessionDraft(
     ? await fileOwnerContextForAccess(deps, authorization, "sessions:create")
     : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
   return withSessionRlsActorContext(actor, () => saveActorNewSessionDraftInFileScope(...args));
+}
+
+/** Reuse the website's actor/workspace selections without consuming its draft. */
+export async function getActorNewSessionDefaults(
+  deps: Parameters<typeof getActorNewSessionDraft>[0],
+  grant: AccessGrant,
+  workspaceId: string,
+) {
+  const draft = await getActorNewSessionDraft(deps, grant, workspaceId);
+  const options = draft.options;
+  return {
+    // Revision zero is a synthetic empty form, not a user's model preference.
+    ...(draft.revision > 0
+      ? {
+          model: draft.model,
+          reasoningEffort: draft.reasoningEffort,
+          latencyMode: draft.latencyMode,
+        }
+      : {}),
+    resources: draft.resources.flatMap((resource) =>
+      resource.kind === "repository" ? [reusableNewSessionRepositoryResource(resource)] : [],
+    ),
+    ...(draft.toolsProvided
+      ? { tools: draft.tools }
+      : options.excludedMcpServerIds
+        ? { excludedMcpServerIds: options.excludedMcpServerIds }
+        : {}),
+    ...(options.firstPartyMcpTools ? { firstPartyMcpTools: options.firstPartyMcpTools } : {}),
+    ...(options.firstPartyMcpPermissions
+      ? { firstPartyMcpPermissions: options.firstPartyMcpPermissions }
+      : {}),
+    ...(options.variableSetIds ? { variableSetIds: options.variableSetIds } : {}),
+    ...(options.rigId ? { rigId: options.rigId } : {}),
+    ...(options.sandboxBackend ? { sandboxBackend: options.sandboxBackend } : {}),
+    ...(options.targetSandboxId
+      ? {
+          targetSandboxId: options.targetSandboxId,
+          ...(options.workingDir ? { workingDir: options.workingDir } : {}),
+        }
+      : {}),
+  };
 }

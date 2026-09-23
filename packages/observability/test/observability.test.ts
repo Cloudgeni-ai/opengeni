@@ -9,6 +9,7 @@ import {
   parseHeaders,
   recordTenancyCompatibilityLaneUse,
   sandboxOperationMetricObserver,
+  sandboxCaptureWaitMetricObserver,
   TENANCY_COMPATIBILITY_LANES,
   workspaceInsightsMetricObserver,
 } from "../src";
@@ -208,6 +209,53 @@ describe("observability", () => {
     expect(metrics).not.toContain("sb-user-controlled-provider-id");
     expect(metrics).not.toContain("/private/path");
     expect(metrics).toContain("opengeni_sandbox_operation_duration_seconds_bucket");
+  });
+
+  test("capture waits have distinct bounded metrics and never inflate provider call counts", async () => {
+    const exported: unknown[] = [];
+    const obs = createObservability(settings, {
+      component: "worker",
+      now: () => 1,
+      exporter: async (_url, body) => {
+        exported.push(body);
+      },
+    });
+    const observe = sandboxCaptureWaitMetricObserver(obs);
+    observe({
+      backend: "modal",
+      op: "exec",
+      outcome: "ok",
+      durationMs: 54_600,
+      captureWaitStage: "admission",
+    });
+    observe({
+      backend: "private-provider",
+      op: "/private/path",
+      outcome: "failed",
+      durationMs: 200,
+      captureWaitStage: "provider",
+    });
+    observe({
+      backend: "modal",
+      op: "exec",
+      outcome: "ok",
+      durationMs: NaN,
+      captureWaitStage: "admission",
+    });
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toContain("opengeni_sandbox_capture_wait_duration_seconds");
+    expect(metrics).toContain('stage="admission"');
+    expect(metrics).toContain('stage="provider"');
+    expect(metrics).toContain('outcome="failed"');
+    expect(metrics).not.toContain("private-provider");
+    expect(metrics).not.toContain("/private/path");
+    expect(metrics).not.toContain("opengeni_sandbox_operations_total");
+    expect(metrics).not.toContain("NaN");
+    await obs.flush();
+    expect(JSON.stringify(exported)).toContain("sandbox.capture_wait.admission");
+    expect(JSON.stringify(exported)).toContain("sandbox.capture_wait.provider");
+    expect(JSON.stringify(exported)).not.toContain("private-provider");
+    expect(JSON.stringify(exported)).not.toContain("/private/path");
   });
 
   test("recognizes every public sandbox backend without collapsing it", async () => {
@@ -546,9 +594,72 @@ describe("observability", () => {
       console.warn = originalWarn;
     }
 
-    expect(observed).toEqual([
-      "Startup dependency Temporal connection failed; retrying (1/3 in 100ms)",
-    ]);
+    expect(observed).toEqual(["Startup dependency Temporal check failed; retrying (1/3 in 100ms)"]);
+  });
+
+  test("snapshot logs preserve closed provider classification and opaque lease correlation", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    const id = "slk_0123456789abcdef0123456789abcdef";
+    const sentinel = "private-provider-value";
+    try {
+      const obs = createObservability(
+        { ...settings, observabilityStructuredLogs: true },
+        { component: "worker" },
+      );
+      obs.warn("snapshot failed", {
+        errorClass: "SnapshotOperationError",
+        errorCode: "snapshot_operation_failed",
+        origin: "worker-lifecycle",
+        causeName: "SandboxProviderCaptureTimeoutError",
+        providerErrorName: "ClientError",
+        providerGrpcCode: 4,
+        providerHttpStatus: 504,
+        providerRetryable: true,
+        sandboxLeaseKey: id,
+        sessionId: "0ffbda8c-11c6-49dc-b636-b15a58163753",
+        leaseEpoch: 3,
+        responseBody: sentinel,
+        cause: sentinel,
+      });
+      obs.warn("snapshot failed", {
+        errorClass: "SnapshotOperationError",
+        causeName: sentinel,
+        providerErrorName: sentinel,
+        providerGrpcCode: 100,
+        providerHttpStatus: NaN,
+        providerRetryable: sentinel,
+        sessionId: sentinel,
+        sandboxLeaseKey: sentinel,
+        leaseEpoch: Infinity,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      origin: "worker-lifecycle",
+      causeName: "SandboxProviderCaptureTimeoutError",
+      providerErrorName: "ClientError",
+      providerGrpcCode: 4,
+      providerHttpStatus: 504,
+      providerRetryable: true,
+      sandboxLeaseKey: id,
+      leaseEpoch: 3,
+    });
+    expect(observed.join(" ")).not.toContain(sentinel);
+    expect(observed.join(" ")).not.toContain("0ffbda8c-11c6-49dc-b636-b15a58163753");
+    for (const key of [
+      "causeName",
+      "providerErrorName",
+      "providerGrpcCode",
+      "providerHttpStatus",
+      "providerRetryable",
+      "sessionId",
+      "sandboxLeaseKey",
+      "leaseEpoch",
+    ])
+      expect(JSON.parse(observed[1]!)).not.toHaveProperty(key);
   });
 
   test("keeps safe retry context in structured startup logs", () => {
@@ -909,7 +1020,7 @@ describe("observability", () => {
         },
       });
       obs.startSpan("worker.operation").end();
-      await Bun.sleep(0);
+      await obs.flush();
     } finally {
       console.warn = originalWarn;
     }
@@ -945,9 +1056,8 @@ describe("observability", () => {
 
   test("counts one compatibility-lane use with the lane as its only label", async () => {
     const obs = createObservability(settings, { component: "worker", now: () => 1 });
-    recordTenancyCompatibilityLaneUse(obs, "connection_pre_snapshot_ref");
-    recordTenancyCompatibilityLaneUse(obs, "connection_pre_snapshot_ref");
-    recordTenancyCompatibilityLaneUse(obs, "connection_legacy_user");
+    recordTenancyCompatibilityLaneUse(obs, "workspace_writer_unattributed");
+    recordTenancyCompatibilityLaneUse(obs, "workspace_writer_unattributed");
 
     const metrics = await obs.prometheusMetrics();
     const sample = (lane: string): string =>
@@ -958,14 +1068,12 @@ describe("observability", () => {
             line.startsWith("opengeni_tenancy_compatibility_lane_uses_total{") &&
             line.includes(`lane="${lane}"`),
         ) ?? "";
-    expect(sample("connection_pre_snapshot_ref")).toMatch(/\s2$/);
-    expect(sample("connection_legacy_user")).toMatch(/\s1$/);
-    expect(sample("workspace_writer_unattributed")).toMatch(/\s0$/);
+    expect(sample("workspace_writer_unattributed")).toMatch(/\s2$/);
     // Content-free: only the reviewed lane name plus the registry's fixed
     // deployment labels. No tenant, subject, connection, or resource identity.
-    const labels = sample("connection_legacy_user").slice(
-      sample("connection_legacy_user").indexOf("{") + 1,
-      sample("connection_legacy_user").indexOf("}"),
+    const labels = sample("workspace_writer_unattributed").slice(
+      sample("workspace_writer_unattributed").indexOf("{") + 1,
+      sample("workspace_writer_unattributed").indexOf("}"),
     );
     expect(
       labels
@@ -981,9 +1089,11 @@ describe("observability", () => {
       obs,
       "connection_id_47f0d0a1" as unknown as (typeof TENANCY_COMPATIBILITY_LANES)[number],
     );
-    expect(() => recordTenancyCompatibilityLaneUse(null, "connection_legacy_user")).not.toThrow();
     expect(() =>
-      recordTenancyCompatibilityLaneUse(undefined, "connection_legacy_user"),
+      recordTenancyCompatibilityLaneUse(null, "workspace_writer_unattributed"),
+    ).not.toThrow();
+    expect(() =>
+      recordTenancyCompatibilityLaneUse(undefined, "workspace_writer_unattributed"),
     ).not.toThrow();
 
     const metrics = await obs.prometheusMetrics();

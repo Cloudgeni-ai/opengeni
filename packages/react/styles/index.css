@@ -16,6 +16,7 @@
 
 @import "./tokens.css";
 @import "./effective-tokens.css";
+@import "./session-capability.css";
 
 /* Full-surface preview preparation. Private palette preserves the accepted
    ripple study; the steady label uses the host's typography and text tokens. */

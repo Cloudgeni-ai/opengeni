@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import {
-  StoredCapabilityPack,
   StoredSessionSkills,
+  StoredAutomationSessionTemplate,
   validateSkillTextFiles,
   type SkillFile,
 } from "@opengeni/contracts";
@@ -74,7 +74,16 @@ export function convertLegacyPackConfig(value: unknown, identity: string): Objec
         },
       };
     });
-  StoredCapabilityPack.parse(converted);
+  // Historical migration 0433 only: validate the execution fields this
+  // conversion rewrites. The remaining archived manifest is opaque evidence,
+  // not an active capability or an admission contract.
+  if (converted.skills !== undefined) StoredSessionSkills.parse(converted.skills);
+  if (converted.automationTemplates !== undefined) {
+    if (!Array.isArray(converted.automationTemplates))
+      throw new Error("Expected historical automation template array");
+    for (const entry of converted.automationTemplates)
+      StoredAutomationSessionTemplate.parse(object(entry).sessionTemplate);
+  }
   return converted;
 }
 

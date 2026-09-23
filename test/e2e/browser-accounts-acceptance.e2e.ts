@@ -35,7 +35,25 @@ import {
 } from "playwright";
 
 import { createApp } from "../../apps/api/src/app";
+import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics";
+import { createAccountReadDiagnostics } from "./browser-account-read-diagnostics";
+import { observeReloadCapabilities } from "./browser-account-reload-barrier";
 import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
+import {
+  observeCapabilityResume,
+  consumeCapabilityResumeRead,
+  evaluateCapabilityResumeRead,
+  type CapabilityResumeEvidence,
+} from "./browser-account-capability-resume";
+import {
+  createCapabilityDiagnostics,
+  capabilityMatcherDiagnostics,
+} from "./browser-account-capability-diagnostics";
+import {
+  sanitizeRaceProjection,
+  sanitizeRaceRequest,
+  sanitizeRaceResult,
+} from "./browser-account-race-diagnostics";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
@@ -76,6 +94,7 @@ type PendingFiniteRead = {
 };
 
 type BrowserProblems = {
+  capabilityDiagnostics: ReturnType<typeof createCapabilityDiagnostics>;
   crossTabReloadStartedAt?: number;
   acceptedRequestTerminals: Array<{
     observedAt: number;
@@ -746,6 +765,13 @@ function actorTransitionResponseDispatchPhaseMatches(input: {
     : input.dispatchPhase === input.expectedPhase;
 }
 
+function isActorTransitionRead(method: string, pathname: string): boolean {
+  return (
+    method === "GET" ||
+    (method === "POST" && /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(pathname))
+  );
+}
+
 let owned: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let edge: ReturnType<typeof Bun.serve> | null = null;
@@ -754,6 +780,10 @@ let edgeCookieSummary = "not-observed";
 let completionResponseLoss: CompletionResponseLoss | null = null;
 const actorMutationAcceptances: ActorMutationAcceptance[] = [];
 const observedBrowserProblems = new WeakMap<Page, BrowserProblems>();
+let companionReadDiagnostics: {
+  page: Page;
+  ledger: ReturnType<typeof createAccountReadDiagnostics>;
+} | null = null;
 let alpha: AccountFixture;
 let beta: AccountFixture;
 
@@ -831,6 +861,7 @@ async function authSessionCount(email: string): Promise<number> {
 
 function observeBrowser(page: Page): BrowserProblems {
   const problems: BrowserProblems = {
+    capabilityDiagnostics: createCapabilityDiagnostics(),
     acceptedRequestTerminals: [],
     activeStreams: new Map(),
     boundedHttp1StreamDispatches: 0,
@@ -862,11 +893,24 @@ function observeBrowser(page: Page): BrowserProblems {
   page.on("request", (request) => {
     const requestUrl = new URL(request.url());
     const pathname = requestUrl.pathname;
+    if (companionReadDiagnostics?.page === page) {
+      companionReadDiagnostics.ledger.start("browser", request, request.method(), pathname);
+    }
     const actorEpoch = request.headers()[MANAGED_AUTH_ACTOR_EPOCH_HEADER] ?? null;
     const startedAt = performance.now();
     const requestSessionSetAuthorityHash = request
       .headerValue("cookie")
       .then(sessionSetAuthorityHash, () => null);
+    problems.capabilityDiagnostics.request(
+      request,
+      problems.phase,
+      request.url(),
+      request.method(),
+      actorEpoch,
+    );
+    void requestSessionSetAuthorityHash.then((authorityHash) => {
+      problems.capabilityDiagnostics.authority(request, problems.phase, authorityHash);
+    });
     if (actorEpoch !== null) problems.actorDispatches.push({ actorEpoch, startedAt });
     if (pathname.endsWith("/stream") || pathname.includes("/live-events/stream")) {
       if (requestUrl.searchParams.get("transport") === "http1-bounded") {
@@ -912,6 +956,10 @@ function observeBrowser(page: Page): BrowserProblems {
   });
   page.on("response", (response) => {
     const request = response.request();
+    problems.capabilityDiagnostics.response(request, problems.phase, response.status());
+    if (companionReadDiagnostics?.page === page) {
+      companionReadDiagnostics.ledger.response("browser", request, response.status());
+    }
     const pathname = new URL(response.url()).pathname;
     const retiredTerminalProblem = retiredFiniteReadTerminalProblem(
       problems.retiredFiniteReadTombstones.get(request),
@@ -946,7 +994,7 @@ function observeBrowser(page: Page): BrowserProblems {
         pathname.endsWith("/attention") &&
         new Set(["logout-one", "logout-all-response-loss-replay"]).has(problems.phase)) ||
       (response.status() === 409 &&
-        request.method() === "GET" &&
+        isActorTransitionRead(request.method(), pathname) &&
         pathname.startsWith("/v1/workspaces/") &&
         problems.phase === "cross-tab-select-race");
     if (recordsActorTransition) {
@@ -965,6 +1013,10 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   });
   page.on("requestfinished", (request) => {
+    problems.capabilityDiagnostics.terminal(request, problems.phase, "finished");
+    if (companionReadDiagnostics?.page === page) {
+      companionReadDiagnostics.ledger.finish("browser", request, "finished");
+    }
     const finishedAt = performance.now();
     const finishedUrl = new URL(request.url());
     const finishedFiniteRead = problems.pendingFiniteReads.get(request);
@@ -1007,6 +1059,7 @@ function observeBrowser(page: Page): BrowserProblems {
       // every other browser error strict.
       if (!isExpectedHttpConsoleError(rendered, problems.phase)) {
         problems.consoleErrors.push(`[${problems.phase}] ${rendered}`);
+        problems.capabilityDiagnostics.console(problems.phase, source, message.text());
       }
     }
   });
@@ -1016,6 +1069,10 @@ function observeBrowser(page: Page): BrowserProblems {
     problems.pageErrors.push(message);
   });
   page.on("requestfailed", (request) => {
+    problems.capabilityDiagnostics.terminal(request, problems.phase, "failed");
+    if (companionReadDiagnostics?.page === page) {
+      companionReadDiagnostics.ledger.finish("browser", request, "failed");
+    }
     const failedAt = performance.now();
     const dispatch = requestPhases.get(request);
     const failure = request.failure()?.errorText ?? "unknown";
@@ -1100,6 +1157,7 @@ function observeBrowser(page: Page): BrowserProblems {
 
 function setBrowserPhase(problems: BrowserProblems, phase: string): void {
   problems.phase = phase;
+  problems.capabilityDiagnostics.boundary(phase, "phase");
 }
 
 async function waitForFiniteReadQuiescence(
@@ -1364,13 +1422,15 @@ async function expectNoBrowserProblems(problems: BrowserProblems): Promise<void>
 async function expectAndConsumeConsoleErrors(
   page: Page,
   problems: BrowserProblems,
-  allowed: string[],
-  required: string[] = allowed,
+  allowed: string[] | (() => Promise<string[]>),
+  required?: string[],
 ): Promise<void> {
   // Console delivery trails the response event by a task. Consume only the
   // exact fail-closed requests intentionally induced by the current window;
   // every later or additional browser error remains subject to the final gate.
+  const capabilityGateId = problems.capabilityDiagnostics.beginGate(problems.phase);
   await page.waitForTimeout(1_000);
+  const allowedMessages = typeof allowed === "function" ? await allowed() : allowed;
   const counts = Object.fromEntries(
     [...new Set(problems.consoleErrors)].map((message) => [
       message,
@@ -1378,18 +1438,22 @@ async function expectAndConsumeConsoleErrors(
     ]),
   );
   const allowedCounts = Object.fromEntries(
-    [...new Set(allowed)].map((message) => [
+    [...new Set(allowedMessages)].map((message) => [
       message,
-      allowed.filter((candidate) => candidate === message).length,
+      allowedMessages.filter((candidate) => candidate === message).length,
     ]),
   );
+  problems.capabilityDiagnostics.countedGate(problems.phase, capabilityGateId);
   expect({
     excess: Object.fromEntries(
       Object.entries(counts).filter(([message, count]) => count > (allowedCounts[message] ?? 0)),
     ),
-    missing: required.filter((message) => !problems.consoleErrors.includes(message)),
+    missing: (required ?? allowedMessages).filter(
+      (message) => !problems.consoleErrors.includes(message),
+    ),
   }).toEqual({ excess: {}, missing: [] });
   problems.consoleErrors.splice(0);
+  problems.capabilityDiagnostics.clearedGate(problems.phase, capabilityGateId);
 }
 
 async function expectAndConsumePageErrors(
@@ -1686,11 +1750,15 @@ async function expectAndConsumeActorTransitionResponse(
     expect(responseEvidence).toEqual(
       expect.objectContaining({
         actorEpoch: input.actorEpoch,
-        method: input.method,
         responsePhase: input.phase,
         status: input.status,
       }),
     );
+    expect(
+      response.method === input.method ||
+        (input.timing?.kind === "direct-race-fence" &&
+          isActorTransitionRead(response.method, response.pathname)),
+    ).toBe(true);
     const dispatchPhaseValid = actorTransitionResponseDispatchPhaseMatches({
       dispatchPhase: response.dispatchPhase,
       expectedPhase: input.phase,
@@ -2385,7 +2453,7 @@ async function sessionSet(page: Page): Promise<ManagedAuthSessionSetProjection> 
 }
 
 async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjection, slotId: string) {
-  return await page.evaluate(
+  const result = await page.evaluate(
     async ({
       projection: acceptedProjection,
       slotId: selectedSlotId,
@@ -2408,7 +2476,18 @@ async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjectio
           slotId: selectedSlotId,
         }),
       });
-      return response.status;
+      const payload = await response.json().catch(() => null);
+      const managedAuthCode = payload?.error?.details?.managedAuthCode;
+      return {
+        status: response.status,
+        managedAuthCode:
+          typeof managedAuthCode === "string" && /^[a-z_]{1,80}$/u.test(managedAuthCode)
+            ? managedAuthCode
+            : null,
+        expectedGeneration: acceptedProjection.generation,
+        expectedActorEpoch: acceptedProjection.actorEpoch,
+        responseActorEpoch: response.headers.get("x-opengeni-actor-epoch"),
+      };
     },
     {
       projection,
@@ -2418,6 +2497,55 @@ async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjectio
       contractRevision: MANAGED_AUTH_SESSION_SET_API_CONTRACT_REVISION,
     },
   );
+  return sanitizeRaceResult(result);
+}
+
+// Observe admission overlap without introducing a wait or changing race semantics.
+// Keep only allowlisted metadata; never retain headers, bodies, or query strings.
+const pendingAccountApiRequests = new Map<
+  Request,
+  { method: string; pathname: string; actorEpoch: string | null; authorityHash: string | null }
+>();
+const selectAdmissionDiagnostics: Array<{
+  authorityHash: string | null;
+  pending: Array<{
+    method: string;
+    pathname: string;
+    actorEpoch: string | null;
+    authorityHash: string | null;
+  }>;
+}> = [];
+
+async function observeAccountApiRequest(
+  request: Request,
+  dispatch: () => Response | Promise<Response>,
+) {
+  const readDiagnostics = companionReadDiagnostics?.ledger;
+  readDiagnostics?.start("server", request, request.method, new URL(request.url).pathname);
+  const metadata = sanitizeRaceRequest({
+    method: request.method,
+    pathname: new URL(request.url).pathname,
+    actorEpoch: request.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER),
+    authorityHash: sessionSetAuthorityHash(request.headers.get("cookie")),
+  });
+  if (metadata.pathname === "/v1/auth/session-set/select") {
+    selectAdmissionDiagnostics.push({
+      authorityHash: metadata.authorityHash,
+      pending: [...pendingAccountApiRequests.values()],
+    });
+  }
+  pendingAccountApiRequests.set(request, metadata);
+  try {
+    const response = await dispatch();
+    readDiagnostics?.response("server", request, response.status);
+    readDiagnostics?.finish("server", request, "handler-resolved");
+    return response;
+  } catch (failure) {
+    readDiagnostics?.finish("server", request, "handler-rejected");
+    throw failure;
+  } finally {
+    pendingAccountApiRequests.delete(request);
+  }
 }
 
 async function launchAccountBrowser(engine: EngineName): Promise<Browser> {
@@ -2611,8 +2739,10 @@ async function captureResponsiveEvidenceInBrowser(
   );
   expect(menuTargetSizes.length).toBeGreaterThan(0);
   expect(menuTargetSizes.every(({ height, width }) => height >= 44 && width >= 44)).toBe(true);
-  await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
-  await expectNoAxeViolations(touchPage, '[data-slot="dropdown-menu-content"]');
+  await withAccountMenuAxeDiagnostics(touchPage, async () => {
+    await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
+    await expectNoAxeViolations(touchPage, '[data-slot="dropdown-menu-content"]');
+  });
   await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
   await expectAccountMenuEvidenceVisible(touchPage, alpha.displayName);
   const touchScreenshot = await touchPage.screenshot({
@@ -2831,7 +2961,7 @@ beforeAll(async () => {
           completionResponseLoss.firstBody ??= requestBody;
           completionResponseLoss.attempts += 1;
           completionResponseLoss.exactBodies.push(firstBody === null || firstBody === requestBody);
-          const response = await api.fetch(request);
+          const response = await observeAccountApiRequest(request, () => api.fetch(request));
           completionResponseLoss.statuses.push(response.status);
           if (completionResponseLoss.acceptedAt === null && response.ok) {
             completionResponseLoss.acceptedAt = performance.now();
@@ -2871,7 +3001,7 @@ beforeAll(async () => {
             .join(",");
           edgeCookieSummary += `;caseEqual:${lowerCookieHeader === upperCookieHeader}`;
         }
-        const response = await api.fetch(request);
+        const response = await observeAccountApiRequest(request, () => api.fetch(request));
         if (
           response.ok &&
           (new Set([
@@ -2918,6 +3048,20 @@ afterAll(async () => {
 }, 180_000);
 
 describe("provider-neutral browser account acceptance", () => {
+  test("actor transition reads include only the exact read-only POST search", () => {
+    const path = "/v1/workspaces/workspace/knowledge/entries/search";
+    expect(isActorTransitionRead("POST", path)).toBe(true);
+    expect(isActorTransitionRead("GET", path)).toBe(true);
+    for (const [method, pathname] of [
+      ["DELETE", path],
+      ["PATCH", path],
+      ["POST", `${path}/other`],
+      ["POST", "/v1/workspaces/workspace/knowledge/entries/review"],
+      ["POST", "/v1/workspaces/workspace/sessions"],
+    ]) {
+      expect(isActorTransitionRead(method!, pathname!)).toBe(false);
+    }
+  });
   test("neutral race cancellations require the exact accepted select and explicit reload window", () => {
     const input: BrowserRequestFailureInput = {
       actorEpoch: null,
@@ -4237,13 +4381,22 @@ describe("provider-neutral browser account acceptance", () => {
     const context = await browser.newContext({
       viewport: { width: 1440, height: 960 },
     });
-    const otherBrowserSet = await browser.newContext({
+    // Keep the independent account set out of the shared-tab journey's native
+    // connection pool, as for responsive evidence. The two racing tabs still
+    // share one context and browser; no request assertions are relaxed.
+    const independentBrowser = await launchAccountBrowser(engine);
+    const otherBrowserSet = await independentBrowser.newContext({
       viewport: { width: 1024, height: 768 },
     });
     const page = await context.newPage();
     const secondTab = await context.newPage();
     const otherPage = await otherBrowserSet.newPage();
     const pageProblems = observeBrowser(page);
+    let capabilityResumeObserver: Awaited<ReturnType<typeof observeCapabilityResume>> | undefined;
+    let reloadCapabilityObserver: ReturnType<typeof observeReloadCapabilities> | undefined;
+    let capabilityResumeEvidence: CapabilityResumeEvidence | undefined;
+    let capabilityMatcherEvidence: ReturnType<typeof capabilityMatcherDiagnostics> | undefined;
+    const consumedCapabilityResumeRequests = new Set<string>();
     const draftRequests: Array<{ method: string; pathname: string }> = [];
     page.on("request", (request) => {
       const pathname = new URL(request.url()).pathname;
@@ -4338,6 +4491,13 @@ describe("provider-neutral browser account acceptance", () => {
         await captureResponsiveEvidence(context, engine);
       }
 
+      // Responsive/focus work can let a background POST search start after the
+      // earlier bootstrap checkpoint. POSTs retain actor mutation leases even
+      // for read-only search, so that unrelated request can correctly reject
+      // BOTH selects. Establish the intended two-mutation race precondition
+      // again; keep both selects concurrent and the one-winner assertion exact.
+      await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems]);
+
       const stopRaceAuthorityObservation = await Promise.all(
         [page, secondTab].map((observedPage) =>
           observeChromiumNeutralSessionSetRequestAuthority(observedPage, publicOrigin),
@@ -4352,11 +4512,29 @@ describe("provider-neutral browser account acceptance", () => {
         sessionSet(page),
         sessionSet(secondTab),
       ]);
+      selectAdmissionDiagnostics.length = 0;
       const raced = await Promise.all([
         raceSelect(page, pageProjection, betaSlot.id),
         raceSelect(secondTab, tabProjection, betaSlot.id),
       ]);
-      expect(raced.sort()).toEqual([200, 409]);
+      const racedStatuses = raced.map(({ status }) => status).sort();
+      if (racedStatuses[0] !== 200 || racedStatuses[1] !== 409) {
+        const currentProjections = await Promise.all(
+          [page, secondTab].map(async (observedPage) => {
+            try {
+              const current = await sessionSet(observedPage);
+              return sanitizeRaceProjection(current);
+            } catch {
+              return { unavailable: true };
+            }
+          }),
+        );
+        console.error(
+          "Account selection race diagnostics",
+          JSON.stringify({ raced, admissions: selectAdmissionDiagnostics, currentProjections }),
+        );
+      }
+      expect(racedStatuses).toEqual([200, 409]);
       pageProblems.crossTabReloadStartedAt = performance.now();
       secondTabProblems.crossTabReloadStartedAt = pageProblems.crossTabReloadStartedAt;
       await Promise.all([
@@ -4462,6 +4640,8 @@ describe("provider-neutral browser account acceptance", () => {
       await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems]);
       const oldProjection = await sessionSet(secondTab);
       const delay = await delayedWorkspaceResponse(secondTab, oldProjection.actorEpoch);
+      const companionDiagnostics = createAccountReadDiagnostics();
+      companionReadDiagnostics = { page: secondTab, ledger: companionDiagnostics };
       let reloadOutcome = "pending";
       const reload = secondTab.reload({ waitUntil: "domcontentloaded" }).then(
         (response) => {
@@ -4473,8 +4653,18 @@ describe("provider-neutral browser account acceptance", () => {
           return null;
         },
       );
-      const intentionallyHeldRequest = await delay.intercepted;
-      await waitForCompanionFiniteReadQuiescence(secondTabProblems, intentionallyHeldRequest);
+      try {
+        const intentionallyHeldRequest = await delay.intercepted;
+        companionDiagnostics.markHeld(intentionallyHeldRequest);
+        await waitForCompanionFiniteReadQuiescence(secondTabProblems, intentionallyHeldRequest);
+      } catch (cause) {
+        throw new Error(
+          `companion read lifecycle evidence: ${JSON.stringify(companionDiagnostics.snapshot())}`,
+          { cause },
+        );
+      } finally {
+        companionReadDiagnostics = null;
+      }
       setBrowserPhase(pageProblems, "late-old-epoch-alpha-to-beta");
       setBrowserPhase(secondTabProblems, "late-old-epoch-alpha-to-beta");
       await selectAccount(page, alpha, beta);
@@ -4615,6 +4805,17 @@ describe("provider-neutral browser account acceptance", () => {
           select auth_session_id from managed_auth_login_slots where id = ${alphaSlot.id}
         )`;
       const slotRevocationReloadStartedAt = performance.now();
+      const resumeCapabilityUrl = `${publicOrigin}/v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`;
+      // Firefox does not emit these native HTTP console errors. Preserve its
+      // existing strict ledgers; this barrier joins Chromium/WebKit delivery.
+      if (engine !== "firefox") {
+        reloadCapabilityObserver = observeReloadCapabilities(page, {
+          url: resumeCapabilityUrl,
+          actorEpoch: projectionBeforeSlotRevocation.actorEpoch,
+          actorEpochHeader: MANAGED_AUTH_ACTOR_EPOCH_HEADER,
+          phase: () => pageProblems.phase,
+        });
+      }
       await page.reload({ waitUntil: "domcontentloaded" });
       await accountMenuTrigger(page, beta.displayName).waitFor();
       await retirePendingReadsAfterConfirmedDocumentReplacement(page, pageProblems, {
@@ -4629,15 +4830,27 @@ describe("provider-neutral browser account acceptance", () => {
       await expectAndConsumeConsoleErrors(
         page,
         pageProblems,
-        [
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
-        ],
+        async () => {
+          await reloadCapabilityObserver?.wait();
+          return [
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+          ];
+        },
         [],
       );
+      reloadCapabilityObserver?.dispose();
+      pageProblems.capabilityDiagnostics.boundary(pageProblems.phase, "resume-arm-begin");
+      capabilityResumeObserver = await observeCapabilityResume(page, {
+        url: resumeCapabilityUrl,
+        phase: () => pageProblems.phase,
+        actorEpochHeader: MANAGED_AUTH_ACTOR_EPOCH_HEADER,
+        hashAuthority: sessionSetAuthorityHash,
+      });
+      pageProblems.capabilityDiagnostics.boundary(pageProblems.phase, "resume-arm-end");
       const reauthMenu = await openAccountMenu(page, beta.displayName);
       const alphaReauthSlot = reauthMenu.getByRole("menuitem", {
         name: new RegExp(alpha.displayName),
@@ -4655,24 +4868,50 @@ describe("provider-neutral browser account acceptance", () => {
       await expectAndConsumeConsoleErrors(
         page,
         pageProblems,
-        [
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-          // WebKit can restore page visibility after closing the popup as well
-          // as remounting the actor. useSessionCapabilities renegotiates once
-          // on that page-live transition. Budget only this exact denied read.
-          ...(engine === "webkit"
-            ? [
-                `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-              ]
-            : []),
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
-          ...optionalWebKitReauthenticationReloadError(pageProblems, engine),
-        ],
+        async () => {
+          const authorityHash = sessionSetAuthorityHash(await browserCookieHeader(context));
+          pageProblems.capabilityDiagnostics.boundary(pageProblems.phase, "resume-seal-begin");
+          const evidence = await capabilityResumeObserver!.finish();
+          pageProblems.capabilityDiagnostics.boundary(pageProblems.phase, "resume-seal-end");
+          capabilityResumeEvidence = evidence;
+          // A controlled resume reproduces this extra read in Chromium too.
+          // Original CI causation remains unknown; only actual lifecycle and
+          // authenticated request evidence can authorize this one extra error.
+          const expectedResume = {
+            url: resumeCapabilityUrl,
+            actorEpoch: projection.actorEpoch,
+            authorityHash,
+            phase: pageProblems.phase,
+          };
+          capabilityMatcherEvidence = capabilityMatcherDiagnostics(
+            expectedResume,
+            evaluateCapabilityResumeRead(
+              evidence,
+              expectedResume,
+              consumedCapabilityResumeRequests,
+            ),
+          );
+          const resumedRequest = consumeCapabilityResumeRead(
+            evidence,
+            expectedResume,
+            consumedCapabilityResumeRequests,
+          );
+          return [
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+            ...(resumedRequest !== null
+              ? [
+                  `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+                ]
+              : []),
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+            ...optionalWebKitReauthenticationReloadError(pageProblems, engine),
+          ];
+        },
         [],
       );
       await expectAndConsumePageErrors(
@@ -4984,8 +5223,44 @@ describe("provider-neutral browser account acceptance", () => {
         )}\n`,
       );
     } finally {
+      const diagnosticWrites = [
+        writeFile(
+          `${EVIDENCE_DIR}/${engine}-capability-diagnostics.json`,
+          `${JSON.stringify(
+            {
+              resumeSnapshot: capabilityResumeEvidence
+                ? { status: "available", clock: "browser-unix-ms" }
+                : { status: "unavailable", reason: "finish-not-reached" },
+              matcher: capabilityMatcherEvidence ?? { status: "unavailable" },
+              primary: pageProblems.capabilityDiagnostics.snapshot(),
+              secondTab: secondTabProblems.capabilityDiagnostics.snapshot(),
+              independent: otherProblems.capabilityDiagnostics.snapshot(),
+            },
+            null,
+            2,
+          )}\n`,
+        ),
+      ];
+      if (capabilityResumeEvidence) {
+        diagnosticWrites.push(
+          writeFile(
+            `${EVIDENCE_DIR}/${engine}-capability-resume.json`,
+            `${JSON.stringify(capabilityResumeEvidence, null, 2)}\n`,
+          ),
+        );
+      }
+      // Diagnostic write failures must not replace the assertion failure or
+      // prevent browser cleanup. No diagnostic I/O occurs before gate counting.
+      if (
+        (await Promise.allSettled(diagnosticWrites)).some((result) => result.status === "rejected")
+      ) {
+        console.warn("Capability diagnostic evidence could not be fully persisted.");
+      }
+      await capabilityResumeObserver?.dispose();
+      reloadCapabilityObserver?.dispose();
       await context.close().catch(() => undefined);
       await otherBrowserSet.close().catch(() => undefined);
+      await independentBrowser.close().catch(() => undefined);
       await browser.close().catch(() => undefined);
     }
   }, 600_000);

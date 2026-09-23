@@ -96,6 +96,15 @@ describe("migration 0344 private visibility transition gate", () => {
         reasoningEffort: "medium",
         latencyMode: "standard",
         sandboxBackend: "none",
+        personalConnectionDelegations: [
+          {
+            serverId: "selected-service",
+            connectionId: crypto.randomUUID(),
+            ownerSubjectId: subjectId,
+            providerDomain: "https://service.example.test/mcp",
+            kind: "oauth2",
+          },
+        ],
         createIdempotencyKey: key,
       });
       if (result.denied) throw new Error("fixture session unexpectedly denied");
@@ -107,6 +116,25 @@ describe("migration 0344 private visibility transition gate", () => {
       `shared-replay-${crypto.randomUUID()}`,
     );
     const operationKey = `transition-replay-${crypto.randomUUID()}`;
+    // Even an otherwise-authorized SQL writer cannot clear the captured
+    // connection selection or forge the lifecycle capability with a GUC.
+    await expect(
+      (async () =>
+        await owned!.admin`
+      update sessions set initial_personal_connection_delegations = '[]'::jsonb
+      where id = ${replaySession.id}`)(),
+    ).rejects.toMatchObject({ code: "23514" });
+    await expect(
+      (async () =>
+        await owned!.admin.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id', ${accountId}, true),
+            set_config('opengeni.workspace_id', ${sharedWorkspaceId}, true),
+            set_config('opengeni.subject_id', ${subjectId}, true)`;
+          await tx`select set_config('opengeni.session_visibility_write_capability', ${crypto.randomUUID()}, true)`;
+          await tx`update sessions set visibility = 'user_private', authority_epoch = authority_epoch + 1,
+        initial_personal_connection_delegations = '[]'::jsonb where id = ${replaySession.id}`;
+        }))(),
+    ).rejects.toMatchObject({ code: "42501" });
     const applied = await transitionSessionVisibility(client.db, {
       workspaceId: sharedWorkspaceId,
       sessionId: replaySession.id,
@@ -116,6 +144,10 @@ describe("migration 0344 private visibility transition gate", () => {
       operationKey,
     });
     expect(applied).toMatchObject({ visibility: "user_private", changed: true, replay: false });
+    const [selection] = await owned.admin`
+      select initial_personal_connection_delegations as delegations
+      from sessions where id = ${replaySession.id}`;
+    expect(selection?.delegations).toEqual([]);
 
     const disabled = await updateOrganizationPrivateSessionSettings(client.db, {
       organizationId: accountId,

@@ -15,11 +15,17 @@ const MCP_TOOL_NAME_SEPARATOR = "__";
 const NO_MCP_SERVER_IDS: ReadonlySet<string> = new Set();
 
 /** Return the authorized server id for a runtime MCP function tool name. */
-function mcpServerIdForTool(tool: unknown, mcpServerIds: ReadonlySet<string>): string | null {
+function mcpServerIdForTool(
+  tool: unknown,
+  mcpServerIds: ReadonlySet<string>,
+  modelServerIds?: ReadonlyMap<string, string>,
+): string | null {
   if (!tool || typeof tool !== "object") return null;
   if ((tool as { type?: unknown }).type !== "function") return null;
   const name = (tool as { name?: unknown }).name;
   if (typeof name !== "string") return null;
+  const exact = modelServerIds?.get(name);
+  if (exact !== undefined) return mcpServerIds.has(exact) ? exact : null;
   let match: string | null = null;
   for (const serverId of mcpServerIds) {
     if (
@@ -41,15 +47,17 @@ function mcpServerIdForTool(tool: unknown, mcpServerIds: ReadonlySet<string>): s
  * server is an authority decision; it does not make every schema from that
  * server eager. Per-turn eager identities are removed from this searchable
  * pool by the runtime before provider projection.
- * The prefix is the same runtime namespace used by PrefixedMcpServer; this
- * intentionally does not inspect the global registry, connection metadata, or
- * credentials, so search cannot widen the already-authorized tool set.
+ * Prepared servers supply their exact bounded-model-name map. Prefix lookup is
+ * only the legacy embedded-server fallback. Neither path inspects the global
+ * registry, connection metadata, or credentials, and both intersect the
+ * already-authorized server set.
  */
 export function isSearchableMcpFunctionTool(
   tool: unknown,
   mcpServerIds: ReadonlySet<string> = NO_MCP_SERVER_IDS,
+  modelServerIds?: ReadonlyMap<string, string>,
 ): tool is Tool & { name: string; deferLoading?: boolean } {
-  const serverId = mcpServerIdForTool(tool, mcpServerIds);
+  const serverId = mcpServerIdForTool(tool, mcpServerIds, modelServerIds);
   return serverId !== null;
 }
 

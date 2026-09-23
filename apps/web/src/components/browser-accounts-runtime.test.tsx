@@ -104,6 +104,7 @@ describe("signed-out browser account recovery", () => {
             onActorTransition={async () => undefined}
           >
             <BrowserAccountsSignedOutPanel
+              presentation="embedded"
               emptySetRegistrationPanel={<div data-registration="true">Sign up and resend</div>}
             />
           </BrowserAccountsProvider>,
@@ -112,6 +113,9 @@ describe("signed-out browser account recovery", () => {
       await flush();
 
       expect(container.textContent).toContain("Continue with email");
+      expect(container.querySelector("h1")).toBeNull();
+      expect(container.querySelector("h2")?.textContent).toBe("Sign in to OpenGeni");
+      expect(container.querySelector(".max-w-sm")).toBeNull();
       expect(container.textContent).toContain("Create an account");
       expect(container.querySelector('[data-registration="true"]')).toBeNull();
       const createAccount = Array.from(container.querySelectorAll("button")).find(

@@ -5,7 +5,6 @@ import type {
   GitCredentialsRequest,
 } from "@opengeni/contracts";
 import { prReviewRegistrationIdFromCredentialBinding } from "@opengeni/core";
-import { createNativeRemoteMcpCredentialsPort } from "@opengeni/core/remote-mcp-credentials";
 import { decryptVariableSetValue, resolvePrReviewGitCredential, type Database } from "@opengeni/db";
 import {
   createGitHubAppInstallationTokenWithExpiry,
@@ -19,7 +18,6 @@ export function createStandaloneConnectionCredentialsPort(
   db: Database,
 ): ConnectionCredentialsPort {
   return {
-    ...createNativeRemoteMcpCredentialsPort(settings, db),
     gitCredentials: async (request) => await resolveStandaloneGitCredentials(settings, db, request),
   };
 }

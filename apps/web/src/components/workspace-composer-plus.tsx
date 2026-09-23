@@ -161,12 +161,15 @@ export function WorkspaceComposerPlus(props: ComposerPlusProps & { workspaceId: 
         (path) => client.catalogAssetUrl(path),
       )}
       connectorActions={{
+        ...props.connectorActions,
         onReconnect: (id) => void reconnect(id),
         loading,
         error,
         busyId,
       }}
       onOpenConnectors={() => {
+        props.connectorActions?.accountControls?.onRefresh?.();
+        props.onOpenConnectors?.();
         void reload();
         void refreshRuntime.current(workspaceId);
       }}

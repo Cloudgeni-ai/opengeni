@@ -309,6 +309,20 @@ describe("summarizeRailNodes", () => {
       label: "1 unread",
     });
   });
+
+  test("queued output stays unread but exposes the unread label only after settling", () => {
+    const queued = session({ id: "answered", status: "queued", unread: true });
+    expect(summarizeRailNodes(buildRailForest([queued]).running)).toMatchObject({
+      kind: "queued",
+      label: "1 waiting to run",
+    });
+    expect(queued.unread).toBe(true);
+    const settled = buildRailForest([{ ...queued, status: "idle" }]);
+    expect(summarizeRailNodes(settled.grouped.flatMap((group) => group.sessions))).toMatchObject({
+      kind: "unread",
+      label: "1 unread",
+    });
+  });
 });
 
 describe("creatorInitials", () => {

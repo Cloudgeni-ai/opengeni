@@ -80,7 +80,7 @@ echo "OpenGeni worktree stack: project=${COMPOSE_PROJECT_NAME} backend=${OPENGEN
 if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
   if [ "$mode" = "clean" ]; then
     if [ "$assume_yes" != "1" ] && [ -t 0 ]; then
-      printf 'Remove native project %s including its Postgres/MinIO data? [y/N] ' "$COMPOSE_PROJECT_NAME"
+      printf 'Remove native project %s including its Postgres/object-storage data? [y/N] ' "$COMPOSE_PROJECT_NAME"
       read -r answer
       case "$answer" in
       y | Y | yes | YES) ;;

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/artifact-client";
+import { OpenGeniEmbeddingClient } from "../src/embedding-client";
 import { OpenGeniApiError, OpenGeniSecureContextRequiredError } from "../src/errors";
 import {
   OPENGENI_API_CONTRACT_REVISION,
@@ -1854,75 +1855,6 @@ describe("OpenGeniClient documents", () => {
   });
 });
 
-describe("OpenGeniClient packs", () => {
-  test("list, register, inspect, install, uninstall, and delete (204)", async () => {
-    const { client, requests } = makeClient((request) => {
-      if (request.method === "DELETE" && request.url.endsWith("/packs/acme")) {
-        return new Response(null, { status: 204 });
-      }
-      if (request.url.endsWith("/packs") && request.method === "GET") {
-        return jsonResponse({ packs: [], installations: [] });
-      }
-      return jsonResponse({ pack: { id: "acme" }, installation: null });
-    });
-    await client.listPacks(WORKSPACE_ID);
-    await client.registerPack(WORKSPACE_ID, {
-      id: "acme",
-      name: "Acme",
-      description: "d",
-      role: "devops",
-      category: "infra",
-      version: "1.0.0",
-    });
-    await client.getPack(WORKSPACE_ID, "acme");
-    await client.enablePack(WORKSPACE_ID, "acme", {
-      environmentId: ENVIRONMENT_ID,
-    });
-    await client.previewPackInstallation(WORKSPACE_ID, "acme", {
-      variableSetId: ENVIRONMENT_ID,
-    });
-    await client.installPack(WORKSPACE_ID, "acme", {
-      expectedManifestDigest: "a".repeat(64),
-      idempotencyKey: "44444444-4444-4444-8444-444444444444",
-    });
-    await client.previewPackUninstall(WORKSPACE_ID, "acme");
-    await client.uninstallPack(WORKSPACE_ID, "acme", {
-      expectedInstallationVersion: 1,
-      idempotencyKey: "55555555-5555-4555-8555-555555555555",
-    });
-    await client.listPackInstallations(WORKSPACE_ID);
-    await client.deletePack(WORKSPACE_ID, "acme");
-    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
-      [
-        `GET /v1/workspaces/${WORKSPACE_ID}/packs`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/packs`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/packs/acme`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/packs/acme/enable`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/packs/acme/installation-preview`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/packs/acme/install`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/packs/acme/uninstall-preview`,
-        `DELETE /v1/workspaces/${WORKSPACE_ID}/packs/acme/installation`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/packs/installations`,
-        `DELETE /v1/workspaces/${WORKSPACE_ID}/packs/acme`,
-      ],
-    );
-    expect(JSON.parse(requests[3]!.body!)).toEqual({
-      environmentId: ENVIRONMENT_ID,
-    });
-    expect(JSON.parse(requests[4]!.body!)).toEqual({
-      variableSetId: ENVIRONMENT_ID,
-    });
-    expect(JSON.parse(requests[5]!.body!)).toEqual({
-      expectedManifestDigest: "a".repeat(64),
-      idempotencyKey: "44444444-4444-4444-8444-444444444444",
-    });
-    expect(JSON.parse(requests[7]!.body!)).toEqual({
-      expectedInstallationVersion: 1,
-      idempotencyKey: "55555555-5555-4555-8555-555555555555",
-    });
-  });
-});
-
 describe("OpenGeniClient capabilities", () => {
   test("list, create, enable, disable, and registry discovery (id is URL-encoded)", async () => {
     const { client, requests } = makeClient(() => jsonResponse({ items: [], installations: [] }));
@@ -2389,6 +2321,27 @@ describe("OpenGeniClient connections", () => {
       ...overrides,
     };
   }
+
+  test("recovers a connection creation result without sending credentials", async () => {
+    const connection = fakeConnection({ status: "revoked" });
+    const { fetch, requests } = recordingFetch(() => jsonResponse({ connection }));
+    const client = new OpenGeniEmbeddingClient({
+      baseUrl: "https://api.example.test",
+      apiKey: "og_test_key",
+      fetch,
+    }).asUser("alice");
+    const operationId = "d4226368-95d9-4eca-9dd3-1df27dd81891";
+    expect(await client.getConnectionCreationResult(WORKSPACE_ID, operationId)).toEqual(connection);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("GET");
+    expect(new URL(requests[0]!.url).pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/connections/operations/${operationId}`,
+    );
+    expect(requests[0]!.body).toBeNull();
+    expect(
+      JSON.parse(decodeURIComponent(requests[0]!.headers["x-opengeni-external-actor"]!)),
+    ).toEqual({ mode: "external", identity: { externalId: "alice", source: "default" } });
+  });
 
   test("list/create/update/delete round-trip through their unwrapped connection shape", async () => {
     const connection = fakeConnection();

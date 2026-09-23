@@ -285,7 +285,7 @@ function AuthenticationStep({
             <Choice
               selected={state.draft.ownership === "personal"}
               title="Personal"
-              description="Only you and explicitly delegated runs"
+              description="Your messages and personal schedules"
               onClick={() => onDraftChange({ ownership: "personal", existingConnectionId: "" })}
             />
             <Choice

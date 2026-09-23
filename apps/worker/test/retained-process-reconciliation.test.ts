@@ -1,4 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { spawn, spawnSync, execFile, type ChildProcess } from "node:child_process";
+import { mkdtempSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve, join } from "node:path";
+import { promisify } from "node:util";
 import postgres from "postgres";
 import type { SandboxProviderCommand } from "@opengeni/contracts";
 import {
@@ -281,6 +286,7 @@ async function promoteTurnProcess(
     providerSessionId?: number;
     backgroundCommand?: string;
     providerCommand?: boolean;
+    supervised?: boolean;
     providerCommandSandboxId?: string;
   } = {},
 ): Promise<ProcessFixture> {
@@ -307,18 +313,36 @@ async function promoteTurnProcess(
   });
   const processId = crypto.randomUUID();
   const providerSessionId = input.providerSessionId ?? 71;
-  const command: SandboxProviderCommand | null = input.providerCommand
+  const invocationId = crypto.randomUUID();
+  const command: SandboxProviderCommand | null = input.supervised
     ? {
-        kind: "modal-control-v1",
-        sandboxId: input.providerCommandSandboxId ?? instanceId,
+        kind: "modal-router-v1",
+        sandboxId: instanceId,
         taskId: "ta-test",
-        execId: `tp-${crypto.randomUUID()}`,
+        execId: crypto.randomUUID(),
+        supervision: {
+          protocol: "native-subreaper-v1",
+          invocationId,
+          nonce: "a".repeat(64),
+          controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
+        },
         streams: {
-          stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
-          stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+          stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+          stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
         },
       }
-    : null;
+    : input.providerCommand
+      ? {
+          kind: "modal-control-v1",
+          sandboxId: input.providerCommandSandboxId ?? instanceId,
+          taskId: "ta-test",
+          execId: `tp-${crypto.randomUUID()}`,
+          streams: {
+            stdout: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+            stderr: { batchIndex: 0, utf8Remainder: "", exitCode: null },
+          },
+        }
+      : null;
   const process = await retainWorkspaceProviderCommand(db, {
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
@@ -551,6 +575,248 @@ afterAll(async () => {
 }, 180_000);
 
 describe("retained-process terminal-owner reconciliation", () => {
+  test.skipIf(process.platform !== "linux")(
+    "SIGKILL after native launch preserves the pre-dispatch DB reservation and cancels the original idle invocation",
+    async () => {
+      const ids = await freshWorkspace();
+      const attempt = await freshTurn(ids);
+      const { leaseId, instanceId } = await insertWarmLease(ids, {
+        sessionId: attempt.sessionId,
+        holderId: attempt.holderId,
+        holderKind: "turn",
+      });
+      const operation = "execCommand";
+      const admission = await advanceWorkspaceGeneration(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 7,
+        expectedInstanceId: instanceId,
+        operation,
+      });
+      const directory = mkdtempSync(join(tmpdir(), "sandbox_rotation-launch-crash-"));
+      const binary = join(directory, "supervisor");
+      const marker = join(directory, "user-code-ran");
+      const source = resolve(
+        import.meta.dir,
+        "../../../agent/native/command-supervisor/supervisor.c",
+      );
+      const compilation = spawnSync("cc", ["-O2", "-o", binary, source], { encoding: "utf8" });
+      expect(compilation.status).toBe(0);
+      let native: ChildProcess | undefined;
+      let providerTerminal: Promise<number | null> | undefined;
+      let reserved: SandboxRetainedProcess | undefined;
+      let starts = 0;
+      let serverError: unknown;
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        async fetch(request) {
+          try {
+            const body = await request.json();
+            if (new URL(request.url).pathname === "/reserve") {
+              expect(starts).toBe(0);
+              reserved = await retainWorkspaceProviderCommand(db, {
+                accountId: ids.accountId,
+                workspaceId: ids.workspaceId,
+                sessionId: attempt.sessionId,
+                processId: body.id,
+                providerSessionId: body.providerSessionId,
+                providerCommand: body.providerCommand,
+                admissionId: admission.id,
+                admittedWorkspaceGeneration: admission.workspaceGeneration,
+                operation,
+                providerBinding: MODAL_PROVIDER_BINDING,
+                owner: {
+                  kind: "turn",
+                  turnId: attempt.turnId,
+                  executionGeneration: attempt.executionGeneration,
+                  attemptId: attempt.attemptId,
+                  holderId: attempt.holderId,
+                  sandboxGroupId: ids.groupId,
+                  expectedEpoch: 7,
+                  expectedInstanceId: instanceId,
+                },
+              });
+              return Response.json({ retained: true });
+            }
+            expect(reserved).toBeDefined();
+            const committed = await getRetainedProviderCommand(db, {
+              accountId: ids.accountId,
+              workspaceId: ids.workspaceId,
+              sessionId: attempt.sessionId,
+              processId: reserved!.id,
+            });
+            expect(committed?.execId).toBe(body.execId);
+            starts++;
+            native = spawn(binary, body.commandArgs.slice(1), {
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+            providerTerminal = new Promise((resolveExit, reject) => {
+              native!.once("error", reject);
+              native!.once("exit", (code) => resolveExit(code));
+            });
+            const socket = body.commandArgs[body.commandArgs.indexOf("--socket") + 1];
+            for (let poll = 0; poll < 100 && !existsSync(socket); poll++) await Bun.sleep(10);
+            expect(existsSync(socket)).toBe(true);
+            return Response.json({ accepted: true });
+          } catch (error) {
+            serverError = error;
+            return new Response("fixture failed", { status: 500 });
+          }
+        },
+      });
+      const worker = spawn(
+        process.execPath,
+        [resolve(import.meta.dir, "fixtures/supervised-launch-crash-worker.ts")],
+        {
+          env: {
+            ...process.env,
+            TEST_SUPERVISION_ENDPOINT: `http://127.0.0.1:${server.port}`,
+            TEST_SUPERVISION_SANDBOX: instanceId,
+            TEST_SUPERVISION_MARKER: marker,
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let workerError = "";
+      worker.stderr!.on("data", (chunk) => {
+        workerError += chunk;
+      });
+      try {
+        const signal = await new Promise<NodeJS.Signals | null>((resolveExit, reject) => {
+          worker.once("error", reject);
+          worker.once("exit", (_code, exitSignal) => resolveExit(exitSignal));
+        });
+        if (serverError) throw serverError;
+        expect(workerError).toBe("");
+        expect(signal).toBe("SIGKILL");
+        expect(starts).toBe(1);
+        expect(existsSync(marker)).toBe(false);
+        const scope = {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          processId: reserved!.id,
+        };
+        const command = await getRetainedProviderCommand(db, scope);
+        if (command?.kind !== "modal-router-v1" || !command.supervision)
+          throw new Error("Lost durable reservation");
+        const control = async (action: string, receiptId?: string) =>
+          JSON.parse(
+            (
+              await promisify(execFile)(
+                binary,
+                [
+                  "control",
+                  "--invocation",
+                  command.supervision!.invocationId,
+                  "--nonce",
+                  command.supervision!.nonce,
+                  "--socket",
+                  command.supervision!.controlPath,
+                  "--action",
+                  action,
+                  ...(receiptId ? ["--receipt", receiptId] : []),
+                ],
+                { timeout: 5_000 },
+              )
+            ).stdout,
+          );
+        expect((await control("status")).state).toBe("idle");
+        await closeTurnOwner(ids, attempt, "failed");
+        await admin`update sandbox_leases set rotation_requested_at=now(), rotation_reason='provider_deadline' where id=${leaseId}`;
+        await runReaper(async (_settings, _lease, retained, _mode, _capture, persistence) => {
+          expect(retained.id).toBe(reserved!.id);
+          expect(await persistence!.load()).toEqual(command);
+          expect(await persistence!.cancellationRequested!()).toBe(true);
+          let observation = await control("cancel");
+          for (let n = 0; n < 100 && !observation.receipt; n++) {
+            await Bun.sleep(10);
+            observation = await control("status");
+          }
+          expect(observation.receipt.leaderExitCode).toBe(125);
+          await persistence!.recordSupervisionReceipt!(observation.receipt);
+          await control("ack", observation.receipt.receiptId);
+          expect(await providerTerminal).toBe(0);
+          const terminal = structuredClone(command);
+          for (const stream of ["stdout", "stderr"] as const)
+            terminal.streams[stream] = { ...terminal.streams[stream], eof: true, exitCode: 0 };
+          await persistence!.captureRouterPage!({
+            expected: command,
+            command: terminal,
+            stdout: "",
+            stderr: "",
+          });
+          return {
+            status: "proved",
+            proof: { outcome: "exited", exitCode: 125, reason: "provider_exit_banner" },
+          };
+        });
+        expect((await getRetainedProcess(db, scope))?.state).toBe("exited");
+        expect(starts).toBe(1);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        worker.kill("SIGKILL");
+        if (native?.exitCode === null) native.kill("SIGKILL");
+        server.stop(true);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
+
+  test("supervised background command survives turn completion and settles only after deadline dual proof", async () => {
+    const fixture = await promoteTurnProcess({
+      supervised: true,
+      outcome: "completed",
+      backgroundCommand: "preview",
+    });
+    let observations = 0;
+    await runReaper(async (_settings, _lease, _process, _mode, _capture, persistence) => {
+      observations++;
+      expect(await persistence!.cancellationRequested!()).toBe(false);
+      return { status: "deferred", reason: "provider_running" };
+    });
+    expect(observations).toBe(1);
+    expect((await durableProcess(fixture)).state).toBe("active");
+    await admin`update sandbox_leases set rotation_requested_at=now(), rotation_reason='provider_deadline' where id=${fixture.leaseId}`;
+    await admin`update sandbox_retained_processes set reconcile_after=now()-interval '1 second' where id=${fixture.process.id}`;
+    await runReaper(async (_settings, _lease, _process, _mode, _capture, persistence) => {
+      observations++;
+      expect(await persistence!.cancellationRequested!()).toBe(true);
+      const command = await persistence!.load();
+      if (command?.kind !== "modal-router-v1" || !command.supervision)
+        throw new Error("Expected supervised command");
+      await persistence!.recordSupervisionReceipt!({
+        protocol: "native-subreaper-v1",
+        invocationId: command.supervision.invocationId,
+        receiptId: crypto.randomUUID(),
+        leaderExitCode: 7,
+      });
+      const terminal = structuredClone(command);
+      for (const stream of ["stdout", "stderr"] as const)
+        terminal.streams[stream] = { ...terminal.streams[stream], eof: true, exitCode: 0 };
+      await persistence!.captureRouterPage!({
+        expected: command,
+        command: terminal,
+        stdout: "",
+        stderr: "",
+      });
+      return {
+        status: "proved",
+        proof: { outcome: "exited", exitCode: 7, reason: "provider_exit_banner" },
+      };
+    });
+    expect(observations).toBe(2);
+    expect(await durableProcess(fixture)).toMatchObject({ state: "exited", exitCode: 7 });
+  }, 60_000);
+
   test("a completed attempt's final provider mutation re-arms the cleanup wake", async () => {
     if (!available) throw new Error("PostgreSQL is required for cleanup admission proof");
     const ids = await freshWorkspace();
@@ -772,6 +1038,35 @@ describe("retained-process terminal-owner reconciliation", () => {
     );
     expect(recovered).toMatchObject({ status: "proved", proof: { exitCode: 0 } });
     expect(new Set(chunkIds).size).toBe(1);
+  }, 60_000);
+
+  test("local SDK resume identity can recover retained terminal output without crossing providers", async () => {
+    if (!available) throw new Error("PostgreSQL required for retained-process regression");
+    const fixture = await promoteTurnProcess({ outcome: "completed" });
+    const originalLease = await readLease(db, fixture.workspaceId, fixture.groupId);
+    if (!originalLease) throw new Error("Expected lease");
+    const process = { ...fixture.process, providerBackend: "local" };
+    const lease = { ...originalLease, backend: "local", resumeBackendId: "unix_local" };
+    const result = "Process exited with code 0\n\nOutput:\nretained tail";
+    await expect(
+      captureRetainedProbeOutput(process.id, result, async () => {
+        throw new Error("temporary persistence failure");
+      }),
+    ).rejects.toThrow("temporary persistence failure");
+    expect(
+      await probeRetainedProcessAtProvider(
+        SETTINGS,
+        { ...lease, resumeBackendId: "docker" },
+        process,
+      ),
+    ).toEqual({ status: "deferred", reason: "identity_mismatch" });
+    const outputs: unknown[] = [];
+    expect(
+      await probeRetainedProcessAtProvider(SETTINGS, lease, process, "observe", async (output) => {
+        outputs.push(output);
+      }),
+    ).toMatchObject({ status: "proved", proof: { outcome: "exited", exitCode: 0 } });
+    expect(outputs).toEqual([result]);
   }, 60_000);
 
   test("running and terminal reaper output is retained without observing completion", async () => {
@@ -1286,6 +1581,73 @@ describe("retained-process terminal-owner reconciliation", () => {
       providerBindingKey: MODAL_PROVIDER_BINDING.key,
       providerBinding: MODAL_PROVIDER_BINDING.binding,
     });
+  }, 60_000);
+
+  test("an unbound legacy observer cannot strand deadline cancellation", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed" });
+    await admin`update sandbox_retained_processes
+      set provider_binding_key = null, provider_binding = null
+      where id = ${fixture.process.id}`;
+    await admin`update sandbox_leases
+      set rotation_requested_at = now(), rotation_reason = 'provider_deadline'
+      where id = ${fixture.leaseId}`;
+    await runReaper(
+      async () => {
+        throw new Error("unbound command must be inspected before provider process probing");
+      },
+      async () => ({ status: "not_found" }),
+    );
+    expect(await durableProcess(fixture)).toMatchObject({
+      state: "active",
+      lastReconcileOutcome: "provider_binding_missing",
+      cancellationRequestedAt: expect.any(String),
+      deadlineCancellationRequestedAt: expect.any(String),
+    });
+  }, 60_000);
+
+  test("deadline rotation records its own grace after an earlier explicit stop", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed", backgroundCommand: "work" });
+    await admin`update sandbox_retained_processes set
+      cancellation_requested_at = now() - interval '10 minutes',
+      cancellation_reason = 'explicit_stop'
+      where id = ${fixture.process.id}`;
+    await admin`update sandbox_leases set rotation_requested_at = now(),
+      rotation_reason = 'provider_deadline' where id = ${fixture.leaseId}`;
+    let probes = 0;
+    await runReaper(async (_settings, _lease, process, mode) => {
+      probes += 1;
+      expect(process.cancellationReason).toBe("explicit_stop");
+      expect(mode).toBe("cancel");
+      return { status: "deferred", reason: "provider_running" };
+    });
+    expect(probes).toBe(1);
+    const upgraded = await durableProcess(fixture);
+    expect(upgraded.cancellationReason).toBe("explicit_stop");
+    expect(Date.now() - Date.parse(upgraded.deadlineCancellationRequestedAt!)).toBeLessThan(5_000);
+  }, 60_000);
+
+  test("deadline cancellation probes a stopping command without sending another stop", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed", backgroundCommand: "work" });
+    await admin`update sandbox_retained_processes set
+      cancellation_requested_at = now(), cancellation_reason = 'provider_deadline',
+      deadline_cancellation_requested_at = now()
+      where id = ${fixture.process.id}`;
+    await admin`update session_background_commands set state = 'stopping',
+      cancel_requested_at = now(), cancel_requested_by = 'test-user'
+      where id = ${fixture.process.id}`;
+    await admin`update sandbox_leases set rotation_requested_at = now(),
+      rotation_reason = 'provider_deadline' where id = ${fixture.leaseId}`;
+    let probes = 0;
+    await runReaper(async (_settings, _lease, process, mode) => {
+      probes += 1;
+      expect(process.deadlineCancellationRequestedAt).not.toBeNull();
+      expect(mode).toBe("observe");
+      return { status: "deferred", reason: "provider_running" };
+    });
+    expect(probes).toBe(1);
   }, 60_000);
 
   test("a terminal historical Modal box settles its stale process holder after lease succession", async () => {

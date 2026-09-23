@@ -1786,7 +1786,9 @@ function ToolSearchRenderer({ item }: ToolRendererProps) {
 function DocsSearchRenderer({ item }: ToolRendererProps) {
   const args = parseToolArgs(item.arguments);
   const query = typeof args.query === "string" ? args.query.trim() : "";
-  const title = query ? `Search “${truncatePreview(query, 48)}”` : toolDisplayName(item.name);
+  const title = query
+    ? `Search “${truncatePreview(query, 48)}”`
+    : toolDisplayName(item.name, item.display);
   const running = item.status === "running";
 
   if (running) {
@@ -1860,7 +1862,7 @@ function DocsSearchRenderer({ item }: ToolRendererProps) {
 function SetSessionTitleRenderer({ item }: ToolRendererProps) {
   const args = parseToolArgs(item.arguments);
   const titleArg = typeof args.title === "string" ? args.title.trim() : "";
-  const display = toolDisplayName(item.name);
+  const display = toolDisplayName(item.name, item.display);
   const previewTitle = titleArg ? truncatePreview(titleArg, 72) : "";
   const icon = <MessagesSquareIcon className={ICON_SIZE} />;
 
@@ -2198,7 +2200,7 @@ function RunOnRenderer({ item }: ToolRendererProps) {
 function GenericRenderer({ item }: ToolRendererProps) {
   const running = item.status === "running";
   const args = parseToolArgs(item.arguments);
-  const display = toolDisplayName(item.name);
+  const display = toolDisplayName(item.name, item.display);
   const icon = <GenericToolIcon name={item.name} />;
   // Goal tools: surface the objective text on the collapsed row so the in-cluster
   // tool replaces the old breakaway GoalRow pill without losing the gist.

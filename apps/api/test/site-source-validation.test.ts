@@ -32,3 +32,31 @@ test("source validation accepts editable files and rejects malformed JSON", asyn
     else await expect(result).rejects.toThrow("Source must be JSON");
   }
 });
+
+test("uploaded source visibility misses do not become invalid-JSON errors", async () => {
+  const json = JSON.stringify({
+    entrypoint: "index.html",
+    files: [{ path: "index.html", content: "<h1>Hi</h1>" }],
+  });
+  let reads = 0;
+  const storage = {
+    getObjectBytes: async () => (++reads === 1 ? null : { bytes: new TextEncoder().encode(json) }),
+  };
+  await expect(
+    validateSiteSource(storage as never, "source.json", json.length),
+  ).resolves.toBeUndefined();
+  expect(reads).toBe(2);
+});
+
+test("source read failures retain their cause without retrying", async () => {
+  let reads = 0;
+  const error = new Error("storage denied");
+  const storage = {
+    getObjectBytes: async () => {
+      reads++;
+      throw error;
+    },
+  };
+  await expect(validateSiteSource(storage as never, "source.json", 10)).rejects.toBe(error);
+  expect(reads).toBe(1);
+});

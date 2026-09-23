@@ -20,6 +20,9 @@ import {
   type Database,
 } from "@opengeni/db";
 
+import { measureInsightsPhase, type InsightsPhaseObserver } from "./insights-timing";
+export { measureInsightsPhase, workspaceInsightsPhaseMetricObserver } from "./insights-timing";
+export type { InsightsPhaseObservation, InsightsPhaseObserver } from "./insights-timing";
 const MACHINE_HEARTBEAT_FRESH_MS = 120_000;
 export const WORKSPACE_INSIGHTS_PROVIDER_FILTER_MAX_UTF8_BYTES = 256;
 export const WORKSPACE_INSIGHTS_MODEL_FILTER_MAX_UTF8_BYTES = 512;
@@ -210,10 +213,13 @@ export async function getWorkspaceInsights(
   db: Database,
   settings: Settings,
   input: GetWorkspaceInsightsInput,
+  observePhase?: InsightsPhaseObserver,
 ): Promise<WorkspaceInsightsResponse> {
   const provider = normalizeWorkspaceInsightsFilter(input.provider, "provider");
   const model = normalizeWorkspaceInsightsFilter(input.model, "model");
-  await requireWorkspace(db, input.workspaceId);
+  await measureInsightsPhase(observePhase, "require_workspace", () =>
+    requireWorkspace(db, input.workspaceId),
+  );
   const now = input.now ?? new Date();
   const window = resolveRangeWindow(input.range, now);
   const modelFilterActive = Boolean(provider || model);
@@ -221,31 +227,45 @@ export async function getWorkspaceInsights(
 
   const [modelBundle, usageBundle, liveWarm, tasks, depth, floorRows, machinesOnline] =
     await Promise.all([
-      readWorkspaceInsightsModelBundle(db, {
-        workspaceId: input.workspaceId,
-        since: window.since,
-        until: window.until,
-        priorSince: window.priorSince,
-        priorUntil: window.priorUntil,
-        granularity: input.range === "today" ? "hour" : "day",
-        ...filter,
-      }),
-      readWorkspaceInsightsUsageBundle(db, {
-        workspaceId: input.workspaceId,
-        since: window.since,
-        until: window.until,
-        priorSince: window.priorSince,
-        priorUntil: window.priorUntil,
-        monthSince: startOfUtcMonth(now),
-        granularity: input.range === "today" ? "hour" : "day",
-        warmGroupLimit: 24,
-      }),
-      listLiveWarmLeases(db, input.workspaceId),
-      listScheduledTasks(db, input.workspaceId, 100),
-      aggregateSessionDepth(db, input.workspaceId),
-      listFloorSessions(db, input.workspaceId, 24),
+      measureInsightsPhase(observePhase, "model_bundle", () =>
+        readWorkspaceInsightsModelBundle(db, {
+          workspaceId: input.workspaceId,
+          since: window.since,
+          until: window.until,
+          priorSince: window.priorSince,
+          priorUntil: window.priorUntil,
+          granularity: input.range === "today" ? "hour" : "day",
+          ...filter,
+        }),
+      ),
+      measureInsightsPhase(observePhase, "usage_bundle", () =>
+        readWorkspaceInsightsUsageBundle(db, {
+          workspaceId: input.workspaceId,
+          since: window.since,
+          until: window.until,
+          priorSince: window.priorSince,
+          priorUntil: window.priorUntil,
+          monthSince: startOfUtcMonth(now),
+          granularity: input.range === "today" ? "hour" : "day",
+          warmGroupLimit: 24,
+        }),
+      ),
+      measureInsightsPhase(observePhase, "live_warm", () =>
+        listLiveWarmLeases(db, input.workspaceId),
+      ),
+      measureInsightsPhase(observePhase, "scheduled_tasks", () =>
+        listScheduledTasks(db, input.workspaceId, 100),
+      ),
+      measureInsightsPhase(observePhase, "session_depth", () =>
+        aggregateSessionDepth(db, input.workspaceId),
+      ),
+      measureInsightsPhase(observePhase, "floor_sessions", () =>
+        listFloorSessions(db, input.workspaceId, 24),
+      ),
       settings.sandboxSelfhostedEnabled
-        ? countOnlineMachines(db, input.workspaceId, MACHINE_HEARTBEAT_FRESH_MS, now)
+        ? measureInsightsPhase(observePhase, "online_machines", () =>
+            countOnlineMachines(db, input.workspaceId, MACHINE_HEARTBEAT_FRESH_MS, now),
+          )
         : Promise.resolve(0),
     ]);
 
@@ -271,17 +291,21 @@ export async function getWorkspaceInsights(
     agentRunsUsed,
   } = usageBundle;
   const [attached, fireCounts] = await Promise.all([
-    countSessionsAttachedToGroups(
-      db,
-      input.workspaceId,
-      warmGroups.map((group) => group.groupId),
+    measureInsightsPhase(observePhase, "attached_sessions", () =>
+      countSessionsAttachedToGroups(
+        db,
+        input.workspaceId,
+        warmGroups.map((group) => group.groupId),
+      ),
     ),
-    countScheduledTaskFires(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      taskIds: tasks.map((task) => task.id),
-    }),
+    measureInsightsPhase(observePhase, "scheduled_fires", () =>
+      countScheduledTaskFires(db, {
+        workspaceId: input.workspaceId,
+        since: window.since,
+        until: window.until,
+        taskIds: tasks.map((task) => task.id),
+      }),
+    ),
   ]);
   const backendByGroup = new Map(liveWarm.map((lease) => [lease.groupId, lease.backend]));
   const warmSecondsByGroup = new Map(warmGroups.map((group) => [group.groupId, group.warmSeconds]));

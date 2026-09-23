@@ -5,7 +5,6 @@ import {
   CreatePrReviewRepositoryBindingRequest,
   PrReviewAppRegistration,
   PrReviewRepositoryBinding,
-  OPENGENI_PR_REVIEW_PACK_ID,
   UpdatePrReviewAppRegistrationRequest,
   UpdatePrReviewRepositoryBindingRequest,
 } from "@opengeni/contracts";
@@ -13,18 +12,16 @@ import {
   assertWorkspaceModelPolicyAllows,
   canonicalConfiguredModel,
   defaultPrReviewProviderBaseUrl,
-  getCapabilityPack,
   workspaceCustomModelReference,
   lockActiveCustomModelForAdmission,
   prReviewWebhookAuthKind,
   normalizePrReviewProviderBaseUrl,
-  prReviewPackConnectorId,
-  PR_REVIEW_AUTOMATION_TEMPLATE_ID,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requirePermission,
   resolveWorkspaceCatalogSettings,
   type ApiRouteDeps,
+  PR_REVIEW_AUTOMATION_SETUP,
 } from "@opengeni/core";
 import {
   createPrReviewAppRegistration,
@@ -34,7 +31,6 @@ import {
   decryptVariableSetValue,
   encryptVariableSetValue,
   getPrReviewAppRegistrationSecret,
-  getPackInstallation,
   listPrReviewAppRegistrations,
   listPrReviewRepositoryBindings,
   nestedPostgresSqlState,
@@ -59,7 +55,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/pr-review/registrations", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    await requirePrReviewPackActive(db, workspaceId);
+
     return c.json({
       registrations: await listPrReviewAppRegistrations(db, grant.accountId, workspaceId),
       repositories: await listPrReviewRepositoryBindings(db, grant.accountId, workspaceId),
@@ -70,7 +66,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     requirePermission(grant, "secrets:write");
-    const packInstallation = await requirePrReviewPackActive(db, workspaceId);
+
     assertPrReviewSandboxBackend(deps);
     const payload = CreatePrReviewAppRegistrationRequest.parse(await c.req.json());
     const encryptionKey = requirePrReviewEncryptionKey(deps);
@@ -121,8 +117,6 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
             webhookSecretEncrypted: encryptVariableSetValue(encryptionKey, payload.webhookSecret),
             webhookUsername: payload.webhookUsername ?? null,
             createdBySubjectId: grant.subjectId,
-            packInstallationId: packInstallation.id,
-            packConnectorId: prReviewPackConnectorId(payload.provider),
           }),
       ),
       "A PR Review registration with this provider and name already exists",
@@ -147,7 +141,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     requirePermission(grant, "secrets:write");
-    await requirePrReviewPackActive(db, workspaceId);
+
     const payload = UpdatePrReviewAppRegistrationRequest.parse(await c.req.json());
     const existing = await getPrReviewAppRegistrationSecret(db, {
       accountId: grant.accountId,
@@ -286,7 +280,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
       ["workspace:admin"],
       { settings: deps.settings, authorizationHeader: c.req.header("authorization") },
     );
-    const packInstallation = await requirePrReviewPackActive(db, workspaceId);
+
     const payload = CreatePrReviewRepositoryBindingRequest.parse(await c.req.json());
     const registration = await getPrReviewAppRegistrationSecret(db, {
       accountId: grant.accountId,
@@ -421,12 +415,8 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
           modelId: model,
         })
       : undefined;
-    const template = getCapabilityPack(OPENGENI_PR_REVIEW_PACK_ID)?.automationTemplates?.find(
-      (candidate) => candidate.id === PR_REVIEW_AUTOMATION_TEMPLATE_ID,
-    );
-    if (!template) {
-      throw new HTTPException(503, { message: "PR Review automation template is unavailable" });
-    }
+    const template = PR_REVIEW_AUTOMATION_SETUP;
+
     const binding = await mapPrReviewUniqueConflict(
       withOrganizationIntegrationAcquisition(db, grant, [integrationKey], async (tx) => {
         await grant.authorizeCommit(tx);
@@ -445,8 +435,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
           additionalInstructions: payload.additionalInstructions ?? null,
           status: payload.status,
           createdBySubjectId: grant.subjectId,
-          packInstallationId: packInstallation.id,
-          packTemplateId: template.id,
+
           adapterId: template.adapterId,
           eventTypes: template.eventTypes,
           configuration: template.configuration,
@@ -475,7 +464,7 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/pr-review/repositories/:bindingId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    await requirePrReviewPackActive(db, workspaceId);
+
     const payload = UpdatePrReviewRepositoryBindingRequest.parse(await c.req.json());
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
@@ -600,16 +589,6 @@ function assertPrReviewSandboxBackend(deps: ApiRouteDeps): void {
         "OpenGeni Review Bot requires managed compute so it can materialize and verify the exact pull-request head",
     });
   }
-}
-
-async function requirePrReviewPackActive(db: ApiRouteDeps["db"], workspaceId: string) {
-  const installation = await getPackInstallation(db, workspaceId, OPENGENI_PR_REVIEW_PACK_ID);
-  if (installation?.status !== "active") {
-    throw new HTTPException(409, {
-      message: "Install and enable the OpenGeni Review Bot Pack first",
-    });
-  }
-  return installation;
 }
 
 function requirePrReviewEncryptionKey(deps: ApiRouteDeps): Uint8Array {

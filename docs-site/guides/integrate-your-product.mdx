@@ -12,7 +12,8 @@ The browser talks to your backend. The organization API key stays on that backen
   Verify that your installed `@opengeni/sdk` exports `/chat` and that the target deployment supports
   the corresponding contract. Check the package exports/types and `/v1/config/client`; older
   releases may not include the facade. Set the API URL explicitly. A feature in source or
-  documentation is not proof that your deployment includes it.
+  documentation is not proof that your deployment includes it. A successful config response alone
+  does not verify chat compatibility; test the authenticated chat flow on your target deployment.
 </Note>
 
 ## Connect your backend
@@ -163,7 +164,7 @@ return {
 
 This is the return value of your authenticated `resolve` hook. With the raw session client, pass these fields directly to `createSession`. Omit `bundledSkillIds` for defaults, pass `[]` for no bundled guides, or select specific IDs such as `"builtin:opengeni-documents"`. Selection grants no tool permissions. Children inherit the selection and can narrow it.
 
-Workspace-authored/installed Skills, inline Skills, tool authority, and ordinary runtime instructions are separate. Use a workspace whose shared Skills are appropriate for the product. Empty bundled selection does not make a workspace's shared guidance disappear. The larger Product Integration Pack is implementation guidance and should not be attached to the support bot.
+Workspace-authored/installed Skills, inline Skills, tool authority, and ordinary runtime instructions are separate. Use a workspace whose shared Skills are appropriate for the product. Empty bundled selection does not make a workspace's shared guidance disappear. The repository's `opengeni-client` Skill guides developers implementing an integration; it should not be attached to the support bot.
 
 ## Request cost and verification
 

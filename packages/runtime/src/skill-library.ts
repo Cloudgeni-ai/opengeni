@@ -429,12 +429,6 @@ export function buildPortableSkillArtifact(
   });
 }
 
-/**
- * Canonical whole-artifact identity for any validated runtime Skill shape.
- * This deliberately does not require frontmatter because legacy Pack/session
- * contracts historically allowed a top-level SKILL.md without metadata. The
- * content identity is nevertheless byte-exact and shared with portable imports.
- */
 export function skillArtifactContentSha256(inputFiles: readonly SkillLibraryFile[]): string {
   return skillLibraryArtifactSha256(materializePortableSkillFiles(inputFiles).materialized);
 }

@@ -16,10 +16,9 @@ import { canonicalProviderDomain } from "./provider-domain";
  *
  * Profiles come from two layers:
  *
- * 1. Built-in profiles below, for the providers whose fences are security
- *    invariants (hosted Slack MCP and official Gmail are personal-only, their
- *    authorization servers are origin-pinned). These live in code as data so
- *    the fences never depend on catalog import state.
+ * 1. Built-in profiles pin known authorization servers and protocol quirks.
+ *    Ownership defaults guide setup; users may choose personal or workspace.
+ *    Authorization-server pins never depend on catalog import state.
  * 2. A validated `oauthProfile` object on a global catalog row (curated
  *    overlay -> importer -> `capability_catalog_items.metadata`). A catalog
  *    profile applies only when no built-in matches, and it can only narrow the
@@ -81,10 +80,8 @@ export type OAuthProviderProfile = {
   requireExactMcpUrl?: { url: string; message: string };
   /** Deployment-managed client credentials must be configured (503 otherwise). */
   requireDeploymentClient?: { key: DeploymentManagedClientKey; message: string };
-  /** Ownerships a connection may take; a singleton also sets the default. */
-  allowedOwnership: readonly ConnectionOwnership[];
-  /** Exact 422 message when an explicit disallowed ownership is requested. */
-  ownershipMessage?: string;
+  /** Suggested ownership; an explicit user choice always wins. */
+  defaultOwnership?: ConnectionOwnership;
   /** Bind reconnect/dedupe to the exact mcpUrl, not just the provider domain. */
   exactMcpBinding: boolean;
   /** How an existing connection is chosen for reconnect coalescing. */
@@ -113,7 +110,6 @@ export type OAuthProviderProfile = {
 export const DEFAULT_OAUTH_PROFILE: OAuthProviderProfile = {
   key: "default",
   match: {},
-  allowedOwnership: ["workspace", "personal"],
   exactMcpBinding: false,
   connectionSelection: "first_active",
   sendResourceParameter: true,
@@ -138,9 +134,6 @@ const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
     key: "slack",
     message: "Slack MCP OAuth requires OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET",
   },
-  allowedOwnership: ["personal"],
-  ownershipMessage:
-    "Slack's hosted MCP connection is personal only; install the OpenGeni Slack bot for workspace access",
   exactMcpBinding: true,
   connectionSelection: "canonical_personal",
   authorizationServer: {
@@ -156,9 +149,7 @@ const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
 const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   key: "official-gmail",
   match: { mcpUrls: [OFFICIAL_GMAIL_MCP_URL] },
-  allowedOwnership: ["personal"],
-  ownershipMessage:
-    "Gmail connections are personal only; each workspace member must connect their own mailbox",
+  defaultOwnership: "personal",
   exactMcpBinding: true,
   connectionSelection: "first_active",
   authorizationServer: {
@@ -285,24 +276,7 @@ export function builtInOAuthProfileFor(input: {
 
 /** Ownership an omitted request defaults to under a profile. */
 export function defaultOwnershipFor(profile: OAuthProviderProfile): ConnectionOwnership {
-  return profile.allowedOwnership.length === 1 && profile.allowedOwnership[0] === "personal"
-    ? "personal"
-    : "workspace";
-}
-
-/** Rejects an ownership outside the profile's allowed set with its exact message. */
-export function assertOwnershipAllowed(
-  profile: OAuthProviderProfile,
-  ownership: ConnectionOwnership,
-): void {
-  if (profile.allowedOwnership.includes(ownership)) {
-    return;
-  }
-  throw new HTTPException(422, {
-    message:
-      profile.ownershipMessage ??
-      `this integration allows only ${profile.allowedOwnership.join(" or ")} connections`,
-  });
+  return profile.defaultOwnership ?? "workspace";
 }
 
 /** Enforces a profile's authorization-server origin pins with its exact message. */
@@ -375,10 +349,7 @@ export const catalogOAuthProfileSchema = z
     pinnedIssuerOrigins: z.array(z.string().url()).min(1).optional(),
     pinnedEndpointOrigins: z.array(z.string().url()).min(1).optional(),
     sendResourceParameter: z.boolean().optional(),
-    allowedOwnership: z
-      .array(z.enum(["personal", "workspace"]))
-      .min(1)
-      .optional(),
+    defaultOwnership: z.enum(["personal", "workspace"]).optional(),
     requestedScopes: z.array(z.string().min(1)).min(1).optional(),
     extraAuthorizeParams: z
       .record(z.string(), z.string())
@@ -425,7 +396,7 @@ export function catalogMcpUrlKey(value: string): string {
  *
  * A present-but-invalid profile fails closed with a 422: the row's operator
  * declared constraints, and silently degrading to the default profile would
- * drop an ownership fence or origin pin on a JSON typo.
+ * drop an origin pin on a JSON typo.
  */
 export function oauthProfileFromCatalog(mcpUrl: string, raw: unknown): OAuthProviderProfile {
   const parsed = catalogOAuthProfileSchema.safeParse(raw);
@@ -451,13 +422,7 @@ export function oauthProfileFromCatalog(mcpUrl: string, raw: unknown): OAuthProv
   return {
     key: `catalog:${mcpUrl}`,
     match: { mcpUrls: [mcpUrl] },
-    allowedOwnership: data.allowedOwnership ?? DEFAULT_OAUTH_PROFILE.allowedOwnership,
-    ...(data.allowedOwnership && !data.allowedOwnership.includes("workspace")
-      ? {
-          ownershipMessage:
-            "this integration allows only personal connections; each workspace member must connect their own account",
-        }
-      : {}),
+    ...(data.defaultOwnership ? { defaultOwnership: data.defaultOwnership } : {}),
     exactMcpBinding: Boolean(data.exactMcpUrl),
     ...(data.exactMcpUrl
       ? {

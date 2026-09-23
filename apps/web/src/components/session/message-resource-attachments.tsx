@@ -10,15 +10,17 @@ type FileResource = Extract<ResourceRef, { kind: "file" }>;
 
 export default function MessageResourceAttachments({
   workspaceId,
+  sessionId,
   resources,
 }: {
   workspaceId: string;
+  sessionId?: string | undefined;
   resources: ResourceRef[];
 }) {
   const fileResources = resources.filter(
     (resource): resource is FileResource => resource.kind === "file",
   );
-  const { assets, ready } = useFileAssets(workspaceId, fileResources);
+  const { assets, ready } = useFileAssets(workspaceId, fileResources, sessionId);
   const filesPending = fileResources.length > 0 && !ready;
   const imageResources = filesPending
     ? []
@@ -42,6 +44,7 @@ export default function MessageResourceAttachments({
             <MessageImagePreview
               key={`${resource.fileId}:${resource.mountPath ?? ""}`}
               workspaceId={workspaceId}
+              sessionId={sessionId}
               resource={resource}
               asset={assets.get(resource.fileId) as FileAsset}
               grid={imageResources.length > 1}
@@ -55,6 +58,7 @@ export default function MessageResourceAttachments({
             <MessageFileAttachment
               key={`${resource.fileId}:${resource.mountPath ?? ""}`}
               workspaceId={workspaceId}
+              sessionId={sessionId}
               resource={resource}
               asset={assets.get(resource.fileId) ?? undefined}
             />
@@ -70,6 +74,7 @@ export default function MessageResourceAttachments({
 function useFileAssets(
   workspaceId: string,
   resources: FileResource[],
+  sessionId?: string,
 ): { assets: Map<string, FileAsset | null>; ready: boolean } {
   const { client } = useAppContext();
   // The map remembers WHICH id-key it was fetched for: when the attachments
@@ -80,10 +85,11 @@ function useFileAssets(
     key: "",
     assets: new Map(),
   });
-  const key = resources.map((resource) => resource.fileId).join(",");
+  const fileIdsKey = resources.map((resource) => resource.fileId).join(",");
+  const key = `${sessionId ?? ""}:${fileIdsKey}`;
   useEffect(() => {
     let mounted = true;
-    const ids = key ? key.split(",") : [];
+    const ids = fileIdsKey ? fileIdsKey.split(",") : [];
     if (ids.length === 0) {
       setLoaded({ key, assets: new Map() });
       return;
@@ -91,7 +97,7 @@ function useFileAssets(
     void Promise.all(
       ids.map(async (id): Promise<readonly [string, FileAsset | null]> => {
         try {
-          return [id, await client.getFile(workspaceId, id)] as const;
+          return [id, await client.getFile(workspaceId, id, { sessionId })] as const;
         } catch {
           return [id, null] as const;
         }
@@ -104,7 +110,7 @@ function useFileAssets(
     return () => {
       mounted = false;
     };
-  }, [client, workspaceId, key]);
+  }, [client, workspaceId, sessionId, fileIdsKey, key]);
   return { assets: loaded.key === key ? loaded.assets : new Map(), ready: loaded.key === key };
 }
 
@@ -115,11 +121,13 @@ function isImageAsset(asset: FileAsset | null | undefined): boolean {
 /** Signed image preview with lightbox and download; failures become file chips. */
 function MessageImagePreview({
   workspaceId,
+  sessionId,
   resource,
   asset,
   grid,
 }: {
   workspaceId: string;
+  sessionId?: string | undefined;
   resource: FileResource;
   asset: FileAsset;
   grid: boolean;
@@ -138,7 +146,7 @@ function MessageImagePreview({
     setFailed(false);
     setLoaded(false);
     void client
-      .createFileDownloadUrl(workspaceId, resource.fileId)
+      .createFileDownloadUrl(workspaceId, resource.fileId, { sessionId })
       .then((signed) => {
         if (mounted) {
           setUrl(signed.url);
@@ -152,11 +160,18 @@ function MessageImagePreview({
     return () => {
       mounted = false;
     };
-  }, [client, workspaceId, resource.fileId]);
+  }, [client, workspaceId, sessionId, resource.fileId]);
 
   // A dead/expired signed URL degrades to the plain file card — never a broken image.
   if (failed) {
-    return <MessageFileAttachment workspaceId={workspaceId} resource={resource} asset={asset} />;
+    return (
+      <MessageFileAttachment
+        workspaceId={workspaceId}
+        sessionId={sessionId}
+        resource={resource}
+        asset={asset}
+      />
+    );
   }
 
   const openFull = () => {
@@ -172,7 +187,9 @@ function MessageImagePreview({
 
   async function download() {
     try {
-      const signed = await client.createFileDownloadUrl(workspaceId, resource.fileId);
+      const signed = await client.createFileDownloadUrl(workspaceId, resource.fileId, {
+        sessionId,
+      });
       window.open(signed.url, "_blank", "noopener,noreferrer");
     } catch (error) {
       toast.error("Failed to download image", {
@@ -227,10 +244,12 @@ function MessageImagePreview({
 /** File chip with the download-url affordance (signed URL on click). */
 function MessageFileAttachment({
   workspaceId,
+  sessionId,
   resource,
   asset: preloaded,
 }: {
   workspaceId: string;
+  sessionId?: string | undefined;
   resource: FileResource;
   /** When the parent already fetched the asset, skip the redundant lookup. */
   asset?: FileAsset | undefined;
@@ -246,7 +265,7 @@ function MessageFileAttachment({
     }
     let mounted = true;
     void client
-      .getFile(workspaceId, resource.fileId)
+      .getFile(workspaceId, resource.fileId, { sessionId })
       .then((asset) => {
         if (mounted) {
           setFile(asset);
@@ -256,12 +275,14 @@ function MessageFileAttachment({
     return () => {
       mounted = false;
     };
-  }, [client, workspaceId, resource.fileId, preloaded]);
+  }, [client, workspaceId, sessionId, resource.fileId, preloaded]);
 
   async function openFile() {
     setBusy(true);
     try {
-      const signed = await client.createFileDownloadUrl(workspaceId, resource.fileId);
+      const signed = await client.createFileDownloadUrl(workspaceId, resource.fileId, {
+        sessionId,
+      });
       window.open(signed.url, "_blank", "noopener,noreferrer");
     } catch (error) {
       toast.error("Failed to open file", {

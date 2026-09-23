@@ -439,10 +439,10 @@ describe("Integration Facet lifecycle state", () => {
     }
   });
 
-  test("renders a Pack-owned facet as shared and read-only", async () => {
-    const packOwned = binding("active", 1, "inventory-source", "402", [packOwner]);
+  test("renders a Plugin-owned facet as shared and read-only", async () => {
+    const pluginOwned = binding("active", 1, "inventory-source", "402", [pluginOwner]);
     const client = {
-      listIntegrationFacets: mock(async () => response(packOwned)),
+      listIntegrationFacets: mock(async () => response(pluginOwned)),
     } as unknown as OpenGeniBrowserClient;
     const rendered = await renderPanel({ client });
     try {
@@ -451,7 +451,7 @@ describe("Integration Facet lifecycle state", () => {
 
       const row = requiredFacet(rendered.container, "inventory-source");
       expect(row.textContent).toContain("Shared");
-      expect(row.textContent).toContain("Managed by another Pack");
+      expect(row.textContent).toContain("Managed by another Plugin");
       expect(button(row, "Edit").disabled).toBe(true);
       expect(optionalButton(row, "Pause")).toBeNull();
       expect(optionalButton(row, "Remove")).toBeNull();
@@ -496,16 +496,16 @@ describe("Integration Facet lifecycle state", () => {
   test("removes only direct control when another owner retains the facet", async () => {
     const directlyShared = binding("active", 1, "inventory-source", "502", [
       directOwner,
-      packOwner,
+      pluginOwner,
     ]);
-    const retained = binding("active", 1, "inventory-source", "502", [packOwner]);
+    const retained = binding("active", 1, "inventory-source", "502", [pluginOwner]);
     const removeIntegrationFacet = mock(async () => ({
       capabilityId: instance.capabilityId,
       instanceKey: instance.instanceKey,
       facetKey: "inventory-source",
       status: "retained_by_other_owners" as const,
       binding: retained,
-      remainingOwners: [packOwner],
+      remainingOwners: [pluginOwner],
     }));
     const client = {
       listIntegrationFacets: mock(async () => response(directlyShared)),
@@ -531,7 +531,7 @@ describe("Integration Facet lifecycle state", () => {
 
       const retainedRow = requiredFacet(rendered.container, "inventory-source");
       expect(retainedRow.textContent).toContain("Shared");
-      expect(retainedRow.textContent).toContain("Managed by another Pack");
+      expect(retainedRow.textContent).toContain("Managed by another Plugin");
       expect(button(retainedRow, "Edit").disabled).toBe(true);
       expect(optionalButton(retainedRow, "Pause")).toBeNull();
       expect(optionalButton(retainedRow, "Remove")).toBeNull();
@@ -707,9 +707,9 @@ const directOwner = {
   removable: true,
 };
 
-const packOwner = {
-  kind: "pack" as const,
-  id: "pack:inventory-operations",
+const pluginOwner = {
+  kind: "plugin" as const,
+  id: "plugin:inventory-operations",
   removable: false,
 };
 

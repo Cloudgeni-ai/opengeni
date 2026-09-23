@@ -1,5 +1,22 @@
 # @opengeni/ogtool
 
+## 0.3.43
+
+### Patch Changes
+
+- @opengeni/codemode@0.6.1
+
+## 0.3.42
+
+### Patch Changes
+
+- 9d9b94b: Keep the published dependency closure aligned with the updated plugin removal
+  contracts. The SDK exposes named removal outcomes and optional preview-token
+  confirmation alongside the existing installation-version check.
+- Updated dependencies [9d9b94b]
+- Updated dependencies [0ea365c]
+  - @opengeni/codemode@0.6.0
+
 ## 0.3.41
 
 ### Patch Changes

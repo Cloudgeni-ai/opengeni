@@ -2,7 +2,6 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
 import { getExternalLinkTurnAuthorization } from "./external-link-work";
-import { initiatorFromStorage } from "./turn-initiator";
 
 /** Shared physical-attempt fence. Does not mutate goal/execution snapshots. */
 export async function getLiveSessionAttemptTurn(
@@ -61,25 +60,4 @@ export async function getLiveSessionAttemptTurn(
     if (linked && !linked.authorized) return null;
     return row.turn;
   });
-}
-
-/** Host credential reads need provenance and live authority, not a runnable
- * execution projection or a write to the turn's frozen goal snapshot. */
-export async function getHostMcpLiveAttempt(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  attemptId: string,
-) {
-  const row = await getLiveSessionAttemptTurn(db, workspaceId, sessionId, attemptId);
-  if (!row) return null;
-  return {
-    ...row,
-    initiator: initiatorFromStorage(
-      row.initiatorKind,
-      row.initiatorSubjectId,
-      row.initiatorContext ?? {},
-    ),
-    initiatorContext: row.initiatorContext ?? {},
-  };
 }

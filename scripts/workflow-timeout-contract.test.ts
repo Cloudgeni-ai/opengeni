@@ -24,6 +24,34 @@ type Job = Readonly<{
 type Workflow = Readonly<{ jobs?: Readonly<Record<string, Job>> }>;
 
 const EXPECTED_CAPS = [
+  [
+    "agent-ci.yml",
+    "native-command-supervisor",
+    "Compile and exercise native protocol and failure cases",
+    5,
+    "run",
+  ],
+  ["local-startup.yml", "docker", "Check startup ownership and prerequisite regressions", 2, "run"],
+  ["local-startup.yml", "docker", "Verify the runner Docker dependency", 1, "run"],
+  ["local-startup.yml", "docker", "Start the documented stack from a clean checkout", 50, "run"],
+  ["local-startup.yml", "docker", "Install startup browser runtime", 17, "action"],
+  ["local-startup.yml", "docker", "Verify rendered startup and restart", 15, "run"],
+  ["local-startup.yml", "docker", "Clean only the acceptance project", 3, "run"],
+  ["local-startup.yml", "platform-preflight", "Verify host prerequisite contracts", 2, "run"],
+  [
+    "publish-artifact-runtime.yml",
+    "publish",
+    "Install controller dependencies without lifecycle scripts",
+    4,
+    "run",
+  ],
+  [
+    "publish-artifact-runtime.yml",
+    "publish",
+    "Verify and retain all seven native archives without rebuilding",
+    8,
+    "run",
+  ],
   ["ci.yml", "plan", "Install exact dependency tree", 11, "run"],
   ["ci.yml", "source-contracts", "Profile impacted TypeScript 7 projects", 11, "run"],
   ["ci.yml", "source-contracts", "Run exactly the explained source guards", 16, "run"],
@@ -44,6 +72,7 @@ const EXPECTED_CAPS = [
   ["ci.yml", "browser-acceptance", "Organization onboarding lifecycle acceptance", 8, "run"],
   ["ci.yml", "browser-acceptance", "Browser account session-set acceptance", 14, "run"],
   ["ci.yml", "browser-acceptance", "Workbench browser acceptance", 4, "run"],
+  ["ci.yml", "browser-acceptance", "Compact session-search header browser acceptance", 8, "run"],
   ["desktop-e2e.yml", "desktop-image", "Desktop image e2e", 36, "run"],
   [
     "publish-desktop-image.yml",
@@ -58,13 +87,17 @@ const EXPECTED_CAPS = [
 ] as const;
 
 const EXPECTED_JOB_BUDGETS = {
+  "agent-ci.yml:native-command-supervisor": { stepCaps: 5, needed: 6, jobCap: 6 },
+  "local-startup.yml:docker": { stepCaps: 88, needed: 89, jobCap: 90 },
+  "local-startup.yml:platform-preflight": { stepCaps: 2, needed: 3, jobCap: 5 },
+  "publish-artifact-runtime.yml:publish": { stepCaps: 12, needed: 13, jobCap: 15 },
   "ci.yml:plan": { stepCaps: 11, needed: 12, jobCap: 15 },
   "ci.yml:source-contracts": { stepCaps: 27, needed: 28, jobCap: 35 },
   "ci.yml:unit-shards": { stepCaps: 21, needed: 22, jobCap: 30 },
   "ci.yml:integration-shards": { stepCaps: 31, needed: 32, jobCap: 40 },
   "ci.yml:e2e-shards": { stepCaps: 30, needed: 31, jobCap: 35 },
   "ci.yml:test-suite": { stepCaps: 18, needed: 19, jobCap: 30 },
-  "ci.yml:browser-acceptance": { stepCaps: 55, needed: 56, jobCap: 60 },
+  "ci.yml:browser-acceptance": { stepCaps: 63, needed: 64, jobCap: 70 },
   "ci.yml:package-contracts": { stepCaps: 38, needed: 39, jobCap: 55 },
   "desktop-e2e.yml:desktop-image": { stepCaps: 36, needed: 37, jobCap: 45 },
   "publish-desktop-image.yml:ghcr-mirror": { stepCaps: 5, needed: 6, jobCap: 10 },
@@ -87,7 +120,7 @@ function numericCap(value: unknown): number | null {
 }
 
 describe("workflow timeout contract", () => {
-  test("all jobs and the exact 16 run plus 3 action steps use static native caps", async () => {
+  test("all jobs and the exact 26 run plus 4 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
     const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
@@ -127,8 +160,8 @@ describe("workflow timeout contract", () => {
       right: readonly [string, string, string, number, "run" | "action"],
     ) => left.slice(0, 3).join("\0").localeCompare(right.slice(0, 3).join("\0"));
     expect(capped.toSorted(byIdentity)).toEqual(EXPECTED_CAPS.toSorted(byIdentity));
-    expect(capped.filter((row) => row[4] === "run")).toHaveLength(16);
-    expect(capped.filter((row) => row[4] === "action")).toHaveLength(3);
+    expect(capped.filter((row) => row[4] === "run")).toHaveLength(26);
+    expect(capped.filter((row) => row[4] === "action")).toHaveLength(4);
     for (const [job, expected] of Object.entries(EXPECTED_JOB_BUDGETS)) {
       expect(budgets[job], job).toEqual(expected);
     }
@@ -143,7 +176,7 @@ describe("workflow timeout contract", () => {
           .map((step) => ({ file, job, step })),
       ),
     );
-    expect(callers).toHaveLength(3);
+    expect(callers).toHaveLength(4);
     expect(callers.find(({ job }) => job === "browser-acceptance")?.step.with?.browsers).toBe(
       "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}",
     );

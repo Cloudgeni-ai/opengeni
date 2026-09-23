@@ -14,6 +14,7 @@ import {
   OrganizationRetentionSection,
 } from "@/components/organization-admin";
 import { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
+import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
 import { OrganizationModelProviderConnection } from "@/components/organization-model-provider-connection";
 import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
 import { OrganizationUsageDashboard } from "@/components/organization-usage-dashboard";
@@ -747,41 +748,13 @@ export function OrgSettingsRoute({
 
         {section === "billing" ? (
           <section className="grid gap-4 border-b border-border pb-6">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <h2 className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-                  Available credits
-                </h2>
-                <p
-                  className={
-                    visibleBilling
-                      ? "mt-1 text-2xl font-semibold tracking-tight text-fg"
-                      : "mt-2 flex items-center gap-1.5 text-xs text-fg-muted"
-                  }
-                >
-                  {visibleBilling ? (
-                    `${formatMoneyMicros(visibleBilling.balance.balanceMicros, visibleBilling.balance.currency)} available`
-                  ) : !canReadBilling || !accountId ? (
-                    "You don't have permission to view billing."
-                  ) : visibleBillingError ? (
-                    "Couldn't load your balance"
-                  ) : visibleBillingLoading ? (
-                    <>
-                      <Loader2Icon className="size-3.5 animate-spin" />
-                      Loading balance…
-                    </>
-                  ) : (
-                    "Billing balance unavailable"
-                  )}
-                </p>
-                <p className="mt-1 text-xs text-fg-muted">
-                  Used for organization-funded model and platform usage.
-                </p>
-              </div>
-              <span className="rounded-full border border-border px-2 py-1 text-xs text-fg-muted">
-                {visibleBilling?.mode ?? "unknown"}
-              </span>
-            </div>
+            <OrganizationCreditBalance
+              billing={visibleBilling}
+              canReadBilling={canReadBilling}
+              hasAccount={Boolean(accountId)}
+              loading={visibleBillingLoading}
+              hasError={Boolean(visibleBillingError)}
+            />
             {visibleBillingError ? (
               <LoadErrorState
                 title="Couldn't load the billing balance"

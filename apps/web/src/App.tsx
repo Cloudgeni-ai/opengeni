@@ -11,8 +11,7 @@
 //   /workspaces/:id/variable-sets            → variable sets + variables
 //   /workspaces/:id/rigs                     → rigs list + create
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
-//   /workspaces/:id/packs                    → redirect to plugins (Packs subsection)
-//   /workspaces/:id/plugins                  → plugin catalog + registry (incl. Packs subsection)
+
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
@@ -39,6 +38,7 @@ import { ProblemPanel } from "@/components/common";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
+import { parseSessionSearchRoute, type SessionSearchRoute } from "@/lib/session-search-route";
 import { artifactReturnSearch, parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import {
   parseRootWorkspaceSearch,
@@ -283,8 +283,10 @@ const workspaceSessionsRoute = createRoute({
 const workspaceSessionRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "sessions/$sessionId",
-  validateSearch: (search: Record<string, unknown>): ComposerLaunchSearch =>
-    parseComposerLaunchSearch(search),
+  validateSearch: (search: Record<string, unknown>): ComposerLaunchSearch & SessionSearchRoute => ({
+    ...parseComposerLaunchSearch(search),
+    ...parseSessionSearchRoute(search),
+  }),
   component: SessionView,
 });
 const workspaceAgentsRoute = createRoute({
@@ -327,37 +329,19 @@ const workspacePriorityRoute = createRoute({
   path: "priority",
   component: Priority,
 });
-// Legacy standalone Packs route: packs are now a subsection of Capabilities,
-// so this redirects there (focusing the Packs subsection) instead of mounting
-// a separate page.
-const workspacePacksRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "packs",
-  component: PacksRedirect,
-});
 const workspaceCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "plugins",
-  // `?section=packs` focuses the Packs subsection (used by the legacy
-  // /packs redirect and the nav). Unknown values fall back to the catalog.
-  validateSearch: (search: Record<string, unknown>): { section?: "packs" | "skills" } => ({
-    ...(search.section === "packs"
-      ? { section: "packs" as const }
-      : search.section === "skills"
-        ? { section: "skills" as const }
-        : {}),
+  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
+    ...(search.section === "skills" ? { section: "skills" as const } : {}),
   }),
   component: Capabilities,
 });
 const workspaceLegacyCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "capabilities",
-  validateSearch: (search: Record<string, unknown>): { section?: "packs" | "skills" } => ({
-    ...(search.section === "packs"
-      ? { section: "packs" as const }
-      : search.section === "skills"
-        ? { section: "skills" as const }
-        : {}),
+  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
+    ...(search.section === "skills" ? { section: "skills" as const } : {}),
   }),
   component: CapabilitiesLegacyRedirect,
 });
@@ -536,7 +520,6 @@ const routeTree = rootRoute.addChildren([
     workspaceMachinesRoute,
     workspaceInsightsRoute,
     workspacePriorityRoute,
-    workspacePacksRoute,
     workspaceCapabilitiesRoute,
     workspaceLegacyCapabilitiesRoute,
     workspaceSchedulesRoute,
@@ -615,6 +598,7 @@ function SessionView() {
       sessionId={sessionId}
       launch={launch}
       realtimeAutostartModel={launch.realtime}
+      searchTarget={launch}
     />
   );
 }
@@ -662,18 +646,6 @@ function Insights() {
 function Priority() {
   const { workspaceId } = workspacePriorityRoute.useParams();
   return <LazyPriorityRoute workspaceId={workspaceId} />;
-}
-
-function PacksRedirect() {
-  const { workspaceId } = workspacePacksRoute.useParams();
-  return (
-    <Navigate
-      to="/workspaces/$workspaceId/plugins"
-      params={{ workspaceId }}
-      search={{ section: "packs" }}
-      replace
-    />
-  );
 }
 
 function CapabilitiesLegacyRedirect() {

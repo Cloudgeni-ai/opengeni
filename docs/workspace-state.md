@@ -56,7 +56,7 @@ Workspace State projects existing sources; it owns none of them:
   plus its immutable revisions and lifecycle events) is the sole active
   preference authority, as documented in
   [`preference-registry.md`](preference-registry.md);
-- skills, tools, agents/sessions, rigs, variable sets, and workspace settings
+- skills, tools, agents/sessions, sandbox environments, variable sets, and workspace settings
   remain on their existing API and console surfaces.
 
 The inventory does not add `workspace_charters`, a generic source/fact schema,

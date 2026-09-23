@@ -280,7 +280,7 @@ describe("integrations.sh catalog import normalization", () => {
         "unlabel_message",
         "unlabel_thread",
       ],
-      connectionOwnership: "personal_only",
+      defaultConnectionOwnership: "personal",
       logoSourceUrl: null,
       installUrl: "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
     });
@@ -288,7 +288,7 @@ describe("integrations.sh catalog import normalization", () => {
       catalogRowToDbInput(normalized.rows[0]!, {
         importBatchId: "00000000-0000-4000-8000-000000000121",
       }).metadata,
-    ).toMatchObject({ connectionOwnership: "personal_only" });
+    ).toMatchObject({ defaultConnectionOwnership: "personal" });
   });
 
   test("pins Mobbin to its reviewed official Registry and OAuth contract", () => {

@@ -2,6 +2,8 @@ import type { CompanyBrainOkfDownload, CompanyBrainOkfPackage } from "./company-
 import { OpenGeniClient as OpenGeniCoreClient } from "./client";
 import type {
   Document,
+  IssueUserResourceGrantRequest,
+  UserResourceGrantMutationResponse,
   DocumentBase,
   FileDownloadUrlResponse,
   DocumentAuthorityReclassification,
@@ -24,6 +26,19 @@ import type {
  * methods or their routes.
  */
 export class OpenGeniDocumentAuthorityClient extends OpenGeniCoreClient {
+  /** Issue an exact-session or standing personal-resource grant. */
+  async issueUserResourceGrant(
+    workspaceId: string,
+    authorityId: string,
+    request: IssueUserResourceGrantRequest,
+  ): Promise<UserResourceGrantMutationResponse> {
+    return await this.requestJson<UserResourceGrantMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/user-resource-authorities/${authorityId}/grants`,
+      request,
+    );
+  }
+
   async listDocumentBases(workspaceId: string): Promise<DocumentBase[]> {
     return await this.requestJson<DocumentBase[]>(
       "GET",

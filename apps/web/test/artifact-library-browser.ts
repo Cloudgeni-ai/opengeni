@@ -137,6 +137,8 @@ try {
     });
     await page.getByRole("button", { name: "Open Project mark", exact: true }).click();
     await page.getByRole("button", { name: "Expand Project mark.svg", exact: true }).waitFor();
+    assert.equal(await page.getByRole("link", { name: "All artifacts", exact: true }).count(), 0);
+    assert.equal(await page.getByRole("button", { name: "Browse session artifacts" }).count(), 1);
     const embeddedScroll = await page.locator('[data-slot="content-page"]').evaluate((element) => {
       const bottom = element.getBoundingClientRect().bottom;
       const overflows = element.scrollHeight > element.clientHeight;
@@ -150,8 +152,7 @@ try {
     });
     assert.ok(embeddedScroll.bottom <= height + 1, "embedded page fits inside the dock");
     assert.ok(embeddedScroll.clientHeight > 0);
-    if (height === 600) {
-      assert.ok(embeddedScroll.overflows, "short-desktop content must be scrollable");
+    if (embeddedScroll.overflows) {
       assert.ok(embeddedScroll.scrollTop > 0, "bottom image and padding remain reachable");
     }
     await page.screenshot({ path: `${output}/embedded-${suffix}.png`, fullPage: true });

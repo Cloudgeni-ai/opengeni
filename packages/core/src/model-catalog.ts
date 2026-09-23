@@ -4,6 +4,7 @@ import {
   configuredGatewayWorkspaceProductModelIds,
   configuredGatewayOrganizationProductModelIds,
   configuredModels,
+  isModelAvailableForNewSelection,
   configuredModelNotes,
   configuredOpenRouterWorkspaceProductModelIds,
   configuredOpenRouterOrganizationProductModelIds,
@@ -708,38 +709,41 @@ export function resolveWorkspaceModelSelection(
       ? input.credentialReadinessMaxAgeMs
       : MODEL_CREDENTIAL_READINESS_OBSERVATION_MAX_AGE_MS;
 
-  return configuredModels(catalogSettings).map((model) => {
-    const provider = providers.get(model.providerId);
-    const policyAllowed =
-      evaluateWorkspaceModelPolicy(input.policy, {
-        providerId: model.providerId,
-        modelId: model.id,
-      }).allowed && modelAllowedByConnections(input.connectionModelRestrictions ?? {}, model.id);
-    const credentialReadiness = credentialReadinessFor({
-      model,
-      provider,
-      codexSubscriptionActive: input.codexSubscriptionActive,
-      xaiSubscriptionActive: input.xaiSubscriptionActive === true,
-      workspaceGatewayConnectionActive: input.workspaceGatewayConnectionActive === true,
-      workspaceOpenRouterConnectionActive: input.workspaceOpenRouterConnectionActive === true,
-      organizationGatewayConnectionActive: input.organizationGatewayConnectionActive === true,
-      organizationOpenRouterConnectionActive: input.organizationOpenRouterConnectionActive === true,
-      observation: input.credentialReadinessObservations?.[model.definitionVersion],
-      nowMs,
-      maxAgeMs,
-    });
-    return {
-      model,
-      credentialReadiness,
-      policyAllowed,
-      availability: availabilityFor({
+  return configuredModels(catalogSettings)
+    .filter((model) => isModelAvailableForNewSelection(catalogSettings, model.id))
+    .map((model) => {
+      const provider = providers.get(model.providerId);
+      const policyAllowed =
+        evaluateWorkspaceModelPolicy(input.policy, {
+          providerId: model.providerId,
+          modelId: model.id,
+        }).allowed && modelAllowedByConnections(input.connectionModelRestrictions ?? {}, model.id);
+      const credentialReadiness = credentialReadinessFor({
+        model,
+        provider,
+        codexSubscriptionActive: input.codexSubscriptionActive,
+        xaiSubscriptionActive: input.xaiSubscriptionActive === true,
+        workspaceGatewayConnectionActive: input.workspaceGatewayConnectionActive === true,
+        workspaceOpenRouterConnectionActive: input.workspaceOpenRouterConnectionActive === true,
+        organizationGatewayConnectionActive: input.organizationGatewayConnectionActive === true,
+        organizationOpenRouterConnectionActive:
+          input.organizationOpenRouterConnectionActive === true,
+        observation: input.credentialReadinessObservations?.[model.definitionVersion],
+        nowMs,
+        maxAgeMs,
+      });
+      return {
         model,
         credentialReadiness,
         policyAllowed,
-        observation: input.observations?.[model.definitionVersion],
-        nowMs,
-        maxAgeMs,
-      }),
-    };
-  });
+        availability: availabilityFor({
+          model,
+          credentialReadiness,
+          policyAllowed,
+          observation: input.observations?.[model.definitionVersion],
+          nowMs,
+          maxAgeMs,
+        }),
+      };
+    });
 }

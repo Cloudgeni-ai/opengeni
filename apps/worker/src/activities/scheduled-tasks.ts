@@ -17,7 +17,6 @@ import {
   type ScheduledTaskRun,
 } from "@opengeni/contracts";
 import {
-  defaultSessionMcpServerIds,
   openGeniSlackBotMetadata,
   requireOpenGeniSlackBotConnection,
   resolveWorkspaceCatalogSettings,
@@ -25,6 +24,12 @@ import {
   workspaceCustomModelReference,
   lockActiveCustomModelForAdmission,
   scheduledSlackBotConnectionId,
+  freezeConnectionAccounts,
+  ConnectionAccountSelectionError,
+  scheduledConnectionSurfaceEligibility,
+  scheduledConnectionTools,
+  settingsWithEnabledCapabilityMcpServers,
+  settingsWithSessionMcpServerMetadata,
   swapActiveSandbox,
 } from "@opengeni/core";
 import {
@@ -41,7 +46,6 @@ import {
   getScheduledTaskRunAcceptedExecution,
   getScheduledTaskRunByProducerKey,
   getScheduledTargetSessionExecution,
-  getScheduledTaskPersonalConnectionDelegations,
   getScheduledTaskRunPersonalResourceAuthority,
   getScheduledTaskPersonalResourceAuthoritySubject,
   getScheduledTaskRevisionAuthority,
@@ -57,7 +61,6 @@ import {
   isCodexBilledModel,
   initializeSessionStartAtomically,
   materializeScheduledTaskReusableSessionFromRun,
-  listEnabledMcpCapabilityServerIds,
   listInstalledApiIntegrationServerIdsForDelegations,
   markScheduledTaskRunFailedIfQueued,
   markScheduledTaskRunSkippedIfQueued,
@@ -391,20 +394,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (incidentDeclaration.action === "blocked") {
         return incidentDeclaration;
       }
-      const taskPersonalConnectionDelegations = await getScheduledTaskPersonalConnectionDelegations(
-        db,
-        task.workspaceId,
-        task.id,
-      );
-      const taskConnectionAuthoritySubjects = [
-        ...new Set(
-          taskPersonalConnectionDelegations.map((delegation) => delegation.ownerSubjectId),
-        ),
-      ];
-      if (taskConnectionAuthoritySubjects.length > 1) {
-        throw new Error("scheduled connection authority has multiple causal humans");
-      }
-      const taskConnectionAuthoritySubjectId = taskConnectionAuthoritySubjects[0] ?? null;
       const taskPersonalResourceAuthoritySubjectId =
         await getScheduledTaskPersonalResourceAuthoritySubject(db, {
           accountId: task.accountId,
@@ -418,17 +407,16 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         taskId: task.id,
         taskAuthorityRevision: task.authorityRevision,
       });
+      const taskAuthoritySubjectId = task.ownerSubjectId;
       if (
-        taskConnectionAuthoritySubjectId &&
-        taskPersonalResourceAuthoritySubjectId &&
-        taskConnectionAuthoritySubjectId !== taskPersonalResourceAuthoritySubjectId
+        task.action.kind === "agent_turn" &&
+        ((taskRevisionAuthority?.subjectId ?? null) !== taskAuthoritySubjectId ||
+          [taskPersonalResourceAuthoritySubjectId].some(
+            (subject) => subject !== null && subject !== taskAuthoritySubjectId,
+          ))
       ) {
-        throw new Error("scheduled authority classes have different causal humans");
+        throw new Error("scheduled authority differs from its immutable execution owner");
       }
-      const taskAuthoritySubjectId =
-        taskRevisionAuthority?.subjectId ??
-        taskPersonalResourceAuthoritySubjectId ??
-        taskConnectionAuthoritySubjectId;
       const acceptedTargetSessionId =
         task.runMode === "existing_session"
           ? task.targetSessionId
@@ -467,6 +455,60 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const firstPartyMcpPermissions = creatorPolicy?.firstPartyMcpPermissions
         ? [...creatorPolicy.firstPartyMcpPermissions]
         : [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS];
+      // A fresh occurrence resolves the immutable owner's current accounts.
+      // Retry/recovery above uses the already accepted occurrence snapshot.
+      const connectionSettings = await settingsWithEnabledCapabilityMcpServers(
+        db,
+        task.workspaceId,
+        settings,
+        taskAuthoritySubjectId ? { subjectId: taskAuthoritySubjectId } : {},
+      );
+      const connectionTarget =
+        acceptedTargetSessionId && targetSessionExecutionBase
+          ? await requireSession(db, task.workspaceId, acceptedTargetSessionId)
+          : null;
+      const connectionTools = await scheduledConnectionTools(
+        db,
+        task.workspaceId,
+        connectionSettings,
+        connectionTarget,
+        taskTools,
+        taskAuthoritySubjectId ?? undefined,
+      );
+      const taskConnections = await freezeConnectionAccounts({
+        db,
+        accountId: task.accountId,
+        workspaceId: task.workspaceId,
+        settings: connectionTarget
+          ? settingsWithSessionMcpServerMetadata(connectionSettings, connectionTarget.mcpServers)
+          : connectionSettings,
+        tools: connectionTools,
+        resources: connectionTarget?.resources ?? task.agentConfig.resources,
+        source: taskAuthoritySubjectId
+          ? { kind: "subject", subjectId: taskAuthoritySubjectId, accountId: task.accountId }
+          : { kind: "none" },
+        authoritySelections: task.agentConfig.connectionAccounts ?? [],
+        authoritySelectionsFrozen: task.agentConfig.connectionAccountsFrozen === true,
+        ...scheduledConnectionSurfaceEligibility(
+          settings,
+          connectionTarget ?? {
+            firstPartyMcpTools,
+            firstPartyMcpPermissions,
+          },
+        ),
+      }).catch((error: unknown) => {
+        if (error instanceof ConnectionAccountSelectionError) return null;
+        throw error;
+      });
+      if (taskConnections === null) {
+        return { action: "blocked", reason: "connection_account_unavailable" };
+      }
+      const {
+        personalConnectionDelegations: taskPersonalConnectionDelegations,
+        mcpAccountBindings: taskMcpAccountBindings,
+      } = taskConnections;
+      const taskConnectionAuthoritySubjectId =
+        taskPersonalConnectionDelegations.length > 0 ? taskAuthoritySubjectId : null;
       const creatorSessionPolicy = scheduledCreatorSessionPolicyInput(
         creatorPolicy?.sessionPolicy ?? null,
       );
@@ -537,20 +579,16 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         : null;
       const targetSessionExecution = targetSessionExecutionBase
         ? await (async () => {
-            const [capabilityServerIds, apiIntegrationServerIds] = await Promise.all([
-              listEnabledMcpCapabilityServerIds(db, task.workspaceId),
-              listInstalledApiIntegrationServerIdsForDelegations(
+            const apiIntegrationServerIds =
+              await listInstalledApiIntegrationServerIdsForDelegations(
                 db,
                 task.workspaceId,
                 taskPersonalConnectionDelegations,
-              ),
+              );
+            const availableMcpServerIds = new Set([
+              ...connectionSettings.mcpServers.map((server) => server.id),
+              ...apiIntegrationServerIds,
             ]);
-            const workspaceDefaultMcpServerIds = new Set(
-              settings.mcpServers.map((server) => server.id),
-            );
-            for (const id of capabilityServerIds) workspaceDefaultMcpServerIds.add(id);
-            for (const id of apiIntegrationServerIds) workspaceDefaultMcpServerIds.add(id);
-            const availableMcpServerIds = new Set(workspaceDefaultMcpServerIds);
             for (const id of targetSessionExecutionBase.mcpServerIds) {
               availableMcpServerIds.add(id);
             }
@@ -558,9 +596,10 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               toolPolicy: targetSessionExecutionBase.toolPolicy,
               sessionTools: targetSessionExecutionBase.tools,
               availableMcpServerIds,
-              defaultMcpServerIds: defaultSessionMcpServerIds(
-                [...workspaceDefaultMcpServerIds].map((id) => ({ id })),
-              ),
+              defaultMcpServerIds: [
+                ...connectionTools.map((tool) => tool.id),
+                ...apiIntegrationServerIds,
+              ],
             });
             return {
               ...targetSessionExecutionBase,
@@ -604,7 +643,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             )
           : null;
       if (generatedTarget && task.rigId && (!acceptedRig || !acceptedRig.activeVersion)) {
-        throw new Error(`rig has no active version to bind: ${task.rigId}`);
+        throw new Error(`sandbox environment has no active version to bind: ${task.rigId}`);
       }
       const acceptedRigDefaultVariableSets = acceptedRig?.activeVersion
         ? await Promise.all(
@@ -619,7 +658,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 variableSetId,
               );
               if (!variableSet) {
-                throw new Error(`rig default Variable Set not found: ${variableSetId}`);
+                throw new Error(
+                  `sandbox environment default Variable Set not found: ${variableSetId}`,
+                );
               }
               return { id: variableSet.id, generation: variableSet.generation };
             }),
@@ -843,6 +884,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           targetSessionExecution,
           generatedSessionBinding,
           personalConnectionDelegations: taskPersonalConnectionDelegations,
+          mcpAccountBindings: taskMcpAccountBindings,
           personalResourceAuthoritySubjectId: taskPersonalResourceAuthoritySubjectId,
           causalHumanSubjectId,
           causalHumanAuthority: taskRevisionAuthority,
@@ -966,16 +1008,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 taskId: task.id,
               },
             );
-            if (
-              stableJson({
-                task: exactAuthority.task,
-                personalConnectionDelegations: exactAuthority.personalConnectionDelegations,
-              }) !==
-              stableJson({
-                task,
-                personalConnectionDelegations: taskPersonalConnectionDelegations,
-              })
-            ) {
+            if (stableJson(exactAuthority) !== stableJson(task)) {
               throw new IncidentTelemetryPreflightBlockedError(
                 "incident_preflight_metadata_missing",
               );
@@ -1009,7 +1042,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             if (task.rigId) {
               const rig = acceptedRig;
               if (!rig || !rig.activeVersion) {
-                throw new Error(`rig has no active version to bind: ${task.rigId}`);
+                throw new Error(`sandbox environment has no active version to bind: ${task.rigId}`);
               }
               frozenRigId = rig.id;
               frozenRigVersionId =
@@ -1017,7 +1050,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   (resource) => resource.resourceKind === "rig" && resource.resourceId === rig.id,
                 )?.resourceVersionId ?? rig.activeVersion.id;
               if (frozenRigVersionId !== rig.activeVersion.id) {
-                throw new Error("scheduled run rig version changed during admission");
+                throw new Error(
+                  "scheduled run sandbox environment version changed during admission",
+                );
               }
             }
             let session: Awaited<ReturnType<typeof createSession>>;
@@ -1368,6 +1403,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                     : {}),
                 },
                 personalConnectionDelegations: taskPersonalConnectionDelegations,
+                mcpAccountBindings: taskMcpAccountBindings,
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
                 scheduledTaskRunId: run.id,
               },
@@ -1495,6 +1531,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                     : {}),
                 },
                 personalConnectionDelegations: taskPersonalConnectionDelegations,
+                mcpAccountBindings: taskMcpAccountBindings,
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
                 scheduledTaskRunId: run.id,
               },
@@ -1799,18 +1836,10 @@ async function prepareIncidentTelemetrySource(input: {
   workspaceId: string;
   sessionId: string;
   alertOccurrenceLabels: Readonly<Record<string, string>> | null;
-  acceptedExecution?: ScheduledTaskRunAcceptedExecution;
+  acceptedExecution: ScheduledTaskRunAcceptedExecution;
 }) {
   const session = await requireSession(input.tx, input.workspaceId, input.sessionId);
-  const { task, personalConnectionDelegations } = input.acceptedExecution
-    ? {
-        task: input.acceptedExecution.task,
-        personalConnectionDelegations: input.acceptedExecution.personalConnectionDelegations,
-      }
-    : await requireScheduledTaskIncidentAuthorityInTransaction(input.tx, {
-        workspaceId: input.workspaceId,
-        taskId: input.taskId,
-      });
+  const { task, personalConnectionDelegations } = input.acceptedExecution;
   const responder = await resolveIncidentTelemetryResponderMetadata({
     db: input.tx,
     settings: input.settings,
@@ -1818,39 +1847,34 @@ async function prepareIncidentTelemetrySource(input: {
     session,
     personalConnectionDelegations,
     personalResourceAuthoritySubjectId:
-      input.acceptedExecution?.personalResourceAuthoritySubjectId ?? null,
-    ...(input.acceptedExecution
+      input.acceptedExecution.personalResourceAuthoritySubjectId ?? null,
+    executionPolicy: input.acceptedExecution.targetSessionExecution
       ? {
-          executionPolicy: input.acceptedExecution.targetSessionExecution
-            ? {
-                tools: input.acceptedExecution.targetSessionExecution.tools,
-                firstPartyMcpTools:
-                  input.acceptedExecution.targetSessionExecution.firstPartyMcpTools,
-                firstPartyMcpPermissions:
-                  input.acceptedExecution.targetSessionExecution.firstPartyMcpPermissions,
-                variableSetIds: input.acceptedExecution.targetSessionExecution.variableSets.map(
-                  (variableSet) => variableSet.id,
-                ),
-                variableSetId: input.acceptedExecution.targetSessionExecution.variableSetId,
-                rigId: input.acceptedExecution.targetSessionExecution.rigId,
-                rigVersionId: input.acceptedExecution.targetSessionExecution.rigVersionId,
-                toolPolicy: input.acceptedExecution.targetSessionExecution.toolPolicy,
-                mcpServerIds: input.acceptedExecution.targetSessionExecution.mcpServerIds,
-                toolPolicyVersion: input.acceptedExecution.targetSessionExecution.toolPolicyVersion,
-              }
-            : {
-                tools: input.acceptedExecution.resolvedTools,
-                firstPartyMcpTools: input.acceptedExecution.resolvedFirstPartyMcpTools,
-                firstPartyMcpPermissions: input.acceptedExecution.resolvedFirstPartyMcpPermissions,
-                variableSetId: input.acceptedExecution.resolvedVariableSet?.id ?? null,
-                rigId: input.acceptedExecution.resolvedRig?.id ?? null,
-                rigVersionId: input.acceptedExecution.resolvedRig?.versionId ?? null,
-                toolPolicy: session.toolPolicy,
-                mcpServerIds: [],
-                toolPolicyVersion: session.toolPolicyVersion,
-              },
+          tools: input.acceptedExecution.targetSessionExecution.tools,
+          firstPartyMcpTools: input.acceptedExecution.targetSessionExecution.firstPartyMcpTools,
+          firstPartyMcpPermissions:
+            input.acceptedExecution.targetSessionExecution.firstPartyMcpPermissions,
+          variableSetIds: input.acceptedExecution.targetSessionExecution.variableSets.map(
+            (variableSet) => variableSet.id,
+          ),
+          variableSetId: input.acceptedExecution.targetSessionExecution.variableSetId,
+          rigId: input.acceptedExecution.targetSessionExecution.rigId,
+          rigVersionId: input.acceptedExecution.targetSessionExecution.rigVersionId,
+          toolPolicy: input.acceptedExecution.targetSessionExecution.toolPolicy,
+          mcpServerIds: input.acceptedExecution.targetSessionExecution.mcpServerIds,
+          toolPolicyVersion: input.acceptedExecution.targetSessionExecution.toolPolicyVersion,
         }
-      : {}),
+      : {
+          tools: input.acceptedExecution.resolvedTools,
+          firstPartyMcpTools: input.acceptedExecution.resolvedFirstPartyMcpTools,
+          firstPartyMcpPermissions: input.acceptedExecution.resolvedFirstPartyMcpPermissions,
+          variableSetId: input.acceptedExecution.resolvedVariableSet?.id ?? null,
+          rigId: input.acceptedExecution.resolvedRig?.id ?? null,
+          rigVersionId: input.acceptedExecution.resolvedRig?.versionId ?? null,
+          toolPolicy: session.toolPolicy,
+          mcpServerIds: [],
+          toolPolicyVersion: session.toolPolicyVersion,
+        },
   });
   const preflight = evaluateIncidentTelemetryPreflight({
     agentConfig: task.agentConfig,
@@ -2356,6 +2380,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
           : {}),
       },
       personalConnectionDelegations: input.acceptedExecution.personalConnectionDelegations,
+      mcpAccountBindings: input.acceptedExecution.mcpAccountBindings ?? null,
       xaiProviderAccountAuthoritySnapshot:
         input.acceptedExecution.xaiProviderAccountAuthoritySnapshot,
       scheduledTaskRunId: input.run.id,

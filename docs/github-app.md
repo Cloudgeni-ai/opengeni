@@ -11,9 +11,9 @@ path uses a separate per-environment OAuth App, callback, encrypted Connection,
 and GitHub user identity. Neither credential may satisfy the other's authority
 checks.
 
-The PR Review Pack likewise uses a separately registered, workspace-owned
+PR Review likewise uses a separately registered, workspace-owned
 provider app. It never inherits this platform App or a personal GitHub
-connection. See [`pr-review-pack.md`](pr-review-pack.md).
+connection. See [`pr-review.md`](pr-review.md).
 
 ## Status contract
 
@@ -187,3 +187,56 @@ to use their machine's ambient Git authentication.
   deployments retain the operator setup flow.
 - Workspace unlink deletes only that OpenGeni binding. It does not uninstall the
   App from GitHub or change another workspace's independent binding.
+
+## Operator setup
+
+The GitHub App integration is optional, but it is the recommended way to give
+agents scoped repository access. It lets the UI list installed repositories and
+lets the worker mint short-lived installation tokens only for repositories
+selected for a session. Each workspace binding owns an independent repository
+allowlist and can be unlinked without uninstalling the App from GitHub.
+
+From the web app (configured/local deployments):
+
+1. Open the repository picker in the composer.
+2. Expand **GitHub App**.
+3. Optionally enter an organization login if the app should be created under an organization instead of your personal account.
+4. Click **Create app**. The web app submits a GitHub App manifest to GitHub, and GitHub opens a prefilled app form.
+5. Create the app in GitHub. The callback page prints `OPENGENI_GITHUB_APP_*` lines and includes a copy button.
+6. Copy those lines into `.env`.
+7. Restart the API and worker, or restart everything with `bun run dev`.
+8. Reopen the repository picker and click **Connect GitHub**. Complete GitHub's installation/configuration screen and fresh user authorization as the personal-account owner or an active organization owner.
+
+OpenGeni reports App server configuration and workspace binding separately as
+`disabled`, `unbound`, or `bound` (see [Status contract](#status-contract)). It
+binds only after fresh GitHub authorization proves exact personal ownership or
+active organization ownership and then atomically stores the OpenGeni
+account/workspace/subject, GitHub actor/account/installation, one-time proof,
+and explicit repository IDs. An organization approval request remains pending
+and unbound.
+
+For local development, the manifest callback can use the API origin from the
+running request. If you run behind a tunnel or deployed URL, set:
+
+```bash
+OPENGENI_GITHUB_APP_MANIFEST_BASE_URL=https://YOUR_DOMAIN
+OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET=change-me
+```
+
+The generated App configures `<baseUrl>/v1/github/oauth/callback` and requests
+**Members: read** so GitHub can expose active organization-owner membership.
+Existing organization installations must approve the added permission before
+organization-owner self-service can succeed; unavailable proof fails closed.
+
+Existing database rows created without an owner-authority receipt remain
+visible for audit/unlink as `unverified`, but they cannot enumerate
+repositories, authorize session resources, or mint installation tokens. Session
+creation, repository listing, and GitHub-authenticated worker turn startup
+recheck the workspace binding, so unlinking or narrowing it revokes queued and
+scheduled use before a new token is minted. Installation tokens remain
+host-owned run material: the worker writes and renews them through the sandbox
+credential-file boundary, and no model-visible MCP/API/SDK tool returns one.
+
+The generated GitHub URL is only the manifest form target. Opening or copying
+that URL by itself only sends `state`, so GitHub shows an empty app form instead
+of the prefilled manifest.

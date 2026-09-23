@@ -1,5 +1,9 @@
 # @opengeni/artifact-kernel-wasm-spreadsheet
 
+## 0.3.31
+
+## 0.3.30
+
 ## 0.3.29
 
 ## 0.3.28

@@ -35,4 +35,20 @@ export const embeddingMigrationTail = [
   // Compiles against the Knowledge tables and visibility helper from 0461.
   "0468_knowledge_relationship_projection.sql",
   "0469_knowledge_source_discovery.sql",
+  "0478_sender_owned_connections.sql",
+  // Replayed 0402/0433 still consume historical Pack tables. Remove them only
+  // after those earlier accepted-work and Skill cutovers have completed.
+  "0482_remove_packs.sql",
+  // Patches the exact Skill lifecycle rewritten by 0461; replay after it.
+  "0488_permanent_skill_removal.sql",
+  // Rewrites the original-file policy introduced by 0461.
+  "0499_session_attachment_access.sql",
+  "0501_session_sharing_execution.sql",
+  // Reads the cursor table from 0374, withheld by these historical fixtures.
+  "0503_session_meaningful_attention.sql",
+  // New trial/Knowledge cutovers depend on the 0299 lifecycle and 0461 tables
+  // withheld above. Keep historical replay fixtures on their original side.
+  "0509_verified_signup_trial_credits.sql",
+  "0510_knowledge_index_funding_wait.sql",
+  "0511_knowledge_visible_index_status.sql",
 ];

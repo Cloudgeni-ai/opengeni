@@ -1,25 +1,21 @@
 import { createHash } from "node:crypto";
 
 import { describe, expect, test } from "bun:test";
-import { stableJson, type CapabilityPack } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { stableJson } from "@opengeni/contracts";
+import { type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 
 import {
-  adoptPackComponentReferences,
   bootstrapWorkspace,
   configureIntegrationFacet,
   createDb,
-  enablePackInstallation,
-  getPackInstallation,
-  getWorkspacePack,
   installApiIntegration,
   listIntegrationInstanceFacets,
-  listPackInstallationComponents,
-  registerWorkspacePack,
   type InstallApiIntegrationInput,
 } from "../src";
-import { migrate } from "../src/migrate";
+import { acquirePreRemovalDatabase, migrateBefore } from "./helpers/historical-schema";
+
+const migrate = (url: string) => migrateBefore(url, "0482_remove_packs.sql");
 
 const migrationName = "0232_integration_facet_authority_cutover.sql";
 
@@ -65,7 +61,7 @@ describe("Integration Facet authority migration replay", () => {
         idempotencyKey: crypto.randomUUID(),
       });
 
-      const pack: CapabilityPack = {
+      const pack = {
         id: "facet-cutover-pack",
         name: "Facet cutover Pack",
         description: "Pins one exact Integration Facet binding.",
@@ -92,26 +88,25 @@ describe("Integration Facet authority migration replay", () => {
         metadata: {},
       };
       const packDigest = sha256(stableJson(pack));
-      await registerWorkspacePack(app.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        pack,
-      });
-      const installation = await enablePackInstallation(app.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        packId: pack.id,
-        manifestSnapshot: pack,
-        manifestDigest: packDigest,
-        installedBySubjectId: grant.subjectId,
-        metadata: { platformVersion: 2 },
-      });
-      await adoptPackComponentReferences(app.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        packInstallationId: installation.id,
-        references: pack.components,
-      });
+      // Historical SQL fixture, deliberately independent of removed runtime APIs.
+      await shared.admin`
+        INSERT INTO workspace_packs(account_id,workspace_id,pack_id,manifest)
+        VALUES(${grant.accountId},${grant.workspaceId},${pack.id},${shared.admin.json(pack)})
+      `;
+      const [installation] = await shared.admin<{ id: string }[]>`
+        INSERT INTO pack_installations(account_id,workspace_id,pack_id,manifest_snapshot,manifest_digest,installed_by_subject_id,metadata)
+        VALUES(${grant.accountId},${grant.workspaceId},${pack.id},${shared.admin.json(pack)},${packDigest},${grant.subjectId},'{"platformVersion":2}')
+        RETURNING id
+      `;
+      if (!installation) throw new Error("Historical installation fixture failed");
+      await shared.admin`
+        INSERT INTO pack_installation_components(account_id,workspace_id,pack_installation_id,component_key,kind,capability_id,resolved_id,digest,metadata)
+        VALUES(${grant.accountId},${grant.workspaceId},${installation.id},'finance-mail','facet',${integration.capabilityId},${configured.binding.id},${sha256(stableJson(facetConfig))},'{"facetKey":"mail-inbox"}')
+      `;
+      await shared.admin`
+        INSERT INTO integration_facet_binding_owners(account_id,workspace_id,binding_id,owner_kind,owner_id,removable)
+        VALUES(${grant.accountId},${grant.workspaceId},${configured.binding.id},'pack',${installation.id},false)
+      `;
 
       await app.close();
 
@@ -251,17 +246,16 @@ describe("Integration Facet authority migration replay", () => {
       });
 
       app = createDb(shared.appUrl);
-      const registered = await getWorkspacePack(app.db, grant.workspaceId, pack.id);
-      expect(registered?.pack.components).toEqual(pack.components);
-      const migratedInstallation = await getPackInstallation(app.db, grant.workspaceId, pack.id);
-      expect(migratedInstallation?.manifestSnapshot?.components).toEqual(pack.components);
-      expect(migratedInstallation?.manifestDigest).toBe(packDigest);
-      const components = await listPackInstallationComponents(
-        app.db,
-        grant.workspaceId,
-        installation.id,
-      );
-      expect(components).toEqual([
+      const [registered] =
+        await shared.admin`SELECT manifest FROM workspace_packs WHERE workspace_id=${grant.workspaceId} AND pack_id=${pack.id}`;
+      expect(registered?.manifest.components).toEqual(pack.components);
+      const [migratedInstallation] =
+        await shared.admin`SELECT manifest_snapshot,manifest_digest FROM pack_installations WHERE id=${installation.id}`;
+      expect(migratedInstallation?.manifest_snapshot.components).toEqual(pack.components);
+      expect(migratedInstallation?.manifest_digest).toBe(packDigest);
+      const components =
+        await shared.admin`SELECT kind,metadata FROM pack_installation_components WHERE pack_installation_id=${installation.id}`;
+      expect([...components]).toEqual([
         expect.objectContaining({
           kind: "facet",
           metadata: expect.objectContaining({ facetKey: "mail-inbox" }),
@@ -349,7 +343,7 @@ async function acquireFacetAuthorityDatabase(): Promise<SharedTestDatabase | nul
     );
   }
   if (!adminUrl || !appUrl) {
-    return await acquireSharedTestDatabase("migration-0232-facet-authority");
+    return await acquirePreRemovalDatabase("migration-0232-facet-authority");
   }
   await migrate(adminUrl);
   const admin = postgres(adminUrl, { max: 4 });
@@ -432,7 +426,10 @@ function integrationInput(input: {
   };
 }
 
-function featureEraPack(pack: CapabilityPack): FeatureEraPack {
+function featureEraPack(pack: {
+  id: string;
+  components: { kind: string; facetKey?: string }[];
+}): FeatureEraPack {
   return JSON.parse(
     stableJson({
       ...pack,

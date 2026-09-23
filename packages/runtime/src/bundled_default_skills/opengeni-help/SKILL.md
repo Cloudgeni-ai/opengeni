@@ -25,10 +25,10 @@ SDK exports/types, and authorized live configuration or probes. Report a failed
 documentation fetch explicitly and use another authoritative source. Do not
 ask the customer to supply OpenGeni's own API contract before trying these sources.
 
-For implementation, use the current product-integration guide. A selected
-OpenGeni Product Integration Pack provides the deeper implementation procedure;
-ordinary product questions do not require installing that Pack or cloning the
-OpenGeni repository.
+For implementation, read the bundled `opengeni-client` Skill with `skill_read`
+and follow its relevant references. It is available by default without a Pack,
+installation, or repository clone. If an embedding host excludes it, respect
+that selection; the public product-integration guide remains reference material.
 
 ## Integration and account setup
 
@@ -62,6 +62,20 @@ reviewed integration candidates and `skill_read` for available guidance. Missing
 For connection setup, follow the shared Integration setup guidance and the
 catalog's returned next action. Account-management permissions and the ability
 to request human setup are separate.
+
+## Connected Machine enrollment
+
+Use `sandboxes_list` to check existing machine readiness before enrolling again.
+For authorized headless setup, `connected_machine_enroll_token` returns a
+short-lived token, expiry, and Unix/PowerShell installation commands bound to the
+current deployment and workspace. It requires the existing `enrollments:manage`
+permission and session tool selection; it adds no separate approval prompt.
+Screen control defaults off. Run the returned command through an existing
+authorized path to the intended machine, then verify it appears ready in
+`sandboxes_list`. Do not publish the token in code or unrelated logs. If the tool
+is unavailable, distinguish missing permission/selection from an offline target;
+`sandbox_provision` supplies the interactive human enrollment instructions.
+An already enrolled machine normally needs connection diagnosis, not a new token.
 
 ## Cost questions
 

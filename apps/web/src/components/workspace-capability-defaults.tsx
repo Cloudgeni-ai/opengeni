@@ -191,12 +191,22 @@ export function WorkspaceCapabilityDefaultsView({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <h2 className="text-sm font-medium">
-            {custom ? "Custom workspace selection" : "Using deployment defaults"}
+            {permissions
+              ? custom
+                ? "Custom workspace selection"
+                : "Using deployment defaults"
+              : inheritConnectors
+                ? "All connected tools"
+                : "Selected connected tools"}
           </h2>
           <p className="mt-1 max-w-2xl text-xs text-fg-muted">
-            {custom
-              ? "This workspace has custom tool defaults. Deployment restrictions and required approvals still apply."
-              : "Tools are available by default. New sessions follow deployment defaults, including future updates."}
+            {permissions
+              ? custom
+                ? "This workspace has custom tool defaults. Deployment restrictions and required approvals still apply."
+                : "Tools are available by default. New sessions follow deployment defaults, including future updates."
+              : inheritConnectors
+                ? "New sessions include available connected tools, including integrations connected later."
+                : "New sessions use a fixed selection. Connecting another integration does not add it to this selection."}
           </p>
           <p className="mt-1 text-xs text-fg-muted">
             Changes apply to new sessions only. Deployment restrictions always apply.

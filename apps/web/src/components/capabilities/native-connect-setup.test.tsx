@@ -37,6 +37,50 @@ function transport(pending: ConnectAttempt[]) {
   } satisfies ConnectTransport;
 }
 
+test("native setup hands the exact completed account receipt to its completion handler", async () => {
+  const api = transport([]);
+  const completed: ConnectAttempt = {
+    ...attempt,
+    providerId: "slack-personal",
+    state: "complete",
+    credentialsCommitted: true,
+    completionRequirement: "connection",
+    nextAction: { type: "none" },
+    account: {
+      id: "account",
+      version: 1,
+      providerId: "slack-personal",
+      ownership: "workspace",
+      label: "Slack",
+      status: "connected",
+    },
+  };
+  api.begin.mockImplementation(async () => completed);
+  const onComplete = mock(() => {});
+  const view = await renderComponent(
+    <NativeConnectSetup
+      transport={api}
+      workspaceId="workspace"
+      request={{
+        scope: { workspaceId: "workspace", transport: api },
+        providerId: "slack-personal",
+        ownership: "workspace",
+        returnUrl: "http://localhost/plugins",
+        idempotencyKey: "complete",
+      }}
+      onClose={() => {}}
+      onComplete={onComplete}
+    />,
+  );
+  try {
+    await flush(20);
+    expect(onComplete).toHaveBeenCalledWith(completed);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  } finally {
+    await view.unmount();
+  }
+});
+
 for (const count of [0, 1, 2])
   test(`native setup with ${count} matching pending attempts preserves explicit provider authorization`, async () => {
     const api = transport(

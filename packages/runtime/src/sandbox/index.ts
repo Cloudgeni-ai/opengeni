@@ -599,6 +599,7 @@ export {
   type RoutingSandboxFirstOperationPhaseObservation,
   type RoutingSandboxOperationObservation,
   type RoutingSandboxOperationObserver,
+  type RoutingSandboxCaptureWaitObserver,
   type RoutingSandboxPhaseOutcome,
   type RoutingSandboxWaitObservation,
   type RoutingRetainedProcess,

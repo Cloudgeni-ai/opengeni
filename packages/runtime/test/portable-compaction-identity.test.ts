@@ -5,6 +5,7 @@ import { compactionHistoryFixture as longHistory } from "../../../scripts/operat
 import {
   CompactionProviderResponseError,
   compactionProviderFailureDiagnostics,
+  compactionProviderRejection,
   EmptyCompactionSummaryError,
   buildCompactionReplacementHistory,
   estimateTokens,
@@ -472,6 +473,70 @@ describe("portable compaction provider identity", () => {
       expect(diagnostics).not.toHaveProperty("rejectionReason");
       expect(JSON.stringify(diagnostics)).not.toMatch(/private|fixture-secret|Authorization/);
     }
+  });
+
+  test("retains the rejected parameter path and a closed rejection record without the message", () => {
+    const rejected = Object.assign(new Error("Invalid value for input[3].content: private text"), {
+      status: 400,
+      type: "invalid_request_error",
+      error: {
+        type: "invalid_request_error",
+        code: "invalid_value",
+        param: "input[3].content[0].image_url",
+        message: "Invalid value for input[3].content: private text",
+      },
+      headers: new Headers({ "x-request-id": "req_fixture" }),
+    });
+    const diagnostics = compactionProviderFailureDiagnostics(rejected);
+    expect(diagnostics).toMatchObject({
+      httpStatus: 400,
+      type: "invalid_request_error",
+      code: "invalid_value",
+      param: "input[3].content[0].image_url",
+      requestId: "req_fixture",
+    });
+    expect(JSON.stringify(diagnostics)).not.toContain("private text");
+    const error = new CompactionProviderResponseError(diagnostics, rejected);
+    expect(error.param).toBe("input[3].content[0].image_url");
+    expect(error.message).toContain(
+      "rejected (HTTP 400 invalid_request_error invalid_value; param input[3].content[0].image_url; request req_fixture)",
+    );
+    expect(error.message).not.toContain("private text");
+    expect(compactionProviderRejection(error)).toEqual({
+      httpStatus: 400,
+      type: "invalid_request_error",
+      code: "invalid_value",
+      param: "input[3].content[0].image_url",
+      requestId: "req_fixture",
+    });
+    // Only a definitive request rejection is a rejection; transport and
+    // capacity failures keep their transient classification.
+    expect(
+      compactionProviderRejection(
+        new CompactionProviderResponseError({ httpStatus: 503, code: "server_error" }),
+      ),
+    ).toBeNull();
+    expect(compactionProviderFailureDiagnostics({ param: "" })).toMatchObject({ param: null });
+    expect(
+      compactionProviderFailureDiagnostics({ param: "x".repeat(5000) }).param as string,
+    ).toHaveLength(compactionProviderFailureDiagnostics({ code: "x".repeat(5000) }).code!.length);
+  });
+
+  test("classifies the exact Codex encrypted-content rejection code on the compaction request", () => {
+    const rejected = Object.assign(new Error("Invalid encrypted reasoning artifact"), {
+      status: 400,
+      headers: new Headers({ "x-opengeni-codex-transport-error": "1" }),
+      error: {
+        type: "invalid_request_error",
+        code: "invalid_encrypted_content",
+        message: "Invalid encrypted reasoning artifact",
+      },
+    });
+    expect(compactionProviderFailureDiagnostics(rejected)).toMatchObject({
+      httpStatus: 400,
+      code: "invalid_encrypted_content",
+      rejectionReason: "encrypted_content_rejected",
+    });
   });
 
   test("preserves history on provider failure and persists only a closed diagnosis", async () => {

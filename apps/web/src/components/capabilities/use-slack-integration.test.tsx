@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { OPENGENI_PERSONAL_SLACK_MCP_URL } from "@opengeni/contracts";
 import { OpenGeniClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, isValidElement } from "react";
 import { createRoot } from "react-dom/client";
 
 import { Sheet } from "@/components/ui/sheet";
@@ -274,7 +274,9 @@ test("a sibling installation cannot hide the local bot's reconnect action", asyn
     // local account, not start a sibling's legacy redirect flow.
     expect(install).not.toHaveBeenCalled();
     const fragment = rendered.dialogs() as React.ReactElement<{ children: React.ReactNode[] }>;
-    const setup = fragment.props.children[0] as React.ReactElement<{
+    const setup = fragment.props.children.find(
+      (child) => isValidElement<{ request?: unknown }>(child) && child.props.request !== undefined,
+    ) as React.ReactElement<{
       request: { providerId: string; reconnectAccountId: string };
     }>;
     expect(setup.props.request.providerId).toBe("slack-bot");
@@ -420,6 +422,8 @@ describe("useSlackIntegration model selection and gating", () => {
       bindings: [],
     });
     try {
+      expect(rendered.model.notice?.title).toBe("Account connected; Slack tools are not enabled");
+      expect(rendered.model.notice?.description).toContain("capability-management permission");
       const container = document.createElement("div");
       document.body.appendChild(container);
       const root = createRoot(container);

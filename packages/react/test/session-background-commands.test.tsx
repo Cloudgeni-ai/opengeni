@@ -18,6 +18,7 @@ test("command panel distinguishes tracking loss from running and stop requests",
       state,
       observationStatus: "unavailable",
       commandPreview: "build",
+      commandText: "bun run build --filter 'two  spaces'\n" + "x".repeat(600),
       cancelRequestedAt: null,
       exitCode: null,
       settlementReason: null,
@@ -40,6 +41,8 @@ test("command panel distinguishes tracking loss from running and stop requests",
       state === "stopping" ? "Stop requested · status unavailable" : "Command status unavailable",
     );
     expect(html).not.toContain(">Running<");
+    expect(html).toContain("x".repeat(600));
+    expect(html).toContain("two  spaces");
   }
 });
 

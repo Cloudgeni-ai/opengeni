@@ -62,8 +62,8 @@ test("chooser requires ready provider and explicit ownership and forwards exact 
       rendered.container.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled,
     ).toBe(true);
     expect(
-      rendered.container.querySelector<HTMLOptionElement>('option[value="disabled"]')!.disabled,
-    ).toBe(true);
+      rendered.container.querySelector<HTMLOptionElement>('option[value="disabled"]'),
+    ).toBeNull();
     await actRun(() => {
       const select = rendered.container.querySelector("select")!;
       select.value = "ready";
@@ -117,5 +117,53 @@ test("actor replacement ignores old catalog even when transport ignores abort", 
     await rendered.unmount();
     previous.dispose();
     current.dispose();
+  }
+});
+
+test("catalog uses live account state and omits unavailable setup entirely", async () => {
+  const source = transport(async () => [
+    provider,
+    { ...provider, id: "custom", label: "Custom API", setup: ["openapi"] },
+    {
+      ...provider,
+      id: "unavailable",
+      label: "Unavailable provider",
+      readiness: "needs_configuration",
+      reason: "Private deployment details",
+    },
+  ]);
+  source.accounts = async () => [
+    {
+      id: "account",
+      providerId: provider.id,
+      label: "My account",
+      ownership: "personal",
+      status: "connected",
+    },
+  ];
+  const controller = new ConnectController(source, "workspace");
+  const rendered = await renderComponent(
+    <ConnectChooser
+      controller={controller}
+      returnUrl="https://host.example"
+      presentation="catalog"
+    />,
+  );
+  try {
+    expect(rendered.container.querySelector('[data-status="added"]')?.textContent).toContain(
+      "Connected",
+    );
+    expect([...rendered.container.querySelectorAll("details")].map((node) => node.open)).toEqual([
+      false,
+    ]);
+    expect(rendered.container.textContent).not.toContain("Private deployment details");
+    expect(rendered.container.textContent).not.toContain("Unavailable provider");
+    expect(rendered.container.textContent).not.toContain("Unavailable services");
+    expect(rendered.container.querySelector(".og-connection-catalog")?.textContent).not.toContain(
+      "needs configuration",
+    );
+  } finally {
+    await rendered.unmount();
+    controller.dispose();
   }
 });

@@ -283,7 +283,7 @@ export function SessionInspector(props: {
                 <InfoRow label="Model" value={props.session.model} />
                 <InfoRow label="Effort" value={props.session.reasoningEffort} />
                 <InfoRow label={computeLabel} value={computeValue} />
-                <InfoRow label="Rig" value={props.session.rigId ?? "none"} />
+                <InfoRow label="Sandbox Environment" value={props.session.rigId ?? "none"} />
                 <div className="space-y-2 rounded-md border border-border bg-bg/35 p-2">
                   <div className="text-xs font-medium">Variable Sets</div>
                   {selectedVariableSetIds.length === 0 ? (
@@ -410,14 +410,14 @@ export function SessionInspector(props: {
                 </div>
                 {props.session.tenancy ? (
                   <div className="space-y-2 rounded-md border border-border bg-bg/35 p-2">
-                    <div className="text-xs font-medium">Restart with rig</div>
+                    <div className="text-xs font-medium">Restart with sandbox environment</div>
                     <Select
                       value={selectedRigId}
                       disabled={savingVariableSets || restarting || Boolean(pendingRestartAttempt)}
                       onChange={(event) => setSelectedRigId(event.target.value)}
                       className="h-8 w-full text-xs"
                     >
-                      <option value="">No rig</option>
+                      <option value="">No sandbox environment</option>
                       {rigs.rigs.map((rig) => (
                         <option key={rig.id} value={rig.id}>
                           {rig.name}
@@ -426,8 +426,9 @@ export function SessionInspector(props: {
                       ))}
                     </Select>
                     <p className="text-2xs text-fg-subtle">
-                      Rig setup is immutable for a live sandbox. Restart creates an independent
-                      history fork with a fresh sandbox and leaves this session unchanged.
+                      Sandbox Environment setup is immutable for a live sandbox. Restart creates an
+                      independent history fork with a fresh sandbox and leaves this session
+                      unchanged.
                     </p>
                     <Button
                       type="button"

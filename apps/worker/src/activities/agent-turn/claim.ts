@@ -1,3 +1,4 @@
+import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
 import {
   applySessionTurnSettlement,
   claimSessionWorkForAttempt,
@@ -14,9 +15,11 @@ import {
   type SessionTurnForExecution,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
+import { linkCurrentSpanToAdmission, turnExecutionTelemetryKey } from "@opengeni/observability";
 import { deliverChildRequiresActionToParent } from "../parent-wake";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
+  settingsForAcceptedSubscriptionTurn,
   resolveTurnExecutionPolicyV1,
   type Settings,
 } from "@opengeni/config";
@@ -192,6 +195,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       update,
     });
   const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
+    filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
     sessionId: input.sessionId,
     workflowId: input.workflowId,
     workflowRunId: input.workflowRunId,
@@ -249,6 +253,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     db,
     mcpSettings,
     input.workspaceId,
+    turn.id,
   );
   const codexSettings = await settingsWithCodexCredential(
     db,
@@ -273,7 +278,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     gatewaySettings,
     claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
   );
-  const capabilitySettings = await settingsWithOrganizationProviderCredentials(
+  let capabilitySettings = await settingsWithOrganizationProviderCredentials(
     db,
     input.accountId,
     input.workspaceId,
@@ -283,7 +288,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const codexAppsCredentialId = capabilitySettings.codexConnectedAppsEnabled
     ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
     : null;
-  runtime.configure(capabilitySettings);
   const policyForAbsent =
     claimedPolicy.kind === "valid"
       ? claimedPolicy.policy
@@ -300,6 +304,16 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   if (!installedPolicy.accepted) {
     throw new TurnAttemptFencedError(`turn execution policy was fenced: ${installedPolicy.reason}`);
   }
+  capabilitySettings = settingsForAcceptedSubscriptionTurn(
+    capabilitySettings,
+    installedPolicy.policy,
+    {
+      modelId: turn.model,
+      reasoningEffort: turn.reasoningEffort,
+      latencyMode: turn.latencyMode,
+    },
+  );
+  runtime.configure(capabilitySettings);
   const verifiedExecutionPolicy = assertTurnExecutionPolicyMatchesConfigV1(
     capabilitySettings,
     installedPolicy.policy,
@@ -321,6 +335,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   if (!trigger) {
     throw new Error(`Trigger event not found: ${attempt.triggerEventId}`);
   }
+  if (trigger.type === "user.message") linkCurrentSpanToAdmission(trigger.id);
   const humanInputResume = await getHumanInputResumeForEvent(
     db,
     input.workspaceId,
@@ -336,6 +351,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   attempt.triggerType = trigger.type;
   const attachPendingUpdatesAfterOpenSuffix = async (): Promise<boolean> => {
     const attached = await claimSessionWorkForAttempt(db, input.workspaceId, {
+      filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
       sessionId: input.sessionId,
       workflowId: input.workflowId,
       workflowRunId: input.workflowRunId,
@@ -548,6 +564,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   throwIfTurnCancelled();
   recordTurnStartupPhase(observability, {
     phase: "claim_and_policy",
+    executionCorrelationId: turnExecutionTelemetryKey(
+      input.workspaceId,
+      input.sessionId,
+      input.attemptId,
+    ),
     provider: turnExecutionPolicy.providerId,
     backend: turn.sandboxBackend,
     outcome: "completed",

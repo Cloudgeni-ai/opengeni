@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { describe, expect, test } from "bun:test";
-import { CapabilityPack, stableJson } from "@opengeni/contracts";
+import { stableJson } from "@opengeni/contracts";
 import { listSkillLibraryEntries, loadSkillLibrarySkill } from "@opengeni/runtime/skill-library";
-import { acquireSharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 
 import { bootstrapWorkspace, createDb, installPortableSkill } from "../src";
-import { migrate } from "../src/migrate";
+import { acquirePreRemovalDatabase, migrateBefore } from "./helpers/historical-schema";
+const migrate = (url: string) => migrateBefore(url, "0482_remove_packs.sql");
 
 const migrationName = "0247_terraform_stacks_provenance_repair.sql";
 const resolutionFenceMigrationName = "0248_terraform_stacks_component_resolution_fence.sql";
@@ -96,7 +96,7 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
     const shared =
       adminUrl && appUrl
         ? await (async () => {
-            await migrate(adminUrl);
+            await migrateBefore(adminUrl, "0482_remove_packs.sql");
             const admin = postgres(adminUrl, { max: 4 });
             return {
               admin,
@@ -105,7 +105,7 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
               release: async () => await admin.end().catch(() => undefined),
             };
           })()
-        : await acquireSharedTestDatabase("migration-0247-terraform-stacks-provenance");
+        : await acquirePreRemovalDatabase("migration-0247-terraform-stacks-provenance");
     if (!shared) {
       if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
         throw new Error(
@@ -148,13 +148,19 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
       expect(totalBytes).toBe(oldManifest.totalBytes);
 
       const packId = `terraform-stacks-provenance-${suffix}`;
-      const oldPackManifest = CapabilityPack.parse({
+      const oldPackManifest = {
         id: packId,
         name: "Terraform Stacks provenance fixture",
         description: "Exercises exact Skill Plugin digest references in Pack state.",
         role: "test",
         category: "test",
         version: "1.0.0",
+        skills: [],
+        tools: [],
+        connectors: [],
+        knowledge: [],
+        scheduledTaskTemplates: [],
+        automationTemplates: [],
         components: [
           {
             key: "skills/terraform-stacks",
@@ -166,14 +172,14 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
           },
         ],
         metadata: { A: 1, a: 2 },
-      });
-      const newPackManifest = CapabilityPack.parse({
+      };
+      const newPackManifest = {
         ...oldPackManifest,
         components: oldPackManifest.components.map((component) => ({
           ...component,
           manifestDigest: newDigest,
         })),
-      });
+      };
       const oldPackJson = JSON.parse(stableJson(oldPackManifest)) as postgres.JSONValue;
       const newPackJson = JSON.parse(stableJson(newPackManifest)) as postgres.JSONValue;
       const oldPackDigest = sha256(stableJson(oldPackManifest));

@@ -1,6 +1,8 @@
 import { InsightsRange, WorkspaceInsightsResponse } from "@opengeni/contracts";
 import {
   getWorkspaceInsights,
+  measureInsightsPhase,
+  workspaceInsightsPhaseMetricObserver,
   normalizeWorkspaceInsightsFilter,
   requireAccessGrant,
   WorkspaceInsightsFilterValidationError,
@@ -27,6 +29,7 @@ export function normalizeWorkspaceInsightsQueryFilter(
 
 export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
   const observeRequest = workspaceInsightsMetricObserver(deps.observability);
+  const observePhase = workspaceInsightsPhaseMetricObserver(deps.observability);
   app.get("/v1/workspaces/:workspaceId/insights", async (c) => {
     const startedAtMs = performance.now();
     const rangeRaw = c.req.query("range") ?? "week";
@@ -38,7 +41,9 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
 
     try {
       const workspaceId = c.req.param("workspaceId");
-      await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+      await measureInsightsPhase(observePhase, "auth", () =>
+        requireAccessGrant(c, deps, workspaceId, "workspace:admin"),
+      );
 
       const rangeParsed = InsightsRange.safeParse(rangeRaw);
       if (!rangeParsed.success) {
@@ -49,12 +54,17 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
       provider = normalizeWorkspaceInsightsQueryFilter(providerRaw, "provider");
       model = normalizeWorkspaceInsightsQueryFilter(modelRaw, "model");
 
-      const response = await getWorkspaceInsights(deps.db, deps.settings, {
-        workspaceId,
-        range: rangeParsed.data,
-        provider,
-        model,
-      });
+      const response = await getWorkspaceInsights(
+        deps.db,
+        deps.settings,
+        {
+          workspaceId,
+          range: rangeParsed.data,
+          provider,
+          model,
+        },
+        observePhase,
+      );
       c.header("cache-control", "private, no-store");
       const result = c.json(WorkspaceInsightsResponse.parse(response));
       outcome = "completed";

@@ -9,6 +9,7 @@ import {
 } from "@opengeni/config";
 import {
   assertRuntimeDatabasePosture,
+  isRetryableRuntimeDatabaseStartupError,
   countSessionRecoveryBacklog,
   createDb,
   getContextCompactionPendingSummary,
@@ -1162,7 +1163,7 @@ export async function startWorker() {
     await retryStartupDependency(
       "PostgreSQL runtime posture",
       () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
-      { ...retryOptions, onRetry },
+      { ...retryOptions, onRetry, shouldRetry: isRetryableRuntimeDatabaseStartupError },
     );
     bus = await retryStartupDependency(
       "NATS",

@@ -160,7 +160,9 @@ function addNoteButton(): HTMLButtonElement | undefined {
 }
 
 async function waitFor(condition: () => boolean, message: string): Promise<void> {
-  const deadline = Date.now() + 1_000;
+  // This is an eventual DOM assertion, not a one-second performance budget.
+  // CI shares the event loop with rendering work; keep the wait bounded.
+  const deadline = Date.now() + 5_000;
   while (!condition()) {
     if (Date.now() >= deadline) throw new Error(message);
     await flush(10);
@@ -209,32 +211,38 @@ describe("timeline annotations", () => {
     const rendered = await renderComponent(
       <MessageTimeline items={[item]} onAnnotate={(next) => (captured = next)} />,
     );
-    await flush();
-    const source = rendered.container.querySelector<HTMLElement>(
-      `[data-og-annotation-source-key="${SOURCE_EVENT_ID}"]`,
-    );
-    expect(source).not.toBeNull();
-    const text = firstTextNode(source!);
-    selectText(text, 6, 10);
-    source?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
-    await waitFor(() => Boolean(addNoteButton()), "annotation action did not appear");
-    const action = addNoteButton();
-    expect(action).toBeDefined();
-    expect(action?.textContent).toContain("Add note");
-    expect(action?.textContent).toContain("beta");
-    await act(async () => action?.click());
-    expect(captured).toMatchObject({
-      quote: "beta",
-      note: "",
-      source: {
-        eventId: SOURCE_EVENT_ID,
-        startOffset: 6,
-        endOffset: 10,
-        contextBefore: "alpha ",
-        contextAfter: " omega",
-      },
-    });
-    await rendered.unmount();
+    try {
+      await flush();
+      const source = rendered.container.querySelector<HTMLElement>(
+        `[data-og-annotation-source-key="${SOURCE_EVENT_ID}"]`,
+      );
+      expect(source).not.toBeNull();
+      const text = firstTextNode(source!);
+      await act(async () => {
+        selectText(text, 6, 10);
+        source?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await waitFor(() => Boolean(addNoteButton()), "annotation action did not appear");
+      const action = addNoteButton();
+      expect(action).toBeDefined();
+      expect(action?.textContent).toContain("Add note");
+      expect(action?.textContent).toContain("beta");
+      await act(async () => action?.click());
+      expect(captured).toMatchObject({
+        quote: "beta",
+        note: "",
+        source: {
+          eventId: SOURCE_EVENT_ID,
+          startOffset: 6,
+          endOffset: 10,
+          contextBefore: "alpha ",
+          contextAfter: " omega",
+        },
+      });
+    } finally {
+      await rendered.unmount();
+    }
   });
 
   test("rejects a selection spanning two timeline messages", async () => {

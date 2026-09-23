@@ -1,15 +1,21 @@
 import { configuredStaticUsageLimits } from "@opengeni/config";
+import { documentEmbeddingCostMicros, paidDocumentEmbedding } from "@opengeni/core";
 import {
+  applyCreditDebitAfterUse,
   appendKnowledgeIndexChunks,
   claimKnowledgeIndexJobs,
   completeKnowledgeIndexJob,
   continueKnowledgeIndexJob,
   deferKnowledgeIndexJob,
+  freezeKnowledgeIndexBillingMode,
   getBillingBalance,
+  guardPaidKnowledgeIndexPublication,
+  knowledgeIndexBillingActivationTime,
   readKnowledgeIndexSource,
   recordUsageEvent,
   sumUsageQuantity,
   withWorkspaceUsageLock,
+  waitKnowledgeIndexForFunding,
 } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { ControlActivityServices } from "./types";
@@ -18,11 +24,26 @@ export function createKnowledgeIndexingActivities(
   services: () => Promise<ControlActivityServices>,
   resolveDocumentServices?: () => Promise<DocumentServices>,
 ) {
+  // Unpaid modes retain a conservative first-poll cutoff; paid mode uses the
+  // operator's explicit timestamp so process restarts cannot change eligibility.
+  let activationTime: Promise<Date> | undefined;
   return {
     indexKnowledge: async () => {
       const result = { completed: 0, advanced: 0, deferred: 0, unavailable: 0 };
       if (!resolveDocumentServices) return result;
       const { db, settings, observability } = await services();
+      let policyActivatedAt: Date;
+      if (paidDocumentEmbedding(settings)) {
+        if (!settings.documentEmbeddingCreditsActivatedAt)
+          throw new Error("paid Knowledge embedding requires an activation cutoff");
+        policyActivatedAt = new Date(settings.documentEmbeddingCreditsActivatedAt);
+      } else {
+        activationTime ??= knowledgeIndexBillingActivationTime(db).catch((error) => {
+          activationTime = undefined;
+          throw error;
+        });
+        policyActivatedAt = await activationTime;
+      }
       const { embedder } = await resolveDocumentServices();
       const { knowledgeIndexChunks } = await import("@opengeni/documents");
       const claims = await claimKnowledgeIndexJobs(db, {
@@ -37,9 +58,9 @@ export function createKnowledgeIndexingActivities(
             result.unavailable++;
             continue;
           }
-          // Reuse the existing embedding budget and usage ledger. Each batch's
-          // checkpoint and charge commit together, so a restart never charges
-          // twice for an accepted projection. Canonical text is never changed.
+          // The checkpoint, usage and post-use debit commit together. A new
+          // generation requires funding once; committed batches may finish even
+          // if their accumulated cost takes the balance below zero.
           await withWorkspaceUsageLock(db, source.billingWorkspaceId, async (lockedDb) => {
             const current = await readKnowledgeIndexSource(lockedDb, claim);
             if (!current) {
@@ -57,9 +78,34 @@ export function createKnowledgeIndexingActivities(
               chunks.push(chunk);
             }
             if (chunks.length) {
-              if (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed") {
+              const frozenPolicy = await freezeKnowledgeIndexBillingMode(
+                lockedDb,
+                claim,
+                // Deterministic embeddings incur no provider charge; a valid
+                // credits-mode config with zero tariff must still index them.
+                // OpenAI shadow keeps its price snapshot for internal estimates.
+                settings.documentEmbeddingProvider === "openai"
+                  ? (settings.documentEmbeddingBillingMode ?? "usage_only")
+                  : "usage_only",
+                policyActivatedAt,
+                settings.documentEmbeddingRateMicrosPerMillionBytes ?? 0,
+              );
+              if (frozenPolicy.mode === "awaiting_review") {
+                result.deferred++;
+                return;
+              }
+              if (frozenPolicy.mode === "obsolete") {
+                result.unavailable++;
+                return;
+              }
+              const paid = frozenPolicy.mode === "credits" && paidDocumentEmbedding(settings);
+              if (paid && current.nextIndex === 0) {
                 const balance = await getBillingBalance(lockedDb, claim.accountId);
-                if (balance.balanceMicros <= 0) throw new Error("insufficient OpenGeni credits");
+                if (balance.balanceMicros <= 0) {
+                  await waitKnowledgeIndexForFunding(lockedDb, claim);
+                  result.deferred++;
+                  return;
+                }
               }
               if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
                 const limit =
@@ -75,9 +121,24 @@ export function createKnowledgeIndexingActivities(
                     throw new Error("monthly document indexing limit reached");
                 }
               }
-              const vectors = await embedder.embedMany(chunks.map((chunk) => chunk.embeddingInput));
+              const inputs = chunks.map((chunk) => chunk.embeddingInput);
+              const bytes = inputs.reduce(
+                (sum, input) => sum + Buffer.byteLength(input, "utf8"),
+                0,
+              );
+              const vectors = await embedder.embedMany(inputs);
               if (vectors.length !== chunks.length)
                 throw new Error("Incomplete Knowledge embeddings");
+              // A reviewer may have rejected this revision during the provider
+              // call. The DB guard holds its publication row through settlement.
+              if (paid) {
+                const publication = await guardPaidKnowledgeIndexPublication(lockedDb, claim);
+                if (publication !== "published") {
+                  if (publication === "obsolete") result.unavailable++;
+                  else result.deferred++;
+                  return;
+                }
+              }
               const appended = await appendKnowledgeIndexChunks(
                 lockedDb,
                 claim,
@@ -98,6 +159,63 @@ export function createKnowledgeIndexingActivities(
                 sourceResourceId: claim.revisionId,
                 idempotencyKey: `knowledge.indexed:${claim.revisionId}:${claim.generation}:${current.nextIndex}`,
               });
+              await recordUsageEvent(lockedDb, {
+                accountId: claim.accountId,
+                workspaceId: current.billingWorkspaceId,
+                eventType: "document.embedding_bytes",
+                quantity: bytes,
+                unit: "byte",
+                sourceResourceType: "knowledge_revision",
+                sourceResourceId: claim.revisionId,
+                idempotencyKey: `knowledge.embedding_bytes:${claim.revisionId}:${claim.generation}:${current.nextIndex}`,
+              });
+              if (frozenPolicy.mode === "shadow" && frozenPolicy.rateMicrosPerMillionBytes > 0) {
+                const estimate = documentEmbeddingCostMicros(
+                  {
+                    ...settings,
+                    documentEmbeddingRateMicrosPerMillionBytes:
+                      frozenPolicy.rateMicrosPerMillionBytes,
+                  },
+                  bytes,
+                );
+                if (estimate > 0)
+                  await recordUsageEvent(lockedDb, {
+                    accountId: claim.accountId,
+                    workspaceId: current.billingWorkspaceId,
+                    eventType: "document.embedding_shadow_estimate",
+                    quantity: estimate,
+                    unit: "micro_usd",
+                    sourceResourceType: "knowledge_revision",
+                    sourceResourceId: claim.revisionId,
+                    idempotencyKey: `knowledge.embedding_shadow:${claim.revisionId}:${claim.generation}:${current.nextIndex}`,
+                  });
+              }
+              if (paid) {
+                const cost = documentEmbeddingCostMicros(
+                  {
+                    ...settings,
+                    documentEmbeddingRateMicrosPerMillionBytes:
+                      frozenPolicy.rateMicrosPerMillionBytes,
+                  },
+                  bytes,
+                );
+                if (cost > 0)
+                  await applyCreditDebitAfterUse(lockedDb, {
+                    accountId: claim.accountId,
+                    workspaceId: current.billingWorkspaceId,
+                    type: "document_embedding_debit",
+                    amountMicros: cost,
+                    sourceType: "knowledge_revision",
+                    sourceId: claim.revisionId,
+                    idempotencyKey: `knowledge.embedding:${claim.revisionId}:${claim.generation}:${current.nextIndex}`,
+                    metadata: {
+                      model: claim.model,
+                      bytes,
+                      chunks: chunks.length,
+                      rateMicrosPerMillionBytes: frozenPolicy.rateMicrosPerMillionBytes,
+                    },
+                  });
+              }
             }
             if (more) {
               await continueKnowledgeIndexJob(lockedDb, claim);

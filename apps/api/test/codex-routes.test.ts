@@ -59,6 +59,78 @@ afterEach(() => {
 });
 
 describe("Codex status readiness semantics", () => {
+  test("session account metadata is authorized separately and never accepts a caller-selected turn or source", async () => {
+    const sessionId = crypto.randomUUID();
+    const account = {
+      id: crypto.randomUUID(),
+      source: "workspace",
+      label: "Accepted account",
+      status: "active",
+      isActive: true,
+      primaryUsedPercent: 15,
+      primaryResetAt: null,
+      secondaryUsedPercent: 20,
+      secondaryResetAt: null,
+      allocatorEnabled: true,
+      allocatorVersion: 1,
+      connectedBySubjectId: "secret-owner",
+      credentialEncrypted: "must-not-leak",
+    } as unknown as opengeniDb.CodexAccountStatus;
+    const authority = spyOn(opengeniDb, "getSessionAuthorityProjection").mockResolvedValue(null);
+    const slack = spyOn(opengeniDb, "getSlackInteractionSessionAccessForSession").mockResolvedValue(
+      null,
+    );
+    const projection = spyOn(opengeniDb, "getSessionCodexAccounts").mockResolvedValue({
+      accounts: [account],
+      currentAccount: account,
+      currentSelection: { credentialId: account.id, waiting: true },
+      rotation: {
+        activeCredentialId: account.id,
+        rotationEnabled: true,
+        rotationStrategy: "sharded",
+      },
+      pinnedAccountId: account.id,
+      lastAccountId: null,
+    });
+    restores.push(
+      () => authority.mockRestore(),
+      () => slack.mockRestore(),
+      () => projection.mockRestore(),
+    );
+    const path = `/v1/workspaces/${WS_A}/sessions/${sessionId}/codex-accounts`;
+    const response = await app().request(
+      `${path}?turnId=${crypto.randomUUID()}&source=organization`,
+      {
+        headers: { authorization: await bearer(WS_A, ["workspace:read", "sessions:read"]) },
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(projection).toHaveBeenCalledWith(expect.anything(), WS_A, sessionId);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      accounts: [{ id: account.id, canEnableApps: false, appsDesignated: false }],
+      currentAccount: { id: account.id },
+      currentSelection: { waiting: true },
+    });
+    expect(JSON.stringify(body)).not.toContain("must-not-leak");
+    expect(JSON.stringify(body)).not.toContain("secret-owner");
+    const calls = projection.mock.calls.length;
+    for (const permissions of [["workspace:read"], ["sessions:read"]] as Permission[][]) {
+      expect(
+        (await app().request(path, { headers: { authorization: await bearer(WS_A, permissions) } }))
+          .status,
+      ).toBe(403);
+    }
+    expect(projection.mock.calls.length).toBe(calls);
+    projection.mockResolvedValue(null);
+    expect(
+      (
+        await app().request(path, {
+          headers: { authorization: await bearer(WS_A, ["workspace:read", "sessions:read"]) },
+        })
+      ).status,
+    ).toBe(404);
+  });
   const now = new Date("2026-09-03T12:00:00.000Z");
   const healthy = {
     id: "healthy",
@@ -183,10 +255,9 @@ describe("Codex status readiness semantics", () => {
       },
       accountCount: 1,
       models: [
-        { id: "codex/gpt-5.6-sol" },
-        { id: "codex/gpt-5.6-terra" },
-        { id: "codex/gpt-5.6-luna" },
         { id: "codex/gpt-6-astra", label: "GPT-6 Astra" },
+        { id: "codex/gpt-6-sol", label: "GPT-6 Sol" },
+        { id: "codex/gpt-6-luna", label: "GPT-6 Luna" },
       ],
     });
   });
@@ -308,6 +379,74 @@ describe("codex connect routes", () => {
       },
     });
   });
+
+  for (const mode of ["automatic", "workspace", "organization", "disabled"] as const) {
+    test(`connect/poll preserves ${mode} source preference`, async () => {
+      mockDevice({
+        usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }),
+      });
+      const { body } = await start(WS_A);
+      mockDevice({
+        token: () => json({ authorization_code: "authorization-code", code_verifier: "verifier" }),
+        exchange: () =>
+          json({
+            id_token: jwt({
+              "https://api.openai.com/auth": {
+                chatgpt_account_id: "provider-account",
+                chatgpt_plan_type: "pro",
+              },
+            }),
+            access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+            refresh_token: "refresh-token",
+          }),
+      });
+      const source = {
+        accountId: ACCOUNT,
+        workspaceId: WS_A,
+        workspaceKind: "shared" as const,
+        mode,
+        effectiveSource: mode === "automatic" ? ("organization" as const) : mode,
+        workspaceAvailable: false,
+        organizationAvailable: true,
+      };
+      const mocks = [
+        spyOn(opengeniDb, "getWorkspaceCodexSubscriptionSource").mockResolvedValue(source),
+        spyOn(opengeniDb, "upsertCodexSubscriptionCredential").mockResolvedValue({
+          kind: "upserted",
+          id: "local-account",
+          isNew: true,
+        }),
+        spyOn(opengeniDb, "ensureCodexRotationSettings").mockResolvedValue(undefined),
+        spyOn(opengeniDb, "setInitialActiveCodexCredential").mockResolvedValue(true),
+        spyOn(opengeniDb, "getCodexRotationSettings").mockResolvedValue(null),
+      ];
+      const setMode = spyOn(
+        opengeniDb,
+        "setWorkspaceCodexSubscriptionModeInTransaction",
+      ).mockResolvedValue(source);
+      const mutation = spyOn(opengeniDb, "withSessionCodexCapacityMutation").mockImplementation(
+        async (_db, _input, mutate) => {
+          const result = await mutate(poisonDb as never);
+          return { result: result.result, wakeTargets: [] };
+        },
+      );
+      restores.push(...[...mocks, setMode, mutation].map((mock) => () => mock.mockRestore()));
+      const res = await app().request(`/v1/workspaces/${WS_A}/codex/connect/poll`, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(WS_A, ["connections:write"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ state: body.state }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ status: "connected", accountId: "local-account" });
+      expect(setMode.mock.calls[0]?.[1]).toMatchObject({
+        mode,
+        effectiveSourceBeforeMutation: source.effectiveSource,
+      });
+    });
+  }
 
   test("connect/poll rejects a state minted for a different workspace", async () => {
     mockDevice({

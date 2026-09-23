@@ -99,6 +99,17 @@ test("installs route emulation on about:blank before the first external navigati
             currentUrl = String(params?.url);
           }
           return {} as T;
+        case "Page.getNavigationHistory":
+          return {
+            currentIndex: currentUrl === destination ? 0 : 1,
+            entries: [
+              { id: 10, url: destination },
+              { id: 11, url: "https://next.example.test/" },
+            ],
+          } as T;
+        case "Page.navigateToHistoryEntry":
+          currentUrl = params?.entryId === 10 ? destination : "https://next.example.test/";
+          return {} as T;
         case "Runtime.evaluate":
           if (String(params?.expression).includes("navigator.userAgentData")) {
             if (
@@ -226,178 +237,270 @@ test("installs route emulation on about:blank before the first external navigati
         sessionId: undefined,
       },
     );
+    const next = await driver.dispatch({
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      browserSessionId,
+      controllerGeneration,
+      targetId: observation.target.id,
+      expectedTargetGeneration: observation.target.targetGeneration,
+      expectedDocumentGeneration: observation.target.documentGeneration,
+      expectedFrameId: observation.frameId,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      action: { type: "navigate", url: "https://next.example.test/" },
+    });
+    expect(next?.target.url).toBe("https://next.example.test/");
+    const back = await driver.dispatch({
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      browserSessionId,
+      controllerGeneration,
+      targetId: next!.target.id,
+      expectedTargetGeneration: next!.target.targetGeneration,
+      expectedDocumentGeneration: next!.target.documentGeneration,
+      expectedFrameId: next!.frameId,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      action: { type: "history", direction: "back" },
+    });
+    expect(back?.target.url).toBe(destination);
+    expect(
+      cdpCalls.some(
+        (call) => call.method === "Page.navigateToHistoryEntry" && call.params?.entryId === 10,
+      ),
+    ).toBe(true);
+    await driver.dispatch({
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      browserSessionId,
+      controllerGeneration,
+      targetId: back!.target.id,
+      expectedTargetGeneration: back!.target.targetGeneration,
+      expectedDocumentGeneration: back!.target.documentGeneration,
+      expectedFrameId: back!.frameId,
+      actor: { kind: "agent", subjectId: "agent:test" },
+      action: { type: "activate" },
+    });
+    expect(
+      cdpCalls.some(
+        (call) =>
+          call.method === "Target.activateTarget" &&
+          call.params?.targetId === observation.target.id,
+      ),
+    ).toBe(true);
   } finally {
     await driver.close();
   }
 });
 
-test("settles a headed background target before returning its first observation", async () => {
-  const browserSessionId = randomUUID();
-  const controllerGeneration = "controller-background";
-  let created = false;
-  let createdTargetReads = 0;
-  let createdFrameReads = 0;
-  const jpeg = Uint8Array.from([
-    0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 2, 0, 3, 1, 1, 0x11, 0, 0xff, 0xd9,
-  ]);
-  const calls: Array<{ method: string; params?: Readonly<Record<string, unknown>> }> = [];
-  const runner: BrowserCommandRunner = {
-    async run<T>(args: readonly string[]): Promise<T> {
-      if (args[0] === "open") return { targetId: "target-1", url: args[1] } as T;
-      if (args[0] === "get" && args[1] === "cdp-url") {
-        return { cdpUrl: "ws://127.0.0.1:9222/devtools/browser/test" } as T;
-      }
-      if (args[0] === "close") return { closed: true } as T;
-      throw new Error(`unexpected runner command: ${args.join(" ")}`);
-    },
-  };
-  const connection: BrowserCdpConnection = {
-    async send<T>(
-      method: string,
-      params?: Readonly<Record<string, unknown>>,
-      options?: { sessionId?: string },
-    ): Promise<T> {
-      calls.push({ method, ...(params ? { params } : {}) });
-      if (method === "Browser.getVersion") {
-        return { product: "Chrome/151.0.0.0", userAgent: "fixture" } as T;
-      }
-      if (method === "Target.createTarget") {
-        expect(params).toEqual({ url: "https://second.example.test/", background: true });
-        created = true;
-        return { targetId: "target-2" } as T;
-      }
-      if (method === "Target.getTargets") {
-        if (created) createdTargetReads += 1;
-        return {
-          targetInfos: [
-            {
-              targetId: "target-1",
-              type: "page",
-              title: "First",
-              url: "https://first.example.test/",
-              attached: true,
-            },
-            ...(created
-              ? [
-                  {
-                    targetId: "target-2",
-                    type: "page",
-                    title: createdTargetReads >= 2 ? "Second" : "",
-                    url: createdTargetReads >= 2 ? "https://second.example.test/" : "",
-                    attached: createdTargetReads >= 2,
-                  },
-                ]
-              : []),
-          ],
-        } as T;
-      }
-      if (method === "Target.attachToTarget") {
-        return {
-          sessionId: params?.targetId === "target-2" ? "session-2" : "session-1",
-        } as T;
-      }
-      if (method === "Page.getFrameTree") {
-        const second = options?.sessionId === "session-2";
-        if (second) createdFrameReads += 1;
-        return {
-          frameTree: {
-            frame: {
-              id: second ? "frame-2" : "frame-1",
-              loaderId: second ? "loader-2" : "loader-1",
-              url: second
-                ? createdFrameReads >= 3
-                  ? "https://second.example.test/"
-                  : ""
-                : "https://first.example.test/",
-            },
-          },
-        } as T;
-      }
-      if (method === "Runtime.evaluate") {
-        return { result: { value: "complete" } } as T;
-      }
-      if (method === "Page.getLayoutMetrics") {
-        return {
-          cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 3, clientHeight: 2 },
-          cssContentSize: { x: 0, y: 0, width: 3, height: 2 },
-        } as T;
-      }
-      if (method === "Page.captureScreenshot") {
-        return { data: Buffer.from(jpeg).toString("base64") } as T;
-      }
-      if (method === "Accessibility.getFullAXTree") return { nodes: [] } as T;
-      return {} as T;
-    },
-    on() {
-      return () => undefined;
-    },
-    async waitForEvent(): Promise<CdpEvent> {
-      return { method: "Page.loadEventFired", params: {}, sessionId: "session-2" };
-    },
-    close() {},
-  };
-  const driver = new AgentBrowserDriver({
-    browserSessionId,
-    controllerGeneration,
-    runner,
-    connect: async () => connection,
-  });
-  try {
-    await driver.start("https://first.example.test/");
-    const opened = await driver.openTarget("https://second.example.test/");
-    expect(opened.target).toMatchObject({
-      id: "target-2",
-      title: "Second",
-      url: "https://second.example.test/",
-      selected: true,
-    });
-    expect(createdTargetReads).toBeGreaterThanOrEqual(2);
-    expect(createdFrameReads).toBeGreaterThanOrEqual(3);
-    expect(calls.some((call) => call.method === "Target.activateTarget")).toBe(false);
-    const frames = await driver.subscribeFrames(opened.target.id, {
-      format: "jpeg",
-      maxWidth: 640,
-      maxHeight: 480,
-    });
-    const streamed = await frames[Symbol.asyncIterator]().next();
-    expect(streamed).toMatchObject({
-      done: false,
-      value: {
-        targetId: "target-2",
-        sequence: 1,
-        width: 3,
-        height: 2,
+test.each([
+  { targetLifecycle: "runner", foregroundManagedTabs: false },
+  { targetLifecycle: "runner", foregroundManagedTabs: true },
+  { targetLifecycle: "cdp", foregroundManagedTabs: false },
+] as const)(
+  "settles a new target using $targetLifecycle lifecycle (foreground=$foregroundManagedTabs)",
+  async ({ targetLifecycle, foregroundManagedTabs }) => {
+    const browserSessionId = randomUUID();
+    const controllerGeneration = "controller-background";
+    let created = false;
+    let createdTargetReads = 0;
+    let createdFrameReads = 0;
+    let regressFrameToEmpty = false;
+    const jpeg = Uint8Array.from([
+      0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 2, 0, 3, 1, 1, 0x11, 0, 0xff, 0xd9,
+    ]);
+    const calls: Array<{
+      method: string;
+      params?: Readonly<Record<string, unknown>>;
+      sessionId?: string;
+    }> = [];
+    const runner: BrowserCommandRunner = {
+      async run<T>(args: readonly string[]): Promise<T> {
+        if (args[0] === "open") return { targetId: "target-1", url: args[1] } as T;
+        if (args[0] === "get" && args[1] === "cdp-url") {
+          return { cdpUrl: "ws://127.0.0.1:9222/devtools/browser/test" } as T;
+        }
+        if (args[0] === "close") return { closed: true } as T;
+        throw new Error(`unexpected runner command: ${args.join(" ")}`);
       },
-    });
-    const compactFrames = await driver.subscribeFrames(opened.target.id, {
-      format: "jpeg",
-      quality: 55,
-      maxWidth: 320,
-      maxHeight: 240,
-      everyNthFrame: 2,
-    });
-    const compactStreamed = await compactFrames[Symbol.asyncIterator]().next();
-    expect(compactStreamed).toMatchObject({
-      done: false,
-      value: {
-        targetId: "target-2",
-        sequence: 1,
-        width: 3,
-        height: 2,
+    };
+    const connection: BrowserCdpConnection = {
+      async send<T>(
+        method: string,
+        params?: Readonly<Record<string, unknown>>,
+        options?: { sessionId?: string },
+      ): Promise<T> {
+        calls.push({
+          method,
+          ...(params ? { params } : {}),
+          ...(options?.sessionId ? { sessionId: options.sessionId } : {}),
+        });
+        if (method === "Browser.getVersion") {
+          return { product: "Chrome/151.0.0.0", userAgent: "fixture" } as T;
+        }
+        if (method === "Target.createTarget") {
+          expect(params).toEqual({
+            url: targetLifecycle === "cdp" ? "about:blank" : "https://second.example.test/",
+            background: true,
+          });
+          created = true;
+          return { targetId: "target-2" } as T;
+        }
+        if (method === "Target.getTargets") {
+          if (created) createdTargetReads += 1;
+          return {
+            targetInfos: [
+              {
+                targetId: "target-1",
+                type: "page",
+                title: "First",
+                url: "https://first.example.test/",
+                attached: true,
+              },
+              ...(created
+                ? [
+                    {
+                      targetId: "target-2",
+                      type: "page",
+                      title: createdTargetReads >= 2 ? "Second" : "",
+                      url: createdTargetReads >= 2 ? "https://second.example.test/" : "",
+                      attached: createdTargetReads >= 2,
+                    },
+                  ]
+                : []),
+            ],
+          } as T;
+        }
+        if (method === "Target.attachToTarget") {
+          return {
+            sessionId: params?.targetId === "target-2" ? "session-2" : "session-1",
+          } as T;
+        }
+        if (method === "Page.getFrameTree") {
+          const second = options?.sessionId === "session-2";
+          if (second) createdFrameReads += 1;
+          return {
+            frameTree: {
+              frame: {
+                id: second ? "frame-2" : "frame-1",
+                loaderId: second ? "loader-2" : "loader-1",
+                url: second
+                  ? regressFrameToEmpty
+                    ? ":"
+                    : createdFrameReads >= 3
+                      ? "https://second.example.test/"
+                      : ":"
+                  : "https://first.example.test/",
+              },
+            },
+          } as T;
+        }
+        if (method === "Runtime.evaluate") {
+          return { result: { value: "complete" } } as T;
+        }
+        if (method === "Page.getLayoutMetrics") {
+          return {
+            cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 3, clientHeight: 2 },
+            cssContentSize: { x: 0, y: 0, width: 3, height: 2 },
+          } as T;
+        }
+        if (method === "Page.captureScreenshot") {
+          return { data: Buffer.from(jpeg).toString("base64") } as T;
+        }
+        if (method === "Accessibility.getFullAXTree") return { nodes: [] } as T;
+        return {} as T;
       },
+      on() {
+        return () => undefined;
+      },
+      async waitForEvent(): Promise<CdpEvent> {
+        return { method: "Page.loadEventFired", params: {}, sessionId: "session-2" };
+      },
+      close() {},
+    };
+    const driver = new AgentBrowserDriver({
+      browserSessionId,
+      controllerGeneration,
+      runner,
+      targetLifecycle,
+      foregroundManagedTabs,
+      connect: async () => connection,
     });
-    const captureQualities = calls
-      .filter((call) => call.method === "Page.captureScreenshot")
-      .map((call) => call.params?.quality);
-    expect(captureQualities).toContain(70);
-    expect(captureQualities).toContain(55);
-    expect(calls.some((call) => call.method === "Page.captureScreenshot")).toBe(true);
-    await frames.close();
-    await compactFrames.close();
-  } finally {
-    await driver.close();
-  }
-});
+    try {
+      // The attached path must create its own tab even when an existing page is present.
+      const opened =
+        targetLifecycle === "cdp"
+          ? await driver.start("https://second.example.test/")
+          : (await driver.start("https://first.example.test/"),
+            await driver.openTarget("https://second.example.test/"));
+      if (targetLifecycle === "cdp")
+        expect(
+          calls
+            .filter((call) => call.method === "Page.navigate")
+            .every((call) => call.sessionId === "session-2"),
+        ).toBe(true);
+      expect(opened.target).toMatchObject({
+        id: "target-2",
+        title: "Second",
+        url: "https://second.example.test/",
+        selected: true,
+      });
+      expect(createdTargetReads).toBeGreaterThanOrEqual(2);
+      expect(createdFrameReads).toBeGreaterThanOrEqual(3);
+      expect(calls.some((call) => call.method === "Target.activateTarget")).toBe(
+        foregroundManagedTabs,
+      );
+      // Chromium can briefly report a non-URL main-frame placeholder even
+      // after the target itself advertises the requested absolute URL.
+      regressFrameToEmpty = true;
+      expect((await driver.observe(opened.target.id)).target.url).toBe(
+        "https://second.example.test/",
+      );
+      regressFrameToEmpty = false;
+      const frames = await driver.subscribeFrames(opened.target.id, {
+        format: "jpeg",
+        maxWidth: 640,
+        maxHeight: 480,
+      });
+      const streamed = await frames[Symbol.asyncIterator]().next();
+      expect(streamed).toMatchObject({
+        done: false,
+        value: {
+          targetId: "target-2",
+          sequence: 1,
+          width: 3,
+          height: 2,
+        },
+      });
+      const compactFrames = await driver.subscribeFrames(opened.target.id, {
+        format: "jpeg",
+        quality: 55,
+        maxWidth: 320,
+        maxHeight: 240,
+        everyNthFrame: 2,
+      });
+      const compactStreamed = await compactFrames[Symbol.asyncIterator]().next();
+      expect(compactStreamed).toMatchObject({
+        done: false,
+        value: {
+          targetId: "target-2",
+          sequence: 1,
+          width: 3,
+          height: 2,
+        },
+      });
+      const captureQualities = calls
+        .filter((call) => call.method === "Page.captureScreenshot")
+        .map((call) => call.params?.quality);
+      expect(captureQualities).toContain(70);
+      expect(captureQualities).toContain(55);
+      expect(calls.some((call) => call.method === "Page.captureScreenshot")).toBe(true);
+      await frames.close();
+      await compactFrames.close();
+    } finally {
+      await driver.close();
+    }
+  },
+);
 
 test("rotates physical generations exactly once after a provider profile reconfiguration", async () => {
   const browserSessionId = randomUUID();

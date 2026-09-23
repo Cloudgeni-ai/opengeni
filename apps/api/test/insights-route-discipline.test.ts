@@ -86,8 +86,21 @@ describe("insights route discipline", () => {
       exp: Math.floor(Date.now() / 1_000) + 3_600,
     })}`;
     const app = new Hono();
+    const phaseMetrics: Array<{ labels?: Record<string, string | number>; value: number }> = [];
     registerInsightsRoutes(app, {
       settings: testSettings({ productAccessMode: "managed", delegationSecret }),
+      observability: {
+        observeHistogram: (metric: {
+          name: string;
+          labels?: Record<string, string | number>;
+          value: number;
+        }) => {
+          if (metric.name === "opengeni_workspace_insights_phase_duration_seconds") {
+            phaseMetrics.push(metric);
+          }
+          throw new Error("observer failure must not replace HTTP 400");
+        },
+      },
       db: new Proxy(
         {},
         {
@@ -112,6 +125,42 @@ describe("insights route discipline", () => {
       expect(response.status).toBe(400);
       expect(await response.text()).toBe(message);
     }
+    expect(phaseMetrics).toHaveLength(cases.length);
+    for (const metric of phaseMetrics) {
+      expect(metric.labels).toEqual({ phase: "auth", stage: "helper", outcome: "completed" });
+      expect(metric.value).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  test("failed auth is timed without database reads or analytical helpers", async () => {
+    const metrics: Array<{ name: string; labels?: Record<string, string | number> }> = [];
+    const app = new Hono();
+    registerInsightsRoutes(app, {
+      settings: testSettings({ productAccessMode: "managed" }),
+      observability: {
+        observeHistogram: (metric: { name: string; labels?: Record<string, string | number> }) => {
+          metrics.push(metric);
+        },
+        info: () => undefined,
+      },
+      db: new Proxy(
+        {},
+        {
+          get() {
+            throw new Error("unauthenticated request touched DB");
+          },
+        },
+      ),
+    } as unknown as ApiRouteDeps);
+    const response = await app.request(
+      "http://x/v1/workspaces/22222222-2222-4222-8222-222222222222/insights",
+    );
+    expect(response.status).toBe(401);
+    expect(
+      metrics
+        .filter((metric) => metric.name === "opengeni_workspace_insights_phase_duration_seconds")
+        .map((metric) => metric.labels),
+    ).toEqual([{ phase: "auth", stage: "helper", outcome: "failed" }]);
   });
 
   test("is registered on the API app and access-key catalog", () => {

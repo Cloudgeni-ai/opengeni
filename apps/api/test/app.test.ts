@@ -609,6 +609,9 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/queue`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/queue",
     );
+    expect(routeLabel(`/v1/workspaces/${workspace}/session-message-search`)).toBe(
+      "/v1/workspaces/:workspaceId/session-message-search",
+    );
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/composer-draft`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/composer-draft",
     );
@@ -800,14 +803,6 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/plugins/example%2Fplugin`)).toBe(
       "/v1/workspaces/:workspaceId/plugins/:pluginKey",
     );
-    expect(
-      routeLabel(`/v1/workspaces/${workspace}/packs/marketing-social-daily-analysis/enable`),
-    ).toBe("/v1/workspaces/:workspaceId/packs/:id/enable");
-    expect(
-      routeLabel(
-        `/v1/workspaces/${workspace}/packs/marketing-social-daily-analysis/scheduled-tasks`,
-      ),
-    ).toBe("/v1/workspaces/:workspaceId/packs/marketing-social-daily-analysis/scheduled-tasks");
     expect(routeLabel(`/v1/workspaces/${workspace}/social/connections`)).toBe(
       "/v1/workspaces/:workspaceId/social/connections",
     );
@@ -1994,13 +1989,13 @@ describe("GET /v1/config/client", () => {
   test("supports a Codex subscription model as the client default", async () => {
     const settings = testSettings({
       codexSubscriptionEnabled: true,
-      openaiModel: "codex/gpt-5.6-sol",
-      openaiAllowedModels: "codex/gpt-5.6-sol",
+      openaiModel: "codex/gpt-6-sol",
+      openaiAllowedModels: "codex/gpt-6-sol",
     });
     const config = await fetchClientConfig(settings);
 
-    expect(config.defaultModel).toBe("codex/gpt-5.6-sol");
-    expect(config.allowedModels).toContain("codex/gpt-5.6-sol");
+    expect(config.defaultModel).toBe("codex/gpt-6-sol");
+    expect(config.allowedModels).toContain("codex/gpt-6-sol");
     const defaultModel = config.models.find((model) => model.id === config.defaultModel);
     expect(defaultModel).toMatchObject({
       provider: "codex",

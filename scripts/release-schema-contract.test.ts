@@ -137,6 +137,75 @@ describe("release schema contract", () => {
 
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
+    const backgroundCommandText = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0506_background_command_text.sql",
+    );
+    const oauthPendingStates = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0507_integration_oauth_pending_states.sql",
+    );
+    const deadlineCommandWorkspaceCapture = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0508_deadline_command_workspace_capture.sql",
+    );
+    const verifiedSignupTrialCredits = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0509_verified_signup_trial_credits.sql",
+    );
+    const knowledgeIndexFundingWait = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0510_knowledge_index_funding_wait.sql",
+    );
+    const knowledgeVisibleIndexStatus = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0511_knowledge_visible_index_status.sql",
+    );
+    const controlRevisionFrontier = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
+    );
+    const skillFolderLimits = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0504_skill_folder_limits.sql",
+    );
+    const meaningfulAttention = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0503_session_meaningful_attention.sql",
+    );
+    const activeMessageBoundaryForks = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0502_active_message_boundary_forks.sql",
+    );
+    const sessionExecutionEpoch = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0500_session_execution_epoch.sql",
+    );
+    const sessionSharingExecution = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0501_session_sharing_execution.sql",
+    );
+    const sessionAttachmentAccess = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0499_session_attachment_access.sql",
+    );
+    const modalInventoryOwnerRead = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0497_modal_inventory_owner_read_capability.sql",
+    );
+    const mcpAccountBindings = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0494_mcp_account_bindings.sql",
+    );
+    const stoppingCommandErrorContainment = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0493_stopping_command_error_containment.sql",
+    );
+    const codexAcceptedSourceAuthority = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0492_codex_accepted_source_authority.sql",
+    );
+    const consentedRecovery = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0495_consented_sandbox_recovery.sql",
+    );
+    const supervisedCommandSettlement = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0496_supervised_command_settlement.sql",
+    );
+    const enrollmentMembershipFence = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0498_enrollment_membership_fence.sql",
+    );
+    const warmCaptureHolderReclamation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0491_warm_capture_holder_reclamation.sql",
+    );
+    const periodicCaptureAttemptCadence = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0490_periodic_capture_attempt_cadence.sql",
+    );
+    const modalCommandByteOffsets = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0489_modal_command_byte_offsets.sql",
+    );
     const organizationScopedExternalWorkspaces = completeSourceContract.migrations.some(
       (migration) => migration.path === "0437_organization_scoped_external_workspaces.sql",
     );
@@ -227,8 +296,41 @@ describe("release schema contract", () => {
     const hostResolverFullOrganizationKeys = completeSourceContract.migrations.some(
       (migration) => migration.path === "0467_host_resolver_full_organization_keys.sql",
     );
+    const senderOwnedConnections = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0478_sender_owned_connections.sql",
+    );
     const managedSignInMethods = completeSourceContract.migrations.some(
       (migration) => migration.path === "0477_managed_sign_in_methods.sql",
+    );
+    const connectionCreateIdempotency = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0479_connection_create_idempotency.sql",
+    );
+    const privateSessionKeyAdministration = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0480_private_session_organization_key_administration.sql",
+    );
+    const packsRemoved = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0482_remove_packs.sql",
+    );
+    const preclaimAdmissionBlock = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0483_preclaim_admission_block.sql",
+    );
+    const skillCatalogMessageForks = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0487_skill_catalog_message_forks.sql",
+    );
+    const reasoningConfigurationMessageForks = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0486_reasoning_configuration_message_forks.sql",
+    );
+    const permanentSkillRemoval = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0488_permanent_skill_removal.sql",
+    );
+    const inheritedMcpApprovalPolicies = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0485_inherited_mcp_approval_policies.sql",
+    );
+    const insightsUsageProjection = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0484_insights_usage_projection.sql",
+    );
+    const personalConnectionVisibilityCleanup = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0481_personal_connection_visibility_cleanup.sql",
     );
     const goalReportRequirements = completeSourceContract.migrations.some(
       (migration) => migration.path === "0474_goal_report_requirements.sql",
@@ -286,6 +388,40 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (knowledgeVisibleIndexStatus ? 1 : 0) +
+        (knowledgeIndexFundingWait ? 1 : 0) +
+        (verifiedSignupTrialCredits ? 1 : 0) +
+        (deadlineCommandWorkspaceCapture ? 1 : 0) +
+        (oauthPendingStates ? 1 : 0) +
+        (backgroundCommandText ? 1 : 0) +
+        (controlRevisionFrontier ? 1 : 0) +
+        (skillFolderLimits ? 1 : 0) +
+        (meaningfulAttention ? 1 : 0) +
+        (activeMessageBoundaryForks ? 1 : 0) +
+        (sessionExecutionEpoch ? 1 : 0) +
+        (sessionSharingExecution ? 1 : 0) +
+        (sessionAttachmentAccess ? 1 : 0) +
+        (modalInventoryOwnerRead ? 1 : 0) +
+        (mcpAccountBindings ? 1 : 0) +
+        (stoppingCommandErrorContainment ? 1 : 0) +
+        (codexAcceptedSourceAuthority ? 1 : 0) +
+        (consentedRecovery ? 1 : 0) +
+        (supervisedCommandSettlement ? 1 : 0) +
+        (enrollmentMembershipFence ? 1 : 0) +
+        (warmCaptureHolderReclamation ? 1 : 0) +
+        (periodicCaptureAttemptCadence ? 1 : 0) +
+        (modalCommandByteOffsets ? 1 : 0) +
+        (permanentSkillRemoval ? 1 : 0) +
+        (skillCatalogMessageForks ? 1 : 0) +
+        (reasoningConfigurationMessageForks ? 1 : 0) +
+        (inheritedMcpApprovalPolicies ? 1 : 0) +
+        (insightsUsageProjection ? 1 : 0) +
+        (preclaimAdmissionBlock ? 1 : 0) +
+        (packsRemoved ? 1 : 0) +
+        (senderOwnedConnections ? 1 : 0) +
+        (personalConnectionVisibilityCleanup ? 1 : 0) +
+        (privateSessionKeyAdministration ? 1 : 0) +
+        (connectionCreateIdempotency ? 1 : 0) +
         (managedSignInMethods ? 1 : 0) +
         (sessionEventHistoryStatistics ? 1 : 0) +
         (sessionEventHistoryPolicyPlanning ? 1 : 0) +
@@ -404,17 +540,23 @@ describe("release schema contract", () => {
                                                                         ? "0429_message_boundary_session_forks.sql"
                                                                         : "0428_scheduled_task_creator_policy.sql",
       ...(agentInstructionNonDestructiveEdits
-        ? { latestMigration: "0462_agent_instruction_non_destructive_edits.sql" }
+        ? {
+            latestMigration: "0462_agent_instruction_non_destructive_edits.sql",
+          }
         : {}),
       ...(hostMcpResolverRegistration
         ? { latestMigration: "0463_host_mcp_resolver_registration.sql" }
         : {}),
       ...(externalWorkspaceMembershipOperations
-        ? { latestMigration: "0464_external_workspace_membership_operations.sql" }
+        ? {
+            latestMigration: "0464_external_workspace_membership_operations.sql",
+          }
         : {}),
       ...(sandboxFilePublications ? { latestMigration: "0465_sandbox_file_publications.sql" } : {}),
       ...(agentInstructionActivationPreservation
-        ? { latestMigration: "0466_agent_instruction_activation_preservation.sql" }
+        ? {
+            latestMigration: "0466_agent_instruction_activation_preservation.sql",
+          }
         : {}),
       ...(hostResolverFullOrganizationKeys
         ? { latestMigration: "0467_host_resolver_full_organization_keys.sql" }
@@ -435,7 +577,9 @@ describe("release schema contract", () => {
         ? { latestMigration: "0472_usage_events_workspace_recent_index.sql" }
         : {}),
       ...(organizationUsageAnalyticalCapability
-        ? { latestMigration: "0473_organization_usage_analytical_capability.sql" }
+        ? {
+            latestMigration: "0473_organization_usage_analytical_capability.sql",
+          }
         : {}),
       ...(goalReportRequirements ? { latestMigration: "0474_goal_report_requirements.sql" } : {}),
       ...(sessionEventHistoryStatistics
@@ -445,21 +589,254 @@ describe("release schema contract", () => {
         ? { latestMigration: "0476_session_event_history_policy_planning.sql" }
         : {}),
       ...(managedSignInMethods ? { latestMigration: "0477_managed_sign_in_methods.sql" } : {}),
+      ...(senderOwnedConnections ? { latestMigration: "0478_sender_owned_connections.sql" } : {}),
+      ...(connectionCreateIdempotency
+        ? { latestMigration: "0479_connection_create_idempotency.sql" }
+        : {}),
+      ...(privateSessionKeyAdministration
+        ? {
+            latestMigration: "0480_private_session_organization_key_administration.sql",
+          }
+        : {}),
+      ...(personalConnectionVisibilityCleanup
+        ? { latestMigration: "0481_personal_connection_visibility_cleanup.sql" }
+        : {}),
+      ...(packsRemoved ? { latestMigration: "0482_remove_packs.sql" } : {}),
+      ...(preclaimAdmissionBlock ? { latestMigration: "0483_preclaim_admission_block.sql" } : {}),
+      ...(insightsUsageProjection ? { latestMigration: "0484_insights_usage_projection.sql" } : {}),
+      ...(inheritedMcpApprovalPolicies
+        ? { latestMigration: "0485_inherited_mcp_approval_policies.sql" }
+        : {}),
+      ...(reasoningConfigurationMessageForks
+        ? { latestMigration: "0486_reasoning_configuration_message_forks.sql" }
+        : {}),
+      ...(skillCatalogMessageForks
+        ? { latestMigration: "0487_skill_catalog_message_forks.sql" }
+        : {}),
+      ...(permanentSkillRemoval ? { latestMigration: "0488_permanent_skill_removal.sql" } : {}),
+      ...(modalCommandByteOffsets
+        ? { latestMigration: "0489_modal_command_byte_offsets.sql" }
+        : {}),
+      ...(periodicCaptureAttemptCadence
+        ? { latestMigration: "0490_periodic_capture_attempt_cadence.sql" }
+        : {}),
+      ...(warmCaptureHolderReclamation
+        ? { latestMigration: "0491_warm_capture_holder_reclamation.sql" }
+        : {}),
+      ...(codexAcceptedSourceAuthority
+        ? { latestMigration: "0492_codex_accepted_source_authority.sql" }
+        : {}),
+      ...(stoppingCommandErrorContainment
+        ? { latestMigration: "0493_stopping_command_error_containment.sql" }
+        : {}),
+      ...(mcpAccountBindings ? { latestMigration: "0494_mcp_account_bindings.sql" } : {}),
+      ...(consentedRecovery ? { latestMigration: "0495_consented_sandbox_recovery.sql" } : {}),
+      ...(supervisedCommandSettlement
+        ? { latestMigration: "0496_supervised_command_settlement.sql" }
+        : {}),
+      ...(modalInventoryOwnerRead
+        ? { latestMigration: "0497_modal_inventory_owner_read_capability.sql" }
+        : {}),
+      ...(enrollmentMembershipFence
+        ? { latestMigration: "0498_enrollment_membership_fence.sql" }
+        : {}),
+      ...(sessionAttachmentAccess ? { latestMigration: "0499_session_attachment_access.sql" } : {}),
+      ...(sessionExecutionEpoch ? { latestMigration: "0500_session_execution_epoch.sql" } : {}),
+      ...(sessionSharingExecution ? { latestMigration: "0501_session_sharing_execution.sql" } : {}),
+      ...(activeMessageBoundaryForks
+        ? { latestMigration: "0502_active_message_boundary_forks.sql" }
+        : {}),
+      ...(meaningfulAttention ? { latestMigration: "0503_session_meaningful_attention.sql" } : {}),
+      ...(skillFolderLimits ? { latestMigration: "0504_skill_folder_limits.sql" } : {}),
+      ...(controlRevisionFrontier
+        ? { latestMigration: "0505_workspace_control_revision_frontier.sql" }
+        : {}),
+      ...(backgroundCommandText ? { latestMigration: "0506_background_command_text.sql" } : {}),
+      ...(oauthPendingStates
+        ? { latestMigration: "0507_integration_oauth_pending_states.sql" }
+        : {}),
+      ...(deadlineCommandWorkspaceCapture
+        ? { latestMigration: "0508_deadline_command_workspace_capture.sql" }
+        : {}),
+      ...(verifiedSignupTrialCredits
+        ? { latestMigration: "0509_verified_signup_trial_credits.sql" }
+        : {}),
+      ...(knowledgeIndexFundingWait
+        ? { latestMigration: "0510_knowledge_index_funding_wait.sql" }
+        : {}),
+      ...(knowledgeVisibleIndexStatus
+        ? { latestMigration: "0511_knowledge_visible_index_status.sql" }
+        : {}),
     });
-    expect(completeSourceContract.migrations.at(-1)).toMatchObject({
-      path: managedSignInMethods
-        ? "0477_managed_sign_in_methods.sql"
-        : sessionEventHistoryPolicyPlanning
-          ? "0476_session_event_history_policy_planning.sql"
-          : sessionEventHistoryStatistics
-            ? "0475_session_event_history_statistics.sql"
-            : goalReportRequirements
-              ? "0474_goal_report_requirements.sql"
-              : organizationUsageAnalyticalCapability
-                ? "0473_organization_usage_analytical_capability.sql"
-                : "0472_usage_events_workspace_recent_index.sql",
-      deploymentMode: managedSignInMethods ? "maintenance" : "rolling",
+    expect(
+      completeSourceContract.migrations.at(
+        -1 -
+          Number(oauthPendingStates) -
+          Number(deadlineCommandWorkspaceCapture) -
+          Number(verifiedSignupTrialCredits) -
+          Number(knowledgeIndexFundingWait) -
+          Number(knowledgeVisibleIndexStatus),
+      ),
+    ).toMatchObject({
+      path: backgroundCommandText
+        ? "0506_background_command_text.sql"
+        : controlRevisionFrontier
+          ? "0505_workspace_control_revision_frontier.sql"
+          : skillFolderLimits
+            ? "0504_skill_folder_limits.sql"
+            : meaningfulAttention
+              ? "0503_session_meaningful_attention.sql"
+              : activeMessageBoundaryForks
+                ? "0502_active_message_boundary_forks.sql"
+                : sessionSharingExecution
+                  ? "0501_session_sharing_execution.sql"
+                  : sessionAttachmentAccess
+                    ? "0499_session_attachment_access.sql"
+                    : enrollmentMembershipFence
+                      ? "0498_enrollment_membership_fence.sql"
+                      : modalInventoryOwnerRead
+                        ? "0497_modal_inventory_owner_read_capability.sql"
+                        : supervisedCommandSettlement
+                          ? "0496_supervised_command_settlement.sql"
+                          : consentedRecovery
+                            ? "0495_consented_sandbox_recovery.sql"
+                            : mcpAccountBindings
+                              ? "0494_mcp_account_bindings.sql"
+                              : stoppingCommandErrorContainment
+                                ? "0493_stopping_command_error_containment.sql"
+                                : codexAcceptedSourceAuthority
+                                  ? "0492_codex_accepted_source_authority.sql"
+                                  : warmCaptureHolderReclamation
+                                    ? "0491_warm_capture_holder_reclamation.sql"
+                                    : periodicCaptureAttemptCadence
+                                      ? "0490_periodic_capture_attempt_cadence.sql"
+                                      : modalCommandByteOffsets
+                                        ? "0489_modal_command_byte_offsets.sql"
+                                        : permanentSkillRemoval
+                                          ? "0488_permanent_skill_removal.sql"
+                                          : skillCatalogMessageForks
+                                            ? "0487_skill_catalog_message_forks.sql"
+                                            : reasoningConfigurationMessageForks
+                                              ? "0486_reasoning_configuration_message_forks.sql"
+                                              : inheritedMcpApprovalPolicies
+                                                ? "0485_inherited_mcp_approval_policies.sql"
+                                                : insightsUsageProjection
+                                                  ? "0484_insights_usage_projection.sql"
+                                                  : preclaimAdmissionBlock
+                                                    ? "0483_preclaim_admission_block.sql"
+                                                    : packsRemoved
+                                                      ? "0482_remove_packs.sql"
+                                                      : personalConnectionVisibilityCleanup
+                                                        ? "0481_personal_connection_visibility_cleanup.sql"
+                                                        : privateSessionKeyAdministration
+                                                          ? "0480_private_session_organization_key_administration.sql"
+                                                          : connectionCreateIdempotency
+                                                            ? "0479_connection_create_idempotency.sql"
+                                                            : senderOwnedConnections
+                                                              ? "0478_sender_owned_connections.sql"
+                                                              : managedSignInMethods
+                                                                ? "0477_managed_sign_in_methods.sql"
+                                                                : sessionEventHistoryPolicyPlanning
+                                                                  ? "0476_session_event_history_policy_planning.sql"
+                                                                  : sessionEventHistoryStatistics
+                                                                    ? "0475_session_event_history_statistics.sql"
+                                                                    : goalReportRequirements
+                                                                      ? "0474_goal_report_requirements.sql"
+                                                                      : organizationUsageAnalyticalCapability
+                                                                        ? "0473_organization_usage_analytical_capability.sql"
+                                                                        : "0472_usage_events_workspace_recent_index.sql",
+      deploymentMode: backgroundCommandText
+        ? "rolling"
+        : controlRevisionFrontier
+          ? "rolling"
+          : skillFolderLimits
+            ? "rolling"
+            : meaningfulAttention
+              ? "maintenance"
+              : activeMessageBoundaryForks
+                ? "rolling"
+                : sessionSharingExecution
+                  ? "maintenance"
+                  : sessionAttachmentAccess
+                    ? "rolling"
+                    : enrollmentMembershipFence
+                      ? "maintenance"
+                      : modalInventoryOwnerRead || supervisedCommandSettlement
+                        ? "rolling"
+                        : consentedRecovery
+                          ? "rolling"
+                          : mcpAccountBindings
+                            ? "maintenance"
+                            : stoppingCommandErrorContainment
+                              ? "rolling"
+                              : codexAcceptedSourceAuthority
+                                ? "maintenance"
+                                : warmCaptureHolderReclamation || periodicCaptureAttemptCadence
+                                  ? "rolling"
+                                  : modalCommandByteOffsets ||
+                                      permanentSkillRemoval ||
+                                      (!skillCatalogMessageForks &&
+                                        !reasoningConfigurationMessageForks &&
+                                        !inheritedMcpApprovalPolicies &&
+                                        !insightsUsageProjection &&
+                                        !preclaimAdmissionBlock &&
+                                        (packsRemoved ||
+                                          (!connectionCreateIdempotency &&
+                                            (senderOwnedConnections || managedSignInMethods))))
+                                    ? "maintenance"
+                                    : "rolling",
     });
+    if (oauthPendingStates) {
+      expect(
+        completeSourceContract.migrations.at(
+          -1 -
+            Number(deadlineCommandWorkspaceCapture) -
+            Number(verifiedSignupTrialCredits) -
+            Number(knowledgeIndexFundingWait) -
+            Number(knowledgeVisibleIndexStatus),
+        ),
+      ).toMatchObject({
+        path: "0507_integration_oauth_pending_states.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (deadlineCommandWorkspaceCapture) {
+      expect(
+        completeSourceContract.migrations.at(
+          -1 -
+            Number(verifiedSignupTrialCredits) -
+            Number(knowledgeIndexFundingWait) -
+            Number(knowledgeVisibleIndexStatus),
+        ),
+      ).toMatchObject({
+        path: "0508_deadline_command_workspace_capture.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (verifiedSignupTrialCredits) {
+      expect(
+        completeSourceContract.migrations.at(
+          -1 - Number(knowledgeIndexFundingWait) - Number(knowledgeVisibleIndexStatus),
+        ),
+      ).toMatchObject({
+        path: "0509_verified_signup_trial_credits.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (knowledgeIndexFundingWait) {
+      expect(
+        completeSourceContract.migrations.at(-1 - Number(knowledgeVisibleIndexStatus)),
+      ).toMatchObject({
+        path: "0510_knowledge_index_funding_wait.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (knowledgeVisibleIndexStatus) {
+      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+        path: "0511_knowledge_visible_index_status.sql",
+        deploymentMode: "rolling",
+      });
+    }
     expect(
       completeSourceContract.migrations.find(
         (migration) => migration.path === "0431_retained_provider_commands.sql",
@@ -1489,7 +1866,9 @@ describe("release schema contract", () => {
       ...(modelConnectionAccess ? { latestMigration: "0424_model_connection_access.sql" } : {}),
       ...(feedbackSubmissions ? { latestMigration: "0425_feedback_submissions.sql" } : {}),
       ...(codexBookkeepingPreservesSessionRecency
-        ? { latestMigration: "0426_codex_bookkeeping_preserves_session_recency.sql" }
+        ? {
+            latestMigration: "0426_codex_bookkeeping_preserves_session_recency.sql",
+          }
         : {}),
       ...(sessionAgentAccessScope
         ? { latestMigration: "0427_session_agent_access_scope.sql" }
@@ -1548,6 +1927,75 @@ describe("release schema contract", () => {
 
   test("preserves published host-export history and appends the forward repair", async () => {
     const unfilteredSourceContract = await buildCompleteSchemaContract();
+    const meaningfulAttention = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0503_session_meaningful_attention.sql",
+    );
+    const backgroundCommandText = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0506_background_command_text.sql",
+    );
+    const oauthPendingStates = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0507_integration_oauth_pending_states.sql",
+    );
+    const deadlineCommandWorkspaceCapture = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0508_deadline_command_workspace_capture.sql",
+    );
+    const verifiedSignupTrialCredits = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0509_verified_signup_trial_credits.sql",
+    );
+    const knowledgeIndexFundingWait = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0510_knowledge_index_funding_wait.sql",
+    );
+    const knowledgeVisibleIndexStatus = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0511_knowledge_visible_index_status.sql",
+    );
+    const controlRevisionFrontier = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
+    );
+    const skillFolderLimits = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0504_skill_folder_limits.sql",
+    );
+    const activeMessageBoundaryForks = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0502_active_message_boundary_forks.sql",
+    );
+    const sessionExecutionEpoch = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0500_session_execution_epoch.sql",
+    );
+    const sessionSharingExecution = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0501_session_sharing_execution.sql",
+    );
+    const sessionAttachmentAccess = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0499_session_attachment_access.sql",
+    );
+    const modalInventoryOwnerRead = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0497_modal_inventory_owner_read_capability.sql",
+    );
+    const mcpAccountBindings = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0494_mcp_account_bindings.sql",
+    );
+    const stoppingCommandErrorContainment = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0493_stopping_command_error_containment.sql",
+    );
+    const codexAcceptedSourceAuthority = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0492_codex_accepted_source_authority.sql",
+    );
+    const consentedRecovery = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0495_consented_sandbox_recovery.sql",
+    );
+    const supervisedCommandSettlement = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0496_supervised_command_settlement.sql",
+    );
+    const enrollmentMembershipFence = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0498_enrollment_membership_fence.sql",
+    );
+    const warmCaptureHolderReclamation = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0491_warm_capture_holder_reclamation.sql",
+    );
+    const periodicCaptureAttemptCadence = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0490_periodic_capture_attempt_cadence.sql",
+    );
+    const modalCommandByteOffsets = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0489_modal_command_byte_offsets.sql",
+    );
     const agentInstructionNonDestructiveEdits = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0462_agent_instruction_non_destructive_edits.sql",
     );
@@ -1563,8 +2011,41 @@ describe("release schema contract", () => {
     const hostResolverFullOrganizationKeys = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0467_host_resolver_full_organization_keys.sql",
     );
+    const senderOwnedConnections = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0478_sender_owned_connections.sql",
+    );
     const managedSignInMethods = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0477_managed_sign_in_methods.sql",
+    );
+    const connectionCreateIdempotency = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0479_connection_create_idempotency.sql",
+    );
+    const privateSessionKeyAdministration = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0480_private_session_organization_key_administration.sql",
+    );
+    const packsRemoved = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0482_remove_packs.sql",
+    );
+    const preclaimAdmissionBlock = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0483_preclaim_admission_block.sql",
+    );
+    const skillCatalogMessageForks = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0487_skill_catalog_message_forks.sql",
+    );
+    const reasoningConfigurationMessageForks = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0486_reasoning_configuration_message_forks.sql",
+    );
+    const permanentSkillRemoval = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0488_permanent_skill_removal.sql",
+    );
+    const inheritedMcpApprovalPolicies = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0485_inherited_mcp_approval_policies.sql",
+    );
+    const insightsUsageProjection = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0484_insights_usage_projection.sql",
+    );
+    const personalConnectionVisibilityCleanup = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0481_personal_connection_visibility_cleanup.sql",
     );
     const goalReportRequirements = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0474_goal_report_requirements.sql",
@@ -2055,6 +2536,40 @@ describe("release schema contract", () => {
       "0475_session_event_history_statistics.sql",
       "0476_session_event_history_policy_planning.sql",
       "0477_managed_sign_in_methods.sql",
+      "0478_sender_owned_connections.sql",
+      "0479_connection_create_idempotency.sql",
+      "0480_private_session_organization_key_administration.sql",
+      "0481_personal_connection_visibility_cleanup.sql",
+      "0482_remove_packs.sql",
+      "0483_preclaim_admission_block.sql",
+      "0484_insights_usage_projection.sql",
+      "0485_inherited_mcp_approval_policies.sql",
+      "0486_reasoning_configuration_message_forks.sql",
+      "0487_skill_catalog_message_forks.sql",
+      "0488_permanent_skill_removal.sql",
+      "0489_modal_command_byte_offsets.sql",
+      "0490_periodic_capture_attempt_cadence.sql",
+      "0491_warm_capture_holder_reclamation.sql",
+      "0492_codex_accepted_source_authority.sql",
+      "0493_stopping_command_error_containment.sql",
+      "0494_mcp_account_bindings.sql",
+      "0495_consented_sandbox_recovery.sql",
+      "0496_supervised_command_settlement.sql",
+      "0497_modal_inventory_owner_read_capability.sql",
+      "0498_enrollment_membership_fence.sql",
+      "0499_session_attachment_access.sql",
+      "0500_session_execution_epoch.sql",
+      "0501_session_sharing_execution.sql",
+      "0502_active_message_boundary_forks.sql",
+      "0503_session_meaningful_attention.sql",
+      "0504_skill_folder_limits.sql",
+      "0505_workspace_control_revision_frontier.sql",
+      "0506_background_command_text.sql",
+      "0507_integration_oauth_pending_states.sql",
+      "0508_deadline_command_workspace_capture.sql",
+      "0509_verified_signup_trial_credits.sql",
+      "0510_knowledge_index_funding_wait.sql",
+      "0511_knowledge_visible_index_status.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -2463,8 +2978,212 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0477_managed_sign_in_methods.sql",
       };
+    if (senderOwnedConnections)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0478_sender_owned_connections.sql",
+      };
+    if (connectionCreateIdempotency)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0479_connection_create_idempotency.sql",
+      };
+    if (privateSessionKeyAdministration)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0480_private_session_organization_key_administration.sql",
+      };
+    if (personalConnectionVisibilityCleanup)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0481_personal_connection_visibility_cleanup.sql",
+      };
+    if (packsRemoved)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0482_remove_packs.sql",
+      };
+    if (preclaimAdmissionBlock)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0483_preclaim_admission_block.sql",
+      };
+    if (insightsUsageProjection)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0484_insights_usage_projection.sql",
+      };
+    if (inheritedMcpApprovalPolicies)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0485_inherited_mcp_approval_policies.sql",
+      };
+    if (reasoningConfigurationMessageForks)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0486_reasoning_configuration_message_forks.sql",
+      };
+    if (skillCatalogMessageForks)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0487_skill_catalog_message_forks.sql",
+      };
+    if (permanentSkillRemoval)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0488_permanent_skill_removal.sql",
+      };
+    if (modalCommandByteOffsets)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0489_modal_command_byte_offsets.sql",
+      };
+    if (periodicCaptureAttemptCadence)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0490_periodic_capture_attempt_cadence.sql",
+      };
+    if (warmCaptureHolderReclamation)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0491_warm_capture_holder_reclamation.sql",
+      };
+    if (codexAcceptedSourceAuthority)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0492_codex_accepted_source_authority.sql",
+      };
+    if (stoppingCommandErrorContainment)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0493_stopping_command_error_containment.sql",
+      };
+    if (mcpAccountBindings)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0494_mcp_account_bindings.sql",
+      };
+    if (consentedRecovery)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0495_consented_sandbox_recovery.sql",
+      };
+    if (supervisedCommandSettlement)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0496_supervised_command_settlement.sql",
+      };
+    if (modalInventoryOwnerRead)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0497_modal_inventory_owner_read_capability.sql",
+      };
+    if (enrollmentMembershipFence)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0498_enrollment_membership_fence.sql",
+      };
+    if (sessionAttachmentAccess)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0499_session_attachment_access.sql",
+      };
+    if (sessionExecutionEpoch)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0500_session_execution_epoch.sql",
+      };
+    if (sessionSharingExecution)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0501_session_sharing_execution.sql",
+      };
+    if (activeMessageBoundaryForks)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0502_active_message_boundary_forks.sql",
+      };
+    if (meaningfulAttention)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0503_session_meaningful_attention.sql",
+      };
+    if (skillFolderLimits)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0504_skill_folder_limits.sql",
+      };
+    if (controlRevisionFrontier)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0505_workspace_control_revision_frontier.sql",
+      };
+    if (backgroundCommandText)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0506_background_command_text.sql",
+      };
+    if (oauthPendingStates)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0507_integration_oauth_pending_states.sql",
+      };
+    if (deadlineCommandWorkspaceCapture)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0508_deadline_command_workspace_capture.sql",
+      };
+    if (verifiedSignupTrialCredits)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0509_verified_signup_trial_credits.sql",
+      };
+    if (knowledgeIndexFundingWait)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0510_knowledge_index_funding_wait.sql",
+      };
+    if (knowledgeVisibleIndexStatus)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0511_knowledge_visible_index_status.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (knowledgeVisibleIndexStatus ? 1 : 0) +
+        (knowledgeIndexFundingWait ? 1 : 0) +
+        (verifiedSignupTrialCredits ? 1 : 0) +
+        (deadlineCommandWorkspaceCapture ? 1 : 0) +
+        (oauthPendingStates ? 1 : 0) +
+        (backgroundCommandText ? 1 : 0) +
+        (controlRevisionFrontier ? 1 : 0) +
+        (skillFolderLimits ? 1 : 0) +
+        (meaningfulAttention ? 1 : 0) +
+        (activeMessageBoundaryForks ? 1 : 0) +
+        (sessionExecutionEpoch ? 1 : 0) +
+        (sessionSharingExecution ? 1 : 0) +
+        (sessionAttachmentAccess ? 1 : 0) +
+        (modalInventoryOwnerRead ? 1 : 0) +
+        (mcpAccountBindings ? 1 : 0) +
+        (stoppingCommandErrorContainment ? 1 : 0) +
+        (codexAcceptedSourceAuthority ? 1 : 0) +
+        (consentedRecovery ? 1 : 0) +
+        (supervisedCommandSettlement ? 1 : 0) +
+        (enrollmentMembershipFence ? 1 : 0) +
+        (warmCaptureHolderReclamation ? 1 : 0) +
+        (periodicCaptureAttemptCadence ? 1 : 0) +
+        (modalCommandByteOffsets ? 1 : 0) +
+        (permanentSkillRemoval ? 1 : 0) +
+        (skillCatalogMessageForks ? 1 : 0) +
+        (reasoningConfigurationMessageForks ? 1 : 0) +
+        (inheritedMcpApprovalPolicies ? 1 : 0) +
+        (insightsUsageProjection ? 1 : 0) +
+        (preclaimAdmissionBlock ? 1 : 0) +
+        (packsRemoved ? 1 : 0) +
+        (senderOwnedConnections ? 1 : 0) +
+        (personalConnectionVisibilityCleanup ? 1 : 0) +
+        (privateSessionKeyAdministration ? 1 : 0) +
+        (connectionCreateIdempotency ? 1 : 0) +
         (managedSignInMethods ? 1 : 0) +
         (sessionEventHistoryStatistics ? 1 : 0) +
         (sessionEventHistoryPolicyPlanning ? 1 : 0) +
@@ -2777,7 +3496,9 @@ describe("release schema contract", () => {
       ...(modelConnectionAccess ? { latestMigration: "0424_model_connection_access.sql" } : {}),
       ...(feedbackSubmissions ? { latestMigration: "0425_feedback_submissions.sql" } : {}),
       ...(codexBookkeepingPreservesSessionRecency
-        ? { latestMigration: "0426_codex_bookkeeping_preserves_session_recency.sql" }
+        ? {
+            latestMigration: "0426_codex_bookkeeping_preserves_session_recency.sql",
+          }
         : {}),
       ...(sessionAgentAccessScope
         ? { latestMigration: "0427_session_agent_access_scope.sql" }
@@ -2787,14 +3508,20 @@ describe("release schema contract", () => {
         : {}),
       ...(unifiedSkillLifecycle ? { latestMigration: "0433_unified_skill_lifecycle.sql" } : {}),
       ...(agentInstructionNonDestructiveEdits
-        ? { latestMigration: "0462_agent_instruction_non_destructive_edits.sql" }
+        ? {
+            latestMigration: "0462_agent_instruction_non_destructive_edits.sql",
+          }
         : {}),
       ...(externalWorkspaceMembershipOperations
-        ? { latestMigration: "0464_external_workspace_membership_operations.sql" }
+        ? {
+            latestMigration: "0464_external_workspace_membership_operations.sql",
+          }
         : {}),
       ...(sandboxFilePublications ? { latestMigration: "0465_sandbox_file_publications.sql" } : {}),
       ...(agentInstructionActivationPreservation
-        ? { latestMigration: "0466_agent_instruction_activation_preservation.sql" }
+        ? {
+            latestMigration: "0466_agent_instruction_activation_preservation.sql",
+          }
         : {}),
       ...(hostResolverFullOrganizationKeys
         ? { latestMigration: "0467_host_resolver_full_organization_keys.sql" }
@@ -2815,7 +3542,9 @@ describe("release schema contract", () => {
         ? { latestMigration: "0472_usage_events_workspace_recent_index.sql" }
         : {}),
       ...(organizationUsageAnalyticalCapability
-        ? { latestMigration: "0473_organization_usage_analytical_capability.sql" }
+        ? {
+            latestMigration: "0473_organization_usage_analytical_capability.sql",
+          }
         : {}),
       ...(goalReportRequirements ? { latestMigration: "0474_goal_report_requirements.sql" } : {}),
       ...(sessionEventHistoryStatistics
@@ -2825,6 +3554,83 @@ describe("release schema contract", () => {
         ? { latestMigration: "0476_session_event_history_policy_planning.sql" }
         : {}),
       ...(managedSignInMethods ? { latestMigration: "0477_managed_sign_in_methods.sql" } : {}),
+      ...(connectionCreateIdempotency
+        ? { latestMigration: "0479_connection_create_idempotency.sql" }
+        : {}),
+      ...(privateSessionKeyAdministration
+        ? {
+            latestMigration: "0480_private_session_organization_key_administration.sql",
+          }
+        : {}),
+      ...(personalConnectionVisibilityCleanup
+        ? { latestMigration: "0481_personal_connection_visibility_cleanup.sql" }
+        : {}),
+      ...(packsRemoved ? { latestMigration: "0482_remove_packs.sql" } : {}),
+      ...(preclaimAdmissionBlock ? { latestMigration: "0483_preclaim_admission_block.sql" } : {}),
+      ...(insightsUsageProjection ? { latestMigration: "0484_insights_usage_projection.sql" } : {}),
+      ...(inheritedMcpApprovalPolicies
+        ? { latestMigration: "0485_inherited_mcp_approval_policies.sql" }
+        : {}),
+      ...(reasoningConfigurationMessageForks
+        ? { latestMigration: "0486_reasoning_configuration_message_forks.sql" }
+        : {}),
+      ...(skillCatalogMessageForks
+        ? { latestMigration: "0487_skill_catalog_message_forks.sql" }
+        : {}),
+      ...(permanentSkillRemoval ? { latestMigration: "0488_permanent_skill_removal.sql" } : {}),
+      ...(modalCommandByteOffsets
+        ? { latestMigration: "0489_modal_command_byte_offsets.sql" }
+        : {}),
+      ...(periodicCaptureAttemptCadence
+        ? { latestMigration: "0490_periodic_capture_attempt_cadence.sql" }
+        : {}),
+      ...(warmCaptureHolderReclamation
+        ? { latestMigration: "0491_warm_capture_holder_reclamation.sql" }
+        : {}),
+      ...(codexAcceptedSourceAuthority
+        ? { latestMigration: "0492_codex_accepted_source_authority.sql" }
+        : {}),
+      ...(stoppingCommandErrorContainment
+        ? { latestMigration: "0493_stopping_command_error_containment.sql" }
+        : {}),
+      ...(mcpAccountBindings ? { latestMigration: "0494_mcp_account_bindings.sql" } : {}),
+      ...(consentedRecovery ? { latestMigration: "0495_consented_sandbox_recovery.sql" } : {}),
+      ...(supervisedCommandSettlement
+        ? { latestMigration: "0496_supervised_command_settlement.sql" }
+        : {}),
+      ...(modalInventoryOwnerRead
+        ? { latestMigration: "0497_modal_inventory_owner_read_capability.sql" }
+        : {}),
+      ...(enrollmentMembershipFence
+        ? { latestMigration: "0498_enrollment_membership_fence.sql" }
+        : {}),
+      ...(sessionAttachmentAccess ? { latestMigration: "0499_session_attachment_access.sql" } : {}),
+      ...(sessionExecutionEpoch ? { latestMigration: "0500_session_execution_epoch.sql" } : {}),
+      ...(sessionSharingExecution ? { latestMigration: "0501_session_sharing_execution.sql" } : {}),
+      ...(activeMessageBoundaryForks
+        ? { latestMigration: "0502_active_message_boundary_forks.sql" }
+        : {}),
+      ...(meaningfulAttention ? { latestMigration: "0503_session_meaningful_attention.sql" } : {}),
+      ...(skillFolderLimits ? { latestMigration: "0504_skill_folder_limits.sql" } : {}),
+      ...(controlRevisionFrontier
+        ? { latestMigration: "0505_workspace_control_revision_frontier.sql" }
+        : {}),
+      ...(backgroundCommandText ? { latestMigration: "0506_background_command_text.sql" } : {}),
+      ...(oauthPendingStates
+        ? { latestMigration: "0507_integration_oauth_pending_states.sql" }
+        : {}),
+      ...(deadlineCommandWorkspaceCapture
+        ? { latestMigration: "0508_deadline_command_workspace_capture.sql" }
+        : {}),
+      ...(verifiedSignupTrialCredits
+        ? { latestMigration: "0509_verified_signup_trial_credits.sql" }
+        : {}),
+      ...(knowledgeIndexFundingWait
+        ? { latestMigration: "0510_knowledge_index_funding_wait.sql" }
+        : {}),
+      ...(knowledgeVisibleIndexStatus
+        ? { latestMigration: "0511_knowledge_visible_index_status.sql" }
+        : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport

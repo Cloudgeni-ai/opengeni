@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
@@ -73,6 +73,36 @@ describe("writesTable", () => {
 });
 
 describe("analyzeMigrationRlsBackfills", () => {
+  test("0494 resolver patch is runtime source while real snapshot preflights remain guarded", () => {
+    const migration = readFileSync(
+      new URL("../packages/db/drizzle/0494_mcp_account_bindings.sql", import.meta.url),
+      "utf8",
+    );
+    const patch = migration.match(/DO \$resolver\$[\s\S]*?END \$resolver\$;/)![0];
+    const analyze = (sql: string) =>
+      analyzeMigrationRlsBackfills(
+        fixture({
+          "0001_base.sql": FORCED_TABLE.replaceAll(
+            "widgets",
+            "turn_connection_authority_snapshots",
+          ),
+          "0002_patch.sql": sql,
+        }),
+      );
+    expect(analyze(patch)).toEqual([]);
+    expect(
+      analyze(
+        patch.replace(
+          "END $resolver$",
+          `IF EXISTS (SELECT 1 FROM turn_connection_authority_snapshots)
+      THEN RAISE EXCEPTION 'actual migration guard'; END IF; END $resolver$`,
+        ),
+      ),
+    ).toMatchObject([{ kind: "vacuous-guard", tables: ["turn_connection_authority_snapshots"] }]);
+    expect(
+      analyze(patch.replace("EXECUTE replace(definition,anchor,insertion);", "EXECUTE insertion;")),
+    ).toMatchObject([{ kind: "vacuous-guard", tables: ["turn_connection_authority_snapshots"] }]);
+  });
   test("distinguishes catalog routine patches from executed dynamic SQL and real guards", () => {
     const patch = `DO $patch$ DECLARE definition text; replacement text; anchor text;
 BEGIN

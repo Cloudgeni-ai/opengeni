@@ -43,6 +43,7 @@ export function conversationTimeline(
   const optimistic: UserMessageItem[] = pending
     .filter(
       (message) =>
+        (message.destination === "chat" || message.state === "failed") &&
         !keys.has(`user-message:${message.clientEventId}`) &&
         !queue.queue.some((turn) => turn.id === message.turnId),
     )

@@ -497,7 +497,7 @@ function OperationalWorkspaceSettingsRoute({
               <div>
                 <h2 className="text-sm font-medium">Manage capabilities</h2>
                 <p className="mt-1 text-xs text-fg-muted">
-                  Connect apps, MCP servers, skills, and packs on the Capabilities page.
+                  Manage Plugins, Skills, and integrations on the Capabilities page.
                 </p>
               </div>
               <Button asChild type="button" variant="secondary" size="sm">

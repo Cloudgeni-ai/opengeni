@@ -19,6 +19,7 @@ import type {
   IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ConnectionOwnershipDialog } from "./connection-ownership-selector";
 import { useAppContext } from "@/context";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import type {
@@ -257,6 +258,7 @@ export function useApiIntegrationAccounts({
   const client = context.client;
   const connectTransport = useMemo(() => client.connectTransport(), [client]);
   const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
+  const [newConnection, setNewConnection] = useState<NativeConnectRequest | null>(null);
   const completeConnect = useCallback(() => {
     setConnectRequest(null);
     void refresh?.().catch(() =>
@@ -264,7 +266,10 @@ export function useApiIntegrationAccounts({
     );
     onRuntimeChanged?.();
   }, [refresh, onRuntimeChanged]);
-  useEffect(() => setConnectRequest(null), [workspaceId, context.accessContext.subjectId]);
+  useEffect(() => {
+    setConnectRequest(null);
+    setNewConnection(null);
+  }, [workspaceId, context.accessContext.subjectId]);
   const [busy, setBusy] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<{
     instance: ApiIntegrationInstallationSummary;
@@ -294,10 +299,10 @@ export function useApiIntegrationAccounts({
         : accounts.length === 0
           ? definition.name
           : `${definition.name} - Account ${accounts.length + 1}`;
-      setConnectRequest({
+      const request: NativeConnectRequest = {
         scope: { workspaceId, transport: connectTransport },
         providerId: definitionId,
-        ownership,
+        ownership: existing && existing.ownership !== "none" ? existing.ownership : ownership,
         returnUrl: window.location.href,
         idempotencyKey: crypto.randomUUID(),
         ...(existing?.connectionId ? { reconnectAccountId: existing.connectionId } : {}),
@@ -306,7 +311,9 @@ export function useApiIntegrationAccounts({
           displayName,
           ...(existing ? { expectedInstanceVersion: existing.instanceVersion } : {}),
         },
-      });
+      };
+      if (existing) setConnectRequest(request);
+      else setNewConnection(request);
       setBusy(false);
     } catch (error) {
       setBusy(false);
@@ -416,6 +423,20 @@ export function useApiIntegrationAccounts({
 
   const dialogs = (
     <>
+      {newConnection && (
+        <ConnectionOwnershipDialog
+          name={definition?.name ?? "account"}
+          value={newConnection.ownership}
+          onChange={(selectedOwnership) =>
+            setNewConnection({ ...newConnection, ownership: selectedOwnership })
+          }
+          onContinue={() => {
+            setConnectRequest(newConnection);
+            setNewConnection(null);
+          }}
+          onClose={() => setNewConnection(null)}
+        />
+      )}
       {connectRequest && (
         <NativeConnectSetup
           transport={connectTransport}
@@ -472,6 +493,7 @@ export function useIntegrationDefinitionRow({
   description,
   mark,
   definitionId,
+  ownership,
   workspaceId,
   definitions,
   instances,
@@ -484,6 +506,7 @@ export function useIntegrationDefinitionRow({
   description: string;
   mark: IntegrationMark;
   definitionId: string;
+  ownership?: ConnectionOwnership;
   workspaceId: string;
   definitions: IntegrationDefinitionSummary[];
   instances: ApiIntegrationInstallationSummary[];
@@ -503,6 +526,7 @@ export function useIntegrationDefinitionRow({
     definitions,
     instances,
     canManage,
+    ...(ownership ? { ownership } : {}),
     ...(refresh ? { refresh } : {}),
     ...(onRuntimeChanged ? { onRuntimeChanged } : {}),
     ...(refreshRevision !== undefined ? { refreshRevision } : {}),

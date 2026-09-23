@@ -270,14 +270,14 @@ describe("connection ownership UI", () => {
     );
     try {
       expect(rendered.container.textContent).toContain("Personal connection to linear.app");
-      expect(rendered.container.textContent).toContain("only when explicitly delegated");
+      expect(rendered.container.textContent).toContain("Your messages and personal schedules");
       expect(rendered.container.textContent).not.toContain("11111111-1111-4111-8111-111111111111");
     } finally {
       await rendered.unmount();
     }
   });
 
-  test("official Gmail exposes only a personal connect action and explains isolation", async () => {
+  test("Gmail defaults to personal and permits explicit workspace ownership", async () => {
     const gmail = CapabilityCatalogItemSchema.parse({
       id: "registry:gmail",
       kind: "mcp",
@@ -289,7 +289,7 @@ describe("connection ownership UI", () => {
       endpointUrl: "https://gmailmcp.googleapis.com/mcp/v1",
       authKind: "oauth2",
       runtime: { available: true, mcpServerId: "gmail-runtime", notes: null },
-      metadata: { connectionOwnership: "personal_only" },
+      metadata: { defaultConnectionOwnership: "personal" },
     });
     const onAction = mock((_action: unknown) => {});
     const rendered = await render(
@@ -306,14 +306,12 @@ describe("connection ownership UI", () => {
       </Sheet>,
     );
     try {
-      expect(rendered.container.textContent).toContain(
-        "Other workspace members cannot discover or use",
-      );
-      expect(rendered.container.textContent).toContain("Each member connects their own");
-      expect(rendered.container.textContent).toContain(
-        "content added to a session follows that session's visibility",
-      );
-      expect(rendered.container.textContent).not.toContain("Connect for workspace");
+      expect(
+        rendered.container.querySelector<HTMLInputElement>("input[value=personal]")?.checked,
+      ).toBe(true);
+      const workspaceOption =
+        rendered.container.querySelector<HTMLInputElement>("input[value=workspace]");
+      expect(workspaceOption).not.toBeNull();
       const connect = [...rendered.container.querySelectorAll("button")].find((button) =>
         button.textContent?.includes("Connect only for me"),
       );
@@ -323,6 +321,16 @@ describe("connection ownership UI", () => {
         type: "oauth",
         item: gmail,
         ownership: "personal",
+      });
+      await act(async () => workspaceOption!.click());
+      const sharedConnect = [...rendered.container.querySelectorAll("button")].find((button) =>
+        button.textContent?.includes("Connect for workspace"),
+      );
+      await act(async () => sharedConnect!.click());
+      expect(onAction).toHaveBeenLastCalledWith({
+        type: "oauth",
+        item: gmail,
+        ownership: "workspace",
       });
     } finally {
       await rendered.unmount();

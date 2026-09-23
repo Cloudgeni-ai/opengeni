@@ -55,7 +55,7 @@ import {
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
-import { createObservability } from "@opengeni/observability";
+import { createObservability, withTraceContext } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
@@ -154,8 +154,7 @@ import { registerOrganizationIntegrationPolicyRoutes } from "./routes/organizati
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerConnectRoutes } from "./routes/connect";
-import { registerHostMcpBindingRoutes } from "./routes/host-mcp-bindings";
-import { registerHostMcpResolverRoutes } from "./routes/host-mcp-resolvers";
+
 import { registerExternalIdentityLinkRoutes } from "./routes/external-identity-links";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerKnowledgeRoutes } from "./routes/knowledge";
@@ -180,7 +179,6 @@ import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerIntegrationFacetRoutes } from "./routes/integration-facets";
 import { registerInteractionResourceRoutes } from "./routes/interaction-resources";
 import { registerPrReviewRoutes } from "./routes/pr-review";
-import { registerPackRoutes } from "./routes/packs";
 import { registerAutomationRoutes } from "./routes/automations";
 import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
@@ -218,7 +216,6 @@ import {
   scrubManagedAuthProviderResponse,
 } from "./routes/managed-auth-session-sets";
 import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
-import { registerConnectionAuthorityRoutes } from "./routes/connection-authorities";
 import { projectClientModel } from "./model-catalog";
 import { createTranscriptionService } from "./transcription/service";
 import { createFfmpegTranscriptionSegmenter } from "./transcription/segmenter";
@@ -545,70 +542,76 @@ export function createAppComposition(deps: AppDependencies): {
     const route = routeLabel(url.pathname);
     const correlationId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
     const start = performance.now();
-    const span = observability.startSpan(`HTTP ${c.req.method} ${route}`, {
-      "http.request.method": c.req.method,
-      "opengeni.route": route,
+    const span = observability.startSpan(
+      `HTTP ${c.req.method} ${route}`,
+      {
+        "http.request.method": c.req.method,
+        "opengeni.route": route,
+      },
+      { parent: null },
+    );
+    return await withTraceContext(span, async () => {
+      try {
+        await next();
+        const status = c.res.status || 200;
+        const durationSeconds = (performance.now() - start) / 1000;
+        observability.recordHttpRequest({
+          method: c.req.method,
+          route,
+          status,
+          durationSeconds,
+        });
+        span.end({
+          attributes: {
+            "http.response.status_code": status,
+            "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+          },
+        });
+        observability.info("HTTP request completed", {
+          method: c.req.method,
+          route,
+          status,
+          durationMs: Math.round(durationSeconds * 1000),
+          traceId: span.traceId,
+          spanId: span.spanId,
+          correlationId,
+        });
+      } catch (error) {
+        const status = httpStatusForError(error);
+        const errorCode = errorCodeForStatus(status);
+        const durationSeconds = (performance.now() - start) / 1000;
+        observability.recordHttpRequest({
+          method: c.req.method,
+          route,
+          status,
+          durationSeconds,
+        });
+        observability.incrementCounter({
+          name: "opengeni_http_errors_total",
+          help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
+          labels: { route, status: String(status), code: errorCode },
+        });
+        span.end({
+          attributes: {
+            "http.response.status_code": status,
+            "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+          },
+          error,
+        });
+        observability.error("HTTP request failed", {
+          method: c.req.method,
+          route,
+          status,
+          durationMs: Math.round(durationSeconds * 1000),
+          traceId: span.traceId,
+          spanId: span.spanId,
+          correlationId,
+          errorCode,
+          errorClass: "HttpOperationError",
+        });
+        throw error;
+      }
     });
-    try {
-      await next();
-      const status = c.res.status || 200;
-      const durationSeconds = (performance.now() - start) / 1000;
-      observability.recordHttpRequest({
-        method: c.req.method,
-        route,
-        status,
-        durationSeconds,
-      });
-      span.end({
-        attributes: {
-          "http.response.status_code": status,
-          "opengeni.duration_ms": Math.round(durationSeconds * 1000),
-        },
-      });
-      observability.info("HTTP request completed", {
-        method: c.req.method,
-        route,
-        status,
-        durationMs: Math.round(durationSeconds * 1000),
-        traceId: span.traceId,
-        spanId: span.spanId,
-        correlationId,
-      });
-    } catch (error) {
-      const status = httpStatusForError(error);
-      const errorCode = errorCodeForStatus(status);
-      const durationSeconds = (performance.now() - start) / 1000;
-      observability.recordHttpRequest({
-        method: c.req.method,
-        route,
-        status,
-        durationSeconds,
-      });
-      observability.incrementCounter({
-        name: "opengeni_http_errors_total",
-        help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
-        labels: { route, status: String(status), code: errorCode },
-      });
-      span.end({
-        attributes: {
-          "http.response.status_code": status,
-          "opengeni.duration_ms": Math.round(durationSeconds * 1000),
-        },
-        error,
-      });
-      observability.error("HTTP request failed", {
-        method: c.req.method,
-        route,
-        status,
-        durationMs: Math.round(durationSeconds * 1000),
-        traceId: span.traceId,
-        spanId: span.spanId,
-        correlationId,
-        errorCode,
-        errorClass: "HttpOperationError",
-      });
-      throw error;
-    }
   });
 
   const accessKeyBoundary = requireAccessKey(deps.settings);
@@ -1314,8 +1317,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
   registerConnectRoutes(app, routeDeps);
-  registerHostMcpBindingRoutes(app, routeDeps);
-  registerHostMcpResolverRoutes(app, routeDeps);
+
   registerExternalIdentityLinkRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
   registerApiIntegrationRoutes(app, routeDeps);
@@ -1326,7 +1328,6 @@ export function createAppComposition(deps: AppDependencies): {
   registerEnvironmentRoutes(app, routeDeps);
   registerChannelRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
-  registerPackRoutes(app, routeDeps);
   registerAutomationRoutes(app, routeDeps);
   registerPrReviewRoutes(app, routeDeps);
   registerPluginRoutes(app, routeDeps);
@@ -1347,7 +1348,6 @@ export function createAppComposition(deps: AppDependencies): {
   registerOrganizationSessionRoutes(app, routeDeps);
   registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);
-  registerConnectionAuthorityRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
 
   app.notFound((c) => {
@@ -1924,6 +1924,10 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/sessions",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/session-message-search$/,
+    label: "/v1/workspaces/:workspaceId/session-message-search",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/control-events\/stream$/,
     label: "/v1/workspaces/:workspaceId/control-events/stream",
   },
@@ -2435,26 +2439,7 @@ const routeLabelPatterns: Array<{
     pattern: /^\/v1\/workspaces\/[^/]+\/environments\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/environments/:id",
   },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs$/,
-    label: "/v1/workspaces/:workspaceId/packs",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs\/installations$/,
-    label: "/v1/workspaces/:workspaceId/packs/installations",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs\/marketing-social-daily-analysis\/scheduled-tasks$/,
-    label: "/v1/workspaces/:workspaceId/packs/marketing-social-daily-analysis/scheduled-tasks",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs\/[^/]+\/enable$/,
-    label: "/v1/workspaces/:workspaceId/packs/:id/enable",
-  },
-  {
-    pattern: /^\/v1\/workspaces\/[^/]+\/packs\/[^/]+$/,
-    label: "/v1/workspaces/:workspaceId/packs/:id",
-  },
+
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/plugins\/preview$/,
     label: "/v1/workspaces/:workspaceId/plugins/preview",

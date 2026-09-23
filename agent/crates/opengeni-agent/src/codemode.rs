@@ -24,7 +24,7 @@ const TOKEN_FILE_ENV: &str = "OPENGENI_CODEMODE_TOKEN_FILE";
 // Client-compiled protocol acknowledgement, not a value echoed from a server.
 // packages/codemode/test/native-api-contract.test.ts pins this mirror to contracts.
 const API_CONTRACT_HEADER: &str = "x-opengeni-api-contract";
-const API_CONTRACT_REVISION: &str = "2026-08-organization-recovery-custody-v1";
+const API_CONTRACT_REVISION: &str = "2026-09-plugins-and-skills-v1";
 /// Absolute installed binary path exposed only to an attempt-scoped child that
 /// already carries Codemode authority. This avoids every PATH/runtime guess.
 pub const NATIVE_CLIENT_ENV: &str = "OPENGENI_CODEMODE_NATIVE_CLIENT";

@@ -1,3 +1,6 @@
+import { ConnectionAccountPicker } from "@/components/capabilities/connection-account-picker";
+import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
+import { connectionAccountChoices } from "@/components/capabilities/session-connection-accounts";
 import { AgentLearningDraftEditor } from "@/components/knowledge/agent-learning-settings";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
@@ -478,6 +481,7 @@ export function SchedulesRoute({
         ...(form.runMode === "existing_session" ? { targetSessionId: form.targetSessionId } : {}),
         overlapPolicy: form.overlapPolicy,
         metadata: taskMetadataFromFormState(form),
+        connectionAccounts: form.connectionAccounts ?? [],
         agentConfig: agentConfigFromFormState(form),
       });
       setOpen(false);
@@ -547,6 +551,7 @@ export function SchedulesRoute({
         targetSessionId: form.runMode === "existing_session" ? form.targetSessionId : null,
         overlapPolicy: form.overlapPolicy,
         metadata: taskMetadataFromFormState(form, task),
+        connectionAccounts: form.connectionAccounts ?? [],
         agentConfig: agentConfigFromFormState(form, task),
       });
       setEditingTaskId(null);
@@ -633,6 +638,7 @@ export function SchedulesRoute({
           tone={tone}
           expanded={expandedTaskIds.has(task.id)}
           editing={editingTaskId === task.id}
+          viewerSubjectId={context.accessContext.subjectId}
           busy={busyTaskId === task.id}
           history={runHistory[task.id]}
           probedLastRun={list.lastRuns[task.id]}
@@ -882,6 +888,7 @@ class ScheduledTaskCardBoundary extends Component<
 
 function ScheduledTaskCard(props: {
   task: ScheduledTask;
+  viewerSubjectId: string;
   /** Paused cards sit one step down the foreground ladder, not behind opacity. */
   tone: "active" | "paused";
   expanded: boolean;
@@ -901,6 +908,7 @@ function ScheduledTaskCard(props: {
   renderEditor: () => ReactNode;
 }) {
   const { task } = props;
+  const ownsTask = task.ownerSubjectId === null || task.ownerSubjectId === props.viewerSubjectId;
   const panelId = useId();
   const state = scheduledTaskStateLabel(task);
   const muted = props.tone === "paused";
@@ -995,7 +1003,10 @@ function ScheduledTaskCard(props: {
                 )}
               </div>
             ) : (
-              <SchedulePersonalConnectionDisclosure connections={task.personalConnections} />
+              <SchedulePersonalConnectionDisclosure
+                ownerSubjectId={task.ownerSubjectId}
+                viewerSubjectId={props.viewerSubjectId}
+              />
             )}
           </div>
           {/* Run now remains the frequent action. Editing, state changes, and
@@ -1007,12 +1018,12 @@ function ScheduledTaskCard(props: {
               variant="secondary"
               size="sm"
               className="h-8"
-              disabled={props.busy || !state.active}
+              disabled={props.busy || !state.active || !ownsTask}
               onClick={(event) => {
                 event.stopPropagation();
                 props.onRunNow();
               }}
-              title="Fire a manual run now"
+              title={ownsTask ? "Fire a manual run now" : "Only the owner can run this schedule"}
             >
               <ZapIcon className="size-3.5" />
               Run now
@@ -1023,7 +1034,7 @@ function ScheduledTaskCard(props: {
                   type="button"
                   variant={props.editing ? "secondary" : "ghost"}
                   size="icon-sm"
-                  disabled={props.busy}
+                  disabled={props.busy || !ownsTask}
                   aria-label={`More actions for ${task.name}`}
                   title="More actions"
                   onClick={(event) => event.stopPropagation()}
@@ -1327,7 +1338,31 @@ function ScheduledTaskForm(props: {
   onCancel?: () => void;
 }) {
   const context = useAppContext();
-  const [form, setForm] = useState(props.initialState);
+  const [form, setForm] = useState<ScheduledTaskFormState>(() => ({
+    ...props.initialState,
+    mcpServerIds:
+      props.initialState.mcpServerIds ??
+      [...context.selectedCapabilityToolIds].filter((id) => id !== "opengeni"),
+  }));
+  const selectedIds =
+    form.runMode === "existing_session"
+      ? (props.sessions.find((session) => session.id === form.targetSessionId)?.effectiveToolPolicy
+          ?.configuredIds ??
+        props.sessions
+          .find((session) => session.id === form.targetSessionId)
+          ?.tools.map((tool) => tool.id) ??
+        [])
+      : (form.mcpServerIds ?? []);
+  const connectionAccounts = useConnectionAccounts(
+    context.client,
+    {
+      workspaceId: props.workspaceId,
+      id: props.taskId ?? "new-schedule",
+      selectedIds,
+    },
+    context.workspaceCapabilityCatalog,
+    connectionAccountChoices(props.initialState.connectionAccounts ?? []),
+  );
   const [learningOpen, setLearningOpen] = useState(false);
   const learningScope = scheduledLearningScope(
     form,
@@ -1641,6 +1676,82 @@ function ScheduledTaskForm(props: {
         </div>
       </FormDisclosure>
 
+      <div className="grid gap-2">
+        {form.runMode === "existing_session" ? (
+          <p className="text-xs text-fg-subtle">Uses the conversation’s tool selection.</p>
+        ) : (
+          <fieldset className="grid gap-2" disabled={props.busy}>
+            <legend className="mb-2 text-sm font-medium">Tools for this schedule</legend>
+            {context.toolMcpServers
+              .filter((server) => server.id !== "opengeni")
+              .map((server) => (
+                <label key={server.id} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.includes(server.id)}
+                    onChange={(event) =>
+                      update(
+                        "mcpServerIds",
+                        event.target.checked
+                          ? [...selectedIds, server.id]
+                          : selectedIds.filter((id) => id !== server.id),
+                      )
+                    }
+                  />
+                  {server.name}
+                </label>
+              ))}
+            {selectedIds
+              .filter(
+                (id) =>
+                  id !== "opengeni" && !context.toolMcpServers.some((server) => server.id === id),
+              )
+              .map((id) => (
+                <div key={id} className="flex items-center justify-between gap-2 text-sm">
+                  <span>Unavailable tool: {id}</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() =>
+                      update(
+                        "mcpServerIds",
+                        selectedIds.filter((selected) => selected !== id),
+                      )
+                    }
+                  >
+                    Remove
+                  </Button>
+                </div>
+              ))}
+          </fieldset>
+        )}
+        <p className="text-xs text-fg-subtle">
+          Runs as you, using your connected accounts. Only you can edit or run this schedule.
+        </p>
+        <ConnectionAccountPicker
+          groups={connectionAccounts.accountGroups}
+          choices={connectionAccounts.accountChoices}
+          onChoose={connectionAccounts.selectAccount}
+          disabled={props.busy}
+        />
+        {connectionAccounts.error ? (
+          <Notice
+            tone="failed"
+            action={
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => void connectionAccounts.refresh()}
+              >
+                Retry
+              </Button>
+            }
+          >
+            {connectionAccounts.error}
+          </Notice>
+        ) : null}
+      </div>
+
       <FormDisclosure
         title="Agent learning"
         summary="Optional defaults for this task"
@@ -1770,8 +1881,19 @@ function ScheduledTaskForm(props: {
         ) : null}
         <Button
           type="button"
-          onClick={() => props.onSubmit(form)}
-          disabled={props.busy || learningLoading}
+          onClick={() =>
+            props.onSubmit({
+              ...form,
+              connectionAccounts: connectionAccounts.selections,
+            })
+          }
+          disabled={
+            props.busy ||
+            learningLoading ||
+            connectionAccounts.loading ||
+            Boolean(connectionAccounts.error) ||
+            connectionAccounts.requiresAccountChoice
+          }
         >
           {props.busy ? (
             <Loader2Icon className="size-3.5 animate-spin" />

@@ -34,10 +34,10 @@ test("dismissing the Slack result preserves unrelated navigation state", () => {
   window.history.replaceState(
     { retained: true },
     "",
-    "/workspaces/example/plugins?integration=slack&slack=error&reason=http_409&section=packs#details",
+    "/workspaces/example/plugins?integration=slack&slack=error&reason=http_409&section=skills#details",
   );
   clearSlackInstallResult();
-  expect(window.location.search).toBe("?integration=slack&section=packs");
+  expect(window.location.search).toBe("?integration=slack&section=skills");
   expect(window.location.hash).toBe("#details");
   expect(window.history.state).toEqual({ retained: true });
 });

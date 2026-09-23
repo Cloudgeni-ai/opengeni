@@ -617,15 +617,52 @@ describe("ChatComposer attachments", () => {
   });
 
   test("send is ENABLED with a ready attachment even when the draft is empty (file-only message)", async () => {
-    // A composer over an empty draft reports canSend=false; the ready attachment
-    // is what makes the message sendable, and ChatComposer ORs it in.
-    const composer = makeComposer({ value: "", canSend: false });
+    // The delivery owner includes ready resources in canSend after checking
+    // account, policy and draft readiness (as useComposer and the create route do).
+    const composer = makeComposer({ value: "", canSend: true });
     const attachments = makeAttachments({
       attachments: [readyChip("a.png")],
       readyResources: [{ kind: "file", fileId: "f1" }],
     });
     const container = await mount(<ChatComposer composer={composer} attachments={attachments} />);
     expect(sendButton(container)!.disabled).toBe(false);
+  });
+
+  test("a ready PDF cannot override a blocked delivery for clicks, Enter or steer", async () => {
+    let calls = 0;
+    const composer = makeComposer({
+      value: "Read this paper",
+      canSend: false,
+      send: async () => {
+        calls++;
+        return false;
+      },
+      steer: async () => {
+        calls++;
+        return false;
+      },
+    });
+    const attachments = makeAttachments({
+      attachments: [readyChip("paper.pdf")],
+      readyResources: [{ kind: "file", fileId: "f1" }],
+    });
+    const container = await mount(<ChatComposer composer={composer} attachments={attachments} />);
+    expect(sendButton(container)!.disabled).toBe(true);
+    await act(async () => {
+      sendButton(container)!.click();
+      for (const ctrlKey of [false, true]) {
+        container.querySelector("textarea")!.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Enter",
+            ctrlKey,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      }
+    });
+    expect(calls).toBe(0);
+    expect(container.querySelector("textarea")!.value).toBe("Read this paper");
   });
 
   test("send stays DISABLED with an empty draft and no attachment", async () => {

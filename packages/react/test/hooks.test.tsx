@@ -34,7 +34,7 @@ import { FILE_ONLY_MESSAGE_TEXT, useComposer } from "../src/hooks/use-composer";
 import { useEnvironments } from "../src/hooks/use-environments";
 import { useGoal } from "../src/hooks/use-goal";
 import { useLastStartedTurnPolicy } from "../src/hooks/use-last-started-turn-policy";
-import { usePacks } from "../src/hooks/use-packs";
+
 import { useWorkspaceSessions } from "../src/hooks/use-workspace-sessions";
 import { useSessionControl } from "../src/hooks/use-session-control";
 import { useSessionLineage } from "../src/hooks/use-session-lineage";
@@ -1672,81 +1672,88 @@ describe("useGoal", () => {
 });
 
 describe("useSessionMcpApprovalPolicy", () => {
-  test("updates optimistically and reconciles the authoritative policy event", async () => {
-    let reads = 0;
-    let currentPolicy: SessionMcpApprovalPolicy = false;
-    const metadata = (): SessionMcpServerMetadata => ({
-      id: "external_tools",
-      name: "External tools",
-      url: "https://tools.example.test/mcp",
-      headerNames: [],
-      credentialVersion: 1,
-      requireApproval: currentPolicy,
-      connectionRef: null,
-    });
-    const client = {
-      ...fakeClient({
-        getSession: async () => {
-          reads += 1;
-          return {
-            id: SESSION_ID,
-            lastSequence: reads,
-            mcpServers: [metadata()],
-          } as never;
-        },
-      }),
-      updateSessionMcpApprovalPolicy: async (_workspaceId, _sessionId, serverId, request) => {
-        expect(serverId).toBe("external_tools");
-        currentPolicy = request.requireApproval;
-        return { server: metadata(), effectiveFrom: "next_attempt" };
-      },
-    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
-    const hook = await renderHook(
-      (events: SessionEvent[]) =>
-        useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
-          client,
-          workspaceId: WORKSPACE_ID,
-          events,
-        }),
-      [] as SessionEvent[],
-    );
-    await flush();
-    expect(hook.result.current.policy).toBe(false);
-    expect(reads).toBe(1);
-
-    await flushing(async () => {
-      const response = await hook.result.current.update(["write_record"]);
-      expect(response?.effectiveFrom).toBe("next_attempt");
-    });
-    expect(hook.result.current.policy).toEqual(["write_record"]);
-
-    currentPolicy = ["write_record", "delete_record"];
-    await hook.rerender([
-      makeEvent(1, "session.mcp.approval_policy.updated", {
-        serverId: "another_server",
-        requireApproval: true,
-        effectiveFrom: "next_attempt",
-      }),
-    ]);
-    await flush(200);
-    expect(reads).toBe(2);
-    await hook.rerender([
-      makeEvent(1, "session.mcp.approval_policy.updated", {
-        serverId: "another_server",
-        requireApproval: true,
-        effectiveFrom: "next_attempt",
-      }),
-      makeEvent(2, "session.mcp.approval_policy.updated", {
-        serverId: "external_tools",
+  for (const inherited of [false, true])
+    test(`updates ${inherited ? "inherited" : "attached"} policy and reconciles the authoritative policy event`, async () => {
+      let reads = 0;
+      let currentPolicy: SessionMcpApprovalPolicy = false;
+      const metadata = (): SessionMcpServerMetadata => ({
+        id: "external_tools",
+        name: "External tools",
+        url: "https://tools.example.test/mcp",
+        headerNames: [],
+        credentialVersion: 1,
         requireApproval: currentPolicy,
-        effectiveFrom: "next_attempt",
-      }),
-    ]);
-    await flush(250);
-    expect(reads).toBe(3);
-    expect(hook.result.current.policy).toEqual(["write_record", "delete_record"]);
-    await hook.unmount();
-  });
+        connectionRef: null,
+      });
+      const client = {
+        ...fakeClient({
+          getSession: async () => {
+            reads += 1;
+            return {
+              id: SESSION_ID,
+              lastSequence: reads,
+              mcpServers: inherited ? [] : [metadata()],
+              ...(inherited ? { mcpApprovalPolicies: { external_tools: currentPolicy } } : {}),
+            } as never;
+          },
+        }),
+        updateSessionMcpApprovalPolicy: async (_workspaceId, _sessionId, serverId, request) => {
+          expect(serverId).toBe("external_tools");
+          currentPolicy = request.requireApproval;
+          return {
+            server: inherited
+              ? { id: serverId, source: "workspace" as const, requireApproval: currentPolicy }
+              : metadata(),
+            effectiveFrom: "next_attempt",
+          };
+        },
+      } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+      const hook = await renderHook(
+        (events: SessionEvent[]) =>
+          useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
+            client,
+            workspaceId: WORKSPACE_ID,
+            events,
+          }),
+        [] as SessionEvent[],
+      );
+      await flush();
+      expect(hook.result.current.policy).toBe(false);
+      expect(reads).toBe(1);
+
+      await flushing(async () => {
+        const response = await hook.result.current.update(["write_record"]);
+        expect(response?.effectiveFrom).toBe("next_attempt");
+      });
+      expect(hook.result.current.policy).toEqual(["write_record"]);
+
+      currentPolicy = ["write_record", "delete_record"];
+      await hook.rerender([
+        makeEvent(1, "session.mcp.approval_policy.updated", {
+          serverId: "another_server",
+          requireApproval: true,
+          effectiveFrom: "next_attempt",
+        }),
+      ]);
+      await flush(200);
+      expect(reads).toBe(2);
+      await hook.rerender([
+        makeEvent(1, "session.mcp.approval_policy.updated", {
+          serverId: "another_server",
+          requireApproval: true,
+          effectiveFrom: "next_attempt",
+        }),
+        makeEvent(2, "session.mcp.approval_policy.updated", {
+          serverId: "external_tools",
+          requireApproval: currentPolicy,
+          effectiveFrom: "next_attempt",
+        }),
+      ]);
+      await flush(250);
+      expect(reads).toBe(3);
+      expect(hook.result.current.policy).toEqual(["write_record", "delete_record"]);
+      await hook.unmount();
+    });
 
   test("a delayed pre-mutation read cannot clear the newer policy response", async () => {
     const metadata = (requireApproval: SessionMcpApprovalPolicy): SessionMcpServerMetadata => ({
@@ -4077,7 +4084,7 @@ describe("useComposer durable draft and control binding", () => {
   }
 
   for (const delivery of ["send", "steer"] as const) {
-    test(`durable ${delivery} retains explicit host selection across an uncertain retry`, async () => {
+    test(`durable ${delivery} retains native connection selection across an uncertain retry`, async () => {
       const initial: ComposerDraft = {
         revision: 4,
         text: "Use this account",
@@ -4090,9 +4097,12 @@ describe("useComposer durable draft and control binding", () => {
         updatedAt: new Date().toISOString(),
       };
       const original = [
-        { serverId: "host-tools", delegationId: crypto.randomUUID(), generation: 1 },
+        {
+          serverId: "example-tools",
+          connectionId: crypto.randomUUID(),
+        },
       ];
-      let selectedHostMcpDelegations = original;
+      let connectionAccounts = original;
       const attempts: SendMessageInput[] = [];
       const client = fakeClient({
         getComposerDraft: async () => initial,
@@ -4116,7 +4126,7 @@ describe("useComposer durable draft and control binding", () => {
           useComposer(SESSION_ID, {
             client,
             workspaceId: WORKSPACE_ID,
-            sendExtras: () => ({ selectedHostMcpDelegations }),
+            sendExtras: () => ({ connectionAccounts }),
           }),
         undefined,
       );
@@ -4125,7 +4135,7 @@ describe("useComposer durable draft and control binding", () => {
         expect(await hook.result.current[delivery]()).toBe(delivery === "send"),
       );
       await flush();
-      selectedHostMcpDelegations = [{ ...original[0]!, delegationId: crypto.randomUUID() }];
+      connectionAccounts = [{ ...original[0]!, connectionId: crypto.randomUUID() }];
       if (delivery === "send") {
         const failed = hook.result.current.optimisticMessages?.find(
           (message) => message.outcomeUnknown,
@@ -4137,8 +4147,8 @@ describe("useComposer durable draft and control binding", () => {
         await flushing(async () => expect(await hook.result.current.steer()).toBe(true));
       }
       expect(attempts).toHaveLength(2);
-      expect(attempts[0]?.selectedHostMcpDelegations).toEqual(original);
-      expect(attempts[1]?.selectedHostMcpDelegations).toEqual(original);
+      expect(attempts[0]?.connectionAccounts).toEqual(original);
+      expect(attempts[1]?.connectionAccounts).toEqual(original);
       expect(attempts[1]?.clientEventId).toBe(attempts[0]?.clientEventId);
       expect(attempts[1]?.expectedDraftRevision).toBe(attempts[0]?.expectedDraftRevision);
       await hook.unmount();
@@ -5641,90 +5651,6 @@ describe("useEnvironments", () => {
       "delete:env-1",
       "list",
     ]);
-    await hook.unmount();
-  });
-});
-
-describe("usePacks", () => {
-  test("previews, installs, and safely uninstalls a pack", async () => {
-    let installed = false;
-    const installation = {
-      id: "inst-1",
-      accountId: "acc",
-      workspaceId: WORKSPACE_ID,
-      packId: "autonomous-devops",
-      status: "active" as const,
-      version: 1,
-      manifestSnapshot: null,
-      manifestDigest: "a".repeat(64),
-      selectedRigId: null,
-      installedBySubjectId: "user:test",
-      metadata: {},
-      enabledAt: "",
-      updatedAt: "",
-    };
-    const client = fakeClient({
-      listPacks: async () => ({
-        packs: [{ id: "autonomous-devops", name: "Autonomous DevOps" } as never],
-        installations: installed ? [installation] : [],
-      }),
-      previewPackInstallation: async (_ws, packId) => ({
-        packId,
-        packVersion: "1.0.0",
-        manifestDigest: "a".repeat(64),
-        installationVersion: null,
-        action: "install",
-        ready: true,
-        blockers: [],
-        components: [],
-        rig: {
-          required: false,
-          status: "not_required",
-          requestedRigId: null,
-          rigId: null,
-          rigVersionId: null,
-          name: null,
-          image: null,
-        },
-        variableSetId: null,
-        legacyInlineSkillCount: 0,
-        legacySandboxImage: null,
-      }),
-      installPack: async (_ws, packId) => {
-        installed = true;
-        return { ...installation, packId };
-      },
-      previewPackUninstall: async (_ws, packId) => ({
-        packId,
-        installed,
-        installationVersion: installation.version,
-        components: [],
-      }),
-      uninstallPack: async (_ws, packId) => {
-        installed = false;
-        return { packId, status: "uninstalled", retainedComponents: [] };
-      },
-    });
-    const hook = await renderHook(() => usePacks({ client, workspaceId: WORKSPACE_ID }), undefined);
-    await flush();
-    expect(hook.result.current.packs.map((pack) => pack.id)).toEqual(["autonomous-devops"]);
-    expect(hook.result.current.installationFor("autonomous-devops")).toBeNull();
-    await flushing(async () => {
-      const preview = await hook.result.current.previewInstallation("autonomous-devops");
-      await hook.result.current.install("autonomous-devops", {
-        expectedManifestDigest: preview!.manifestDigest,
-        idempotencyKey: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      });
-    });
-    expect(hook.result.current.installationFor("autonomous-devops")?.status).toBe("active");
-    await flushing(async () => {
-      const preview = await hook.result.current.previewUninstall("autonomous-devops");
-      await hook.result.current.uninstall("autonomous-devops", {
-        expectedInstallationVersion: preview!.installationVersion!,
-        idempotencyKey: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-      });
-    });
-    expect(hook.result.current.installationFor("autonomous-devops")).toBeNull();
     await hook.unmount();
   });
 });

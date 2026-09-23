@@ -962,31 +962,33 @@ describe("credential allocator pin and rotation policy", () => {
     expect(selected.credentialId).toBe("b");
   });
 
-  test("manual and rotation-off policy may retry their selected account after health recovers", () => {
-    const baseContext = {
-      ...context([leasedAcct("a"), leasedAcct("b")]),
-      failedCredentialIds: ["a"],
-    };
-    expect(
-      selectCodexCredentialLeaseForTurn({
-        context: baseContext,
-        sessionId: "manual-reconnect",
-        sessionPinSource: "manual",
-        sessionPinnedCredentialId: "a",
-        sessionLastCredentialId: "a",
-        now: NOW,
-      }).credentialId,
-    ).toBe("a");
-    expect(
-      selectCodexCredentialLeaseForTurn({
-        context: { ...baseContext, rotationEnabled: false },
-        sessionId: "rotation-off-reconnect",
-        sessionPinSource: null,
-        sessionPinnedCredentialId: null,
-        sessionLastCredentialId: "a",
-        now: NOW,
-      }).credentialId,
-    ).toBe("a");
+  test("manual and rotation-off policy wait for refusal evidence, then retry only their selected account", () => {
+    for (const failedCredentialIds of [["a"], []]) {
+      const baseContext = {
+        ...context([leasedAcct("a"), leasedAcct("b")]),
+        failedCredentialIds,
+      };
+      expect(
+        selectCodexCredentialLeaseForTurn({
+          context: baseContext,
+          sessionId: "manual-reconnect",
+          sessionPinSource: "manual",
+          sessionPinnedCredentialId: "a",
+          sessionLastCredentialId: "a",
+          now: NOW,
+        }).credentialId,
+      ).toBe(failedCredentialIds.length ? null : "a");
+      expect(
+        selectCodexCredentialLeaseForTurn({
+          context: { ...baseContext, rotationEnabled: false },
+          sessionId: "rotation-off-reconnect",
+          sessionPinSource: null,
+          sessionPinnedCredentialId: null,
+          sessionLastCredentialId: "a",
+          now: NOW,
+        }).credentialId,
+      ).toBe(failedCredentialIds.length ? null : "a");
+    }
   });
 
   test("an allocator-disabled manual pin waits instead of becoming a relogin failure", () => {
