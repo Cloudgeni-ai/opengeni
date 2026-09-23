@@ -991,6 +991,36 @@ can translate its search, current-selection, empty-result, attachment-warning, a
 thinking labels through `messages`, and override payment descriptions through
 `messages.billingHints`.
 
+Hosts can rebrand the full picker without replacing its interaction logic:
+
+```tsx
+<ModelPolicyPicker
+  {...pickerProps}
+  groupPresentation={{
+    opengeni_credits: {
+      label: "Acme Assist",
+      icon: <AcmeMark aria-hidden="true" />,
+      description: "Provided by your workspace",
+    },
+    codex_subscription: { description: null },
+  }}
+/>
+```
+
+`groupPresentation` is a partial map keyed by `PickerBillingClass`. Labels apply
+to group headings, search, and trigger-icon accessibility. Icons apply to both
+the menu and trigger; supply decorative, non-interactive content (SVG or image)
+that fits the existing 14px slot. Explicit `null` hides an icon or description;
+omitted fields retain defaults. Descriptions override `messages.billingHints`,
+can also be shown for the deployment-provided group, and are searchable. Existing
+`rows[].billingClassLabel` remains the fallback when no label override is supplied.
+This is presentation only: model IDs, billing, ordering, availability and callbacks
+are unchanged. The type `ModelPolicyPickerGroupPresentation` is exported from
+both `@opengeni/react` and `@opengeni/react/composer`. The native `ModelPicker`
+is a separate control; this API targets the full `ModelPolicyPicker` shown above.
+
+For a rendered example, open the composer-responsive demo with `?branding=host`.
+
 Subscription descriptions appear once per provider group. Free models carry a
 Free badge. Pass `hasImageAttachments` for the current draft to show an image
 compatibility warning only when the selected model cannot view those images.

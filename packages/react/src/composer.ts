@@ -15,6 +15,7 @@ export {
 export type {
   ModelPolicyPickerMessages,
   ModelPolicyPickerProps,
+  ModelPolicyPickerGroupPresentation,
 } from "./components/model-policy-picker";
 export {
   Actions,

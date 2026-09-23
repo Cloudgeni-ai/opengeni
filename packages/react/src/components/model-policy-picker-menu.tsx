@@ -30,13 +30,26 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
   const selected = findPickerRow(rows, props.model);
   const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
   const filtered = rows.filter((row) => {
+    const description = props.groupPresentation?.[row.billingClass]?.description;
     const text =
-      `${row.label} ${row.id} ${row.providerLabel} ${row.billingClassLabel} ${payerSummaryForModel(row.catalog)}`.toLowerCase();
+      `${row.label} ${row.id} ${row.providerLabel} ${row.billingClassLabel} ${description === undefined ? payerSummaryForModel(row.catalog) : (description ?? "")}`.toLowerCase();
     return words.every((word) => text.includes(word));
   });
   const matchingIds = new Set(filtered.map((row) => row.id));
   const groups = groupPickerRowsByBillingClass(rows, { codexOnly: props.codexOnly === true })
-    .map((group) => ({ ...group, rows: group.rows.filter((row) => matchingIds.has(row.id)) }))
+    .map((group) => {
+      const override = props.groupPresentation?.[group.billingClass]?.description;
+      return {
+        ...group,
+        rows: group.rows.filter((row) => matchingIds.has(row.id)),
+        description:
+          override === undefined
+            ? group.billingClass === "opengeni_credits"
+              ? null
+              : messages.billingHints[group.billingClass]
+            : override,
+      };
+    })
     .filter((group) => group.rows.length > 0);
   const choose = (row: ClientPickerModelRow) => {
     if (!row.selectable || props.disabled) return;
@@ -148,12 +161,16 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
                 className="py-2.5 first:pt-1 [&+section]:border-t [&+section]:border-og-border"
               >
                 <div className="flex items-center gap-2 px-2.5 py-1.5 text-og-control font-semibold text-og-fg">
-                  <BillingClassMark billingClass={group.billingClass} aria-label="" />
-                  {group.label}
+                  <BillingClassMark
+                    billingClass={group.billingClass}
+                    presentation={props.groupPresentation?.[group.billingClass]}
+                    aria-label=""
+                  />
+                  <span className="min-w-0 break-words">{group.label}</span>
                 </div>
-                {group.billingClass !== "opengeni_credits" ? (
-                  <p className="px-2.5 pb-2 text-og-control text-og-fg-subtle">
-                    {messages.billingHints[group.billingClass]}
+                {group.description ? (
+                  <p className="break-words px-2.5 pb-2 text-og-control text-og-fg-subtle">
+                    {group.description}
                   </p>
                 ) : null}
                 {group.rows.map(modelRow)}
