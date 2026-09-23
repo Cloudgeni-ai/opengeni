@@ -10,6 +10,7 @@ export type DevelopmentPrerequisiteOptions = {
   environment?: NodeJS.ProcessEnv;
   /** Only the runtime verifier may select verified-prebuilt; never trust an env flag. */
   artifactRuntime?: "source-build" | "verified-prebuilt";
+  /** Defaults to source-build only when effective selfhosted is enabled. */
   relayRuntime?: "source-build" | "verified-prebuilt" | "disabled";
 };
 
@@ -71,9 +72,11 @@ export async function collectDevelopmentPrerequisites(
 ): Promise<{ backend: "docker" | "native"; errors: string[] }> {
   const repositoryRoot = options.repositoryRoot ?? resolve(import.meta.dir, "..");
   const environment = options.environment ?? process.env;
+  const relayRuntime = options.relayRuntime ??
+    (environment.OPENGENI_SANDBOX_SELFHOSTED_ENABLED === "true" ? "source-build" : "disabled");
   const host = suppliedHost ?? createPrerequisiteHost(environment, repositoryRoot);
   const errors = developmentPrerequisiteErrors({
-    ...host, ...options, requiredBunVersion: await canonicalBunVersion(repositoryRoot),
+    ...host, ...options, relayRuntime, requiredBunVersion: await canonicalBunVersion(repositoryRoot),
   });
   const requested = environment.OPENGENI_DEV_BACKEND || "auto";
   if (!["auto", "native", "docker"].includes(requested)) {
@@ -144,8 +147,10 @@ export async function collectDevelopmentPrerequisites(
     }
     if (requireCommand("nats-server", nativeInstall.nats)) await requireProbe("nats-server", ["--version"], `NATS server 2.10+ (2.x) is required for auth callout. ${nativeInstall.nats}`, /\bv2\.(?:1\d|[2-9]\d)\.\d+/u);
     if (requireCommand("temporal", nativeInstall.temporal)) await requireProbe("temporal", ["server", "start-dev", "--help"], `Temporal CLI does not provide the required native development server. ${nativeInstall.temporal}`, /--db-filename/u);
-    if (fixture === "garage" && requireCommand("garage", nativeInstall.garage)) {
-      await requireProbe("garage", ["--version"], `Native Garage must match v2.3.0. ${nativeInstall.garage}`, /\b2\.3\.0(?:\s|$)/u);
+    if (fixture === "garage") {
+      if (requireCommand("garage", nativeInstall.garage)) {
+        await requireProbe("garage", ["--version"], `Native Garage must match v2.3.0. ${nativeInstall.garage}`, /\b2\.3\.0(?:\s|$)/u);
+      }
       if (host.platform === "darwin") errors.push("Native Garage on macOS has no verified repository bootstrap path. Use the Docker backend, or explicit MinIO compatibility with verified macOS binaries; do not assume a Linux Garage binary will run.");
     }
     if (fixture === "minio") {
@@ -164,7 +169,7 @@ export async function collectDevelopmentPrerequisites(
     await requireProbe("rustup", ["run", channel, "rustc", "--version"], `Artifact source-build requires pinned Rust ${channel}. Run: rustup toolchain install ${channel} --profile minimal --no-self-update. Or supply a source/host/integrity-verified prebuilt artifact runtime through the launcher.`, new RegExp(`^rustc ${channel.replaceAll(".", "\\.")}\\s`, "u"));
     await requireProbe("rustup", ["run", channel, "cargo", "--version"], `Artifact source-build requires cargo in Rust ${channel}. Run: rustup toolchain install ${channel} --profile minimal --no-self-update.`);
   }
-  if (options.relayRuntime !== "disabled" && options.relayRuntime !== "verified-prebuilt") {
+  if (relayRuntime === "source-build") {
     if (requireCommand("cargo", "The local relay is a separate source build. Install the toolchain selected by agent/rust-toolchain.toml, or have the launcher disable the relay/use a verified prebuilt relay.")) await requireProbe("cargo", ["--version"], "Relay cargo is not usable. Install the toolchain selected by agent/rust-toolchain.toml; the artifact runtime's prebuilt status does not satisfy relay build requirements.");
     if (host.which("rustup")) {
       const parsed = Bun.TOML.parse(readFileSync(join(repositoryRoot, "agent/rust-toolchain.toml"), "utf8")) as { toolchain: { channel: string } };
