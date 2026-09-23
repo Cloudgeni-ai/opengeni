@@ -47,10 +47,9 @@ Account isolation: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-a
 
 ## 3. Core invariants
 
-Hosted Responses tool-call status is durable replay data: preserve it through
-history persistence and Codex normalization. Function/message output-only
-status annotations retain their compatibility stripping. Canonical distinction:
-`packages/codex/src/hosted-call-status.ts`; see [model providers](model-providers.md).
+Hosted tool-call `status` survives persistence and Codex replay; function/message
+annotations remain stripped. See `packages/codex/src/hosted-call-status.ts` and
+[model providers](model-providers.md).
 
 ### 3.1 Postgres is durable truth; NATS is transport
 
