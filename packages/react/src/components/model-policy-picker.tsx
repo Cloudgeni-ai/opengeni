@@ -37,6 +37,20 @@ const LazyModelPolicyPickerMenu = lazy(() =>
 
 type ClientPickerModelRow = PickerModelRow<ClientModel>;
 
+/** Presentation only; never changes model identity, billing or availability. */
+export type ModelPolicyPickerGroupPresentation = Partial<
+  Record<
+    PickerBillingClass,
+    {
+      label?: string | undefined;
+      /** Omit to preserve the default; null hides the supporting text. */
+      description?: string | null | undefined;
+      /** Decorative, non-interactive content. Omit for the default; null hides it. */
+      icon?: ReactNode | undefined;
+    }
+  >
+>;
+
 export type ModelPolicyPickerMessages = {
   label: string;
   loading: string;
@@ -85,6 +99,8 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
 };
 
 export type ModelPolicyPickerProps = {
+  /** Host branding for payment-source groups, shared by menu and trigger. */
+  groupPresentation?: ModelPolicyPickerGroupPresentation | undefined;
   /** Lightweight deployment models. Catalog rows take precedence when supplied. */
   models?: ClientModel[] | undefined;
   /** Warn only when the draft actually contains images this model cannot view. */
@@ -157,6 +173,7 @@ function XaiMark(props: SVGProps<SVGSVGElement>) {
 
 export function BillingClassMark(props: {
   billingClass: PickerBillingClass;
+  presentation?: ModelPolicyPickerGroupPresentation[PickerBillingClass] | undefined;
   className?: string | undefined;
   "aria-label"?: string | undefined;
 }) {
@@ -168,13 +185,14 @@ export function BillingClassMark(props: {
     byok: "Workspace provider account",
     organization_byok: "Organization provider account",
   };
-  const label = props["aria-label"] ?? labels[props.billingClass];
+  if (props.presentation?.icon === null) return null;
+  const label = props["aria-label"] ?? props.presentation?.label ?? labels[props.billingClass];
   const accessibility =
     label.length === 0
       ? { "aria-hidden": true as const }
       : { role: "img" as const, "aria-label": label };
   const shell = cn(
-    "inline-flex size-3.5 shrink-0 items-center justify-center overflow-hidden text-og-fg-subtle",
+    "inline-flex size-3.5 shrink-0 items-center justify-center overflow-hidden text-og-fg-subtle [&>svg]:size-full [&>img]:size-full",
     props.className,
   );
   const mark = "size-3.5";
@@ -184,7 +202,9 @@ export function BillingClassMark(props: {
       data-testid={`billing-class-icon-${props.billingClass}`}
       {...accessibility}
     >
-      {props.billingClass === "opengeni_credits" ? (
+      {props.presentation?.icon !== undefined ? (
+        props.presentation.icon
+      ) : props.billingClass === "opengeni_credits" ? (
         <OpenGeniMark className={mark} />
       ) : props.billingClass === "external" ? (
         <Globe2Icon className={mark} aria-hidden />
@@ -235,7 +255,10 @@ function applyCodexOnly(
 export function effectiveRows(props: ModelPolicyPickerProps): ClientPickerModelRow[] {
   const rows = props.rows !== undefined ? props.rows : projectClientModelRows(props.models ?? []);
   const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
-  return applyCodexOnly(rows, props.codexOnly === true, messages.codexOnly);
+  return applyCodexOnly(rows, props.codexOnly === true, messages.codexOnly).map((row) => {
+    const label = props.groupPresentation?.[row.billingClass]?.label;
+    return label === undefined ? row : { ...row, billingClassLabel: label };
+  });
 }
 
 export function PickerNavRow(props: {
@@ -378,6 +401,11 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
       >
         <BillingClassMark
           billingClass={selected?.billingClass ?? billingClassForMissingSelection(props.model)}
+          presentation={
+            props.groupPresentation?.[
+              selected?.billingClass ?? billingClassForMissingSelection(props.model)
+            ]
+          }
           className="text-og-fg"
         />
         <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden @max-[20rem]/model-controls:hidden">
