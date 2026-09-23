@@ -1339,10 +1339,8 @@ impl AtspiComputerAdapter {
         self.finish_window_capture(
             record,
             window,
-            captured.width,
-            captured.height,
-            captured.width,
-            captured.height,
+            (captured.width, captured.height),
+            (captured.width, captured.height),
             "image/png",
             captured.png,
         )
@@ -1378,10 +1376,8 @@ impl AtspiComputerAdapter {
         self.finish_window_capture(
             record,
             window,
-            captured.width,
-            captured.height,
-            width,
-            height,
+            (captured.width, captured.height),
+            (width, height),
             mime_type,
             bytes,
         )
@@ -1392,10 +1388,8 @@ impl AtspiComputerAdapter {
         &self,
         record: TargetRecord,
         window: LinuxWindow,
-        source_width: u32,
-        source_height: u32,
-        width: u32,
-        height: u32,
+        source_size: (u32, u32),
+        frame_size: (u32, u32),
         mime_type: &str,
         bytes: Vec<u8>,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
@@ -1428,7 +1422,7 @@ impl AtspiComputerAdapter {
                 true,
             ));
         }
-        if source_width != current.bounds.width || source_height != current.bounds.height {
+        if source_size != (current.bounds.width, current.bounds.height) {
             return Err(NativeAdapterError::definite(
                 NativeAdapterErrorCode::FrameStale,
                 "X11 window resized during capture",
@@ -1446,8 +1440,8 @@ impl AtspiComputerAdapter {
                 frame_id: frame_id.clone(),
                 target_generation: record.target.target_generation.clone(),
                 window: current,
-                width,
-                height,
+                width: frame_size.0,
+                height: frame_size.1,
             },
         );
         while frames.len() > MAX_WINDOW_FRAME_FENCES {
@@ -1465,8 +1459,8 @@ impl AtspiComputerAdapter {
             frame_id,
             target_id: record.target.id,
             target_generation: record.target.target_generation,
-            width,
-            height,
+            width: frame_size.0,
+            height: frame_size.1,
             mime_type: mime_type.to_string(),
             sha256: hex::encode(Sha256::digest(&bytes)),
             bytes,

@@ -802,14 +802,17 @@ export type BrowserObservation = {
   frameId: string | null;
   semantic: InteractionSemanticSnapshot | InteractionSemanticDiff | null;
   screenshot: RetainedArtifactReference | null;
-  viewport?: {
-    width: number;
-    height: number;
-    visualWidth: number;
-    visualHeight: number;
-    deviceScaleFactor: number;
-    maxTouchPoints: number;
-  } | null | undefined;
+  viewport?:
+    | {
+        width: number;
+        height: number;
+        visualWidth: number;
+        visualHeight: number;
+        deviceScaleFactor: number;
+        maxTouchPoints: number;
+      }
+    | null
+    | undefined;
   focusedRef: string | null;
   changedRegions: InteractionRect[];
   diagnostics: InteractionDiagnosticSummary;
