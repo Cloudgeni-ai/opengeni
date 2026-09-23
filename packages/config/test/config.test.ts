@@ -64,6 +64,58 @@ describe(".env.example", () => {
   });
 });
 
+describe("optional resource credits and verified signup trial", () => {
+  test("keeps every new charge and grant off by default", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings.verifiedSignupTrialCreditsEnabled).toBe(false);
+    expect(settings.sandboxWarmBillingMode).toBe("usage_only");
+    expect(settings.documentEmbeddingBillingMode).toBe("usage_only");
+    expect(settings.documentEmbeddingRateMicrosPerMillionBytes).toBe(0);
+  });
+
+  test("requires an explicit positive commercial embedding tariff for paid OpenAI mode", () => {
+    expect(() =>
+      withEnv({ OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE: "credits" }, () => getSettings()),
+    ).toThrow("OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES");
+    const settings = withEnv(
+      {
+        OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE: "credits",
+        OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES: "1200",
+        OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT: "2026-09-23T00:00:00Z",
+        OPENGENI_SANDBOX_WARM_BILLING_MODE: "shadow",
+        OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED: "true",
+      },
+      () => getSettings(),
+    );
+    expect(settings.documentEmbeddingRateMicrosPerMillionBytes).toBe(1200);
+    expect(settings.documentEmbeddingCreditsActivatedAt).toBe("2026-09-23T00:00:00Z");
+    expect(settings.sandboxWarmBillingMode).toBe("shadow");
+    expect(settings.verifiedSignupTrialCreditsEnabled).toBe(true);
+  });
+  test("rejects paid embedding activation without a cutover timestamp", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE: "credits",
+          OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES: "1200",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT");
+  });
+  test("rejects fractional warm tariffs only when customer debits are enabled", () => {
+    const fractional = { OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON: '{"modal":0.5}' };
+    expect(() =>
+      withEnv({ ...fractional, OPENGENI_SANDBOX_WARM_BILLING_MODE: "shadow" }, () => getSettings()),
+    ).not.toThrow();
+    expect(() =>
+      withEnv({ ...fractional, OPENGENI_SANDBOX_WARM_BILLING_MODE: "credits" }, () =>
+        getSettings(),
+      ),
+    ).toThrow("paid rates must be safe integers");
+  });
+});
+
 describe("MCP OAuth settings", () => {
   test("defaults off and requires a credential-free public origin when enabled", () => {
     const defaults = withEnv({}, () => getSettings());

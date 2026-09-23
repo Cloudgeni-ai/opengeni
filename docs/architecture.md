@@ -981,7 +981,7 @@ separate nullable comparisons, while `priced_cost_micros` remains the actual
 credits-path price and is zero for externally billed calls.
 
 Insights usage uses a four-column projection (0484), preserving full-row readers
-and identical tenant/actor/visibility checks. Transaction-capability writes still
+and tenant/actor/visibility checks. Transaction-capability writes still
 require a writable database.
 Canonical: `packages/db/src/insights-usage-bundle.ts`.
 
@@ -1021,6 +1021,7 @@ Before/after guards reject live runtime DB sessions. Preserve checkpoints and
 recover—not cancel—accepted turns. Never restart pre-0492 binaries.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
+[`credit-boundaries-rollout.md`](credit-boundaries-rollout.md),
 [`model-providers.md`](model-providers.md),
 [`codex-subscription-rotation.md`](codex-subscription-rotation.md), and
 [`supergrok-subscription.md`](supergrok-subscription.md).

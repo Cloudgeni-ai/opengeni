@@ -142,7 +142,14 @@ export function registerKnowledgeEntryTools(
     },
     (input) =>
       run((context) =>
-        prepareKnowledgeSave(deps.db, context, input, () => deps.getDocumentServices().embedder),
+        prepareKnowledgeSave(
+          deps.db,
+          context,
+          input,
+          () => deps.getDocumentServices().embedder,
+          undefined,
+          deps.settings,
+        ),
       ),
   );
   server.registerTool(
@@ -159,7 +166,13 @@ export function registerKnowledgeEntryTools(
     },
     (input) =>
       run((context) =>
-        searchKnowledgeEntries(deps.db, context, input, () => deps.getDocumentServices().embedder),
+        searchKnowledgeEntries(
+          deps.db,
+          context,
+          input,
+          () => deps.getDocumentServices().embedder,
+          deps.settings,
+        ),
       ),
   );
   server.registerTool(

@@ -90,7 +90,7 @@ export function CreditRequiredPromptView({
         <DialogHeader>
           <DialogTitle>Add OpenGeni credits to continue</DialogTitle>
           <DialogDescription>
-            This chat uses OpenGeni credits and the organization balance is empty. Buy credits, or
+            This chat uses OpenGeni credits and none are currently available. Buy credits, or
             connect a model you already pay for.
           </DialogDescription>
         </DialogHeader>
@@ -174,7 +174,7 @@ export function EmptyCreditsNotice({
   if (!empty) return null;
   return (
     <Notice tone="waiting" title="This model uses OpenGeni credits">
-      The organization has no credits yet. Buy some or connect a model so the first chat can run.
+      No credits are available for this model. Buy some or connect a model to continue.
       <div className="mt-2 flex flex-wrap gap-2">
         {canBuyCredits && stripeEnabled ? (
           <Button asChild type="button" size="sm">

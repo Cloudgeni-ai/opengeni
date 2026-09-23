@@ -14,6 +14,7 @@ export type {
   KnowledgeOriginalFileDownload,
   KnowledgeEntryKind,
   KnowledgeEntryScope,
+  KnowledgeIndexStatus,
   KnowledgeEntryContent,
   KnowledgeEntrySource,
   KnowledgeEntryEvidence,
