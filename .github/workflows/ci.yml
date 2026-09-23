@@ -1751,7 +1751,7 @@ jobs:
     needs: [automation-admission, plan, artifact-runtime]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write # push the immutable exact-main-SHA canary image; PR and automation runs remain build-only

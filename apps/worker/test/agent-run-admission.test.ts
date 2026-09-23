@@ -40,7 +40,7 @@ describe("worker agent-run admission funding", () => {
           {
             accountId: ACCOUNT,
             workspaceId: WORKSPACE,
-            model: "supergrok/grok-4.6",
+            model: "supergrok/grok-4.7",
             requestedAgentRuns: 1,
           },
         ),

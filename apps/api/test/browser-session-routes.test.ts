@@ -53,6 +53,7 @@ describe("BrowserSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/select"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/observation"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/screenshot"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId"',
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/downloads/:downloadId/save"',

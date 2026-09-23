@@ -39,7 +39,9 @@ describe("interaction attempt tools", () => {
     let createRequest: Record<string, unknown> | null = null;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
-        listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+        listBrowserSessions: async () => {
+          throw new Error("legacy inventory unavailable");
+        },
         createBrowserSession: async (_workspaceId, request) => {
           createRequest = request as unknown as Record<string, unknown>;
           return { session: { lifecycle: "starting" } } as never;
@@ -381,6 +383,65 @@ describe("interaction attempt tools", () => {
     expect(result.isError).not.toBe(true);
   });
 
+  test("accepts native opaque Computer observation fences through the model tool catalog", async () => {
+    const target = computerTarget();
+    const observation = {
+      ...computerObservation(target),
+      observationId: "o_native_1",
+      frameId: "f_native_2",
+    };
+    let request: ComputerActionRequest | null = null;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeComputerTarget: async () => observation,
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          request = value;
+          return computerReceipt(value.operationId, observation);
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const environment = createAttemptToolEnvironment({
+      scope: {
+        accountId,
+        workspaceId,
+        sessionId,
+        turnId,
+        attemptId,
+        executionGeneration: 7,
+      },
+      generation: 3,
+      definitions,
+    });
+
+    const result = await environment.callModel({
+      operationId: randomUUID(),
+      modelName: "interaction__computer_act",
+      subjectId: "model:test",
+      arguments: {
+        computerSessionId,
+        targetId: target.id,
+        expectedObservationId: observation.observationId,
+        action: {
+          type: "pointer",
+          frameId: observation.frameId,
+          action: "click",
+          x: 195,
+          y: 270,
+        },
+      },
+    });
+
+    expect(request).toMatchObject({
+      expectedObservationId: "o_native_1",
+      expectedFrameId: "f_native_2",
+    });
+    expect(result.structuredContent).toMatchObject({ state: "completed" });
+  });
+
   test("reads only the exact ComputerSession native clipboard", async () => {
     const clipboard = {
       computerSessionId,
@@ -648,6 +709,61 @@ describe("interaction attempt tools", () => {
     expect(result.structuredContent).toMatchObject({ frameId: "captured-frame" });
     expect(result.content).toEqual([
       { type: "text", text: JSON.stringify({ ...observation, frameId: "captured-frame" }) },
+      { type: "image", data: Buffer.from(image).toString("base64"), mimeType: "image/jpeg" },
+    ]);
+  });
+
+  test("returns browser pixels only when a still image is requested", async () => {
+    const target = browserTarget();
+    const observation = browserObservation(target);
+    const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+    let captures = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        observeBrowserTarget: async () => observation,
+        captureBrowserTarget: async () => {
+          captures += 1;
+          return {
+            frameId: "captured-browser-frame",
+            browserSessionId,
+            controllerGeneration: target.controllerGeneration,
+            targetId: target.id,
+            targetGeneration: target.targetGeneration,
+            documentGeneration: target.documentGeneration!,
+            sequence: 1,
+            mediaType: "image/jpeg",
+            width: 1,
+            height: 1,
+            deviceScaleFactor: 1,
+            scrollX: 0,
+            scrollY: 0,
+            capturedAt: now,
+            data: image,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read"],
+    });
+    const context = {
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    };
+    const semantic = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id },
+      context,
+    );
+    expect(captures).toBe(0);
+    expect(semantic.content).toHaveLength(1);
+    const visual = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id, includeScreenshot: true },
+      context,
+    );
+    expect(captures).toBe(1);
+    expect(visual.content).toEqual([
+      { type: "text", text: JSON.stringify(observation) },
       { type: "image", data: Buffer.from(image).toString("base64"), mimeType: "image/jpeg" },
     ]);
   });
@@ -925,5 +1041,40 @@ function unusedTransport(): InteractionTransport {
     get() {
       throw new Error("unexpected interaction transport call");
     },
+  });
+}
+
+for (const mismatch of ["personal-profile", "machine", "identity"] as const) {
+  test(`browser reuse respects requested authority: ${mismatch}`, async () => {
+    const candidate = discoveredBrowserSession(randomUUID(), sessionId);
+    const requestedMachine = { kind: "connected_machine" as const, sandboxId: randomUUID() };
+    const requestedIdentity = randomUUID();
+    if (mismatch === "personal-profile")
+      candidate.placement = { kind: "attached_device", deviceId: randomUUID() };
+    if (mismatch === "machine")
+      candidate.placement = { kind: "connected_machine", sandboxId: randomUUID() };
+    let created = false;
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 0, sessions: [candidate] }),
+        createBrowserSession: async () => {
+          created = true;
+          return { session: { lifecycle: "starting" } } as never;
+        },
+      }),
+    });
+    await definitions[0]!.execute(
+      {
+        mode: "reuse_or_create",
+        ...(mismatch === "machine" ? { placement: requestedMachine } : {}),
+        ...(mismatch === "identity" ? { identityId: requestedIdentity } : {}),
+      },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(created).toBe(true);
   });
 }

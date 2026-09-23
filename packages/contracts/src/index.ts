@@ -857,6 +857,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "run_on",
   "sandbox_provision",
   "connected_machine_remove",
+  "connected_machine_enroll_token",
   "project_list",
   "project_get",
   "project_create",
@@ -16006,7 +16007,19 @@ export const MachineState = z.enum([
 ]);
 export type MachineState = z.infer<typeof MachineState>;
 
-export const MachineKind = z.enum(["modal", "selfhosted", "opensandbox"]);
+export const MachineKind = z.enum([
+  "docker",
+  "modal",
+  "local",
+  "daytona",
+  "runloop",
+  "e2b",
+  "blaxel",
+  "cloudflare",
+  "vercel",
+  "selfhosted",
+  "opensandbox",
+]);
 export type MachineKind = z.infer<typeof MachineKind>;
 
 /** Diagnostic projection of the single live Connected-Machine runner authority.
@@ -16140,7 +16153,7 @@ export type UpdateMachineOperationPolicyRequest = z.infer<
 
 /**
  * A machine as the Machines dashboard renders it. The workspace's enrolled
- * selfhosted machines PLUS the session's synthetic Modal group box
+ * selfhosted machines PLUS the session's own managed sandbox
  * (`isSessionGroup: true`). `active` marks the session's currently-active
  * routing target. `sharedSessionCount` is the lease refcount (how many sessions
  * share this whole machine). `metrics` is the latest sample, or null when none

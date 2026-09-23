@@ -1,5 +1,25 @@
 # @opengeni/react
 
+## 7.1.0
+
+### Minor Changes
+
+- bf744ed: Add optional model-policy picker group labels, icons and description overrides for host branding, shared by menu, trigger, accessibility and search without changing model or billing behavior.
+
+### Patch Changes
+
+- 701ea95: Preserve the original shell command when adopting background processes, so running command rows and completion notices show the command instead of execCommand. Keep long command rows ellipsized and expose their saved preview on hover and expansion.
+- e9c4379: Resolve published-file Markdown links through host navigation, expose message presentation in SessionConversation, and document exact retained-file link/embed syntax.
+- d92af11: Keep original command text through ambiguous launch recovery and persist it separately from bounded previews. Preserve whitespace, mark clipped previews with an ellipsis, and show complete commands on expansion and hover.
+- a463199: Increase browser conversation retention from 8 MiB / 10,000 events to 160 MiB / 200,000 events, reducing eviction during history navigation without changing fetch sizes or folding behavior. Account for appended event bytes incrementally instead of serializing retained history on every live batch.
+- 2f8bc58: Use bounded readable MCP tool aliases while preserving exact account routing and historical approval rehydration. Retain action and account display metadata in native and Codemode timeline events and approval cards without changing execution or approval identity. Legacy opaque calls resolve only against the current authorized tool catalog.
+- dd3387f: Preserve Markdown paragraphs and embedded media when host link callbacks change, preventing selection jumps and video preview restarts.
+- a463199: Repair workspace control revisions behind their retained event frontier, preventing historical control replay on each fresh browser load. Reject subsequent revision rollback without altering pause state, timers, or historical events. Stop refreshing last-started model metadata for unrelated control changes.
+- Updated dependencies [d92af11]
+- Updated dependencies [86c710a]
+- Updated dependencies [2f8bc58]
+  - @opengeni/sdk@7.1.0
+
 ## 7.0.0
 
 ### Major Changes

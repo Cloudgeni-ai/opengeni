@@ -177,7 +177,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
       return this.projectFrame(
         await this.readWithRecovery(
           async (client) =>
-            await client.capture(targetId, {
+            await client.captureStill(targetId, {
               format: normalized.format,
               quality: normalized.quality,
               maxWidth: normalized.maxWidth,

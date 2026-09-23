@@ -78,6 +78,9 @@ export function registerManagedOnboardingRoutes(
             organizationName,
             operationId: parsed.data.operationId,
             requestFingerprint,
+            trialCreditsEnabled:
+              deps.settings.productAccessMode === "managed" &&
+              deps.settings.verifiedSignupTrialCreditsEnabled,
           }),
         ),
       );

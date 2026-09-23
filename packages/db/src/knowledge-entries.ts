@@ -19,6 +19,7 @@ import {
   KnowledgeEntryRestoreRequest,
   KnowledgeEntrySaveRequest,
   KnowledgeEntrySummary,
+  KnowledgeIndexStatus,
   KnowledgeEntryWriteReceipt,
   type AgentLearningContext,
   type KnowledgeEntryScope,
@@ -319,6 +320,39 @@ function decodeProjection(value: unknown, full: boolean) {
       });
 }
 
+/** The owner-definer seam rechecks canonical visibility for every exact revision. */
+async function withIndexStatus<T extends KnowledgeEntryRecord | KnowledgeEntrySummary>(
+  db: Database,
+  context: KnowledgeContext,
+  entries: T[],
+  view: "published" | "needs_review" | "archived" | "rejected",
+): Promise<T[]> {
+  if (view === "archived" || view === "rejected") return entries;
+  const items = entries
+    .filter(
+      (entry) =>
+        ("entry" in entry.revision ? entry.revision.entry.kind : entry.revision.kind) === "source",
+    )
+    .map((entry) => ({ entryId: entry.id, revisionId: entry.revision.id }));
+  if (!items.length) return entries;
+  const statuses = await inKnowledgeContext(db, context, async (tx) => {
+    const [row] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`SELECT knowledge_visible_index_status(${context.accountId}::uuid,
+        ${context.workspaceId}::uuid,${JSON.stringify(context.actor)}::jsonb,
+        ${JSON.stringify(items)}::jsonb,${view}) AS result`,
+    );
+    return z
+      .array(z.object({ entryId: z.uuid(), revisionId: z.uuid(), status: KnowledgeIndexStatus }))
+      .parse(row?.result);
+  });
+  const byRevision = new Map(statuses.map((item) => [item.revisionId, item.status]));
+  return entries.map((entry) => {
+    const indexStatus = byRevision.get(entry.revision.id);
+    return indexStatus ? { ...entry, indexStatus } : entry;
+  });
+}
+
 async function read(
   db: Database,
   context: KnowledgeContext,
@@ -353,7 +387,9 @@ export async function getKnowledgeEntry(
     .strict()
     .parse({ entryId, ...options });
   const rows = await read(db, context, { ...request, operation: "get", limit: 1 });
-  return rows[0] ? decodeProjection(rows[0], true) : null;
+  if (!rows[0]) return null;
+  const record = decodeProjection(rows[0], true);
+  return (await withIndexStatus(db, context, [record], request.view ?? "published"))[0]!;
 }
 
 const Cursor = z
@@ -400,7 +436,12 @@ export async function listKnowledgeEntries(
         }
       : {}),
   });
-  const entries = rows.slice(0, request.limit).map((row) => decodeProjection(row, false));
+  const entries = await withIndexStatus(
+    db,
+    context,
+    rows.slice(0, request.limit).map((row) => decodeProjection(row, false)),
+    request.view,
+  );
   return {
     entries,
     nextCursor:

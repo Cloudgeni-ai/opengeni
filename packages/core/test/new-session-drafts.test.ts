@@ -23,6 +23,7 @@ import type { ApiRouteDeps, SessionWorkflowClient } from "../src";
 import { createSessionForRequest } from "../src/domain/sessions";
 import {
   getActorNewSessionDraft,
+  getActorNewSessionDefaults,
   saveActorNewSessionDraft,
 } from "../src/application/new-session-drafts";
 
@@ -327,5 +328,19 @@ describe("core new-session draft hydration", () => {
     expect(hydrated.model).toBe("scripted-model");
     expect(hydrated.reasoningEffort).toBe("high");
     expect(hydrated.latencyMode).toBe("fast");
+    const defaults = await getActorNewSessionDefaults({ db, settings }, grant, workspaceId);
+    expect(defaults).toEqual({
+      resources: [resources[0], resources[2]],
+      tools: [mcp("opengeni")],
+      model: "scripted-model",
+      reasoningEffort: "high",
+      latencyMode: "fast",
+    });
+    const other = await getActorNewSessionDefaults(
+      { db, settings },
+      { ...grant, subjectId: `user:other-${crypto.randomUUID()}` },
+      workspaceId,
+    );
+    expect(other).toEqual({ resources: [] });
   }, 180_000);
 });

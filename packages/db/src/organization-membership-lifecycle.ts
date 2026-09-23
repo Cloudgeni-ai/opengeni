@@ -59,10 +59,21 @@ export async function createManagedOrganization(
     subjectLabel: string;
     name: string;
     operationId: string;
+    trialCreditsEnabled?: boolean;
   },
 ): Promise<CreateOrganizationResponseType> {
   return await db.transaction(async (tx) => {
     await setSubjectRlsContext(tx as unknown as Database, input.subjectId);
+    // This legacy first-organization route delegates to the same self-service
+    // receipt writer. Do not let it consume the one-shot receipt while the
+    // trial is enabled without issuing its transaction-atomic grant.
+    await rawRows(
+      tx,
+      sql`select pg_catalog.set_config(
+      'opengeni.verified_signup_trial_enabled',
+      ${input.trialCreditsEnabled === true ? "on" : "off"}, true
+    )`,
+    );
     const [row] = await rawRows<{ result: unknown }>(
       tx,
       sql`select create_managed_organization(

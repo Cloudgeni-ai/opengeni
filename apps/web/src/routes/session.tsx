@@ -192,6 +192,11 @@ const ChatInteractiveBlock = lazy(() =>
 );
 
 const HumanInputSurface = lazy(() => import("@/components/session/human-input"));
+const SessionSkillReviews = lazy(() =>
+  import("@/components/session/session-skill-reviews").then((module) => ({
+    default: module.SessionSkillReviews,
+  })),
+);
 const SessionCommands = lazy(() =>
   import("@opengeni/react/session-ui").then((module) => ({ default: module.SessionCommands })),
 );
@@ -2108,8 +2113,12 @@ function SessionChatPane(props: {
   const composerPolicyValid = Boolean(
     composerPolicy && (catalogComboValid || matchesFrozenSessionPolicy),
   );
+  const noRunnableModel =
+    !modelCatalog.loading &&
+    modelCatalog.rows.length > 0 &&
+    !modelCatalog.rows.some((row) => row.selectable);
   const composerPolicyError =
-    composerPolicy && !modelCatalog.loading && !composerPolicyValid
+    composerPolicy && !modelCatalog.loading && !composerPolicyValid && !noRunnableModel
       ? "Choose a model, reasoning level, and speed supported by this session."
       : null;
   composerPolicyValidRef.current = composerPolicyValid;
@@ -2532,6 +2541,15 @@ function SessionChatPane(props: {
                     {/* Recovery follows the failed request, only in the latest history window.
                         Credit exhaustion also surfaces on idle sessions. */}
                     {failureRecovery}
+                    <Suspense fallback={null}>
+                      <SessionSkillReviews
+                        key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
+                        context={context}
+                        workspaceId={props.session.workspaceId}
+                        sessionId={props.session.id}
+                        events={props.events}
+                      />
+                    </Suspense>
                     {props.humanInput.requests.length > 0 &&
                     props.session.status === "requires_action" ? (
                       <div className="pb-1" data-human-input-timeline-surface="">
@@ -2908,6 +2926,7 @@ function SessionChatPane(props: {
                   error={modelCatalog.error ?? composerPolicyError}
                   sessionKey={props.session.id}
                   menuSide="top"
+                  connectModelsHref={`/workspaces/${encodeURIComponent(props.session.workspaceId)}/settings?section=models`}
                   codexOnly={props.session.codexCompactionMode === "remote_v2"}
                   onModelChange={composer.setModel}
                   onEffortChange={composer.setReasoningEffort}

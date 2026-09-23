@@ -3717,6 +3717,31 @@ export const integrationOauthStateNonces = pgTable(
   }),
 );
 
+export const integrationOauthPendingStates = pgTable(
+  "integration_oauth_pending_states",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
+    stateEncrypted: text("state_encrypted").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "integration_oauth_pending_states_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    expiry: index("integration_oauth_pending_states_expiry_idx").on(
+      table.workspaceId,
+      table.expiresAt,
+    ),
+  }),
+);
+
 export const hostMcpBindings = pgTable(
   "host_mcp_bindings",
   {
@@ -9935,6 +9960,9 @@ export const sandboxRetainedProcesses = pgTable(
     supervisionOutputCaptured: boolean("supervision_output_captured").notNull().default(false),
     cancellationRequestedAt: timestamp("cancellation_requested_at", { withTimezone: true }),
     cancellationReason: text("cancellation_reason"),
+    deadlineCancellationRequestedAt: timestamp("deadline_cancellation_requested_at", {
+      withTimezone: true,
+    }),
     providerCommandInputIndex: bigint("provider_command_input_index", { mode: "number" })
       .notNull()
       .default(0),

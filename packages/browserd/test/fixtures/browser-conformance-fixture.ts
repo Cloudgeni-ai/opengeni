@@ -55,6 +55,12 @@ export function startBrowserConformanceFixture(): BrowserConformanceFixture {
       if (url.pathname === "/destination") {
         return html(`<!doctype html><title>Redirect destination</title><p>Redirect complete</p>`);
       }
+      if (url.pathname === "/viewport") {
+        return html(`<!doctype html>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Viewport fixture</title>
+          <button onclick="this.textContent='Viewport click worked'">Try viewport click</button>`);
+      }
       if (url.pathname === "/download") {
         return new Response("deterministic download\n", {
           headers: {

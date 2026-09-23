@@ -109,6 +109,7 @@ import {
 } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
 import { displayModel } from "@/lib/format";
+import { preferredConnectedModelId } from "@/lib/model-access-onboarding";
 import {
   isMachineComputeSelectable,
   resolveSelectableMachineSandboxId,
@@ -116,6 +117,7 @@ import {
 import {
   effortOptionsForModel,
   findPickerRow,
+  defaultEffortForModel,
   modelUsesCredits,
   runnableLatencyModesForModel,
   type PickerModelRow,
@@ -941,10 +943,37 @@ function SessionsIndexRouteContent({
     (context.latencyMode === "standard" ||
       runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(context.latencyMode)),
   );
+  const noRunnableModel =
+    !modelCatalog.loading &&
+    modelCatalog.rows.length > 0 &&
+    !modelCatalog.rows.some((row) => row.selectable);
   const newSessionPolicyError =
-    !modelCatalog.loading && !newSessionPolicyValid
+    !modelCatalog.loading &&
+    !newSessionPolicyValid &&
+    !noRunnableModel &&
+    selectedPolicyRow?.selectable
       ? "Choose a supported model, reasoning level, and speed."
       : null;
+  useEffect(() => {
+    if (modelCatalog.loading || newSessionDraft.loading) return;
+    if (findPickerRow(modelCatalog.rows, context.model)?.selectable) return;
+    const nextId =
+      preferredConnectedModelId(modelCatalog.models) ??
+      modelCatalog.rows.find((row) => row.selectable)?.id ??
+      null;
+    if (!nextId || nextId === context.model) return;
+    const next = modelCatalog.models.find((model) => model.id === nextId);
+    setModel(nextId);
+    if (next) setReasoningEffort(defaultEffortForModel(next));
+  }, [
+    context.model,
+    modelCatalog.loading,
+    modelCatalog.models,
+    modelCatalog.rows,
+    newSessionDraft.loading,
+    setModel,
+    setReasoningEffort,
+  ]);
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&
@@ -1524,6 +1553,7 @@ function SessionsIndexRouteContent({
                   modelCatalog={modelCatalog}
                   policyError={newSessionPolicyError}
                   disabled={busy || newSessionDraft.loading}
+                  workspaceId={workspaceId}
                 />
               </div>
             }
@@ -1825,11 +1855,13 @@ function SessionModelControl({
   modelCatalog,
   policyError,
   disabled,
+  workspaceId,
 }: {
   hasImageAttachments: boolean;
   modelCatalog: WorkspaceModelCatalogState;
   policyError: string | null;
   disabled: boolean;
+  workspaceId: string;
 }) {
   const context = useAppContext();
   return (
@@ -1843,6 +1875,7 @@ function SessionModelControl({
       loading={modelCatalog.loading}
       error={modelCatalog.error ?? policyError}
       menuSide="bottom"
+      connectModelsHref={`/workspaces/${encodeURIComponent(workspaceId)}/settings?section=models`}
       onModelChange={context.setModel}
       onEffortChange={context.setReasoningEffort}
       onLatencyModeChange={context.setLatencyMode}

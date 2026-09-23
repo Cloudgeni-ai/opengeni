@@ -6,6 +6,7 @@ import {
 } from "@opengeni/codex/constants";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
+  TurnExecutionPolicyDefinitionMismatchError,
   calculateGatewayReportedCostBreakdown,
   calculateGatewayReportedCostMicros,
   calculateGatewayReportedProviderCostMicros,
@@ -30,6 +31,7 @@ import {
   responseSatisfiesLatencyMode,
   selectModelPricing,
   serviceTierForLatencyMode,
+  settingsForAcceptedSubscriptionTurn,
   withCodexCatalogProvider,
   withXaiSubscriptionCatalogProvider,
   withWorkspaceGatewayCatalogProvider,
@@ -950,6 +952,16 @@ describe("configuredProviders", () => {
     });
   });
 
+  test("drops a placeholder deployment key so the catalog is not configured", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "your-key",
+      },
+      () => getSettings(),
+    );
+    expect(configuredProviders(settings)[0]?.apiKey).toBeUndefined();
+  });
+
   test("returns the built-in Azure provider id and label", () => {
     const settings = withEnv(
       {
@@ -1024,8 +1036,10 @@ describe("productShortLabelForModelId", () => {
     expect(productShortLabelForModelId("codex/gpt-5.6-sol")).toBe("5.6 Sol");
     expect(productShortLabelForModelId("gpt-5.6-luna")).toBe("5.6 Luna");
     expect(productShortLabelForModelId("gpt-5.6-terra")).toBe("5.6 Terra");
+    expect(productShortLabelForModelId("gpt-6-sol")).toBe("6 Sol");
+    expect(productShortLabelForModelId("gpt-6-luna")).toBe("6 Luna");
     expect(productShortLabelForModelId("codex/gpt-6-astra")).toBe("6 Astra");
-    expect(productShortLabelForModelId("grok-4.6")).toBe("4.6");
+    expect(productShortLabelForModelId("grok-4.7")).toBe("4.7");
     expect(productShortLabelForModelId("gpt-5.4-mini")).toBeNull();
   });
 });
@@ -1060,7 +1074,7 @@ describe("configuredModels", () => {
       () => getSettings(),
     );
     const settings = withXaiSubscriptionCatalogProvider(base);
-    const resolved = resolveModelProvider(settings, "supergrok/grok-4.6")!;
+    const resolved = resolveModelProvider(settings, "supergrok/grok-4.7")!;
     expect(resolved.provider).toMatchObject({
       id: "supergrok-subscription",
       kind: "xai-subscription",
@@ -1068,10 +1082,10 @@ describe("configuredModels", () => {
       baseUrl: "https://cli-chat-proxy.grok.com/v1",
     });
     expect(resolved.model).toMatchObject({
-      id: "supergrok/grok-4.6",
-      upstreamModelId: "grok-4.6",
-      label: "Grok 4.6",
-      shortLabel: "4.6",
+      id: "supergrok/grok-4.7",
+      upstreamModelId: "grok-4.7",
+      label: "Grok 4.7",
+      shortLabel: "4.7",
       contextWindowTokens: 500_000,
       effectiveContextWindowTokens: 475_000,
       autoCompactTokenLimit: 400_000,
@@ -1105,9 +1119,9 @@ describe("configuredModels", () => {
     );
     const settings = withXaiSubscriptionCatalogProvider({
       ...base,
-      openaiModel: "supergrok/grok-4.6",
+      openaiModel: "supergrok/grok-4.7",
     });
-    const matches = configuredModels(settings).filter((model) => model.id === "supergrok/grok-4.6");
+    const matches = configuredModels(settings).filter((model) => model.id === "supergrok/grok-4.7");
     expect(matches).toHaveLength(1);
     expect(matches[0]!.providerId).toBe("supergrok-subscription");
   });
@@ -1124,16 +1138,16 @@ describe("configuredModels", () => {
     );
     const models = configuredModels(settings);
     expect(models.find((model) => model.id === "gpt-5.6-luna")?.label).toBe("GPT-5.6 Luna");
-    expect(models.find((model) => model.id === "codex/gpt-5.6-luna")?.label).toBe("GPT-5.6 Luna");
+    expect(models.find((model) => model.id === "codex/gpt-6-luna")?.label).toBe("GPT-6 Luna");
     expect(models.find((model) => model.id === "gpt-5.6-sol")?.shortLabel).toBe("5.6 Sol");
-    expect(models.find((model) => model.id === "codex/gpt-5.6-sol")?.shortLabel).toBe("5.6 Sol");
+    expect(models.find((model) => model.id === "codex/gpt-6-sol")?.shortLabel).toBe("6 Sol");
     expect(models.find((model) => model.id === "gpt-5.6-luna")?.shortLabel).toBe("5.6 Luna");
-    expect(models.find((model) => model.id === "gpt-5.6-terra")?.shortLabel).toBe("5.6 Terra");
+    expect(models.find((model) => model.id === "codex/gpt-6-luna")?.shortLabel).toBe("6 Luna");
     expect(
       models.find((model) => model.id === "gpt-5.6-luna")?.capabilities.inputModalities,
     ).toEqual(["text", "image"]);
     expect(
-      models.find((model) => model.id === "codex/gpt-5.6-luna")?.capabilities.inputModalities,
+      models.find((model) => model.id === "codex/gpt-6-luna")?.capabilities.inputModalities,
     ).toEqual(["text", "image"]);
     const astra = models.find((model) => model.id === "codex/gpt-6-astra");
     expect(astra).toMatchObject({
@@ -1619,7 +1633,7 @@ describe("turn execution policy V1", () => {
       }),
     ).toThrow("accepted turn model/reasoning");
 
-    const definitionDrifts = [
+    const identityDrifts = [
       { ...policy, providerId: "other" },
       { ...policy, upstreamModelId: "other-upstream" },
       { ...policy, wireApi: "chat" as const },
@@ -1637,15 +1651,86 @@ describe("turn execution policy V1", () => {
           metering: "external" as const,
         },
       },
-      { ...policy, definitionVersion: `sha256:${"f".repeat(64)}` },
     ];
-    for (const drift of definitionDrifts) {
-      expect(() =>
-        assertTurnExecutionPolicyMatchesConfigV1(settings, drift, {
+    for (const drift of identityDrifts) {
+      // An identity mismatch wins even when the digest also mismatches.
+      for (const definitionVersion of [policy.definitionVersion, `sha256:${"f".repeat(64)}`]) {
+        let caught: unknown;
+        try {
+          assertTurnExecutionPolicyMatchesConfigV1(
+            settings,
+            { ...drift, definitionVersion },
+            {
+              modelId: policy.productModelId,
+              reasoningEffort: policy.reasoningEffort,
+            },
+          );
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        expect(caught).not.toBeInstanceOf(TurnExecutionPolicyDefinitionMismatchError);
+        expect((caught as Error).message).toBe(
+          "Turn execution policy does not match the current provider definition",
+        );
+      }
+    }
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(
+        settings,
+        {
+          ...policy,
+          definitionVersion: `sha256:${"f".repeat(64)}`,
+        },
+        { modelId: policy.productModelId, reasoningEffort: policy.reasoningEffort },
+      ),
+    ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
+    const definitionMismatch = new TurnExecutionPolicyDefinitionMismatchError();
+    expect(definitionMismatch.code).toBe("turn_execution_policy_definition_mismatch");
+    expect(definitionMismatch.message).toBe(
+      "Turn execution policy does not match the current provider definition",
+    );
+
+    const nonDefinitionFailures = [
+      () =>
+        assertTurnExecutionPolicyMatchesConfigV1(settings, policy, {
           modelId: policy.productModelId,
-          reasoningEffort: policy.reasoningEffort,
+          reasoningEffort: "low",
         }),
-      ).toThrow("current provider definition");
+      () =>
+        assertTurnExecutionPolicyMatchesConfigV1(
+          settings,
+          {
+            ...policy,
+            definitionVersion: "malformed",
+          },
+          { modelId: policy.productModelId, reasoningEffort: policy.reasoningEffort },
+        ),
+      () =>
+        assertTurnExecutionPolicyMatchesConfigV1(
+          { ...settings, modelProvidersJson: "[]" },
+          policy,
+          { modelId: policy.productModelId, reasoningEffort: policy.reasoningEffort },
+        ),
+      () =>
+        assertTurnExecutionPolicyMatchesConfigV1(
+          settings,
+          {
+            ...policy,
+            requestedModelId: "other-model",
+          },
+          { modelId: policy.productModelId, reasoningEffort: policy.reasoningEffort },
+        ),
+    ];
+    for (const fail of nonDefinitionFailures) {
+      let caught: unknown;
+      try {
+        fail();
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect(caught).not.toBeInstanceOf(TurnExecutionPolicyDefinitionMismatchError);
     }
   });
 
@@ -1703,7 +1788,7 @@ describe("turn execution policy V1", () => {
       () => getSettings(),
     );
     const policy = resolveTurnExecutionPolicyV1(settings, {
-      modelId: "codex/gpt-5.6-sol",
+      modelId: "codex/gpt-6-sol",
       requestedModelId: null,
       modelSource: "continuation",
       reasoningEffort: "xhigh",
@@ -1711,7 +1796,7 @@ describe("turn execution policy V1", () => {
     });
     const preWireProfilePolicy = {
       ...policy,
-      definitionVersion: "sha256:45a93d5876fdb2a3b3d485c83ea6ac758fddb64e7fe493384a05a198bc582c00",
+      definitionVersion: "sha256:f5b77d051ec405ddfcb45815ed1b14a8e07aef33632009eac2689407b1c48194",
     };
 
     expect(() =>
@@ -1720,6 +1805,193 @@ describe("turn execution policy V1", () => {
         reasoningEffort: policy.reasoningEffort,
       }),
     ).not.toThrow();
+  });
+
+  test("preserves accepted Codex Astra identity across the implicit caching rollout", () => {
+    const current = withCodexCatalogProvider(
+      getSettings({ OPENGENI_CODEX_SUBSCRIPTION_ENABLED: "true" }),
+    );
+    const providers = JSON.parse(current.modelProvidersJson);
+    delete providers[0].models[0].capabilities.promptCaching;
+    const historical = { ...current, modelProvidersJson: JSON.stringify(providers) };
+    const input = {
+      modelId: "codex/gpt-6-astra",
+      requestedModelId: null,
+      modelSource: "continuation" as const,
+      reasoningEffort: "low" as const,
+      reasoningSource: "continuation" as const,
+    };
+    const accepted = resolveTurnExecutionPolicyV1(historical, input);
+    const newer = resolveTurnExecutionPolicyV1(current, input);
+    expect(accepted.definitionVersion).toBe(
+      "sha256:3b9f79cc6958b71ef6e14c4dc16797e83b9bbceb070ecd44048f0a685e3a1c2a",
+    );
+    expect(newer.definitionVersion).toBe(
+      "sha256:fc4b0bc9ec1a5cc2c302da88c407a633ae5fec0bcc0166668eca3acf1fa49479",
+    );
+    const before = structuredClone(accepted);
+    for (const policy of [accepted, newer]) {
+      expect(settingsForAcceptedSubscriptionTurn(current, policy, input)).toBe(current);
+      expect(assertTurnExecutionPolicyMatchesConfigV1(current, policy, input).policy).toEqual(
+        policy,
+      );
+    }
+    expect(accepted).toEqual(before);
+
+    // This digest omits both wireProfile and promptCaching. Each compatibility
+    // path accepts one historical change only; they must never compose.
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(
+        current,
+        {
+          ...accepted,
+          definitionVersion:
+            "sha256:3c14a06a1e57af53d8cd11944ace3ecc8cdb15623d672aa362207a7b5e8d29cc",
+        },
+        input,
+      ),
+    ).toThrow(TurnExecutionPolicyDefinitionMismatchError);
+
+    // Compatibility is one-way: it cannot restore a capability on an old worker.
+    expect(() => assertTurnExecutionPolicyMatchesConfigV1(historical, newer, input)).toThrow(
+      "current provider definition",
+    );
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(current, accepted, {
+        ...input,
+        reasoningEffort: "high",
+      }),
+    ).toThrow("accepted turn model/reasoning/latency");
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(current, accepted, {
+        ...input,
+        latencyMode: "fast",
+      }),
+    ).toThrow("accepted turn model/reasoning/latency");
+
+    const mutations: Array<[string, (provider: any, model: any) => void]> = [
+      [
+        "endpoint",
+        (p) => {
+          p.baseUrl = "https://other.example/v1";
+        },
+      ],
+      [
+        "wire profile",
+        (p) => {
+          p.wireProfile = "azure-openai";
+        },
+      ],
+      [
+        "wire API",
+        (p) => {
+          p.api = "chat";
+        },
+      ],
+      [
+        "upstream model",
+        (_p, m) => {
+          m.upstreamModelId = "gpt-6-sol";
+        },
+      ],
+      [
+        "context",
+        (_p, m) => {
+          m.contextWindowTokens = 300000;
+        },
+      ],
+      [
+        "effective context",
+        (_p, m) => {
+          m.effectiveContextWindowTokens = 250000;
+        },
+      ],
+      [
+        "compaction",
+        (_p, m) => {
+          m.autoCompactTokenLimit = 200000;
+        },
+      ],
+      [
+        "truncation",
+        (_p, m) => {
+          m.toolOutputTruncationTokens = 9000;
+        },
+      ],
+      [
+        "reasoning",
+        (_p, m) => {
+          m.capabilities.reasoning.efforts = ["low"];
+        },
+      ],
+      [
+        "tools",
+        (_p, m) => {
+          m.capabilities.hostedTools.webSearch.runnable = false;
+        },
+      ],
+      [
+        "transport",
+        (_p, m) => {
+          m.capabilities.transports.responsesWebSocket.runnable = true;
+        },
+      ],
+      [
+        "cache runnable",
+        (_p, m) => {
+          m.capabilities.promptCaching.runnable = false;
+        },
+      ],
+      [
+        "cache support",
+        (_p, m) => {
+          m.capabilities.promptCaching.upstream = "unknown";
+        },
+      ],
+      [
+        "cache mode",
+        (_p, m) => {
+          m.capabilities.promptCaching.mode = "automatic";
+        },
+      ],
+    ];
+    for (const [label, mutate] of mutations) {
+      const changed = JSON.parse(current.modelProvidersJson);
+      mutate(changed[0], changed[0].models[0]);
+      expect(
+        () =>
+          assertTurnExecutionPolicyMatchesConfigV1(
+            { ...current, modelProvidersJson: JSON.stringify(changed) },
+            accepted,
+            input,
+          ),
+        label,
+      ).toThrow();
+    }
+    for (const changed of [
+      { providerId: "other" },
+      { upstreamModelId: "gpt-6-sol" },
+      { wireApi: "chat" as const },
+      { credentialSource: { kind: "deployment" as const, mechanism: "api_key" as const } },
+      { billing: { upstreamPayer: "deployment" as const, metering: "opengeni_credits" as const } },
+      { definitionVersion: `sha256:${"0".repeat(64)}` },
+    ]) {
+      expect(() =>
+        assertTurnExecutionPolicyMatchesConfigV1(current, { ...accepted, ...changed }, input),
+      ).toThrow();
+    }
+
+    // A missing caching declaration on another model is not this migration.
+    const otherProviders = JSON.parse(current.modelProvidersJson);
+    delete otherProviders[0].models[1].capabilities.promptCaching;
+    const otherInput = { ...input, modelId: "codex/gpt-6-sol" };
+    const otherPolicy = resolveTurnExecutionPolicyV1(
+      { ...current, modelProvidersJson: JSON.stringify(otherProviders) },
+      otherInput,
+    );
+    expect(() =>
+      assertTurnExecutionPolicyMatchesConfigV1(current, otherPolicy, otherInput),
+    ).toThrow("current provider definition");
   });
 
   test("attributes connected Codex subscription turns explicitly as externally billed", () => {
@@ -1731,16 +2003,16 @@ describe("turn execution policy V1", () => {
       () => getSettings(),
     );
     const policy = resolveTurnExecutionPolicyV1(settings, {
-      modelId: "codex/gpt-5.6-sol",
+      modelId: "codex/gpt-6-sol",
       requestedModelId: null,
       modelSource: "session",
       reasoningEffort: "max",
       reasoningSource: "session",
     });
     expect(policy).toMatchObject({
-      productModelId: "codex/gpt-5.6-sol",
+      productModelId: "codex/gpt-6-sol",
       providerId: "codex-subscription",
-      upstreamModelId: "gpt-5.6-sol",
+      upstreamModelId: "gpt-6-sol",
       credentialSource: { kind: "connected_subscription", provider: "codex" },
       billing: {
         upstreamPayer: "connected_subscription",
@@ -1981,7 +2253,14 @@ describe("configuredModelPricing", () => {
     expect(defaultModelPricing["gpt-5.4"]).toBeUndefined();
     expect(defaultModelPricing["gpt-5"]).toBeUndefined();
 
-    const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_OPENAI_MODEL: "gpt-5.6-luna",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.6-luna",
+      },
+      () => getSettings(),
+    );
     // 100k input @ $0.20/M = 20_000 micros, then +5% margin -> 21_000
     expect(
       calculateModelUsageCostMicros(settings, "gpt-5.6-luna", {

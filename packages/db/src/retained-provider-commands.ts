@@ -406,8 +406,10 @@ export async function retainedProcessCancellationRequested(
   });
 }
 
-/** Called by the reaper for an exact retained command. Ordinary completed turns
- * are intentionally irrelevant. Lock order remains process -> lease. */
+/** Record deadline cancellation for an exact retained Modal command. Legacy
+ * PTY callers send Ctrl-C first because cancellation fences stdin; non-PTY
+ * callers only probe, since Ctrl-C would be data. An earlier explicit stop
+ * remains immutable; the deadline uses its own clock. Lock order: process -> lease. */
 export async function requestRetainedProcessDeadlineCancellation(
   db: Database,
   scope: ProcessScope,
@@ -422,8 +424,8 @@ export async function requestRetainedProcessDeadlineCancellation(
     if (
       !row ||
       row.state !== "active" ||
-      !row.providerCommand ||
-      !supervisionDescriptor(row.providerCommand)
+      row.providerBackend !== "modal" ||
+      row.routeTargetId !== null
     )
       return false;
     const [lease] = await tx.execute<{ id: string }>(sql`
@@ -434,11 +436,19 @@ export async function requestRetainedProcessDeadlineCancellation(
         and rotation_requested_at is not null and rotation_reason = 'provider_deadline' for update
     `);
     if (!lease) return false;
-    if (!row.cancellationRequestedAt)
+    if (!row.deadlineCancellationRequestedAt || !row.cancellationRequestedAt) {
       await tx
         .update(schema.sandboxRetainedProcesses)
-        .set({ cancellationRequestedAt: new Date(), cancellationReason: "provider_deadline" })
+        .set({
+          ...(!row.cancellationRequestedAt
+            ? { cancellationRequestedAt: sql`now()`, cancellationReason: "provider_deadline" }
+            : {}),
+          ...(!row.deadlineCancellationRequestedAt
+            ? { deadlineCancellationRequestedAt: sql`now()` }
+            : {}),
+        })
         .where(processWhere(scope));
+    }
     return true;
   });
 }

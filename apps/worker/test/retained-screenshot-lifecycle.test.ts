@@ -757,6 +757,68 @@ describe("retained screenshot lifecycle fences", () => {
     expect(String(output).startsWith("data:image/png;base64,")).toBeTrue();
   }, 180_000);
 
+  test("recovers a truncated screenshot receipt by exact session and tool call", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const other = await freshTurn();
+    const memory = storageFixture();
+    const result = await retainComputerScreenshot({
+      db,
+      objectStorage: memory.storage,
+      ...fixture,
+      output: {
+        callId: "call-truncated-receipt",
+        toolOutputId: "call-truncated-receipt",
+        bytes: PNG,
+        mediaType: "image/png",
+      },
+      retentionMs: 60_000,
+      workspaceQuotaBytes: 1024 * 1024,
+    });
+    expect(result.available).toBe(true);
+    const corruptedHistory = [
+      {
+        type: "function_call_result",
+        callId: "call-truncated-receipt",
+        output: [
+          { type: "input_text", text: "Screen capture" },
+          {
+            type: "input_image",
+            image: {
+              type: "retained_artifact",
+              artifact: {
+                available: false,
+                artifactId: "[omitted text field 1 ...]",
+                reason: "[omitted text field 2 ...]",
+              },
+            },
+          },
+        ],
+      },
+    ];
+    const recovered = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: memory.storage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history: corruptedHistory,
+    });
+    const recoveredOutput = recovered[0]?.output;
+    if (!Array.isArray(recoveredOutput)) throw new Error("expected content array");
+    expect(
+      String((recoveredOutput[1] as { image?: string }).image).startsWith("data:image/png;base64,"),
+    ).toBeTrue();
+    await expect(
+      materializeRetainedScreenshotHistory({
+        db,
+        objectStorage: memory.storage,
+        workspaceId: other.workspaceId,
+        sessionId: other.sessionId,
+        history: corruptedHistory,
+      }),
+    ).rejects.toThrow("cannot be recovered");
+  }, 180_000);
+
   test("FORCE-RLS denies cross-workspace rows while the fixed SECURITY DEFINER claim sees both", async () => {
     if (!available) return;
     const first = await freshTurn();

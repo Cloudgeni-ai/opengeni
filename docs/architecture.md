@@ -47,6 +47,10 @@ Account isolation: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-a
 
 ## 3. Core invariants
 
+Hosted tool-call `status` survives persistence and Codex replay; function/message
+annotations remain stripped. See `packages/codex/src/hosted-call-status.ts` and
+[model providers](model-providers.md).
+
 ### 3.1 Postgres is durable truth; NATS is transport
 
 Postgres commits precede notifications. NATS transports fanout, invalidations,
@@ -111,6 +115,7 @@ independently of connections. See [`run-lifecycle.md`](run-lifecycle.md).
 `runAgentTurn` is non-retryable by default: model/tool/sandbox/Git/connector/cloud
 operations have external effects. Recovery is explicit and attempt-fenced.
 Provider work stays outside retries; retry only idempotent settlement.
+Accepted-policy [compatibility/recovery](run-lifecycle.md).
 Replay: [notices/catalogs](run-lifecycle.md),
 [compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`
 shares sandbox/lazy-tool-prepared requests with remote compaction, including before first inference.
@@ -976,7 +981,7 @@ separate nullable comparisons, while `priced_cost_micros` remains the actual
 credits-path price and is zero for externally billed calls.
 
 Insights usage uses a four-column projection (0484), preserving full-row readers
-and identical tenant/actor/visibility checks. Transaction-capability writes still
+and tenant/actor/visibility checks. Transaction-capability writes still
 require a writable database.
 Canonical: `packages/db/src/insights-usage-bundle.ts`.
 
@@ -1016,6 +1021,7 @@ Before/after guards reject live runtime DB sessions. Preserve checkpoints and
 recover—not cancel—accepted turns. Never restart pre-0492 binaries.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
+[`credit-boundaries-rollout.md`](credit-boundaries-rollout.md),
 [`model-providers.md`](model-providers.md),
 [`codex-subscription-rotation.md`](codex-subscription-rotation.md), and
 [`supergrok-subscription.md`](supergrok-subscription.md).
@@ -1293,16 +1299,12 @@ direct-call path.
 Provider adapters may narrow destinations, credentials, and retries, never
 weaken shared connection, approval, idempotency, or audit boundaries.
 
-The attempt-frozen connector Allow/Ask/Block policy and
-`connector_action_requests` ledger apply to model and Codemode execution only.
-Current-human HTTP/SDK and workspace MCP calls are direct human actions: they
-use the ordinary `requireApproval` classification and preserve a caller-generated
-operation id only for provider-specific handling. Sites retain ordinary per-call
-approval after active-Site and selected-version allowlist revalidation. Older
-published versions remain callable using their own declared tools and the
-viewer’s current permissions. These direct surfaces do
-not synthesize attempt-owned connector rows or a second generalized exactly-once
-journal.
+The attempt-frozen Allow/Ask/Block policy and `connector_action_requests` apply
+to model and Codemode execution. Human HTTP/SDK and workspace MCP calls use
+`requireApproval`; provider handling may retain caller operation IDs. Sites
+approve each call after active-Site and version-allowlist checks. Older versions
+expose their declared tools under current viewer permissions. These paths create
+no attempt-owned connector rows or duplicate exactly-once journal.
 
 GitHub App binding offers explicit selection of existing owner-authorized
 installations or GitHub's new-installation flow for another personal account/organization.
@@ -1317,6 +1319,9 @@ DB connector-policy rows and accepted-attempt snapshots govern execution.
 Canonical: [`capabilities.md`](capabilities.md),
 [`integrations-design.md`](integrations-design.md),
 [`mcp-surfaces.md`](mcp-surfaces.md), and [`credentials.md`](credentials.md).
+
+MCP OAuth redirects carry a short signed reference to encrypted, time-limited
+Postgres state under workspace RLS, then check the existing one-use nonce.
 
 ### 7.5 Artifacts, browser control, and managed computer sessions
 
@@ -1468,17 +1473,13 @@ Sandbox snapshots/provider-native checkpoints are recovery artifacts, not histor
 Capture requires proof against unaccounted racing writers. Failed/unverifiable
 captures are not empty successes; teardown must preserve the only recoverable workspace state.
 
-Provider-deadline rotation is an explicit preemption boundary. Once the durable
-lead-time request fences new mutations, each live turn aborts immediately rather
-than waiting for a turn-side snapshot that can be blocked by that turn's own
-mutation admission or an earlier provider capture. The attempt finalizer drains
-every tool and credential writer before releasing its holder; only the resulting
-zero-holder reaper may take over an in-flight same-request capture, publish the
-exact workspace generation, and terminate the old provider. When this abort
-reaches an Agents SDK run, the SDK closes the readable stream before its
-completion promise rejects. Iterator EOF is therefore not terminal success
-authority: the worker must await SDK completion and route its rejection through
-`sandbox_deadline_rotation` recovery before settling `turn.completed`.
+Provider-deadline rotation preempts turns when its durable lead-time request
+fences mutations. Finalizers drain tool and credential writers before releasing
+holders. Only the zero-holder reaper may adopt an in-flight same-request capture,
+publish the exact workspace generation, then terminate the provider. The Agents
+SDK closes its readable stream before completion rejects; EOF is not success.
+The worker awaits completion and routes rejection through
+`sandbox_deadline_rotation` before `turn.completed`.
 
 BrowserSession/ComputerSession holders remain durable despite old heartbeats.
 Only finite-provider handoff deadlines override them: the reaper marks exact
@@ -1500,6 +1501,12 @@ Idle, unobservable Modal commands use the existing drain after group-wide agent,
 holder, mutation, and idle-grace checks. Records remain until termination;
 unobserved outcomes become lost. Command backoff never suppresses rotation's
 provider-lifecycle checks. Details: `docs/run-lifecycle.md`.
+
+Scheduled deadline rotation stops legacy commands where possible, then captures
+after bounded grace under a quiesced owner, exact lease fence, and no other
+holders or mutation admissions. Surviving commands settle lost after capture;
+supervised commands keep separate proof. Details:
+`docs/design/modal-workspace-durability-2026-09-23.md`.
 
 Desktop/browser images and daemons release separately. Desktop/terminal data
 use the relay; the control plane retains authority. Large edits require
@@ -1686,7 +1693,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
-| Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
+| Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |
@@ -1707,7 +1714,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 
 ## 14. Keeping this current
 
-Update ownership, invariants, flows, lifecycles and sources here.
+Update ownership, invariants, flows, lifecycles and sources.
 Keep mechanics and rollout in [`README.md`](README.md)'s focused docs.
 
 Goal resume/pause semantics: [goals](goals.md).

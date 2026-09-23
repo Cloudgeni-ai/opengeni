@@ -968,6 +968,25 @@ impl ComputerAdapter for AxComputerAdapter {
         }
     }
 
+    async fn capture_still(
+        &self,
+        target_id: &str,
+        options: NativeCaptureOptions,
+    ) -> NativeAdapterResult<NativeCapturedFrame> {
+        Self::ensure_unlocked()?;
+        if let Some(screen) = Self::load_screen(target_id)? {
+            return self.capture_screen(screen, Some(options)).await;
+        }
+        let record = self.load_target(target_id).await?;
+        match record.target.kind {
+            NativeTargetKind::Window => self.capture_window(record, Some(options)).await,
+            NativeTargetKind::App => Err(NativeAdapterError::unsupported(
+                "capture one exact macOS window target rather than an ambiguous application",
+            )),
+            NativeTargetKind::Screen => unreachable!(),
+        }
+    }
+
     async fn start_capture_stream(
         &self,
         target_id: &str,

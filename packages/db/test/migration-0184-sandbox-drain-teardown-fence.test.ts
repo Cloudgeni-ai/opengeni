@@ -81,6 +81,10 @@ const withheldMigrationNames = [
   "0501_session_sharing_execution.sql",
   // Reads the cursor table from withheld 0374; replay after its prerequisite.
   "0503_session_meaningful_attention.sql",
+  // Follow the withheld signup/Knowledge prerequisites during replay.
+  "0509_verified_signup_trial_credits.sql",
+  "0510_knowledge_index_funding_wait.sql",
+  "0511_knowledge_visible_index_status.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

@@ -406,6 +406,7 @@ import {
 import {
   environmentsEncryptionKeyBytes,
   SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
+  SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
@@ -480,9 +481,11 @@ import {
   type NewSessionDraftSnapshot,
 } from "./new-session-drafts";
 import {
+  isRetryableDatabaseTransportFailure,
   nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
   safeDatabaseErrorFacts,
+  SessionEventPersistenceError,
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
 import {
@@ -648,6 +651,10 @@ export * from "./xai-subscription";
 export * from "./organization-xai-subscriptions";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
+export {
+  loadIntegrationOAuthPendingState,
+  storeIntegrationOAuthPendingState,
+} from "./integration-oauth-pending-states";
 export {
   decryptEnvironmentValue as decryptVariableSetValue,
   encryptEnvironmentValue as encryptVariableSetValue,
@@ -5314,6 +5321,82 @@ export async function applyCreditDebitUpToBalance(
   );
 }
 
+/**
+ * Settle an already-consumed, OpenGeni-funded resource for its full cost.
+ * Admission happens before use; an in-flight operation can take the account
+ * below zero. Future grants and purchased top-ups net against that balance.
+ * Never use this helper to admit a new operation or for externally paid use.
+ */
+export async function applyCreditDebitAfterUse(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId?: string | null;
+    type: string;
+    amountMicros: number;
+    sourceType: string;
+    sourceId: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+    occurredAt?: Date;
+  },
+): Promise<{ balance: BillingBalance; debitedMicros: number }> {
+  if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
+    throw new Error("post-use credit debit requires a positive, safe integer micro amount");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
+    async (scopedDb) => {
+      const inserted = await scopedDb
+        .insert(schema.creditLedgerEntries)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId ?? null,
+          type: input.type,
+          amountMicros: -input.amountMicros,
+          sourceType: input.sourceType,
+          sourceId: input.sourceId,
+          idempotencyKey: input.idempotencyKey,
+          metadata: input.metadata ?? {},
+          occurredAt: input.occurredAt ?? new Date(),
+        })
+        .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
+        .returning({ id: schema.creditLedgerEntries.id });
+      if (inserted.length === 0) {
+        const [prior] = await scopedDb
+          .select({
+            accountId: schema.creditLedgerEntries.accountId,
+            workspaceId: schema.creditLedgerEntries.workspaceId,
+            type: schema.creditLedgerEntries.type,
+            amountMicros: schema.creditLedgerEntries.amountMicros,
+            sourceType: schema.creditLedgerEntries.sourceType,
+            sourceId: schema.creditLedgerEntries.sourceId,
+          })
+          .from(schema.creditLedgerEntries)
+          .where(eq(schema.creditLedgerEntries.idempotencyKey, input.idempotencyKey));
+        if (
+          !prior ||
+          prior.accountId !== input.accountId ||
+          prior.workspaceId !== (input.workspaceId ?? null) ||
+          prior.type !== input.type ||
+          prior.amountMicros !== -input.amountMicros ||
+          prior.sourceType !== input.sourceType ||
+          prior.sourceId !== input.sourceId
+        ) {
+          throw new Error(
+            "post-use credit debit idempotency key conflicts with a different charge",
+          );
+        }
+      }
+      return {
+        balance: await getBillingBalance(scopedDb, input.accountId),
+        debitedMicros: inserted.length ? input.amountMicros : 0,
+      };
+    },
+  );
+}
+
 export async function hasCreditLedgerEntry(
   db: Database,
   accountId: string,
@@ -7323,6 +7406,39 @@ export async function getRetainedScreenshotArtifact(
       )
       .limit(1);
     return row ? mapRetainedScreenshotArtifact(row.artifact, row.file) : null;
+  });
+}
+
+/** Recover a legacy damaged receipt only when its tool call has one exact
+ * screenshot in this session. Never infer an artifact across fork ancestry. */
+export async function getRetainedScreenshotArtifactForToolCall(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  toolCallId: string,
+): Promise<RetainedScreenshotArtifact | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({ artifact: schema.retainedScreenshotArtifacts, file: schema.files })
+      .from(schema.retainedScreenshotArtifacts)
+      .innerJoin(
+        schema.files,
+        and(
+          eq(schema.files.workspaceId, schema.retainedScreenshotArtifacts.workspaceId),
+          eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
+          eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
+          eq(schema.retainedScreenshotArtifacts.toolCallId, toolCallId),
+        ),
+      )
+      .limit(2);
+    return rows.length === 1
+      ? mapRetainedScreenshotArtifact(rows[0]!.artifact, rows[0]!.file)
+      : null;
   });
 }
 
@@ -41350,101 +41466,183 @@ function assertPendingToolOutputPolicyMatches(
   }
 }
 
+// Receipt inputs have already passed the strict JSON storage boundary. Compare
+// exact keys structurally: locale collation can equate distinct Unicode keys.
+function pendingToolCallItemsEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object")
+    return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => pendingToolCallItemsEqual(value, right[index]))
+    );
+  }
+  const keys = Object.keys(left);
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every(
+      (key) =>
+        Object.hasOwn(right, key) &&
+        pendingToolCallItemsEqual(
+          (left as Record<string, unknown>)[key],
+          (right as Record<string, unknown>)[key],
+        ),
+    )
+  );
+}
+
 /**
  * Durably capture the raw SDK call item at the exact attempt boundary. This is
  * model-facing truth, deliberately separate from the session-event timeline.
  * The receipt belongs to the logical turn so an approval resume can
  * settle it from a newer attempt. Duplicate SDK delivery converges on the
  * unique (turn, call) identity.
+ * Pass the root database handle so each rollback retry starts a fresh
+ * transaction, not a savepoint in a caller-owned transaction.
  */
 export async function registerPendingSessionToolCall(
   db: Database,
   input: PendingSessionToolCallInput,
 ): Promise<{ accepted: boolean; registered: boolean }> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const fence = await lockTurnAttemptWriteFenceTx(tx, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: input.executionGeneration,
-          attemptId: input.attemptId,
-        });
-        if (!fence.allowed) return { accepted: false, registered: false };
-        const inserted = await tx
-          .insert(schema.sessionPendingToolCalls)
-          .values(
-            withLosslessContentWriteVersion(
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: input.turnId,
-                executionGeneration: input.executionGeneration,
-                attemptId: input.attemptId,
-                callId: input.callId,
-                callType: input.callType,
-                callItem: input.callItem,
-                modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
-              },
-              "callItem",
-              "callItemCodecVersion",
-            ),
-          )
-          .onConflictDoNothing({
-            target: [
-              schema.sessionPendingToolCalls.workspaceId,
-              schema.sessionPendingToolCalls.turnId,
-              schema.sessionPendingToolCalls.callId,
-            ],
-          })
-          .returning({ id: schema.sessionPendingToolCalls.id });
-        if (inserted.length === 0) {
-          const [pending] = await tx
-            .select({
-              id: schema.sessionPendingToolCalls.id,
-              modelToolOutputTruncationTokens:
-                schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
-            })
-            .from(schema.sessionPendingToolCalls)
-            .where(
-              and(
-                eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
-                eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
-                eq(schema.sessionPendingToolCalls.turnId, input.turnId),
-                eq(schema.sessionPendingToolCalls.callId, input.callId),
-              ),
-            )
-            .for("update")
-            .limit(1);
-          if (!pending) {
-            throw new Error(
-              `Pending SDK tool call disappeared during registration: ${input.callId}`,
-            );
-          }
-          assertPendingToolOutputPolicyMatches(
-            pending.modelToolOutputTruncationTokens,
-            input.modelToolOutputTruncationTokens,
-            input.callId,
-          );
-          if (
-            pending.modelToolOutputTruncationTokens === null &&
-            input.modelToolOutputTruncationTokens !== undefined
-          ) {
-            await tx
-              .update(schema.sessionPendingToolCalls)
-              .set({
-                modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+  const correlationId = crypto.randomUUID();
+  const registerOnce = async (attempt: number) => {
+    try {
+      return await withRlsContext(
+        db,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        async (scopedDb) =>
+          await scopedDb.transaction(async (tx) => {
+            const fence = await lockTurnAttemptWriteFenceTx(tx, {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              executionGeneration: input.executionGeneration,
+              attemptId: input.attemptId,
+            });
+            if (!fence.allowed) return { accepted: false, registered: false };
+            const inserted = await tx
+              .insert(schema.sessionPendingToolCalls)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    turnId: input.turnId,
+                    executionGeneration: input.executionGeneration,
+                    attemptId: input.attemptId,
+                    callId: input.callId,
+                    callType: input.callType,
+                    callItem: input.callItem,
+                    modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
+                  },
+                  "callItem",
+                  "callItemCodecVersion",
+                ),
+              )
+              .onConflictDoNothing({
+                target: [
+                  schema.sessionPendingToolCalls.workspaceId,
+                  schema.sessionPendingToolCalls.turnId,
+                  schema.sessionPendingToolCalls.callId,
+                ],
               })
-              .where(eq(schema.sessionPendingToolCalls.id, pending.id));
-          }
-        }
-        return { accepted: true, registered: inserted.length === 1 };
-      }),
+              .returning({ id: schema.sessionPendingToolCalls.id });
+            if (inserted.length === 0) {
+              const [pending] = await tx
+                .select({
+                  id: schema.sessionPendingToolCalls.id,
+                  accountId: schema.sessionPendingToolCalls.accountId,
+                  callType: schema.sessionPendingToolCalls.callType,
+                  callItem: schema.sessionPendingToolCalls.callItem,
+                  callItemCodecVersion: schema.sessionPendingToolCalls.callItemCodecVersion,
+                  modelToolOutputTruncationTokens:
+                    schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
+                })
+                .from(schema.sessionPendingToolCalls)
+                .where(
+                  and(
+                    eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+                    eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+                    eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+                    eq(schema.sessionPendingToolCalls.callId, input.callId),
+                  ),
+                )
+                .for("update")
+                .limit(1);
+              if (
+                !pending ||
+                pending.accountId !== input.accountId ||
+                pending.callType !== input.callType ||
+                !pendingToolCallItemsEqual(
+                  fromPostgresLosslessJson(pending.callItem, pending.callItemCodecVersion),
+                  input.callItem,
+                )
+              ) {
+                // A duplicate acknowledges only this exact call. It neither
+                // replaces the originating attempt nor authorizes effect replay.
+                throw new Error("Pending tool receipt conflicts with the registered call");
+              }
+              assertPendingToolOutputPolicyMatches(
+                pending.modelToolOutputTruncationTokens,
+                input.modelToolOutputTruncationTokens,
+                input.callId,
+              );
+              if (
+                pending.modelToolOutputTruncationTokens === null &&
+                input.modelToolOutputTruncationTokens !== undefined
+              ) {
+                await tx
+                  .update(schema.sessionPendingToolCalls)
+                  .set({
+                    modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+                  })
+                  .where(eq(schema.sessionPendingToolCalls.id, pending.id));
+              }
+            }
+            return { accepted: true, registered: inserted.length === 1 };
+          }),
+      );
+    } catch (error) {
+      if (!isRetryableDatabaseTransportFailure(error)) throw error;
+      // Stop before the shared SQLSTATE traversal can prefer an older nested
+      // rollback over a transport/commit-ack failure. This private outcome is
+      // converted to a sanitized error outside the retry helper, never success.
+      return { transportFailure: error, attempt };
+    }
+  };
+  // Only PostgreSQL-confirmed rollback is retryable. Re-enter RLS and acquire
+  // the complete attempt fence each time; never include inference or tools.
+  const result = await runIdempotentPersistenceTransaction(
+    {
+      stage: "pending_tool_registration",
+      correlationId,
+      maxAttempts: 3,
+      onRetry: async ({ attempt }) => {
+        await new Promise((resolve) => setTimeout(resolve, 25 * attempt));
+      },
+    },
+    registerOnce,
   );
+  if ("transportFailure" in result) {
+    throw new SessionEventPersistenceError(
+      {
+        code: "db_failure",
+        sqlState: null,
+        stage: "pending_tool_registration",
+        eventTypes: [],
+        correlationId,
+        attempts: result.attempt,
+        retryOutcome: "not_retryable",
+        database: safeDatabaseErrorFacts(result.transportFailure),
+      },
+      result.transportFailure,
+    );
+  }
+  return result;
 }
 
 /** Record the raw SDK result without dropping the call receipt. */
@@ -44029,6 +44227,9 @@ export interface AcquireLeaseInput {
    *  attach, mirrored into the scoped stream token's claims. */
   viewerAuthorityEpoch?: number;
   backend: string; // sessions.sandbox_backend
+  /** Explicit compute policy at this admission boundary. Omission is legacy
+   * usage-only; only a priced credits backend needs prepaid admission. */
+  warmBilling?: { mode: "usage_only" | "shadow" | "credits"; rateMicrosPerSecond: number };
   os?: string; // default 'linux'
   // The container image this run resolves (Modal image ref / docker image). Stamped on
   // the cold-create + folded onto a warming/CAS; a warm/draining/warming box already
@@ -44448,6 +44649,94 @@ export class SandboxViewerAdmissionBlockedError extends Error {
         : "Sandbox viewer admission is blocked because the workspace warm allowance is exhausted",
     );
   }
+}
+
+export class SandboxPaidComputeAdmissionError extends Error {
+  readonly name = "SandboxPaidComputeAdmissionError";
+  constructor(
+    public readonly workspaceId: string,
+    public readonly sandboxGroupId: string,
+  ) {
+    super("Insufficient OpenGeni credits to admit paid sandbox compute");
+  }
+}
+
+type SandboxWarmBillingSnapshot = {
+  mode: "usage_only" | "shadow" | "credits";
+  rateMicrosPerSecond: number;
+  accountId: string;
+  workspaceId: string;
+  stopChargeAt?: string;
+};
+
+function warmBillingSnapshot(
+  row: Pick<LeaseRow, "resume_state" | "account_id" | "workspace_id">,
+): SandboxWarmBillingSnapshot | null {
+  const value = row.resume_state?.opengeniWarmBilling;
+  if (!value || typeof value !== "object") return null;
+  const snapshot = value as SandboxWarmBillingSnapshot;
+  return (snapshot.mode === "usage_only" ||
+    snapshot.mode === "shadow" ||
+    snapshot.mode === "credits") &&
+    Number.isFinite(snapshot.rateMicrosPerSecond) &&
+    snapshot.rateMicrosPerSecond >= 0 &&
+    (snapshot.stopChargeAt === undefined ||
+      (typeof snapshot.stopChargeAt === "string" &&
+        Number.isFinite(Date.parse(snapshot.stopChargeAt)))) &&
+    snapshot.accountId === row.account_id &&
+    snapshot.workspaceId === row.workspace_id
+    ? snapshot
+    : null;
+}
+
+/**
+ * Fence the warm-time meter BEFORE requesting provider stop, including free
+ * and shadow usage. The immutable cutoff survives a stop-success/settlement-
+ * failure retry. A failed stop can undercount an idle retry, never count time
+ * after the provider stopped.
+ */
+export async function markWarmBillingStopCutoff(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sandboxGroupId: string; expectedEpoch: number },
+): Promise<Date | null> {
+  return withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [row] = await tx.execute<LeaseRow>(sql`
+        select * from sandbox_leases where workspace_id = ${input.workspaceId}
+          and sandbox_group_id = ${input.sandboxGroupId} for update
+      `);
+        if (
+          !row ||
+          Number(row.lease_epoch) !== input.expectedEpoch ||
+          row.liveness !== "draining" ||
+          (Number(row.refcount) !== 0 && !row.unobservable_command_drain_ids?.length)
+        )
+          return null;
+        const snapshot = warmBillingSnapshot(row);
+        if (row.resume_state?.opengeniWarmBilling && !snapshot)
+          throw new Error("sandbox warm billing snapshot is invalid");
+        if (snapshot?.stopChargeAt) return new Date(snapshot.stopChargeAt);
+        const [stamped] = await tx.execute<{ cutoff: string }>(sql`
+        update sandbox_leases set
+          resume_state = jsonb_set(coalesce(resume_state, '{}'::jsonb),
+            '{opengeniWarmBilling}',
+            coalesce(resume_state->'opengeniWarmBilling',
+              jsonb_build_object('mode', 'usage_only', 'rateMicrosPerSecond', 0,
+                'accountId', account_id, 'workspaceId', workspace_id)) ||
+              jsonb_build_object('stopChargeAt', clock_timestamp()), true),
+          updated_at = now()
+        where id = ${row.id}
+        returning resume_state #>> '{opengeniWarmBilling,stopChargeAt}' as cutoff
+      `);
+        if (!stamped || !Number.isFinite(Date.parse(stamped.cutoff)))
+          throw new Error("sandbox warm billing stop cutoff was not saved");
+        return new Date(stamped.cutoff);
+      }),
+  );
 }
 
 export class SandboxLeaseRecoveryBlockedError extends Error {
@@ -45203,6 +45492,10 @@ async function acquireLeaseOnce(
   const os = input.os ?? "linux";
   const subjectId = input.subjectId ?? null;
   const warmingLeaseTtlMs = input.warmingLeaseTtlMs ?? input.leaseTtlMs;
+  const warmPolicy = input.warmBilling ?? { mode: "usage_only" as const, rateMicrosPerSecond: 0 };
+  if (!Number.isFinite(warmPolicy.rateMicrosPerSecond) || warmPolicy.rateMicrosPerSecond < 0) {
+    throw new Error("sandbox warm rate must be finite and non-negative");
+  }
   return await withRlsContext(
     db,
     { accountId, workspaceId },
@@ -45250,6 +45543,41 @@ async function acquireLeaseOnce(
         if (!row) throw new Error(`Lease row vanished post-insert: ${sandboxGroupId}`);
 
         const liveness = row.liveness;
+        const existingSnapshot = warmBillingSnapshot(row);
+        if (row.resume_state?.opengeniWarmBilling && !existingSnapshot) {
+          throw new Error("sandbox warm billing snapshot is invalid");
+        }
+
+        // Every new paid holder, including direct operations and interaction
+        // controllers, passes the same account funding boundary before it can
+        // elect a spawner, re-arm a drain or prolong a warm lease. Replaying an
+        // existing exact holder does not create new compute authority.
+        const activeMode = input.warmBilling?.mode ?? existingSnapshot?.mode ?? "usage_only";
+        // Reconfiguration may not substitute a new (possibly zero) rate for
+        // an already-running paid provider's immutable admitted tariff.
+        const activeRate =
+          liveness !== "cold" && existingSnapshot?.mode === "credits"
+            ? existingSnapshot.rateMicrosPerSecond
+            : (input.warmBilling?.rateMicrosPerSecond ??
+              existingSnapshot?.rateMicrosPerSecond ??
+              0);
+        if (
+          activeMode === "credits" &&
+          activeRate > 0 &&
+          (liveness === "cold" ||
+            (existingSnapshot?.mode === "credits" && existingSnapshot.rateMicrosPerSecond > 0))
+        ) {
+          const alreadyHeld = await tx.execute<{ held: boolean }>(sql`
+            select exists (select 1 from sandbox_lease_holders
+              where lease_id = ${row.id} and kind = ${kind} and holder_id = ${holderId}) as held
+          `);
+          if (!alreadyHeld[0]?.held) {
+            const balance = await getBillingBalance(tx, accountId);
+            if (balance.balanceMicros <= 0) {
+              throw new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId);
+            }
+          }
+        }
 
         // A workspace-wide billing/cap drain survives this lease becoming cold.
         // Viewer-only admission must consult it while holding the exact lease
@@ -45266,7 +45594,7 @@ async function acquireLeaseOnce(
             where id = ${workspaceId}
           `);
           const reason = workspaceRows[0]?.sandbox_viewer_force_drain_reason ?? null;
-          if (reason !== null) {
+          if (reason === "warm_cap") {
             throw new SandboxViewerAdmissionBlockedError(workspaceId, sandboxGroupId, reason);
           }
         }
@@ -45383,6 +45711,17 @@ async function acquireLeaseOnce(
         // The row lock serializes this holder insertion against the reaper claim:
         // whichever wins first owns the next state without an availability gap.
         if (liveness === "draining") {
+          // Capture may have failed after an earlier stop attempt recorded a
+          // cutoff. This provider was never stopped; a re-armed box must have
+          // a fresh charge horizon when its next drain reaches provider stop.
+          if (warmBillingSnapshot(row)?.stopChargeAt) {
+            await tx.execute(sql`
+              update sandbox_leases
+              set resume_state = resume_state #- '{opengeniWarmBilling,stopChargeAt}',
+                  updated_at = now()
+              where id = ${row.id}
+            `);
+          }
           await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
             subjectId: input.viewerSubjectId ?? null,
             authorityEpoch: input.viewerAuthorityEpoch ?? null,
@@ -45414,6 +45753,17 @@ async function acquireLeaseOnce(
           const casRows = await tx.execute<{ id: string }>(sql`
           update sandbox_leases set
             liveness = 'warming',
+            ${
+              input.warmBilling
+                ? sql`resume_state = coalesce(resume_state, '{}'::jsonb) ||
+              jsonb_build_object('opengeniWarmBilling', ${JSON.stringify({
+                mode: warmPolicy.mode,
+                rateMicrosPerSecond: warmPolicy.rateMicrosPerSecond,
+                accountId,
+                workspaceId,
+              })}::jsonb),`
+                : sql``
+            }
             ${image !== null ? sql`image = ${image},` : sql``}
             ${rigVersionId !== null ? sql`rig_version_id = ${rigVersionId},` : sql``}
             updated_at = now()
@@ -46917,7 +47267,13 @@ export async function commitWarmingToWarm(
           };
         }
 
-        const completedAt = new Date().toISOString();
+        // Warm-time billing and stop cutoffs share the database clock, even
+        // when the worker host's wall clock differs from PostgreSQL's.
+        const [warmClock] = await tx.execute<{ completed_at: Date | string }>(sql`
+          select clock_timestamp() as completed_at
+        `);
+        if (!warmClock) throw new Error("sandbox warm-transition clock unavailable");
+        const completedAt = new Date(warmClock.completed_at).toISOString();
         const recovery: SandboxRecoveryState = rematerialization
           ? {
               provider: {
@@ -46963,7 +47319,17 @@ export async function commitWarmingToWarm(
           input.resumeState ?? null,
           row.resume_state,
         );
-        const resumeStateJson = JSON.stringify(resumeStateWithRecovery(withArchives, recovery));
+        const resumeStateJson = JSON.stringify(
+          resumeStateWithRecovery(
+            {
+              ...(withArchives ?? {}),
+              ...(row.resume_state?.opengeniWarmBilling
+                ? { opengeniWarmBilling: row.resume_state.opengeniWarmBilling }
+                : {}),
+            },
+            recovery,
+          ),
+        );
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             liveness          = 'warm',
@@ -47090,7 +47456,17 @@ export async function recordWarmingSandboxCreated(
           input.resumeState ?? null,
           row.resume_state,
         );
-        const resumeStateJson = JSON.stringify(resumeStateWithRecovery(withArchives, recovery));
+        const resumeStateJson = JSON.stringify(
+          resumeStateWithRecovery(
+            {
+              ...(withArchives ?? {}),
+              ...(row.resume_state?.opengeniWarmBilling
+                ? { opengeniWarmBilling: row.resume_state.opengeniWarmBilling }
+                : {}),
+            },
+            recovery,
+          ),
+        );
         const warmingTtlMs = input.warmingLeaseTtlMs ?? input.leaseTtlMs;
         const providerCreatedAt = input.providerCreatedAt ?? null;
         const providerDeadlineAt = input.providerDeadlineAt ?? null;
@@ -49555,7 +49931,7 @@ export type LeaseHolderHeartbeatStatus =
   | {
       holderAlive: true;
       leaseExtended: false;
-      fence: "epoch" | "liveness" | "rotation_requested";
+      fence: "epoch" | "liveness" | "rotation_requested" | "funding";
     };
 
 export async function heartbeatLeaseHolderStatus(
@@ -49568,6 +49944,7 @@ export async function heartbeatLeaseHolderStatus(
     holderId: string;
     leaseTtlMs: number;
     expectedEpoch: number;
+    billingMode?: "usage_only" | "shadow" | "credits";
   },
 ): Promise<LeaseHolderHeartbeatStatus> {
   if (input.kind === "process") {
@@ -49588,11 +49965,14 @@ export async function heartbeatLeaseHolderStatus(
         // against stale-holder deletion.
         const leases = await tx.execute<{
           id: string;
+          account_id: string;
+          workspace_id: string;
+          resume_state: Record<string, unknown> | null;
           lease_epoch: number | string;
           liveness: SandboxLeaseLiveness;
           rotation_requested_at: Date | string | null;
         }>(sql`
-          select id, lease_epoch, liveness, rotation_requested_at from sandbox_leases
+          select id, account_id, workspace_id, resume_state, lease_epoch, liveness, rotation_requested_at from sandbox_leases
           where workspace_id = ${input.workspaceId}
             and sandbox_group_id = ${input.sandboxGroupId}
           for update
@@ -49624,6 +50004,28 @@ export async function heartbeatLeaseHolderStatus(
             leaseExtended: false,
             fence: "holder_gone",
           };
+        }
+        const snapshot = warmBillingSnapshot(lease);
+        if (lease.resume_state?.opengeniWarmBilling && !snapshot) {
+          throw new Error("sandbox warm billing snapshot is invalid");
+        }
+        // An exhausted balance must not mask an older epoch or a drain/rotation
+        // that requires the client to detach and negotiate a new viewer.
+        if (Number(lease.lease_epoch) !== input.expectedEpoch)
+          return { holderAlive: true, leaseExtended: false, fence: "epoch" };
+        if (lease.liveness !== "warm" && lease.liveness !== "warming")
+          return { holderAlive: true, leaseExtended: false, fence: "liveness" };
+        if (lease.rotation_requested_at !== null)
+          return { holderAlive: true, leaseExtended: false, fence: "rotation_requested" };
+        if (
+          (input.billingMode ?? snapshot?.mode) === "credits" &&
+          snapshot?.mode === "credits" &&
+          snapshot.rateMicrosPerSecond > 0 &&
+          (await getBillingBalance(tx, input.accountId)).balanceMicros <= 0
+        ) {
+          // Touching the holder above is essential: the running writer remains
+          // protected while it winds down. The provider/lease TTL is not renewed.
+          return { holderAlive: true, leaseExtended: false, fence: "funding" };
         }
         // Recheck the same fence in the write even though its row lock is held,
         // keeping the mutation independently auditable and future-proof.
@@ -49667,6 +50069,7 @@ export async function heartbeatLeaseHolder(
     holderId: string;
     leaseTtlMs: number;
     expectedEpoch: number;
+    billingMode?: "usage_only" | "shadow" | "credits";
   },
 ): Promise<boolean> {
   return (await heartbeatLeaseHolderStatus(db, input)).leaseExtended;
@@ -50296,6 +50699,13 @@ export async function enrollUnobservableCommandIdleDrain(
             'quarantined_provider_binding_mismatch')
       `);
     }
+    // A deadline gives a legacy command two minutes after cancellation intent
+    // to exit. Even when the provider cannot signal or observe that command,
+    // capture its current files while the old box still exists. Ordinary idle
+    // containment retains its longer grace.
+    const deadlineStopGraceMs = SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS;
+    const deadlineRotation =
+      initial.rotationReason === "provider_deadline" && initial.rotationRequestedAt !== null;
     // Preserve process -> admission -> lease ordering used by settlement.
     const processes = await rawRows<{
       id: string;
@@ -50329,10 +50739,43 @@ export async function enrollUnobservableCommandIdleDrain(
                     (${input.idleGraceMs}::bigint * interval '1 millisecond')
               )
             )
+            or (
+              ${deadlineRotation}
+              and process.deadline_cancellation_requested_at < now() -
+                (${deadlineStopGraceMs}::bigint * interval '1 millisecond')
+              and process.reconcile_attempts >= 1
+              and (
+                (process.owner_actor_kind = 'turn' and attempt.state = 'closed'
+                  and attempt.quiesced_at is not null
+                  and greatest(attempt.quiesced_at, process.started_at) < now() -
+                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
+                or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
+                  and process.started_at < now() -
+                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
+              )
+            )
           )
-          and attempt.state = 'closed'
-          and greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at), process.started_at) < now() -
-            (${input.idleGraceMs}::bigint * interval '1 millisecond')) as eligible
+          and (attempt.state = 'closed' or (
+            ${deadlineRotation}
+            and process.owner_actor_kind = 'direct' and process.owner_attempt_id is null))
+          and (
+            (attempt.state = 'closed' and
+              greatest(coalesce(attempt.quiesced_at, attempt.closed_at, attempt.updated_at), process.started_at) < now() -
+                (${input.idleGraceMs}::bigint * interval '1 millisecond'))
+            or (
+              ${deadlineRotation}
+              and process.deadline_cancellation_requested_at < now() -
+                (${deadlineStopGraceMs}::bigint * interval '1 millisecond')
+              and (
+                (process.owner_actor_kind = 'turn' and attempt.quiesced_at is not null
+                  and greatest(attempt.quiesced_at, process.started_at) < now() -
+                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
+                or (process.owner_actor_kind = 'direct' and process.owner_attempt_id is null
+                  and process.started_at < now() -
+                    (${deadlineStopGraceMs}::bigint * interval '1 millisecond'))
+              )
+            )
+          )) as eligible
       from sandbox_retained_processes process
       left join session_turn_attempts attempt on attempt.id = process.owner_attempt_id
         and attempt.workspace_id = process.workspace_id and attempt.session_id = process.session_id
@@ -50383,7 +50826,13 @@ export async function enrollUnobservableCommandIdleDrain(
     )
       return null;
     if (!enrolled) {
-      if (lease.archive_capture_id !== null || (await hasSandboxGroupAttemptActivityTx(tx, input)))
+      if (
+        lease.archive_capture_id !== null ||
+        (await hasSandboxGroupAttemptActivityTx(tx, {
+          ...input,
+          idleGraceMs: deadlineRotation ? deadlineStopGraceMs : input.idleGraceMs,
+        }))
+      )
         return null;
       await tx.execute(sql`
         update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
@@ -50695,15 +51144,40 @@ export async function reArmDrainingLease(
     workspaceId: string;
     sandboxGroupId: string;
     leaseTtlMs: number;
+    warmBilling?: AcquireLeaseInput["warmBilling"];
   },
 ): Promise<{ rearmed: boolean }> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const rows = await scopedDb.execute<{ id: string }>(sql`
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [lease] = await tx.execute<LeaseRow>(sql`
+        select * from sandbox_leases
+        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        for update
+      `);
+        if (!lease || lease.liveness !== "draining") return { rearmed: false };
+        const snapshot = warmBillingSnapshot(lease);
+        if (lease.resume_state?.opengeniWarmBilling && !snapshot) {
+          throw new Error("sandbox warm billing snapshot is invalid");
+        }
+        const activeMode = input.warmBilling?.mode ?? snapshot?.mode ?? "usage_only";
+        if (
+          activeMode === "credits" &&
+          (snapshot
+            ? snapshot.mode === "credits" && snapshot.rateMicrosPerSecond > 0
+            : input.warmBilling?.rateMicrosPerSecond !== undefined &&
+              input.warmBilling.rateMicrosPerSecond > 0) &&
+          (await getBillingBalance(tx, input.accountId)).balanceMicros <= 0
+        ) {
+          throw new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId);
+        }
+        const rows = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           liveness = 'warm',
+          resume_state = resume_state #- '{opengeniWarmBilling,stopChargeAt}',
           expires_at = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
           updated_at = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
@@ -50729,8 +51203,8 @@ export async function reArmDrainingLease(
           )
         returning id
       `);
-      return { rearmed: rows.length > 0 };
-    },
+        return { rearmed: rows.length > 0 };
+      }),
   );
 }
 
@@ -51102,6 +51576,9 @@ export type SandboxRetainedProcess = {
   reconcileClaimedAt: string | null;
   reconcileAttempts: number;
   lastReconcileOutcome: string | null;
+  cancellationRequestedAt: string | null;
+  cancellationReason: string | null;
+  deadlineCancellationRequestedAt: string | null;
   reconcileProofOutcome: "exited" | "lost" | null;
   reconcileProofExitCode: number | null;
   reconcileProofReason:
@@ -51450,6 +51927,9 @@ function mapRetainedProcess(
     reconcileClaimedAt: row.reconcileClaimedAt?.toISOString() ?? null,
     reconcileAttempts: row.reconcileAttempts,
     lastReconcileOutcome: row.lastReconcileOutcome ?? null,
+    cancellationRequestedAt: row.cancellationRequestedAt?.toISOString() ?? null,
+    cancellationReason: row.cancellationReason ?? null,
+    deadlineCancellationRequestedAt: row.deadlineCancellationRequestedAt?.toISOString() ?? null,
     reconcileProofOutcome: row.reconcileProofOutcome ?? null,
     reconcileProofExitCode: row.reconcileProofExitCode ?? null,
     reconcileProofReason:
@@ -60664,7 +61144,7 @@ export async function revokeViewer(
 // re-dispatched/overlapping tick at the same (group,epoch,tick) can never
 // double-charge (recordUsageEvent is onConflictDoNothing on idempotencyKey).
 //
-// Cursor advance + usage insert are ATOMIC: both run inside ONE FOR UPDATE txn on
+// Cursor advance + usage insert + paid settlement are ATOMIC: all run inside ONE FOR UPDATE txn on
 // the lease row (the M3 cross-statement-atomicity fix). The insert uses ON
 // CONFLICT DO NOTHING on idempotency_key (matching recordUsageEvent), and the
 // cursor (last_meter_at/last_meter_tick) is advanced in the SAME txn — so the tick
@@ -60680,23 +61160,18 @@ export interface AccrueWarmSecondsResult {
   seconds: number;
   /** The monotonic tick index this accrual was recorded under. */
   tick: number;
-  /** usd_micros charged for this tick (0 when rate is 0). */
+  /** Internal usd_micros estimate for this tick (0 in usage_only mode). */
   costMicros: number;
 }
 
 /**
  * Accrue warm-seconds for the elapsed wall-clock since the lease's last meter
  * cursor, idempotent on (sandbox_group_id, lease_epoch, tick). EPOCH-FENCED +
- * liveness-guarded (warm only): a stale-epoch tick or a draining/cold lease is a
- * no-op, so a superseded writer that re-fires cannot mis-meter. The FIRST tick on
- * a never-metered lease (last_meter_at IS NULL) only SEEDS the cursor — it
- * accrues nothing (there is no prior cursor to diff against), matching the
- * "delta since last tick" contract. warmRateMicrosPerSecond > 0 also records a
- * sandbox.warm_cost event (cost = seconds x rate) AND debits the same micros from
- * the credit balance via applyCreditDebitUpToBalance (the model-cost precedent),
- * idempotent on the SAME (group, epoch, tick) key. The usage event is the
- * REQUESTED cost; the ledger is the ACTUAL debit (they legitimately differ when
- * balance is low — M2). Set debitCredits:false to meter without debiting.
+ * liveness-guarded (warm, or draining for a final provider-stop tick). The first
+ * interval begins at the warm transition's recovery timestamp. A draining tick
+ * is only allowed by the provider-stop path, never by the periodic reaper list.
+ * In credits mode the signed full-cost ledger debit, both usage rows and cursor
+ * commit together; a settlement failure rolls back the tick for retry.
  */
 export async function accrueWarmSeconds(
   db: Database,
@@ -60711,9 +61186,9 @@ export async function accrueWarmSeconds(
     /** Optional attribution: the founding/observing session (visibility only — the
      *  group meter key makes the workspace charge correct regardless). */
     subjectId?: string | null;
-    /** Debit credits for warm-cost (default true). The force-drain at 0 balance
-     *  depends on this decrementing the balance. */
-    debitCredits?: boolean;
+    billingMode?: "usage_only" | "shadow" | "credits";
+    /** Final provider-stop tick, after provider termination and before cold CAS. */
+    finalDrain?: boolean;
   },
 ): Promise<AccrueWarmSecondsResult> {
   const none: AccrueWarmSecondsResult = {
@@ -60731,10 +61206,8 @@ export async function accrueWarmSeconds(
         // Lock the group's lease row so the cursor advance + the usage insert are
         // one atomic step (no other tick can interleave between the diff and the
         // cursor write).
-        const rows = await tx.execute<LeaseRow & { meter_elapsed_s: number | null }>(sql`
-        select *,
-          case when last_meter_at is null then null
-               else floor(extract(epoch from (now() - last_meter_at)))::int end as meter_elapsed_s
+        const rows = await tx.execute<LeaseRow>(sql`
+        select *
         from sandbox_leases
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
         for update
@@ -60742,30 +61215,78 @@ export async function accrueWarmSeconds(
         const row = rows[0];
         if (!row) return none;
 
-        // Epoch fence + liveness guard: only a live-epoch warm box meters. A stale
-        // (superseded) tick or a draining/cold/warming lease is a no-op.
-        if (Number(row.lease_epoch) !== input.expectedEpoch || row.liveness !== "warm") {
+        // An ordinary heartbeat must never charge a box already draining.
+        if (
+          Number(row.lease_epoch) !== input.expectedEpoch ||
+          (row.liveness !== "warm" && !(input.finalDrain && row.liveness === "draining"))
+        ) {
           return none;
         }
 
-        // First tick on a never-metered lease: SEED the cursor, accrue nothing.
-        if (row.last_meter_at == null) {
+        // commitWarmingToWarm stores this timestamp in the recovery envelope
+        // before changing the lease to warm. The legacy cursor is nullable and
+        // survives a new epoch: never start a new epoch at the previous box's
+        // cursor. Refuse an invalid/missing transition timestamp instead of
+        // charging an arbitrary cold/warming interval.
+        const recovery = row.resume_state?.opengeniRecovery as
+          | { restore?: { completedAt?: unknown } }
+          | undefined;
+        const warmStartedAt = recovery?.restore?.completedAt;
+        const warmStartMs = typeof warmStartedAt === "string" ? Date.parse(warmStartedAt) : NaN;
+        const snapshot = warmBillingSnapshot(row);
+        if (row.resume_state?.opengeniWarmBilling && !snapshot) {
+          throw new Error("sandbox warm billing snapshot is invalid");
+        }
+        // A current usage_only/shadow policy is a rollback switch for a paid
+        // lease. In credits mode, only a box explicitly snapshotted as paid may
+        // debit; pre-activation legacy boxes cannot acquire surprise charges.
+        const mode =
+          input.billingMode === "credits"
+            ? (snapshot?.mode ?? "usage_only")
+            : (input.billingMode ?? snapshot?.mode ?? "usage_only");
+        const rate = snapshot?.rateMicrosPerSecond ?? input.warmRateMicrosPerSecond;
+        if (!Number.isFinite(warmStartMs) && mode === "credits" && rate > 0) {
+          throw new Error("paid warm lease has no valid warm-transition timestamp");
+        }
+        if (!Number.isFinite(warmStartMs) && row.last_meter_at == null) {
+          // Legacy unpriced leases cannot prove their first warm instant. Seed
+          // only these rows; new warm transitions carry an exact recovery clock.
           await tx.execute(sql`
-          update sandbox_leases set last_meter_at = now(), updated_at = now()
-          where id = ${row.id}
-        `);
+            update sandbox_leases set last_meter_at = now(), updated_at = now()
+            where id = ${row.id}
+          `);
           return none;
         }
+        const cursorMs = row.last_meter_at ? new Date(row.last_meter_at).getTime() : 0;
+        const startMs = Number.isFinite(warmStartMs) ? Math.max(cursorMs, warmStartMs) : cursorMs;
+        if (input.finalDrain && !snapshot?.stopChargeAt) {
+          throw new Error("sandbox final tick has no durable stop cutoff");
+        }
+        const upperBound =
+          snapshot?.stopChargeAt && input.finalDrain
+            ? sql`${snapshot.stopChargeAt}::timestamptz`
+            : sql`clock_timestamp()`;
+        const elapsedRows = await tx.execute<{ elapsed_ms: number | string }>(sql`
+          select greatest(0, floor(extract(epoch from (${upperBound} -
+            ${new Date(startMs).toISOString()}::timestamptz)) * 1000))::bigint as elapsed_ms
+        `);
+        const elapsedMs = Number(elapsedRows[0]?.elapsed_ms ?? 0);
+        const elapsedS = Math.floor(elapsedMs / 1000);
 
-        const elapsedS = Number(row.meter_elapsed_s ?? 0);
-        if (elapsedS <= 0) {
+        if (elapsedS <= 0 && !(input.finalDrain && elapsedMs > 0)) {
           // No whole second elapsed yet — leave the cursor untouched so the
           // remainder accrues on the next tick (no silent seconds loss).
           return none;
         }
 
         const tick = Number(row.last_meter_tick) + 1;
-        const costMicros = Math.round(elapsedS * Math.max(0, input.warmRateMicrosPerSecond));
+        const costMicros =
+          mode === "usage_only"
+            ? 0
+            : Math.round((input.finalDrain ? elapsedMs / 1000 : elapsedS) * rate);
+        if (!Number.isSafeInteger(costMicros) || costMicros < 0) {
+          throw new Error("warm-cost estimate exceeds safe integer micros");
+        }
 
         // (1) The warm-seconds meter — GROUP+epoch+tick keyed, ON CONFLICT DO
         // NOTHING (the idempotency that makes a shared box one stream + a re-fire a
@@ -60773,19 +61294,22 @@ export async function accrueWarmSeconds(
         await tx.execute(sql`
         insert into usage_events
           (account_id, workspace_id, subject_id, event_type, quantity, unit,
-           source_resource_type, source_resource_id, idempotency_key, occurred_at)
+           source_resource_type, source_resource_id, idempotency_key, initiator_context, occurred_at)
         values
           (${input.accountId}, ${input.workspaceId}, ${input.subjectId ?? null},
            'sandbox.warm_seconds', ${elapsedS}, 'seconds',
            'sandbox_lease', ${`${input.sandboxGroupId}:${input.expectedEpoch}`},
            ${`usage:sandbox.warm_seconds:${input.sandboxGroupId}:${input.expectedEpoch}:${tick}`},
-           now())
+           ${JSON.stringify(mode === "shadow" ? { warmCostShadowMicros: costMicros } : {})}::jsonb, now())
         on conflict (idempotency_key) do nothing
       `);
 
-        // (2) The warm-cost meter (only when a rate is configured). Same keying.
-        if (costMicros > 0) {
-          await tx.execute(sql`
+        // (2) Only credits mode publishes actual warm spend. Shadow's internal
+        // estimate rides the seconds event, never a public spend event.
+        let settledCostMicros = costMicros;
+        if (costMicros > 0 && mode === "credits") {
+          const costKey = `usage:sandbox.warm_cost:${input.sandboxGroupId}:${input.expectedEpoch}:${tick}`;
+          const inserted = await tx.execute<{ quantity: number | string }>(sql`
           insert into usage_events
             (account_id, workspace_id, subject_id, event_type, quantity, unit,
              source_resource_type, source_resource_id, idempotency_key, occurred_at)
@@ -60793,62 +61317,65 @@ export async function accrueWarmSeconds(
             (${input.accountId}, ${input.workspaceId}, ${input.subjectId ?? null},
              'sandbox.warm_cost', ${costMicros}, 'usd_micros',
              'sandbox_lease', ${`${input.sandboxGroupId}:${input.expectedEpoch}`},
-             ${`usage:sandbox.warm_cost:${input.sandboxGroupId}:${input.expectedEpoch}:${tick}`},
+             ${costKey},
              now())
           on conflict (idempotency_key) do nothing
+          returning quantity
         `);
+          // Replayed historical cursor writes must settle the originally
+          // recorded tick, not today's recalculated interval or new tariff.
+          const previous = inserted[0]
+            ? null
+            : await tx.execute<{ quantity: number | string }>(sql`
+                select quantity from usage_events
+                where idempotency_key = ${costKey}
+                  and account_id = ${input.accountId}
+                  and workspace_id = ${input.workspaceId}
+                  and event_type = 'sandbox.warm_cost'
+              `);
+          settledCostMicros = Number((inserted[0] ?? previous?.[0])?.quantity ?? 0);
+          if (!Number.isSafeInteger(settledCostMicros) || settledCostMicros <= 0) {
+            throw new Error("warm-cost tick idempotency key conflicts with another usage event");
+          }
+        }
+
+        if (costMicros > 0 && mode === "credits") {
+          await applyCreditDebitAfterUse(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            type: "sandbox.warm_cost",
+            amountMicros: settledCostMicros,
+            sourceType: "sandbox_lease",
+            sourceId: `${input.sandboxGroupId}:${input.expectedEpoch}`,
+            idempotencyKey: `debit:sandbox.warm_cost:${input.sandboxGroupId}:${input.expectedEpoch}:${tick}`,
+          });
         }
 
         // (3) Advance the cursor IN THE SAME TXN — the atomicity that makes the tick
         // index and the metered seconds inseparable.
         await tx.execute(sql`
         update sandbox_leases set
-          last_meter_at = now(), last_meter_tick = ${tick}, updated_at = now()
+          last_meter_at = ${new Date(startMs).toISOString()}::timestamptz + (${String(input.finalDrain ? elapsedMs : elapsedS * 1000)} || ' milliseconds')::interval,
+          last_meter_tick = ${tick}, updated_at = now()
         where id = ${row.id}
       `);
 
-        return { accrued: true, seconds: elapsedS, tick, costMicros };
+        return { accrued: true, seconds: elapsedS, tick, costMicros: settledCostMicros };
       }),
   );
-
-  // Debit credits for the warm-cost OUTSIDE the lease-row txn (applyCreditDebit
-  // takes its own per-account advisory lock — never nest it under the lease row
-  // lock). Idempotent on the SAME (group, epoch, tick) key so a re-fire of an
-  // already-committed tick cannot double-debit. The ledger records the ACTUAL
-  // debit (min(requested, balance)); the warm_cost usage event above is the
-  // requested cost.
-  if (result.accrued && result.costMicros > 0 && (input.debitCredits ?? true)) {
-    await applyCreditDebitUpToBalance(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      type: "sandbox.warm_cost",
-      requestedAmountMicros: result.costMicros,
-      sourceType: "sandbox_lease",
-      sourceId: `${input.sandboxGroupId}:${input.expectedEpoch}`,
-      idempotencyKey: `debit:sandbox.warm_cost:${input.sandboxGroupId}:${input.expectedEpoch}:${result.tick}`,
-    }).catch(() => undefined);
-  }
 
   return result;
 }
 
-// §2.2/2.3 — the per-workspace warm-cap + force-drain. Under the EXISTING usage
-// lock (withWorkspaceUsageLock — NOT a bare count, so two concurrent ticks in
-// different sessions of one workspace can't both read "under cap" and race past
-// it). A workspace at 0 balance OR over its warm-second cap force-drains its
-// VIEWER-ONLY boxes: CAS warm->draining guarded `AND turn_holders = 0` so a box
-// with a running (paying) turn is NEVER killed. The reaper then issues the
-// provider stop() at refcount 0 (this fn is DB-only — no provider call).
-//
-// Group-wide force-drain on workspace balance exhaustion is deliberate (one
-// balance drains a multi-session box): the workspace, not the session, is the
-// billing unit — correctness (charged once) is automatic from the group meter key.
+// §2.2/2.3 — independent optional warm quota. Exhausted credits are enforced
+// at paid admission; they never cancel an already active holder. The cap can
+// close new viewer admission but only idle, holderless boxes may drain.
 export interface ForceDrainResult {
-  /** Whether the workspace was over a limit (0 balance or over the warm cap). */
+  /** Whether the workspace exceeded its optional warm cap. */
   overLimit: boolean;
   /** The reason, for observability. */
   reason: SandboxViewerForceDrainReason | null;
-  /** The (workspaceId, sandboxGroupId) viewer-only boxes CASed warm->draining. */
+  /** The (workspaceId, sandboxGroupId) holderless boxes CASed warm->draining. */
   drained: { workspaceId: string; sandboxGroupId: string }[];
 }
 
@@ -60863,8 +61390,7 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
   db: Database,
   input: {
     workspaceId: string;
-    /** account balance gate: when <= 0 (and a billing/managed mode is on) drain. */
-    balanceMicros: number;
+    /** Legacy caller option; balance belongs to paid admission, not draining. */
     enforceBalance: boolean;
     /** warm-second cap (cumulative this UTC month). 0 = unbounded (no cap gate). */
     maxWarmSecondsPerWorkspace: number;
@@ -60879,9 +61405,7 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
     // Determine over-limit under the lock (so the cap read + the drain are one
     // serialized critical section per workspace).
     let reason: SandboxViewerForceDrainReason | null = null;
-    if (input.enforceBalance && input.balanceMicros <= 0) {
-      reason = "balance";
-    } else if (input.maxWarmSecondsPerWorkspace > 0) {
+    if (input.maxWarmSecondsPerWorkspace > 0) {
       const since = input.capWindowStart ?? startOfUtcMonthDefault();
       const [{ total } = { total: 0 }] = await scopedDb
         .select({
@@ -60914,10 +61438,8 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
       return { overLimit: false, reason: null, drained: [] };
     }
 
-    // Publish the workspace-wide admission gate before touching any holder.
-    // A concurrent viewer that already owns the lease lock may complete first;
-    // the locked drain below then deletes that holder. Every later viewer sees
-    // this committed intent before it can re-arm or spawn a provider box.
+    // Publish a cap-only gate; no paid-balance gate survives a top-up or mode
+    // change. An already active holder keeps the provider alive.
     await scopedDb.execute(sql`
       update workspaces set
         sandbox_viewer_force_drain_reason = ${reason},
@@ -60935,94 +61457,30 @@ export async function forceDrainOverLimitViewerOnlyBoxes(
         )
     `);
 
-    // Canonical holder-mutation order is lease -> holder. Lock the exact
-    // passive-only candidates before deleting their holder rows so this path
-    // cannot deadlock with the global reaper or race a concurrent acquire.
+    // Lock only holderless candidates. Neither the cap nor a zero balance may
+    // mark an active Browser/ComputerSession, viewer, direct op or process lost.
     await scopedDb.execute(sql`
-      select id from sandbox_leases
-      where workspace_id = ${input.workspaceId}
-        and liveness = 'warm' and turn_holders = 0
+      select lease.id from sandbox_leases lease
+      where lease.workspace_id = ${input.workspaceId}
+        and lease.liveness = 'warm' and lease.refcount = 0
+        and not exists (select 1 from sandbox_lease_holders h where h.lease_id = lease.id)
       order by id
       for update
     `);
-
-    // Force-drain passive-only warm boxes: CAS warm->draining guarded
-    // turn_holders = 0 (a paying turn is NEVER killed). Stamp the grace deadline
-    // so the reaper terminates at refcount 0 past the grace, exactly as a normal
-    // refcount->0 drain would.
-    // An interaction cannot keep a placement controller alive after the
-    // workspace cost boundary has force-drained it. Make BrowserSession and
-    // ComputerSession loss visible before removing their holders; later
-    // recovery is explicit admission, never a silent resurrection.
-    const lostBrowsers = await scopedDb.execute<{ id: string }>(sql`
-      update browser_sessions browser set
-        lifecycle = 'lost',
-        controller_id = null,
-        controller_generation = null,
-        placement_instance_id = null,
-        controller_heartbeat_at = null,
-        failure_code = 'workspace_force_drained',
-        updated_at = now()
-      where browser.workspace_id = ${input.workspaceId}
-        and browser.lifecycle in ('starting', 'active', 'suspending', 'restoring', 'ending')
-        and browser.controller_host_sandbox_group_id in (
-          select sandbox_group_id from sandbox_leases
-          where workspace_id = ${input.workspaceId}
-            and liveness = 'warm' and turn_holders = 0
-        )
-      returning browser.id
-    `);
-    const lostComputers = await scopedDb.execute<{ id: string }>(sql`
-      update computer_sessions computer set
-        lifecycle = 'lost',
-        controller_id = null,
-        controller_generation = null,
-        placement_instance_id = null,
-        controller_heartbeat_at = null,
-        failure_code = 'workspace_force_drained',
-        updated_at = now()
-      where computer.workspace_id = ${input.workspaceId}
-        and computer.lifecycle in ('starting', 'active', 'suspending', 'restoring', 'ending')
-        and computer.sandbox_group_id in (
-          select sandbox_group_id from sandbox_leases
-          where workspace_id = ${input.workspaceId}
-            and liveness = 'warm' and turn_holders = 0
-        )
-      returning computer.id
-    `);
-    if (lostBrowsers.length > 0 || lostComputers.length > 0) {
-      await scopedDb.execute(sql`
-        update workspace_interaction_revisions set
-          revision = revision + 1,
-          updated_at = now()
-        where workspace_id = ${input.workspaceId}
-      `);
-    }
-    // Drop viewer and interaction holders of every passive-only lease. Scoped
-    // through the locked warm rows so a turn-held box remains untouched.
-    await scopedDb.execute(sql`
-      delete from sandbox_lease_holders h
-      where h.kind in ('viewer', 'interaction')
-        and h.lease_id in (
-          select id from sandbox_leases
-          where workspace_id = ${input.workspaceId}
-            and liveness = 'warm' and turn_holders = 0
-        )
-    `);
-    // CAS the now-holderless leases warm→draining at refcount 0 with the grace
-    // deadline stamped — so the SAME reaper sweep's refcount=0 drain predicate
-    // then terminates the box.
+    // Normal release/reaper already drains holderless boxes. This CAS is a
+    // bounded accelerator only; it cannot delete an active holder.
     const drained = await rawRows<{ sandbox_group_id: string }>(
       scopedDb,
       sql`
-      update sandbox_leases set
+      update sandbox_leases lease set
         liveness = 'draining',
         refcount = 0, turn_holders = 0, viewer_holders = 0,
         expires_at = now() + (${String(input.idleGraceMs)} || ' milliseconds')::interval,
         updated_at = now()
-      where workspace_id = ${input.workspaceId}
-        and liveness = 'warm' and turn_holders = 0
-      returning sandbox_group_id
+      where lease.workspace_id = ${input.workspaceId}
+        and lease.liveness = 'warm' and lease.refcount = 0
+        and not exists (select 1 from sandbox_lease_holders h where h.lease_id = lease.id)
+      returning lease.sandbox_group_id
     `,
     );
 

@@ -38,6 +38,7 @@ import { createApp } from "../../apps/api/src/app";
 import { apiRequestBindingsForTransportPeer } from "../../apps/api/src/http/request-source";
 import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics";
 import { createAccountReadDiagnostics } from "./browser-account-read-diagnostics";
+import { observeReloadCapabilities } from "./browser-account-reload-barrier";
 import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
 import {
   observeCapabilityResume,
@@ -4412,6 +4413,7 @@ describe("provider-neutral browser account acceptance", () => {
     const otherPage = await otherBrowserSet.newPage();
     const pageProblems = observeBrowser(page);
     let capabilityResumeObserver: Awaited<ReturnType<typeof observeCapabilityResume>> | undefined;
+    let reloadCapabilityObserver: ReturnType<typeof observeReloadCapabilities> | undefined;
     let capabilityResumeEvidence: CapabilityResumeEvidence | undefined;
     let capabilityMatcherEvidence: ReturnType<typeof capabilityMatcherDiagnostics> | undefined;
     const consumedCapabilityResumeRequests = new Set<string>();
@@ -4823,6 +4825,17 @@ describe("provider-neutral browser account acceptance", () => {
           select auth_session_id from managed_auth_login_slots where id = ${alphaSlot.id}
         )`;
       const slotRevocationReloadStartedAt = performance.now();
+      const resumeCapabilityUrl = `${publicOrigin}/v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`;
+      // Firefox does not emit these native HTTP console errors. Preserve its
+      // existing strict ledgers; this barrier joins Chromium/WebKit delivery.
+      if (engine !== "firefox") {
+        reloadCapabilityObserver = observeReloadCapabilities(page, {
+          url: resumeCapabilityUrl,
+          actorEpoch: projectionBeforeSlotRevocation.actorEpoch,
+          actorEpochHeader: MANAGED_AUTH_ACTOR_EPOCH_HEADER,
+          phase: () => pageProblems.phase,
+        });
+      }
       await page.reload({ waitUntil: "domcontentloaded" });
       await accountMenuTrigger(page, beta.displayName).waitFor();
       await retirePendingReadsAfterConfirmedDocumentReplacement(page, pageProblems, {
@@ -4837,16 +4850,19 @@ describe("provider-neutral browser account acceptance", () => {
       await expectAndConsumeConsoleErrors(
         page,
         pageProblems,
-        [
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
-          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
-        ],
+        async () => {
+          await reloadCapabilityObserver?.wait();
+          return [
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+            `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+          ];
+        },
         [],
       );
-      const resumeCapabilityUrl = `${publicOrigin}/v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`;
+      reloadCapabilityObserver?.dispose();
       pageProblems.capabilityDiagnostics.boundary(pageProblems.phase, "resume-arm-begin");
       capabilityResumeObserver = await observeCapabilityResume(page, {
         url: resumeCapabilityUrl,
@@ -5261,6 +5277,7 @@ describe("provider-neutral browser account acceptance", () => {
         console.warn("Capability diagnostic evidence could not be fully persisted.");
       }
       await capabilityResumeObserver?.dispose();
+      reloadCapabilityObserver?.dispose();
       await context.close().catch(() => undefined);
       await otherBrowserSet.close().catch(() => undefined);
       await independentBrowser.close().catch(() => undefined);

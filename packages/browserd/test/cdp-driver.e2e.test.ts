@@ -10,8 +10,84 @@ import type {
 } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
 import { AgentBrowserDriver, AgentBrowserJsonRunner, imageDimensions } from "../src";
+import { CdpConnection } from "../src/cdp";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
+const headedE2e = process.env.OPENGENI_BROWSERD_HEADED_E2E === "1" ? test : test.skip;
+
+headedE2e(
+  "foregrounds a headed managed tab before frame-scheduled interaction",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-headed-tab-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `headed_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: true,
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+      foregroundManagedTabs: true,
+    });
+    let cdp: CdpConnection | null = null;
+    try {
+      const first = await driver.start(fixture("First"));
+      const opened = await driver.openTarget(
+        dataUrl(`<!doctype html>
+        <title>Deferred control</title>
+        <button onclick="requestAnimationFrame(() => { this.textContent = 'Deferred 1' })">Deferred 0</button>`),
+      );
+      const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+      cdp = await CdpConnection.connect(endpoint.cdpUrl);
+      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: opened.target.id,
+        flatten: true,
+      });
+      const visible = await cdp.send<{ result: { value: string } }>(
+        "Runtime.evaluate",
+        {
+          expression: "document.visibilityState",
+          returnByValue: true,
+        },
+        { sessionId: attached.sessionId },
+      );
+      expect(visible.result.value).toBe("visible");
+      let clicked = await driver.dispatch(
+        command(opened, {
+          type: "click",
+          locator: { kind: "role", role: "button", name: "Deferred 0" },
+        }),
+      );
+      for (let attempt = 0; attempt < 20 && !names(clicked).includes("Deferred 1"); attempt += 1) {
+        await Bun.sleep(25);
+        clicked = await driver.observe(opened.target.id);
+      }
+      expect(names(clicked)).toContain("Deferred 1");
+      await driver.selectTarget(first.target.id);
+      const screenshot = await driver.captureScreenshot(first.target.id);
+      expect([...screenshot.data.slice(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+      const selected = await cdp.send<{ result: { value: string } }>(
+        "Runtime.evaluate",
+        {
+          expression: "document.visibilityState",
+          returnByValue: true,
+        },
+        { sessionId: attached.sessionId },
+      );
+      expect(selected.result.value).toBe("hidden");
+    } finally {
+      cdp?.close();
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
 
 e2e(
   "drives independent Chrome targets through the target-scoped causal controller",

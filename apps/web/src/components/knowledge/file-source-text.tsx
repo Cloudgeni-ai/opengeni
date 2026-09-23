@@ -2,6 +2,7 @@ import type { KnowledgeEntryRecord, KnowledgeEntrySummary } from "@opengeni/sdk"
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
+import { KnowledgeIndexNotice } from "./knowledge-index-status";
 
 /** Show the readable content beside its original, without a second upload surface. */
 export function FileSourceText({ workspaceId, fileId }: { workspaceId: string; fileId: string }) {
@@ -11,6 +12,13 @@ export function FileSourceText({ workspaceId, fileId }: { workspaceId: string; f
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refresh, setRefresh] = useState(0);
+  // A funding wait keeps the same saved revision. Reflect worker progress after
+  // a top-up without requiring the reader to leave and reopen the file.
+  useEffect(() => {
+    if (!sources.some((source) => source.indexStatus && source.indexStatus !== "indexed")) return;
+    const timer = setTimeout(() => setRefresh((value) => value + 1), 30_000);
+    return () => clearTimeout(timer);
+  }, [sources]);
   useEffect(() => {
     let current = true;
     setLoading(true);
@@ -82,9 +90,15 @@ export function FileSourceText({ workspaceId, fileId }: { workspaceId: string; f
           Loading text…
         </p>
       ) : !sources.length && !error ? (
-        <p className="py-6 text-sm text-fg-muted">
-          No published text is available yet. You can still open the original file.
-        </p>
+        <div className="py-6 text-sm text-fg-muted">
+          <p>
+            No published text is available yet. The original remains accessible; text preparation
+            may still be underway.
+          </p>
+          <Button variant="ghost" size="sm" onClick={() => setRefresh((value) => value + 1)}>
+            Check again
+          </Button>
+        </div>
       ) : null}
       {cursor ? (
         <Button variant="outline" disabled={loading} onClick={() => void more()}>
@@ -125,6 +139,7 @@ function SourcePassage({
   return (
     <section className="grid gap-3">
       <h3 className="text-sm font-medium">{source.revision.title}</h3>
+      <KnowledgeIndexNotice status={source.indexStatus} workspaceId={workspaceId} />
       {error ? (
         <p role="alert" className="text-sm text-status-error">
           {error}{" "}

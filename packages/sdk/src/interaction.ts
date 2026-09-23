@@ -802,6 +802,17 @@ export type BrowserObservation = {
   frameId: string | null;
   semantic: InteractionSemanticSnapshot | InteractionSemanticDiff | null;
   screenshot: RetainedArtifactReference | null;
+  viewport?:
+    | {
+        width: number;
+        height: number;
+        visualWidth: number;
+        visualHeight: number;
+        deviceScaleFactor: number;
+        maxTouchPoints: number;
+      }
+    | null
+    | undefined;
   focusedRef: string | null;
   changedRegions: InteractionRect[];
   diagnostics: InteractionDiagnosticSummary;
@@ -863,6 +874,15 @@ export type BrowserPermissionSetting = "granted" | "denied" | "prompt";
 
 export type BrowserAction =
   | { type: "navigate"; url: string }
+  | { type: "history"; direction: "back" | "forward" }
+  | { type: "activate" }
+  | {
+      type: "viewport";
+      width: number;
+      height: number;
+      mobile: boolean;
+      deviceScaleFactor?: number | undefined;
+    }
   | {
       type: "click";
       locator: BrowserLocator;
@@ -1475,6 +1495,12 @@ export interface InteractionTransport {
     targetId: string,
     options?: OpenGeniRequestOptions,
   ): Promise<BrowserObservation>;
+  captureBrowserTarget(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<BrowserFrame>;
   actInBrowser(
     workspaceId: string,
     browserSessionId: string,
@@ -2119,6 +2145,10 @@ export class BrowserSessionResource {
     options: OpenGeniRequestOptions = {},
   ): Promise<BrowserObservation> {
     return await this.transport.observeBrowserTarget(this.workspaceId, this.id, targetId, options);
+  }
+
+  async capture(targetId: string, options: OpenGeniRequestOptions = {}): Promise<BrowserFrame> {
+    return await this.transport.captureBrowserTarget(this.workspaceId, this.id, targetId, options);
   }
 
   async act(

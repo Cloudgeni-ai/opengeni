@@ -222,6 +222,8 @@ export async function listSkillRecords(
     revisionId?: string;
     limit?: number;
     metadataOnly?: boolean;
+    /** Pending revisions authored by this exact session, independent of event retention. */
+    sessionId?: string;
     after?: { stableKey: string; id: string };
   } = {},
 ): Promise<SkillRecord[]> {
@@ -260,7 +262,7 @@ export async function listSkillRecords(
         SELECT candidate.* FROM preference_registry_revisions candidate
         WHERE candidate.preference_id=h.id AND candidate.account_id=h.account_id
           AND (${options.revisionId ?? null}::uuid IS NULL OR candidate.id=${options.revisionId ?? null}::uuid)
-        ORDER BY (candidate.id=h.active_revision_id) DESC NULLS LAST,candidate.revision DESC LIMIT 1
+        ORDER BY (${options.sessionId ?? null}::uuid IS NULL AND candidate.id=h.active_revision_id) DESC NULLS LAST,candidate.revision DESC LIMIT 1
       ) r ON true
       LEFT JOIN skill_source_bindings b ON b.preference_id=h.id AND b.account_id=h.account_id
         AND b.workspace_id=${context.workspaceId}::uuid
@@ -269,6 +271,17 @@ export async function listSkillRecords(
           OR (h.scope='user' AND h.scope_subject_id=${context.subjectId ?? null}))
         AND (${options.skillId ?? null}::uuid IS NULL OR h.id=${options.skillId ?? null}::uuid)
         AND (${options.revisionId ?? null}::uuid IS NULL OR r.id IS NOT NULL)
+        AND (${options.sessionId ?? null}::uuid IS NULL OR EXISTS (
+          SELECT 1 FROM skill_write_receipts origin
+          WHERE origin.account_id=h.account_id AND origin.workspace_id=${context.workspaceId}::uuid
+            AND origin.actor->>'kind'='agent' AND origin.actor->>'sessionId'=${options.sessionId ?? null}
+            AND origin.receipt->>'skillId'=h.id::text AND origin.receipt->>'revisionId'=r.id::text
+            AND origin.receipt->>'outcome'='pending'
+            AND coalesce(origin.receipt->>'pendingReason','approval')='approval'
+            AND NOT EXISTS (SELECT 1 FROM preference_registry_events settled
+              WHERE settled.account_id=h.account_id AND settled.preference_id=h.id
+                AND settled.new_revision_id=r.id AND settled.type IN ('activated','corrected','rejected'))
+        ))
         AND (${options.after?.id ?? null}::uuid IS NULL OR
           (h.stable_key,h.id) > (${options.after?.stableKey ?? ""},${options.after?.id ?? null}::uuid))
       ORDER BY h.stable_key,h.id LIMIT ${Math.min(Math.max(options.limit ?? 128, 1), 1000)}

@@ -3716,6 +3716,9 @@
 :where(.og-root).text-og-status-waiting,:where(.og-root) .text-og-status-waiting {
     color: var(--og-color-status-waiting);
   }
+:where(.og-root).text-og-surface-1,:where(.og-root) .text-og-surface-1 {
+    color: var(--og-color-surface-1);
+  }
 :where(.og-root).text-popover-foreground,:where(.og-root) .text-popover-foreground {
     color: var(--color-fg);
   }
@@ -5906,6 +5909,12 @@
       color: inherit;
     }
   }
+:where(.og-root).\[\&\>img\]\:size-full,:where(.og-root) .\[\&\>img\]\:size-full {
+    &>img {
+      width: 100%;
+      height: 100%;
+    }
+  }
 :where(.og-root).\[\&\>ol\]\:my-1,:where(.og-root) .\[\&\>ol\]\:my-1 {
     &>ol {
       margin-block: calc(var(--spacing) * 1);
@@ -5926,6 +5935,12 @@
     &>svg {
       width: calc(var(--spacing) * 4);
       height: calc(var(--spacing) * 4);
+    }
+  }
+:where(.og-root).\[\&\>svg\]\:size-full,:where(.og-root) .\[\&\>svg\]\:size-full {
+    &>svg {
+      width: 100%;
+      height: 100%;
     }
   }
 :where(.og-root).\[\&\>ul\]\:my-1,:where(.og-root) .\[\&\>ul\]\:my-1 {

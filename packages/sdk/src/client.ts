@@ -68,6 +68,7 @@ import {
 import {
   OpenGeniInteractionClient,
   decodeComputerFrameMetadataHeader,
+  parseBrowserFrameMetadata,
   type AuthRun,
   type AuthRunListOptions,
   type AuthRunListResponse,
@@ -89,6 +90,8 @@ import {
   type BrowserIdentityListResponse,
   type BrowserIdentityMutationResponse,
   type BrowserObservation,
+  type BrowserFrame,
+  type BrowserFrameMetadata,
   type BrowserOpenTargetRequest,
   type BrowserSession,
   type BrowserSessionAttachment,
@@ -3926,6 +3929,48 @@ export class OpenGeniClient {
     );
   }
 
+  async captureBrowserTarget(
+    workspaceId: string,
+    browserSessionId: string,
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserFrame> {
+    const response = await this.requestResponse(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/targets/${encodeURIComponent(targetId)}/screenshot`,
+      {},
+      options,
+    );
+    const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+    const header = response.headers.get("x-opengeni-browser-frame");
+    if (
+      (mediaType !== "image/jpeg" && mediaType !== "image/png") ||
+      !header ||
+      header.length > 64 * 1024
+    ) {
+      await cancelResponseBody(response, "browser frame metadata is invalid");
+      throw new OpenGeniApiError(502, "browser frame metadata is invalid");
+    }
+    let metadata: BrowserFrameMetadata;
+    try {
+      metadata = parseBrowserFrameMetadata(
+        JSON.parse(atob(header.replace(/-/gu, "+").replace(/_/gu, "/"))),
+      );
+    } catch {
+      await cancelResponseBody(response, "browser frame metadata is invalid");
+      throw new OpenGeniApiError(502, "browser frame metadata is invalid");
+    }
+    const data = await readBoundedResponseBytes(response, 24 * 1024 * 1024, null);
+    if (
+      metadata.browserSessionId !== browserSessionId ||
+      metadata.targetId !== targetId ||
+      metadata.mediaType !== mediaType
+    ) {
+      throw new OpenGeniApiError(502, "browser frame evidence does not match its request");
+    }
+    return { ...metadata, data };
+  }
+
   async closeBrowserTarget(
     workspaceId: string,
     browserSessionId: string,
@@ -7262,11 +7307,12 @@ export class OpenGeniClient {
   /** Shared authored/installed catalog metadata. File bodies are read on demand. */
   async listWorkspaceSkills(
     workspaceId: string,
-    options: { cursor?: string; limit?: number } = {},
+    options: { cursor?: string; limit?: number; sessionId?: string } = {},
   ): Promise<{ skills: SkillSummary[]; nextCursor: string | null }> {
     const query = new URLSearchParams();
     if (options.cursor !== undefined) query.set("cursor", options.cursor);
     if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.sessionId !== undefined) query.set("sessionId", options.sessionId);
     const suffix = query.size ? `?${query.toString()}` : "";
     return this.requestJson("GET", `/v1/workspaces/${workspaceId}/skills/content${suffix}`);
   }

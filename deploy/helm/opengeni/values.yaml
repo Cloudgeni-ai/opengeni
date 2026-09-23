@@ -93,6 +93,9 @@ config:
   # release/config change, set this to "query" for mail-gateway-compatible
   # invitation links. See docs/deployment.md before rollback.
   OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: fragment
+  # Keep full MCP OAuth state during the first API rollout. Once every API pod
+  # can resolve short references, set true in a separate config rollout.
+  OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED: "false"
   # Query transport additionally requires a separately proven controller/edge
   # error-log policy. Access-log and OpenTelemetry annotations do not sanitize
   # ingress-nginx's error_log request line. Query mode also requires the chart's
@@ -110,6 +113,13 @@ config:
   # web replicas all understand the host authority discriminator.
   OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "false"
   OPENGENI_BILLING_MODE: disabled
+  # The offer and both new resource charges require separate operator activation.
+  OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED: "false"
+  OPENGENI_SANDBOX_WARM_BILLING_MODE: usage_only
+  OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON: '{}'
+  OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE: usage_only
+  OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT: ""
+  OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES: "0"
   OPENGENI_ENTITLEMENTS_MODE: none
   OPENGENI_USAGE_LIMITS_MODE: none
   # Reviewed code/env catalog by default. Before changing this to "database",

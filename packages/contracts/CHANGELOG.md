@@ -1,5 +1,17 @@
 # @opengeni/contracts
 
+## 5.1.0
+
+### Minor Changes
+
+- 86c710a: Expose a first-party Connected Machine enrollment-token tool with existing enrollment-management authority, short-lived tokens and deployment-bound installer commands. Include agent guidance without introducing an additional approval flow.
+
+### Patch Changes
+
+- d92af11: Keep original command text through ambiguous launch recovery and persist it separately from bounded previews. Preserve whitespace, mark clipped previews with an ellipsis, and show complete commands on expansion and hover.
+- f60ca2b: Raise Skill folder limits eightfold to 1,024 files, 2 MiB per file, and 8 MiB total, while retaining bounded reads and existing validation.
+- 2f8bc58: Use bounded readable MCP tool aliases while preserving exact account routing and historical approval rehydration. Retain action and account display metadata in native and Codemode timeline events and approval cards without changing execution or approval identity. Legacy opaque calls resolve only against the current authorized tool catalog.
+
 ## 5.0.0
 
 ### Major Changes
