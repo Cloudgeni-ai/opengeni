@@ -440,6 +440,15 @@ e2e(
       });
       expect(paymentContainer).toMatchObject({ text: null, redacted: "payment" });
       expect(JSON.stringify(paymentContainer)).not.toContain("fixture-card-text-secret");
+      const paymentChild = await driver.readDom(authPage.target.id, {
+        kind: "element",
+        locator: { kind: "css", selector: "#card-child" },
+        expectedTargetGeneration: authState.targetGeneration,
+        expectedDocumentGeneration: authState.documentGeneration!,
+        expectedFrameId: authState.frameId!,
+      });
+      expect(paymentChild).toMatchObject({ text: null, redacted: "payment" });
+      expect(JSON.stringify(paymentChild)).not.toContain("fixture-card-text-secret");
       await expect(
         driver.readDom(authPage.target.id, {
           kind: "count",
@@ -655,7 +664,7 @@ function authFixture(): string {
     </form>
     <input id="card" name="card-number" autocomplete="cc-number" value="fixture-card-secret">
     <section id="private-container">Public intro <span data-private>fixture-private-secret</span></section>
-    <section id="payment-container">Public intro <span id="card-number">fixture-card-text-secret</span></section>`;
+    <section id="payment-container">Public intro <span id="card-number"><span id="card-child">fixture-card-text-secret</span></span></section>`;
 }
 
 function dataUrl(html: string): string {

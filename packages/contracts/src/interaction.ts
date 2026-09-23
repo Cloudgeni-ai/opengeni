@@ -1927,6 +1927,21 @@ export const BrowserDomSafeAttribute = z.enum([
 ]);
 export type BrowserDomSafeAttribute = z.infer<typeof BrowserDomSafeAttribute>;
 
+export const BrowserDomReadSelector = z
+  .string()
+  .min(1)
+  .max(8_192)
+  .regex(/^[A-Za-z0-9_#.,\s>*-]+$/u);
+
+/** DOM extraction avoids content-matching locators, which can probe redacted text. */
+export const BrowserDomReadLocator = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("ref"), ref: boundedOpaqueId }).strict(),
+  z.object({ kind: z.literal("placeholder"), text: z.string().min(1).max(8_192) }).strict(),
+  z.object({ kind: z.literal("test_id"), value: z.string().min(1).max(2_048) }).strict(),
+  z.object({ kind: z.literal("css"), selector: BrowserDomReadSelector }).strict(),
+]);
+export type BrowserDomReadLocator = z.infer<typeof BrowserDomReadLocator>;
+
 const BrowserDomReadFence = z.object({
   expectedTargetGeneration: opaqueGeneration,
   expectedDocumentGeneration: opaqueGeneration,
@@ -1941,13 +1956,13 @@ const BrowserDomReadFence = z.object({
 export const BrowserDomReadRequest = z.discriminatedUnion("kind", [
   BrowserDomReadFence.extend({
     kind: z.literal("element"),
-    locator: BrowserLocator,
+    locator: BrowserDomReadLocator,
     attributes: z.array(BrowserDomSafeAttribute).max(13).optional(),
     maxChars: z.number().int().min(1).max(32_768).optional(),
   }).strict(),
   BrowserDomReadFence.extend({
     kind: z.literal("count"),
-    selector: z.string().min(1).max(8_192),
+    selector: BrowserDomReadSelector,
   }).strict(),
 ]);
 export type BrowserDomReadRequest = z.infer<typeof BrowserDomReadRequest>;

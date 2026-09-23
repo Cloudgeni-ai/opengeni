@@ -114,7 +114,7 @@ describe("BrowserControlClient", () => {
     };
     const request = {
       kind: "element" as const,
-      locator: { kind: "css" as const, selector: "input[name=secret]" },
+      locator: { kind: "css" as const, selector: "#secret" },
       attributes: ["type" as const],
       expectedTargetGeneration: state.targetGeneration,
       expectedDocumentGeneration: state.documentGeneration,

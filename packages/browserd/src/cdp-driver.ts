@@ -3822,7 +3822,10 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes) {
     return null;
   };
   const tag = String(element.tagName || "").toLowerCase();
-  const redacted = sensitiveReason(element) || (element.closest(privateSelector) ? "private" : null);
+  let redacted = sensitiveReason(element);
+  for (let ancestor = element.parentElement; !redacted && ancestor; ancestor = ancestor.parentElement) {
+    redacted = sensitiveReason(ancestor);
+  }
   if (redacted) return { ok: true, text: null, value: null, attributes: {}, redacted, truncated: false };
   // A container's innerText includes sensitive descendants. Refuse the whole
   // container rather than returning their protected text through an ancestor.

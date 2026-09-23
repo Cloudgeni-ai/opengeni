@@ -9,6 +9,7 @@ import type {
   BrowserClipboard,
   BrowserDiagnosticBatch,
   BrowserDiagnosticKind,
+  BrowserDomReadLocator,
   BrowserDomReadResponse,
   BrowserDomSafeAttribute,
   BrowserIdentity,
@@ -200,7 +201,7 @@ export type CodemodeBrowserDomReadOptions = BrowserActionFences &
     dom:
       | {
           kind: "element";
-          locator: BrowserLocator;
+          locator: BrowserDomReadLocator;
           attributes?: readonly BrowserDomSafeAttribute[];
           maxChars?: number;
         }

@@ -14,7 +14,7 @@ const state = {
 };
 const request: BrowserDomReadRequest = {
   kind: "element",
-  locator: { kind: "role", role: "textbox", name: "Card number" },
+  locator: { kind: "css", selector: "#card-number" },
   expectedTargetGeneration: state.targetGeneration,
   expectedDocumentGeneration: state.documentGeneration,
   expectedFrameId: state.frameId,
