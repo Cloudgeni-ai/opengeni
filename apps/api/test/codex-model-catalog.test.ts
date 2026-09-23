@@ -14,7 +14,7 @@ describe("Codex model catalog", () => {
     const models = codexModelsForPicker();
 
     expect(models.map((model) => model.id)).toEqual(expected);
-    expect(models.at(-1)?.label).toBe("GPT-6 Astra");
+    expect(models.at(0)?.label).toBe("GPT-6 Astra");
   });
 
   test("connection picker honors configured membership and explicit removal", () => {
