@@ -15,8 +15,8 @@ function fixture(mixed: boolean) {
     OPENGENI_MODEL_CATALOG_SOURCE: "code",
     OPENGENI_MODEL_COST_POLICY_JSON: "{}",
     OPENGENI_CODEX_SUBSCRIPTION_ENABLED: "true",
-    OPENGENI_OPENAI_MODEL: "codex/gpt-5.6-sol",
-    OPENGENI_OPENAI_ALLOWED_MODELS: "codex/gpt-5.6-sol",
+    OPENGENI_OPENAI_MODEL: "codex/gpt-6-sol",
+    OPENGENI_OPENAI_ALLOWED_MODELS: "codex/gpt-6-sol",
     OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify(mixed ? registryProviders : []),
   });
   const models = config.configuredModels(config.withCodexCatalogProvider(base));

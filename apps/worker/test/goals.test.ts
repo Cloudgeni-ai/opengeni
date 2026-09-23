@@ -163,8 +163,8 @@ describe("goalContinuationModelDecision", () => {
 
   test("recognizes synthetic Codex and SuperGrok catalog membership", () => {
     for (const [settings, model] of [
-      [testSettings({ codexSubscriptionEnabled: true }), "codex/gpt-5.6-sol"],
-      [testSettings({ supergrokSubscriptionEnabled: true }), "supergrok/grok-4.6"],
+      [testSettings({ codexSubscriptionEnabled: true }), "codex/gpt-6-sol"],
+      [testSettings({ supergrokSubscriptionEnabled: true }), "supergrok/grok-4.7"],
     ] as const) {
       expect(
         goalContinuationModelDecision({
@@ -180,7 +180,7 @@ describe("goalContinuationModelDecision", () => {
     expect(
       goalContinuationFundedWithoutCredits(
         testSettings({ supergrokSubscriptionEnabled: true }),
-        "supergrok/grok-4.6",
+        "supergrok/grok-4.7",
         false,
       ),
     ).toBe(true);
@@ -190,7 +190,7 @@ describe("goalContinuationModelDecision", () => {
     expect(
       goalContinuationFundedWithoutCredits(
         testSettings({ codexSubscriptionEnabled: true }),
-        "codex/gpt-5.6-sol",
+        "codex/gpt-6-sol",
         false,
       ),
     ).toBe(false);
