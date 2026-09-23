@@ -49,6 +49,7 @@ import {
   resolveArtifactKernelRustToolchain,
   runArtifactKernelRustTool,
 } from "./artifact-kernel-rust";
+import { resolveDevelopmentArtifactRuntime } from "./resolve-development-artifact-runtime";
 
 export { assertArtifactKernelRustcVersion } from "./artifact-kernel-rust";
 
@@ -68,6 +69,9 @@ export type PrepareDevelopmentArtifactRuntimeOptions = Readonly<{
   assetRoot?: string;
   buildIfNeeded?: boolean;
   doctor?: boolean;
+  /** Disable network lookup while retaining local source-build behavior. */
+  prebuilt?: boolean;
+  onDiagnostic?: (message: string) => void;
 }>;
 
 export type PreparedDevelopmentArtifactRuntime = Readonly<{
@@ -98,7 +102,7 @@ export async function prepareDevelopmentArtifactRuntime(
   const localOutputRoot = join(repositoryRoot, ".opengeni");
   await rejectSymlinkIfPresent(localOutputRoot);
   const outputRoot = join(localOutputRoot, outputName);
-  const assetRoot =
+  let assetRoot =
     options.assetRoot ??
     join(repositoryRoot, "packages", "artifact-tool", "kernel", "bindings", "dist");
   const target = currentNativeTarget();
@@ -125,14 +129,23 @@ export async function prepareDevelopmentArtifactRuntime(
 
   let rebuiltKernel = false;
   if (!(await reusableReceipt(assetRoot, target, sourceFingerprint))) {
-    if (options.buildIfNeeded === false) {
-      throw new ArtifactRuntimeError(
-        "ARTIFACT_RUNTIME_UNAVAILABLE",
-        "Current-host artifact kernel receipt is absent or stale",
-      );
+    const prebuilt =
+      options.prebuilt === false
+        ? undefined
+        : await resolveDevelopmentArtifactRuntime({ repositoryRoot, target });
+    if (prebuilt?.available) {
+      assetRoot = prebuilt.assetRoot;
+    } else {
+      if (prebuilt) (options.onDiagnostic ?? console.error)(prebuilt.diagnostic);
+      if (options.buildIfNeeded === false) {
+        throw new ArtifactRuntimeError(
+          "ARTIFACT_RUNTIME_UNAVAILABLE",
+          "Current-host artifact kernel receipt is absent or stale",
+        );
+      }
+      await buildCurrentHostKernel(repositoryRoot, assetRoot, target, sourceFingerprint);
+      rebuiltKernel = true;
     }
-    await buildCurrentHostKernel(repositoryRoot, assetRoot, target, sourceFingerprint);
-    rebuiltKernel = true;
   }
   const receipt = await readArtifactKernelBuildReceipt(target, assetRoot);
   const stagingParent = dirname(outputRoot);
@@ -258,6 +271,7 @@ export async function developmentArtifactRuntimeSourceFingerprint(
     "scripts/materialize-artifact-kernel-packages.ts",
     "scripts/artifact-kernel-rust.ts",
     "scripts/prepare-development-artifact-runtime.ts",
+    "scripts/resolve-development-artifact-runtime.ts",
   ];
   const files: string[] = [];
   for (const input of inputs) {
@@ -274,18 +288,8 @@ export async function developmentArtifactRuntimeSourceFingerprint(
     hash.update(await readFile(join(repositoryRoot, path)));
     hash.update(new Uint8Array([0xff]));
   }
-  const rustToolchain = await resolveArtifactKernelRustToolchain(repositoryRoot);
-  await ensureArtifactKernelRustToolchain(rustToolchain);
-  const rustc = await captureArtifactKernelRustTool(rustToolchain, "rustc", ["-Vv"], {
-    ensure: false,
-  });
-  hash.update("rustc\0");
-  hash.update(rustc);
-  const cargo = await captureArtifactKernelRustTool(rustToolchain, "cargo", ["-V"], {
-    ensure: false,
-  });
-  hash.update("cargo\0");
-  hash.update(cargo);
+  // The pinned toolchain file is already an input. Never install or invoke Rust
+  // merely to check a verified installation or resolve a prebuilt kernel.
   const bun = await capture(["bun", "--version"], repositoryRoot);
   hash.update("bun\0");
   hash.update(bun);

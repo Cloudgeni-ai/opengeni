@@ -81,6 +81,24 @@ afterEach(async () => {
 });
 
 describe("development artifact runtime preparation", () => {
+  test("fingerprinting and receipt reuse need no working Rust toolchain", async () => {
+    if (process.platform !== "win32") {
+      const rustup = join(dirname(directRustLog), "bin", "rustup");
+      await writeFile(rustup, "#!/bin/sh\nexit 99\n");
+    }
+    const fixture = await createRepositoryFixture();
+    expect(
+      await prepareDevelopmentArtifactRuntime({
+        repositoryRoot: fixture.repositoryRoot,
+        assetRoot: fixture.assetRoot,
+        outputRoot: fixture.outputRoot,
+        buildIfNeeded: false,
+        prebuilt: false,
+        doctor: false,
+      }),
+    ).toMatchObject({ rebuiltKernel: false });
+  });
+
   test("accepts only the exact pinned compiler identity", () => {
     expect(() =>
       assertArtifactKernelRustcVersion("rustc 1.97.0 (2d8144b78 2026-07-07)\n", "1.97.0"),
@@ -212,6 +230,7 @@ async function createRepositoryFixture() {
     "scripts/materialize-artifact-kernel-packages.ts": "// fixture\n",
     "scripts/artifact-kernel-rust.ts": "// fixture\n",
     "scripts/prepare-development-artifact-runtime.ts": "// fixture\n",
+    "scripts/resolve-development-artifact-runtime.ts": "// fixture\n",
   };
   for (const [path, contents] of Object.entries(files)) {
     await mkdir(dirname(join(repositoryRoot, path)), { recursive: true });
