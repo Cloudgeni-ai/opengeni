@@ -38,7 +38,7 @@ import {
   getSandbox,
   getScheduledScopedRigVersionMetadata,
   getSandboxSessionEnvelope,
-  heartbeatLeaseHolder,
+  heartbeatLeaseHolderStatus,
   loadWorkspaceEnvironmentForRun,
   markSandboxProviderReady,
   markWarmLeaseInstanceLost,
@@ -601,7 +601,7 @@ export async function heartbeatViewer(
     expectedEpoch: number;
   },
 ): Promise<boolean> {
-  const alive = await heartbeatLeaseHolder(services.db, {
+  const status = await heartbeatLeaseHolderStatus(services.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     sandboxGroupId: input.sandboxGroupId,
@@ -611,7 +611,10 @@ export async function heartbeatViewer(
     expectedEpoch: input.expectedEpoch,
     billingMode: services.settings.sandboxWarmBillingMode,
   });
-  if (!alive) return false;
+  // A funding fence stops renewing paid provider time, but the holder is
+  // deliberately kept alive while the viewer winds down or adds funds. Other
+  // fences (epoch/rotation/drain) still require the client to re-attach.
+  if (!status.leaseExtended) return status.holderAlive && status.fence === "funding";
   const lease = await readLease(services.db, input.workspaceId, input.sandboxGroupId);
   if (lease?.liveness === "warm" && lease.leaseEpoch === input.expectedEpoch && lease.instanceId) {
     await renewSandboxProviderExpiration({

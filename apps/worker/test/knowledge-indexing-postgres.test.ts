@@ -250,7 +250,7 @@ test("paid indexing waits for funding, settles accepted batches and finishes a f
       () => embedder,
       settings,
     ),
-  ).rejects.toThrow("insufficient OpenGeni credits");
+  ).rejects.toThrow("Knowledge vector search needs OpenGeni credits");
   expect(calls).toBe(0);
   await shared.admin`INSERT INTO credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key) VALUES (${accountId},NULL,'grant',1,'test',${saved.revisionId},${`funded-index:${saved.revisionId}`})`;
   await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second' WHERE revision_id=${saved.revisionId}`;
@@ -292,6 +292,64 @@ test("paid indexing waits for funding, settles accepted batches and finishes a f
     ).searchMode,
   ).toBe("keyword");
   expect(calls).toBe(2);
+});
+
+test("deterministic embeddings still index without funds under the credits-mode switch", async () => {
+  const accountId = crypto.randomUUID();
+  const workspaceId = crypto.randomUUID();
+  await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Deterministic index')`;
+  await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Deterministic workspace')`;
+  const settings = {
+    billingMode: "stripe",
+    usageLimitsMode: "managed",
+    staticUsageLimitsJson: "{}",
+    documentEmbeddingProvider: "deterministic",
+    documentEmbeddingBillingMode: "credits",
+    documentEmbeddingRateMicrosPerMillionBytes: 0,
+  } as Settings;
+  const embedder: DocumentServices["embedder"] = {
+    model: "deterministic-index-test",
+    dimensions: 3,
+    embedMany: async (inputs) => inputs.map(() => [1, 0, 0]),
+    embedQuery: async () => [1, 0, 0],
+  };
+  const worker = createKnowledgeIndexingActivities(
+    async () =>
+      ({
+        db: client.db,
+        settings,
+        observability: { warn: () => undefined },
+      }) as ControlActivityServices,
+    async () => ({ embedder }) as DocumentServices,
+  );
+  await worker.indexKnowledge();
+  const saved = await saveKnowledgeEntry(
+    client.db,
+    {
+      accountId,
+      workspaceId,
+      actor: {
+        kind: "human",
+        principalKind: "human_session",
+        subjectId: "user:deterministic-owner",
+        writeScopes: ["workspace"],
+        settingsScopes: ["workspace"],
+        review: true,
+      },
+    },
+    {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      scope: "workspace",
+      entry: { kind: "fact", title: "No provider charge", content: "Local embeddings" },
+    },
+  );
+  expect((await worker.indexKnowledge()).completed).toBe(1);
+  const [job] = await shared.admin`
+    SELECT billing_mode, state FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}`;
+  expect(job).toMatchObject({ billing_mode: "usage_only", state: "ready" });
+  expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(0);
 });
 
 test("a queued Knowledge generation remains unpriced when paid mode starts later", async () => {

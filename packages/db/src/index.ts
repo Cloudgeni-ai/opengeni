@@ -44712,7 +44712,7 @@ export async function markWarmBillingStopCutoff(
           !row ||
           Number(row.lease_epoch) !== input.expectedEpoch ||
           row.liveness !== "draining" ||
-          Number(row.refcount) !== 0
+          (Number(row.refcount) !== 0 && !row.unobservable_command_drain_ids?.length)
         )
           return null;
         const snapshot = warmBillingSnapshot(row);
@@ -45701,6 +45701,17 @@ async function acquireLeaseOnce(
         // The row lock serializes this holder insertion against the reaper claim:
         // whichever wins first owns the next state without an availability gap.
         if (liveness === "draining") {
+          // Capture may have failed after an earlier stop attempt recorded a
+          // cutoff. This provider was never stopped; a re-armed box must have
+          // a fresh charge horizon when its next drain reaches provider stop.
+          if (warmBillingSnapshot(row)?.stopChargeAt) {
+            await tx.execute(sql`
+              update sandbox_leases
+              set resume_state = resume_state #- '{opengeniWarmBilling,stopChargeAt}',
+                  updated_at = now()
+              where id = ${row.id}
+            `);
+          }
           await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId, {
             subjectId: input.viewerSubjectId ?? null,
             authorityEpoch: input.viewerAuthorityEpoch ?? null,
@@ -47246,7 +47257,13 @@ export async function commitWarmingToWarm(
           };
         }
 
-        const completedAt = new Date().toISOString();
+        // Warm-time billing and stop cutoffs share the database clock, even
+        // when the worker host's wall clock differs from PostgreSQL's.
+        const [warmClock] = await tx.execute<{ completed_at: Date | string }>(sql`
+          select clock_timestamp() as completed_at
+        `);
+        if (!warmClock) throw new Error("sandbox warm-transition clock unavailable");
+        const completedAt = new Date(warmClock.completed_at).toISOString();
         const recovery: SandboxRecoveryState = rematerialization
           ? {
               provider: {
@@ -61206,9 +61223,7 @@ export async function accrueWarmSeconds(
         // debit; pre-activation legacy boxes cannot acquire surprise charges.
         const mode =
           input.billingMode === "credits"
-            ? input.warmRateMicrosPerSecond > 0
-              ? (snapshot?.mode ?? "usage_only")
-              : "usage_only"
+            ? (snapshot?.mode ?? "usage_only")
             : (input.billingMode ?? snapshot?.mode ?? "usage_only");
         const rate = snapshot?.rateMicrosPerSecond ?? input.warmRateMicrosPerSecond;
         if (!Number.isFinite(warmStartMs) && mode === "credits" && rate > 0) {
@@ -61228,11 +61243,13 @@ export async function accrueWarmSeconds(
         if (mode === "credits" && input.finalDrain && !snapshot?.stopChargeAt) {
           throw new Error("paid sandbox final tick has no durable stop cutoff");
         }
-        const endAt =
-          snapshot?.stopChargeAt && input.finalDrain ? new Date(snapshot.stopChargeAt) : new Date();
+        const upperBound =
+          snapshot?.stopChargeAt && input.finalDrain
+            ? sql`${snapshot.stopChargeAt}::timestamptz`
+            : sql`clock_timestamp()`;
         const elapsedRows = await tx.execute<{ elapsed_ms: number | string }>(sql`
-          select greatest(0, floor(extract(epoch from (${endAt}::timestamptz -
-            ${new Date(startMs)}::timestamptz)) * 1000))::bigint as elapsed_ms
+          select greatest(0, floor(extract(epoch from (${upperBound} -
+            ${new Date(startMs).toISOString()}::timestamptz)) * 1000))::bigint as elapsed_ms
         `);
         const elapsedMs = Number(elapsedRows[0]?.elapsed_ms ?? 0);
         const elapsedS = Math.floor(elapsedMs / 1000);
@@ -61319,7 +61336,7 @@ export async function accrueWarmSeconds(
         // index and the metered seconds inseparable.
         await tx.execute(sql`
         update sandbox_leases set
-          last_meter_at = ${new Date(startMs)}::timestamptz + (${String(input.finalDrain ? elapsedMs : elapsedS * 1000)} || ' milliseconds')::interval,
+          last_meter_at = ${new Date(startMs).toISOString()}::timestamptz + (${String(input.finalDrain ? elapsedMs : elapsedS * 1000)} || ' milliseconds')::interval,
           last_meter_tick = ${tick}, updated_at = now()
         where id = ${row.id}
       `);

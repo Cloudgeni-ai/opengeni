@@ -19,6 +19,7 @@ import {
   prepareKnowledgeSave,
   searchKnowledgeEntries,
   KnowledgeVectorFundingError,
+  KnowledgeVectorQueryRejectedError,
   hasPermission,
   knowledgeContextForAccess,
   requireAccessGrantAuthorization,
@@ -68,6 +69,12 @@ function knowledgeHttpError(error: unknown): never {
   if (error instanceof KnowledgeVectorFundingError)
     throw new ApiHttpError(402, {
       code: "payment_required",
+      message: error.message,
+      details: { code: error.code, keywordAvailable: true },
+    });
+  if (error instanceof KnowledgeVectorQueryRejectedError)
+    throw new ApiHttpError(error.code === "quota" ? 429 : 422, {
+      code: error.code === "quota" ? "limit_exceeded" : "validation_failed",
       message: error.message,
       details: { code: error.code, keywordAvailable: true },
     });

@@ -31,6 +31,16 @@ export class KnowledgeVectorFundingError extends Error {
   }
 }
 
+export class KnowledgeVectorQueryRejectedError extends Error {
+  constructor(
+    public readonly code: "pagination_unavailable" | "query_limit" | "quota",
+    message: string,
+  ) {
+    super(message);
+    this.name = "KnowledgeVectorQueryRejectedError";
+  }
+}
+
 /** Shared search path for HTTP and both first-party retrieval servers. */
 export async function searchKnowledgeEntries(
   db: Database,
@@ -73,12 +83,18 @@ export async function searchKnowledgeEntries(
   // Paid cursors would re-embed and re-charge on each page. Until a durable
   // vector cache exists, require explicit keyword mode to paginate instead.
   if (paidSettings && request.cursor)
-    throw new Error("Paid semantic Knowledge pagination is unavailable; use keyword mode");
+    throw new KnowledgeVectorQueryRejectedError(
+      "pagination_unavailable",
+      "Paid semantic Knowledge pagination is unavailable; use keyword mode",
+    );
   const cost = paidSettings ? documentEmbeddingCostMicros(paidSettings, bytes) : 0;
   if (paidSettings && (bytes > MAX_PAID_QUERY_BYTES || cost > MAX_PAID_QUERY_MICROS))
     return keywordFallback(
       db,
-      new Error("Paid Knowledge query exceeds the per-request limit"),
+      new KnowledgeVectorQueryRejectedError(
+        "query_limit",
+        "Paid Knowledge query exceeds the per-request limit",
+      ),
       "query_limit",
     );
 
@@ -179,7 +195,7 @@ export async function searchKnowledgeEntries(
       )
         return keywordFallback(
           lockedDb,
-          new Error("Paid Knowledge query rate limit reached"),
+          new KnowledgeVectorQueryRejectedError("quota", "Paid Knowledge query rate limit reached"),
           "quota",
         );
       return retrieveThenSettle(lockedDb);

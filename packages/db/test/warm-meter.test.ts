@@ -388,6 +388,67 @@ describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
     ).toBe("attached");
   }, 60_000);
 
+  test("removing the current rate does not reprice an already admitted paid lease", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    await seedBalance(ws.accountId, 1_000);
+    const epoch = await warmGroup(ws, [{ kind: "turn", holderId: "rate-change" }], {
+      mode: "credits",
+      rateMicrosPerSecond: 20,
+    });
+    await backdateWarmStart(ws.workspaceId, ws.groupId, 3);
+    const tick = await accrueWarmSeconds(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+      billingMode: "credits",
+      warmRateMicrosPerSecond: 0,
+    });
+    expect(tick.accrued).toBe(true);
+    expect(tick.costMicros).toBe(tick.seconds * 20);
+    expect(await eventCount(ws.workspaceId, "sandbox.warm_cost")).toBe(1);
+  }, 60_000);
+
+  test("a provider still running after a failed stop gets a fresh cutoff on re-arm", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    await seedBalance(ws.accountId, 1_000);
+    const epoch = await warmGroup(ws, [{ kind: "viewer", holderId: "first" }], {
+      mode: "credits",
+      rateMicrosPerSecond: 20,
+    });
+    await releaseLeaseHolder(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      kind: "viewer",
+      holderId: "first",
+      idleGraceMs: 0,
+    });
+    const firstCutoff = await markWarmBillingStopCutoff(db, {
+      ...ws,
+      sandboxGroupId: ws.groupId,
+      expectedEpoch: epoch,
+    });
+    expect(firstCutoff).toBeInstanceOf(Date);
+    expect(
+      (
+        await acquireLease(db, {
+          ...ws,
+          sandboxGroupId: ws.groupId,
+          kind: "viewer",
+          holderId: "second",
+          backend: "modal",
+          warmBilling: { mode: "credits", rateMicrosPerSecond: 20 },
+          leaseTtlMs: 90_000,
+        })
+      ).role,
+    ).toBe("rearmed");
+    const [rearmed] = await admin<{ state: { opengeniWarmBilling: { stopChargeAt?: string } } }[]>`
+      select resume_state as state from sandbox_leases
+      where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
+    expect(rearmed?.state.opengeniWarmBilling.stopChargeAt).toBeUndefined();
+  }, 60_000);
+
   test("paid lease extension refuses zero balance without removing its active holder", async () => {
     if (!available) return;
     const ws = await freshWorkspace();

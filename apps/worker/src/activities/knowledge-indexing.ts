@@ -80,7 +80,11 @@ export function createKnowledgeIndexingActivities(
               const frozenPolicy = await freezeKnowledgeIndexBillingMode(
                 lockedDb,
                 claim,
-                settings.documentEmbeddingBillingMode ?? "usage_only",
+                // Deterministic embeddings incur no provider charge; a valid
+                // credits-mode config with zero tariff must still index them.
+                paidDocumentEmbedding(settings)
+                  ? (settings.documentEmbeddingBillingMode ?? "usage_only")
+                  : "usage_only",
                 policyActivatedAt,
                 settings.documentEmbeddingRateMicrosPerMillionBytes ?? 0,
               );

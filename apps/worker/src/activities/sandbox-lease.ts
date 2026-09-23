@@ -255,6 +255,7 @@ export type TerminateBoxFn = (
   diskBackedArchives?: boolean,
   releaseFailedCapture?: () => Promise<void>,
   workspaceId?: string,
+  beforeProviderStop?: () => Promise<void>,
 ) => Promise<boolean | ProviderTerminationOutcome>;
 
 export type SweepModalOrphansFn = (
@@ -481,7 +482,14 @@ export function createSandboxLeaseActivities(
   options: SandboxLeaseActivityOptions = {},
 ) {
   const terminateBox: TerminateBoxFn =
-    options.terminateBox ??
+    (options.terminateBox
+      ? async (...args: Parameters<TerminateBoxFn>) => {
+          // The injected test seam represents the stop itself; the real
+          // implementation invokes this only after capture has succeeded.
+          await args[10]?.();
+          return options.terminateBox!(...args);
+        }
+      : null) ??
     (async (
       settings,
       lease,
@@ -493,6 +501,7 @@ export function createSandboxLeaseActivities(
       diskBackedArchives,
       releaseFailedCapture,
       workspaceId,
+      beforeProviderStop,
     ) =>
       await terminateProviderBox(
         settings,
@@ -507,6 +516,7 @@ export function createSandboxLeaseActivities(
         diskBackedArchives,
         releaseFailedCapture,
         workspaceId,
+        beforeProviderStop,
       ));
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
@@ -2995,16 +3005,18 @@ async function terminateDrainableBox(
   ) {
     return false;
   }
-  // Persist the customer charge horizon before the non-transactional provider
-  // stop. A retry after stop success cannot charge post-termination wall time.
-  if (!providerMissingBeforeCapture && settings.sandboxWarmBillingMode === "credits") {
+  // Stamp the charge horizon after verified capture and immediately before
+  // provider stop. Capture can fail and release its claim, allowing re-arm.
+  // A retry after stop success cannot charge post-termination wall time.
+  const beforeProviderStop = async (): Promise<void> => {
+    if (settings.sandboxWarmBillingMode !== "credits") return;
     await markWarmBillingStopCutoff(db, {
       accountId,
       workspaceId: row.workspaceId,
       sandboxGroupId: row.sandboxGroupId,
       expectedEpoch: row.leaseEpoch,
     });
-  }
+  };
   const termination: ProviderTerminationOutcome | boolean = providerMissingBeforeCapture
     ? { terminated: true, providerMissingBeforeCapture: true }
     : await terminateBox(
@@ -3028,6 +3040,7 @@ async function terminateDrainableBox(
           });
         },
         row.workspaceId,
+        beforeProviderStop,
       );
   const terminated = typeof termination === "boolean" ? termination : termination.terminated;
   if (!terminated) {
@@ -3189,6 +3202,7 @@ export async function terminateProviderBox(
   diskBackedArchives = false,
   releaseFailedCapture?: () => Promise<void>,
   workspaceId?: string,
+  beforeProviderStop?: () => Promise<void>,
 ): Promise<ProviderTerminationOutcome> {
   const durableBackendId = (lease.resumeBackendId ?? lease.backend) as string;
   const backend = sandboxBackendForSdkBackendId(durableBackendId) ?? durableBackendId;
@@ -3288,6 +3302,7 @@ export async function terminateProviderBox(
       return { terminated: false, providerMissingBeforeCapture: false };
     }
     try {
+      await beforeProviderStop?.();
       await terminateModalById(settings, lease.instanceId);
     } catch (error) {
       if (!isProviderSandboxNotFoundError("modal", error)) {
@@ -3531,6 +3546,7 @@ export async function terminateProviderBox(
       throw new Error(`sandbox backend ${backend} returned no terminable session state`);
     }
     prepareProviderForTeardownAfterCapture(backend, session);
+    await beforeProviderStop?.();
     await terminateManagedSandboxSession(client, sessionState, session);
     return { terminated: true, providerMissingBeforeCapture: false };
   } catch (error) {
