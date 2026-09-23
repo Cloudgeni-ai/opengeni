@@ -2975,7 +2975,11 @@ async function readBytes(
   timeoutMs: number,
 ): Promise<Uint8Array> {
   const privatePath = absolutePrivatePath(path, "browser private binary response path");
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 24 * 1024 * 1024) {
+  if (
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes < 1 ||
+    maxBytes > Math.max(24 * 1024 * 1024, COMPUTER_SCREENSHOT_MAX_BYTES)
+  ) {
     throw new RangeError("browser private binary response limit is invalid");
   }
   const sizeMarker = `OPENGENI_BROWSER_PRIVATE_SIZE_${randomUUID()}`;
