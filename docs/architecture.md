@@ -111,10 +111,7 @@ independently of connections. See [`run-lifecycle.md`](run-lifecycle.md).
 `runAgentTurn` is non-retryable by default: model/tool/sandbox/Git/connector/cloud
 operations have external effects. Recovery is explicit and attempt-fenced.
 Provider work stays outside retries; retry only idempotent settlement.
-Accepted model-definition checks remain fail-closed. The Codex Astra implicit-cache
-metadata compatibility recomputes the exact historical digest without changing the
-accepted policy. A typed setup mismatch before inference uses bounded same-turn
-recovery; it never substitutes a new model policy or a synthetic user message.
+Accepted-policy [compatibility/recovery](run-lifecycle.md).
 Replay: [notices/catalogs](run-lifecycle.md),
 [compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`
 shares sandbox/lazy-tool-prepared requests with remote compaction, including before first inference.
