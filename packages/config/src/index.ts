@@ -1556,6 +1556,10 @@ export type VoiceInputProviderConfig =
       experimental: true;
     };
 
+function usableDeploymentSecret(value: string | null | undefined): string | undefined {
+  return isUsableVoiceInputSecret(value) ? value : undefined;
+}
+
 /**
  * Reject empty / template secrets so `.env.example` placeholders like
  * `your-key` cannot advertise voice input as available and then 401 upstream.
@@ -4766,12 +4770,13 @@ export function configuredProviders(
   if (settings.openaiProvider === "azure") {
     const baseUrl = settings.azureOpenaiBaseUrl ?? settings.azureOpenaiEndpoint;
     builtin.baseUrl = baseUrl ? normalizeRegistryBaseUrl(baseUrl, builtin.id) : undefined;
-    builtin.apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken;
+    builtin.apiKey =
+      usableDeploymentSecret(settings.azureOpenaiApiKey) ?? settings.azureOpenaiAdToken;
   } else {
     builtin.baseUrl = settings.openaiBaseUrl
       ? normalizeRegistryBaseUrl(settings.openaiBaseUrl, builtin.id)
       : undefined;
-    builtin.apiKey = settings.openaiApiKey;
+    builtin.apiKey = usableDeploymentSecret(settings.openaiApiKey);
   }
   const registry = configuredRegistryProviders(settings).map(
     (provider): ResolvedModelProvider => ({

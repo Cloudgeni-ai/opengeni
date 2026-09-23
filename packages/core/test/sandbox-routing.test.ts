@@ -3,7 +3,11 @@ import {
   directRetainedProcessMatchesBackend,
   retainedProcessBackgroundSettlement,
 } from "../src/sandbox/routing";
-import { managedSessionGroupBackend, managedSessionGroupOs } from "../src/sandbox/runtime-settings";
+import {
+  managedSessionGroupBackend,
+  managedSessionGroupOs,
+  sessionGroupMachinePresentation,
+} from "../src/sandbox/runtime-settings";
 
 describe("managed session-group backend", () => {
   test("uses the deployment provider only for an explicit machine-home fallback", () => {
@@ -15,6 +19,21 @@ describe("managed session-group backend", () => {
     expect(managedSessionGroupBackend("selfhosted", "selfhosted")).toBeNull();
     expect(managedSessionGroupOs("selfhosted", "macos")).toBe("linux");
     expect(managedSessionGroupOs("modal", "windows")).toBe("windows");
+  });
+
+  test("names the session box after its real provider", () => {
+    expect(sessionGroupMachinePresentation("local")).toEqual({
+      name: "this computer",
+      kind: "local",
+    });
+    expect(sessionGroupMachinePresentation("docker")).toEqual({
+      name: "Docker",
+      kind: "docker",
+    });
+    expect(sessionGroupMachinePresentation("modal")).toEqual({
+      name: "Modal",
+      kind: "modal",
+    });
   });
 });
 

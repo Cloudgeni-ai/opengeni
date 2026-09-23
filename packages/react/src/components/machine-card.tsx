@@ -36,10 +36,12 @@ export type MachineCardProps = {
 };
 
 function KindIcon({ machine }: { machine: MachineView }) {
-  if (machine.isSessionGroup)
+  if (machine.kind === "local" || machine.kind === "selfhosted")
+    return <LaptopIcon className="size-4 text-og-fg-subtle" aria-hidden />;
+  if (machine.kind === "docker" || machine.isSessionGroup)
     return <ServerIcon className="size-4 text-og-fg-subtle" aria-hidden />;
   if (machine.kind === "modal") return <CpuIcon className="size-4 text-og-fg-subtle" aria-hidden />;
-  return <LaptopIcon className="size-4 text-og-fg-subtle" aria-hidden />;
+  return <ServerIcon className="size-4 text-og-fg-subtle" aria-hidden />;
 }
 
 /**
@@ -159,7 +161,7 @@ export function MachineCard({
               </span>
               <span aria-hidden>·</span>
               <span className="capitalize">
-                {machine.isSessionGroup ? "session sandbox" : machine.kind}
+                {machine.kind}
               </span>
               <span aria-hidden>·</span>
               <span className="font-og-mono">

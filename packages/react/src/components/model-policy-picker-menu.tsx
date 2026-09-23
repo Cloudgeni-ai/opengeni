@@ -1,5 +1,5 @@
 import type { ClientModel, ReasoningEffort } from "@opengeni/sdk";
-import { CheckIcon, SearchIcon, ZapIcon } from "lucide-react";
+import { ArrowRightIcon, CheckIcon, SearchIcon, ZapIcon } from "lucide-react";
 import { useRef, useState, type RefObject, type CSSProperties } from "react";
 import { Popover, RadioGroup } from "radix-ui";
 import { cn } from "../lib/cn";
@@ -72,7 +72,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
       hint={row.unavailableReason ?? undefined}
       disabled={props.disabled || !row.selectable}
       title={[row.label, row.unavailableReason].filter(Boolean).join(" · ")}
-      active={row.id === props.model}
+      active={row.selectable && row.id === props.model}
       showChevron={false}
       trailing={
         row.catalog.cost === "free" || row.id === props.model ? (
@@ -119,6 +119,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
         buttons[next]?.focus();
       }}
     >
+      {rows.some((row) => row.selectable) ? (
       <div className="border-b border-og-border py-1">
         <label className="og-model-policy-search flex items-center gap-2 rounded-og-sm px-2 py-1 focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-og-accent/40">
           <SearchIcon className="size-4 shrink-0 text-og-fg-subtle" aria-hidden />
@@ -141,6 +142,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
           />
         </label>
       </div>
+      ) : null}
       {props.error ? (
         <p className="px-2 py-2 text-og-control text-og-status-failed" role="alert">
           {props.error}
@@ -152,7 +154,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
       >
         {props.loading ? (
           <p className="px-2 py-3 text-og-control text-og-fg-subtle">{messages.loading}</p>
-        ) : (
+        ) : rows.some((row) => row.selectable) ? (
           <>
             {groups.map((group) => (
               <section
@@ -182,9 +184,14 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
               </p>
             ) : null}
           </>
+        ) : props.connectModelsHref || rows.length > 0 ? (
+          <ConnectModelsPanel href={props.connectModelsHref} messages={messages} />
+        ) : (
+          <p className="px-2 py-4 text-og-control text-og-fg-subtle">{messages.noModels}</p>
         )}
       </div>
-      {selected &&
+      {rows.some((row) => row.selectable) &&
+      selected &&
       ((props.hasImageAttachments &&
         selected.catalog.capabilities?.inputModalities.includes("image") === false) ||
         (effortOptionsForModel(selected.catalog).length > 1 &&
@@ -201,6 +208,78 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
           <ModelThinkingControls {...props} />
         </div>
       ) : null}
+    </div>
+  );
+}
+
+const CONNECT_MODEL_OPTIONS: Array<{
+  billingClass: "codex_subscription" | "supergrok_subscription" | "byok" | "external";
+  title: string;
+  detail: string;
+}> = [
+  { billingClass: "codex_subscription", title: "Codex", detail: "ChatGPT" },
+  { billingClass: "supergrok_subscription", title: "SuperGrok", detail: "xAI" },
+  { billingClass: "byok", title: "AI Gateway", detail: "Vercel" },
+  { billingClass: "external", title: "OpenRouter", detail: "API key" },
+];
+
+function ConnectModelsPanel(props: {
+  href: string | undefined;
+  messages: typeof defaultModelPolicyPickerMessages;
+}) {
+  return (
+    <div className="px-1.5 pb-1.5 pt-2" data-testid="model-picker-connect">
+      <div className="px-1.5 pb-3">
+        <p className="text-og-menu font-medium tracking-tight text-og-fg">
+          {props.messages.connectTitle}
+        </p>
+        <p className="mt-1 text-og-control leading-snug text-og-fg-subtle">
+          {props.messages.connectBody}
+        </p>
+      </div>
+      <div className="grid grid-cols-2 gap-1">
+        {CONNECT_MODEL_OPTIONS.map((option) => {
+          const content = (
+            <>
+              <span className="flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-surface-2 text-og-fg">
+                <BillingClassMark
+                  billingClass={option.billingClass}
+                  aria-label=""
+                  className="size-4 text-og-fg"
+                />
+              </span>
+              <span className="min-w-0">
+                <span className="block truncate text-og-control font-medium text-og-fg">
+                  {option.title}
+                </span>
+                <span className="block truncate text-og-control text-og-fg-subtle">{option.detail}</span>
+              </span>
+            </>
+          );
+          const className =
+            "flex min-w-0 items-center gap-2 rounded-og-md px-1.5 py-1.5 outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40";
+          return props.href ? (
+            <a key={option.title} href={props.href} className={className}>
+              {content}
+            </a>
+          ) : (
+            <div key={option.title} className={className}>
+              {content}
+            </div>
+          );
+        })}
+      </div>
+      {props.href ? (
+        <a
+          href={props.href}
+          className="mt-2 flex h-9 w-full items-center justify-center gap-1.5 rounded-og-md bg-og-fg text-og-control font-medium text-og-surface-1 outline-hidden transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-og-accent/40"
+        >
+          {props.messages.connectAction}
+          <ArrowRightIcon className="size-3.5" aria-hidden />
+        </a>
+      ) : (
+        <p className="px-1.5 pt-3 text-og-control text-og-fg-subtle">{props.messages.noModels}</p>
+      )}
     </div>
   );
 }

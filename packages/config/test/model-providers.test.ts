@@ -950,6 +950,16 @@ describe("configuredProviders", () => {
     });
   });
 
+  test("drops a placeholder deployment key so the catalog is not configured", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "your-key",
+      },
+      () => getSettings(),
+    );
+    expect(configuredProviders(settings)[0]?.apiKey).toBeUndefined();
+  });
+
   test("returns the built-in Azure provider id and label", () => {
     const settings = withEnv(
       {

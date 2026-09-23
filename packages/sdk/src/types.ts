@@ -7789,7 +7789,18 @@ export type MachineState =
   | "display_unavailable"
   | "enrolling";
 
-export type MachineKind = "modal" | "selfhosted" | "opensandbox";
+export type MachineKind =
+  | "docker"
+  | "modal"
+  | "local"
+  | "daytona"
+  | "runloop"
+  | "e2b"
+  | "blaxel"
+  | "cloudflare"
+  | "vercel"
+  | "selfhosted"
+  | "opensandbox";
 
 export type MachineConnectionAuthority = {
   state: "not_applicable" | "unclaimed" | "active" | "expired";
