@@ -1,5 +1,11 @@
 # @opengeni/codex
 
+## 0.2.25
+
+### Patch Changes
+
+- a642885: Update the reviewed Codex client version to stable 0.156.0, keeping discovery query and transport identity aligned.
+
 ## 0.2.24
 
 ### Patch Changes
