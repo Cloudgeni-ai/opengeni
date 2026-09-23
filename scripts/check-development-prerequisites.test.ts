@@ -117,6 +117,9 @@ describe("backend-aware read-only preflight", () => {
       expect(result.errors.join("\n")).toContain(requirement);
     }
     expect(result.errors.join("\n")).not.toMatch(/curl[^\n]*\|\s*(?:bash|sh)/u);
+    expect(result.errors.join("\n")).toContain("--install --tools=nats,temporal");
+    expect(result.errors.join("\n")).toContain("Temporal CLI 1.4.1");
+    expect(result.errors.join("\n")).toContain("lack an upstream checksum source");
   });
 
   test("verified prebuilt runtime skips Rust/cc; a separate source relay still requires them", async () => {

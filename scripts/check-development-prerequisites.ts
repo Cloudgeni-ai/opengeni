@@ -30,9 +30,9 @@ export type PrerequisiteHost = {
 
 const nativeInstall = {
   postgres: "Install PostgreSQL 17 server/client and matching pgvector (Debian/Ubuntu with PGDG: sudo apt-get install postgresql-17 postgresql-client-17 postgresql-17-pgvector; macOS: brew install postgresql@17, then build/install pgvector v0.8.0 with PG_CONFIG pointing to that PostgreSQL 17 installation). Put its bin directory on PATH and verify pg_config --version. Extension files must belong to that same installation; an unversioned Homebrew pgvector may target a different PostgreSQL major.",
-  nats: "Install the host archive from https://github.com/nats-io/nats-server/releases/tag/v2.11.8; verify its published checksum, extract it and put nats-server on PATH (not the nats client).",
-  temporal: "Install the host archive from https://github.com/temporalio/cli/releases/tag/v1.3.0; verify its published checksum, extract it and put temporal on PATH. The CLI must provide server start-dev; tctl is not a substitute.",
-  garage: "Install Garage v2.3.0 for this host from https://garagehq.deuxfleurs.fr/download/ with release checksum verification; put garage on PATH. No automatic download or source build is performed by preflight.",
+  nats: "Install pinned NATS server 2.11.8 and Temporal CLI 1.4.1 with: bun scripts/install-development-tools.ts --install --tools=nats,temporal. Add the reported binDirectory to PATH. The verified project-local installer provides nats-server, not the nats client; preflight itself installs nothing.",
+  temporal: "Install pinned Temporal CLI 1.4.1 with: bun scripts/install-development-tools.ts --install --tools=nats,temporal. Add the reported binDirectory to PATH. The CLI must provide server start-dev; tctl is not a substitute.",
+  garage: "Provide an independently verified Garage v2.3.0 host binary on PATH, or use OPENGENI_DEV_BACKEND=docker with the repository's digest-pinned image. Automatic native Garage bootstrap is unavailable: the official Linux release assets lack an upstream checksum source, and no official macOS binary is provided. Preflight does not download or build Garage.",
   minio: "Explicit MinIO compatibility requires minio RELEASE.2025-09-07T16-13-09Z and mc RELEASE.2025-08-13T08-35-41Z (docker-compose.yml pins). Obtain matching verified host binaries from the upstream release archives; if unavailable on this host use Docker or Garage, not an unpinned latest binary.",
 };
 
