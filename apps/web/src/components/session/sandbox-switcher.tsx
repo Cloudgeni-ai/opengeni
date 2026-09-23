@@ -42,13 +42,7 @@ function sandboxFallbackLabel(backend: SandboxBackend): string {
   return SESSION_SANDBOX_LABELS[backend] ?? CLOUD_SANDBOX_LABEL;
 }
 
-function SandboxMark({
-  kind,
-  backend,
-}: {
-  kind: string | undefined;
-  backend: SandboxBackend;
-}) {
+function SandboxMark({ kind, backend }: { kind: string | undefined; backend: SandboxBackend }) {
   const local = kind === "local" || (kind === undefined && backend === "local");
   const Icon = local ? LaptopIcon : ServerIcon;
   return <Icon className="size-3 shrink-0" />;

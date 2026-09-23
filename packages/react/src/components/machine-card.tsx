@@ -160,9 +160,7 @@ export function MachineCard({
                 {machine.scope === "user" ? "personal" : machine.scope}
               </span>
               <span aria-hidden>·</span>
-              <span className="capitalize">
-                {machine.kind}
-              </span>
+              <span className="capitalize">{machine.kind}</span>
               <span aria-hidden>·</span>
               <span className="font-og-mono">
                 {machine.os}/{machine.arch}
