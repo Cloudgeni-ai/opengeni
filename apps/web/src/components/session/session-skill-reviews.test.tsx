@@ -264,3 +264,54 @@ test("uncertain approval retries keep the same operation and exact revision", as
     await view.unmount();
   }
 });
+
+test("a new receipt restarts discovery after loading another page", async () => {
+  const f = fixture();
+  const earlier = {
+    ...record,
+    id: operationId,
+    revisionId: operationId,
+    pendingRevisionIds: [operationId],
+    title: "Earlier Skill",
+  };
+  const list = mock(async (_workspaceId: string, _options: unknown) => ({
+    skills: [record],
+    nextCursor: "next" as string | null,
+  }))
+    .mockImplementationOnce(async () => ({ skills: [record], nextCursor: "next" }))
+    .mockImplementationOnce(async () => ({ skills: [], nextCursor: null }))
+    .mockImplementationOnce(async () => ({ skills: [earlier], nextCursor: null }));
+  f.context.client.listWorkspaceSkills = list;
+  f.read.mockImplementation(async (_workspaceId, id) => (id === operationId ? earlier : record));
+  const view = await renderComponent(
+    <SessionSkillReviews
+      context={f.context}
+      workspaceId="workspace"
+      sessionId="session"
+      events={[]}
+    />,
+  );
+  try {
+    await flush();
+    const more = [...view.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "More pending Skills",
+    )!;
+    await act(async () => more.click());
+    await flush();
+    expect(list.mock.calls.at(-1)?.[1]).toMatchObject({ cursor: "next" });
+    await view.rerender(
+      <SessionSkillReviews
+        context={f.context}
+        workspaceId="workspace"
+        sessionId="session"
+        events={events}
+      />,
+    );
+    await flush();
+    expect(list.mock.calls.at(-1)?.[1]).toEqual({ sessionId: "session", limit: 100 });
+    expect(view.container.textContent).toContain("Review Earlier Skill");
+    expect(view.container.textContent).not.toContain("Review Test Skill");
+  } finally {
+    await view.unmount();
+  }
+});

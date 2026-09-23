@@ -27,7 +27,9 @@ export function SessionSkillReviews({
   const [error, setError] = useState(false);
   const [reload, setReload] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [page, setPage] = useState<string | undefined>();
+  const [pagination, setPagination] = useState<{ identity: string; cursor: string }>();
+  // A new receipt invalidates every page of the previous discovery snapshot.
+  const page = pagination?.identity === receiptIdentity ? pagination.cursor : undefined;
   useEffect(() => {
     let live = true;
     setLoading(true);
@@ -64,7 +66,7 @@ export function SessionSkillReviews({
   }, [context.client, workspaceId, sessionId, receiptIdentity, reload, page]);
   useEffect(() => {
     const refresh = () => {
-      setPage(undefined);
+      setPagination(undefined);
       setReload((value) => value + 1);
     };
     window.addEventListener("focus", refresh);
@@ -92,7 +94,11 @@ export function SessionSkillReviews({
         </p>
       ) : null}
       {cursor ? (
-        <Button variant="ghost" disabled={loading} onClick={() => setPage(cursor)}>
+        <Button
+          variant="ghost"
+          disabled={loading}
+          onClick={() => setPagination({ identity: receiptIdentity, cursor })}
+        >
           More pending Skills
         </Button>
       ) : null}
