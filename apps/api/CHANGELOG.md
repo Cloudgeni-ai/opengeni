@@ -1,5 +1,52 @@
 # @opengeni/api-router
 
+## 4.1.0
+
+### Minor Changes
+
+- 86c710a: Expose a first-party Connected Machine enrollment-token tool with existing enrollment-management authority, short-lived tokens and deployment-bound installer commands. Include agent guidance without introducing an additional approval flow.
+
+### Patch Changes
+
+- f60ca2b: Raise Skill folder limits eightfold to 1,024 files, 2 MiB per file, and 8 MiB total, while retaining bounded reads and existing validation.
+- 38b9857: Track child unread attention from meaningful content rather than housekeeping, and acknowledge complete parent-consumed results for the exact initiating human. Preserve newer unseen work and manual attention intent, decode retained evidence losslessly, and reconcile proven historical consumption conservatively. Requires maintenance migration 0503 before starting the matching attention-aware writers.
+- 90e089a: Add a rollout-gated short MCP OAuth state that stores encrypted, time-limited callback context in Postgres. Preserve legacy in-flight callbacks and one-use replay protection.
+- 58eb331: Trust successful immutable Site upload writes instead of requiring immediate read-after-write visibility. Observe conditional-write winners and editable source with the existing bounded missing-object retry policy, preserve provider errors, and never replay writes during read recovery.
+- 59682ac: Fix Slack workspace picker cards rejected with invalid_blocks by separating repeated action IDs into distinct provider blocks. Preserve existing operation receipts and click handles for safe retries and apply the same serialization to message updates.
+- b1ad0c6: Start Slack tasks with the initiating user's saved website repositories, variable sets, compute and tool selections in the destination workspace. Preserve draft content, explicit empty tools, and ordinary resource authorization.
+- Updated dependencies [701ea95]
+- Updated dependencies [e9c4379]
+- Updated dependencies [a642885]
+- Updated dependencies [793a6c9]
+- Updated dependencies [d92af11]
+- Updated dependencies [f60ca2b]
+- Updated dependencies [56ddcfb]
+- Updated dependencies [a11d810]
+- Updated dependencies [86c710a]
+- Updated dependencies [38b9857]
+- Updated dependencies [ab3adb3]
+- Updated dependencies [2f8bc58]
+- Updated dependencies [a11d810]
+- Updated dependencies [90e089a]
+- Updated dependencies [a184108]
+- Updated dependencies [b1ad0c6]
+- Updated dependencies [a463199]
+- Updated dependencies [5fbb333]
+  - @opengeni/runtime@4.0.1
+  - @opengeni/codex@0.2.25
+  - @opengeni/config@2.1.0
+  - @opengeni/db@6.0.1
+  - @opengeni/contracts@5.1.0
+  - @opengeni/core@4.0.1
+  - @opengeni/documents@0.8.32
+  - @opengeni/github@0.7.15
+  - @opengeni/storage@0.2.132
+  - @opengeni/events@0.4.30
+  - @opengeni/artifact-tool@0.3.31
+  - @opengeni/codemode@0.6.1
+  - @opengeni/observability@0.8.31
+  - @opengeni/tool-gateway@0.1.12
+
 ## 4.0.0
 
 ### Major Changes
